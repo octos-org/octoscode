@@ -32992,7 +32992,7 @@ now analyzing the bus module"
         std::fs::write(&txt, b"not an image").unwrap();
 
         let mut store = store_with_empty_session();
-        store.state.set_composer_text(&format!(
+        store.state.set_composer_text(format!(
             "what is wrong in @{} (see also {} and ./missing.png)",
             img.display(),
             txt.display()
