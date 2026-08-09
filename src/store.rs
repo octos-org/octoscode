@@ -6449,9 +6449,17 @@ impl Store {
     /// Extension set mirrors the server's `vision::is_image` — attaching
     /// anything else would be silently dropped by the vision filter.
     fn image_media_from_prompt(prompt: &str) -> Vec<octos_core::ui_protocol::FileRef> {
-        /// Bound the attach count so a pasted directory listing cannot
-        /// balloon the turn payload.
+        /// Bound the attach count so a payload cannot balloon.
         const MAX_TURN_IMAGES: usize = 4;
+        /// Bound the candidate scan independently of successes: a prompt with
+        /// thousands of `@…png` tokens must not run thousands of stat syscalls
+        /// on the UI thread.
+        const MAX_CANDIDATES: usize = 32;
+        /// Per-file byte ceiling. The server reads+base64s the whole file
+        /// synchronously in `vision::encode_image`; a multi-hundred-MB file
+        /// would block the executor and blow the wire payload. 20 MB comfortably
+        /// covers real screenshots/photos.
+        const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
         fn image_mime(path: &str) -> Option<&'static str> {
             let lower = path.to_ascii_lowercase();
             if lower.ends_with(".png") {
@@ -6468,33 +6476,59 @@ impl Store {
         }
         let mut seen = std::collections::HashSet::new();
         let mut media = Vec::new();
+        let mut candidates = 0usize;
         for raw in prompt.split_whitespace() {
-            let token = raw.trim_matches(|c| matches!(c, '"' | '\'' | '`' | ',' | ';' | '(' | ')'));
-            let token = token.strip_prefix('@').unwrap_or(token);
+            // INTENT SIGNAL (codex security review): only an EXPLICIT `@path`
+            // attaches — a bare filename that merely happens to exist in cwd
+            // stays text. Without this, `rename foo.png to bar.png` would ship
+            // both files, a `@`-less peer result routed through `/gather` could
+            // egress a client-local file with no user action, and a symlink
+            // named `x.png` could exfiltrate its target. The `@` picker inserts
+            // exactly this form; a user typing `@` is asserting intent.
+            let trimmed = raw.trim_matches(|c| {
+                matches!(c, '"' | '\'' | '`' | ',' | ';' | '(' | ')' | '[' | ']')
+            });
+            let Some(token) = trimmed.strip_prefix('@') else {
+                continue;
+            };
             if token.is_empty() {
                 continue;
             }
             let Some(mime) = image_mime(token) else {
                 continue;
             };
+            candidates += 1;
+            if candidates > MAX_CANDIDATES {
+                break;
+            }
             let path = std::path::Path::new(token);
             let abs = if path.is_absolute() {
                 path.to_path_buf()
             } else {
-                // The TUI process cwd — the same directory `!`-bang commands
-                // run in and the workspace the session was launched from.
+                // The TUI process cwd — the directory `!`-bang commands run in
+                // and, for a local `--stdio --solo` serve, the same filesystem
+                // the server reads. (Remote/hosted serves cannot read a
+                // client-local path; upload support is a follow-up.)
                 match std::env::current_dir() {
                     Ok(cwd) => cwd.join(path),
                     Err(_) => continue,
                 }
             };
-            let Ok(meta) = std::fs::metadata(&abs) else {
+            // NO-FOLLOW: reject a symlink outright rather than reading its
+            // target. `@screenshot.png` pointing at `~/.ssh/id_ed25519` must
+            // not egress the key to the model (codex security review).
+            let Ok(meta) = std::fs::symlink_metadata(&abs) else {
                 continue;
             };
-            if !meta.is_file() {
+            if meta.file_type().is_symlink() || !meta.is_file() {
                 continue;
             }
-            let abs_str = abs.to_string_lossy().into_owned();
+            if meta.len() == 0 || meta.len() > MAX_IMAGE_BYTES {
+                continue;
+            }
+            // Dedupe on the CANONICAL path so `@a.png` and `@./a.png` are one.
+            let canonical = std::fs::canonicalize(&abs).unwrap_or(abs);
+            let abs_str = canonical.to_string_lossy().into_owned();
             if !seen.insert(abs_str.clone()) {
                 continue;
             }
@@ -33001,7 +33035,13 @@ now analyzing the bus module"
         let AppUiCommand::SubmitPrompt(params) = cmd else {
             panic!("expected SubmitPrompt, got {cmd:?}");
         };
-        assert_eq!(params.media.len(), 1, "only the existing image attaches");
+        // Only the `@`-referenced existing image attaches; the bare `.txt`
+        // and the `@`-less `./missing.png` do not.
+        assert_eq!(
+            params.media.len(),
+            1,
+            "only the @-referenced image attaches"
+        );
         assert!(params.media[0].path.ends_with("shot.png"));
         assert_eq!(params.media[0].mime, "image/png");
         assert!(params.media[0].size_bytes > 0);
@@ -33013,6 +33053,67 @@ now analyzing the bus module"
     }
 
     #[test]
+    fn bare_filename_never_attaches_only_at_reference_does() {
+        // codex security P1: `rename foo.png to bar.png` with both files real
+        // must attach NOTHING — bare filenames stay text. This also protects
+        // the `/gather` path, where peer/server prose flows through the same
+        // detection: a peer result merely naming a client-local file cannot
+        // egress it without an explicit `@`.
+        let dir = tempfile::tempdir().unwrap();
+        let foo = dir.path().join("foo.png");
+        let bar = dir.path().join("bar.png");
+        std::fs::write(&foo, b"png").unwrap();
+        std::fs::write(&bar, b"png").unwrap();
+        let bare = format!("rename {} to {}", foo.display(), bar.display());
+        assert!(
+            Store::image_media_from_prompt(&bare).is_empty(),
+            "bare filenames must never auto-attach"
+        );
+        let atref = format!("compare @{} and @{}", foo.display(), bar.display());
+        assert_eq!(
+            Store::image_media_from_prompt(&atref).len(),
+            2,
+            "explicit @refs do attach"
+        );
+    }
+
+    #[test]
+    fn symlinked_image_is_rejected_no_target_egress() {
+        // codex security P1: `ln -s secret diagram.png` then `@diagram.png`
+        // must NOT read the symlink target (a private key, say). No-follow.
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret");
+        std::fs::write(&secret, b"PRIVATE KEY BYTES").unwrap();
+        let link = dir.path().join("diagram.png");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&secret, &link).unwrap();
+            let prompt = format!("look at @{}", link.display());
+            assert!(
+                Store::image_media_from_prompt(&prompt).is_empty(),
+                "a symlinked image must be rejected, not followed to its target"
+            );
+        }
+        let _ = link;
+    }
+
+    #[test]
+    fn oversized_image_is_skipped() {
+        // codex security P1: a huge file must not reach the unbounded
+        // server-side read+base64; size is checked client-side.
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("huge.png");
+        let f = std::fs::File::create(&big).unwrap();
+        f.set_len(64 * 1024 * 1024).unwrap(); // 64 MB sparse, over the 20 MB cap
+        drop(f);
+        let prompt = format!("@{}", big.display());
+        assert!(
+            Store::image_media_from_prompt(&prompt).is_empty(),
+            "a file over the byte cap must be skipped"
+        );
+    }
+
+    #[test]
     fn image_media_detection_dedups_caps_and_ignores_nonfiles() {
         let dir = tempfile::tempdir().unwrap();
         let mut paths = Vec::new();
@@ -33021,13 +33122,16 @@ now analyzing the bus module"
             std::fs::write(&p, b"jpg").unwrap();
             paths.push(p.display().to_string());
         }
-        // duplicate of the first + a directory named like an image
+        // duplicate of the first + a directory named like an image. Every
+        // candidate is `@`-prefixed (intent signal); dup + directory +
+        // quoted-nonexistent are rejected/deduped; cap holds at 4.
         let dup = paths[0].clone();
         let dir_as_img = dir.path().join("folder.png");
         std::fs::create_dir(&dir_as_img).unwrap();
+        let ats: Vec<String> = paths.iter().map(|p| format!("@{p}")).collect();
         let prompt = format!(
-            "{} {} {} {}",
-            paths.join(" "),
+            "{} @{} @{} @{}",
+            ats.join(" "),
             dup,
             dir_as_img.display(),
             "\"trailing.png\"" // quoted nonexistent
