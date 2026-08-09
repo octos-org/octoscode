@@ -1317,6 +1317,7 @@ status:
   goal_objective_empty: "目标内容不能为空"
   setting_goal: "正在设置目标：%{objective}"
   clearing_goal: "正在清除目标"
+  images_attached: "已附加 %{count} 张图片到本轮"
   listing_loops: "正在列出循环"
   loop_interval_min: "循环间隔至少为 1 秒"
   creating_loop: "正在创建循环"

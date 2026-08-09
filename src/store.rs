@@ -6437,6 +6437,79 @@ impl Store {
         self.state.scroll_transcript_to_latest();
     }
 
+    /// Detect image-file references in a submitted prompt and stage them as
+    /// turn media. Terminals cannot deliver pasted image BYTES (bracketed
+    /// paste is text-only), so the PATH is the paste surface: drag-drop into
+    /// the terminal, a pasted path, and the `@` file picker all leave an
+    /// image path in the prompt text. The server's vision pipeline consumes
+    /// these directly — a plain filesystem path passes
+    /// `materialize_turn_uploads` unchanged (Passthrough), lands on
+    /// `Message.media`, and the provider encoders turn it into image parts.
+    ///
+    /// Extension set mirrors the server's `vision::is_image` — attaching
+    /// anything else would be silently dropped by the vision filter.
+    fn image_media_from_prompt(prompt: &str) -> Vec<octos_core::ui_protocol::FileRef> {
+        /// Bound the attach count so a pasted directory listing cannot
+        /// balloon the turn payload.
+        const MAX_TURN_IMAGES: usize = 4;
+        fn image_mime(path: &str) -> Option<&'static str> {
+            let lower = path.to_ascii_lowercase();
+            if lower.ends_with(".png") {
+                Some("image/png")
+            } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+                Some("image/jpeg")
+            } else if lower.ends_with(".gif") {
+                Some("image/gif")
+            } else if lower.ends_with(".webp") {
+                Some("image/webp")
+            } else {
+                None
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut media = Vec::new();
+        for raw in prompt.split_whitespace() {
+            let token = raw.trim_matches(|c| matches!(c, '"' | '\'' | '`' | ',' | ';' | '(' | ')'));
+            let token = token.strip_prefix('@').unwrap_or(token);
+            if token.is_empty() {
+                continue;
+            }
+            let Some(mime) = image_mime(token) else {
+                continue;
+            };
+            let path = std::path::Path::new(token);
+            let abs = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                // The TUI process cwd — the same directory `!`-bang commands
+                // run in and the workspace the session was launched from.
+                match std::env::current_dir() {
+                    Ok(cwd) => cwd.join(path),
+                    Err(_) => continue,
+                }
+            };
+            let Ok(meta) = std::fs::metadata(&abs) else {
+                continue;
+            };
+            if !meta.is_file() {
+                continue;
+            }
+            let abs_str = abs.to_string_lossy().into_owned();
+            if !seen.insert(abs_str.clone()) {
+                continue;
+            }
+            media.push(octos_core::ui_protocol::FileRef {
+                path: abs_str,
+                mime: mime.to_owned(),
+                size_bytes: meta.len(),
+            });
+            if media.len() >= MAX_TURN_IMAGES {
+                break;
+            }
+        }
+        media
+    }
+
     fn start_prompt_turn(
         &mut self,
         prompt: String,
@@ -6475,13 +6548,20 @@ impl Store {
             .session_reasoning_effort
             .get(&session_id)
             .copied();
+        // Route-1 image attach: existing image paths in the prompt (pasted,
+        // drag-dropped, or `@`-picked) ride the turn as media so the vision
+        // pipeline sees them. Text keeps the reference readable either way.
+        let media = Self::image_media_from_prompt(&prompt);
+        if !media.is_empty() {
+            self.state.status = t!("status.images_attached", count = media.len()).into_owned();
+        }
         Some(AppUiCommand::SubmitPrompt(TurnStartParams {
             // Ordinary chat turn: context-scoped tools stay unadvertised.
             tool_context: None,
             session_id,
             turn_id,
             input: vec![InputItem::Text { text: prompt }],
-            media: Vec::new(),
+            media,
             topic: None,
             rewrite_for: None,
             reasoning_effort,
@@ -32895,6 +32975,66 @@ now analyzing the bus module"
                 .and_then(|activity| activity.detail.as_deref()),
             Some("modify src/lib.rs | diff preview ready")
         );
+    }
+
+    #[test]
+    fn submitted_prompt_attaches_existing_image_paths_as_media() {
+        // Route-1 image support: terminals cannot deliver pasted image BYTES
+        // (bracketed paste is text-only), so the path IS the paste surface —
+        // drag-drop, a pasted path, or the `@` picker all put an image PATH in
+        // the prompt. An existing image file must ride the turn as media so
+        // the server's vision path (materialize passthrough → Message.media →
+        // provider image parts) can see it.
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("shot.png");
+        std::fs::write(&img, b"\x89PNG fake").unwrap();
+        let txt = dir.path().join("notes.txt");
+        std::fs::write(&txt, b"not an image").unwrap();
+
+        let mut store = store_with_empty_session();
+        store.state.set_composer_text(&format!(
+            "what is wrong in @{} (see also {} and ./missing.png)",
+            img.display(),
+            txt.display()
+        ));
+        let cmd = store.compose_command().expect("prompt turn dispatches");
+        let AppUiCommand::SubmitPrompt(params) = cmd else {
+            panic!("expected SubmitPrompt, got {cmd:?}");
+        };
+        assert_eq!(params.media.len(), 1, "only the existing image attaches");
+        assert!(params.media[0].path.ends_with("shot.png"));
+        assert_eq!(params.media[0].mime, "image/png");
+        assert!(params.media[0].size_bytes > 0);
+        // The prompt text keeps the reference readable for the model.
+        let InputItem::Text { text } = &params.input[0] else {
+            panic!("text input expected");
+        };
+        assert!(text.contains("shot.png"));
+    }
+
+    #[test]
+    fn image_media_detection_dedups_caps_and_ignores_nonfiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = Vec::new();
+        for i in 0..6 {
+            let p = dir.path().join(format!("img-{i}.jpg"));
+            std::fs::write(&p, b"jpg").unwrap();
+            paths.push(p.display().to_string());
+        }
+        // duplicate of the first + a directory named like an image
+        let dup = paths[0].clone();
+        let dir_as_img = dir.path().join("folder.png");
+        std::fs::create_dir(&dir_as_img).unwrap();
+        let prompt = format!(
+            "{} {} {} {}",
+            paths.join(" "),
+            dup,
+            dir_as_img.display(),
+            "\"trailing.png\"" // quoted nonexistent
+        );
+        let media = Store::image_media_from_prompt(&prompt);
+        assert_eq!(media.len(), 4, "capped at MAX_TURN_IMAGES and deduped");
+        assert!(media.iter().all(|m| m.mime == "image/jpeg"));
     }
 
     #[test]

@@ -573,6 +573,7 @@ status:
   goal_objective_empty: "Goal objective cannot be empty"
   setting_goal: "Setting goal: %{objective}"
   clearing_goal: "Clearing goal"
+  images_attached: "%{count} image(s) attached to this turn"
   listing_loops: "Listing loops"
   loop_interval_min: "Loop interval must be at least 1 second"
   creating_loop: "Creating loop"
