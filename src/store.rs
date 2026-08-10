@@ -6323,6 +6323,18 @@ impl Store {
             .active_turn()
             .map(|(session_id, turn_id)| (session_id.clone(), turn_id.clone()))
         else {
+            // No live reply to interrupt — but the spinner can still be stuck
+            // InProgress when a turn's terminal never landed (dropped event,
+            // wedged transport). Nothing else clears it on this path, so the
+            // user would be pinned to "Working" with no way out. Reconcile the
+            // stale spinner against the absent turn. Blocked is left alone: it
+            // parks on an operator decision that is genuinely still pending.
+            if matches!(
+                self.state.run_state,
+                crate::model::SessionRunState::InProgress
+            ) {
+                self.state.set_run_state_idle();
+            }
             self.state.status = t!("status.no_active_turn_interrupt").into_owned();
             return None;
         };
@@ -28842,6 +28854,39 @@ now analyzing the bus module"
 
         assert!(command.is_none());
         assert_eq!(store.state.status, "No active turn to interrupt");
+    }
+
+    #[test]
+    fn interrupt_command_clears_stale_in_progress_run_state() {
+        let mut store = store_with_empty_session();
+        // A turn whose terminal never landed (dropped event, wedged transport)
+        // leaves the spinner InProgress with no live reply behind it. Esc/Ctrl+C
+        // is the user's only escape hatch, so it must reconcile the two.
+        store.state.set_run_state_in_progress();
+        assert!(store.state.active_turn().is_none());
+
+        let command = store.interrupt_command();
+
+        assert!(command.is_none());
+        assert_eq!(store.state.status, "No active turn to interrupt");
+        assert_eq!(store.state.run_state, crate::model::SessionRunState::Idle);
+        assert!(store.state.run_state_started_at.is_none());
+    }
+
+    #[test]
+    fn interrupt_command_keeps_blocked_run_state_without_active_turn() {
+        let mut store = store_with_empty_session();
+        // Blocked parks on an operator decision that is still genuinely
+        // pending, so the reconcile above must not sweep it away.
+        store.state.set_run_state_blocked("approve rm -rf");
+
+        let command = store.interrupt_command();
+
+        assert!(command.is_none());
+        assert!(matches!(
+            store.state.run_state,
+            crate::model::SessionRunState::Blocked { .. }
+        ));
     }
 
     #[test]
