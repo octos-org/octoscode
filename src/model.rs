@@ -607,6 +607,14 @@ pub struct SessionAutonomyState {
     pub agent_artifacts: Vec<AutonomyAgentArtifactCache>,
     pub goal: Option<octos_core::ui_protocol::UiGoalRecord>,
     pub goal_transition_actor: Option<String>,
+    /// #1959 — highest goal-event `generation` applied for this session. The
+    /// backend stamps every `SessionGoalUpdated`/`SessionGoalCleared` with a
+    /// monotonic generation; we DROP any goal event whose generation is not
+    /// greater than this, so a stale update that races behind a clear (server
+    /// send order is not atomic under a multi-thread runtime) can never
+    /// resurrect the cleared chip. `0` (legacy / unstamped backend) always
+    /// applies and never advances the watermark.
+    pub last_goal_event_generation: u64,
     pub loops: Vec<octos_core::ui_protocol::UiLoopRecord>,
     /// Latest model-authored plan/todo checklist (`plan/updated`). `None` until
     /// the agent calls `update_plan` this session.
@@ -640,6 +648,7 @@ impl SessionAutonomyState {
             agent_artifacts: Vec::new(),
             goal: None,
             goal_transition_actor: None,
+            last_goal_event_generation: 0,
             loops: Vec::new(),
             plan: None,
             plan_turn_id: None,
@@ -6952,6 +6961,30 @@ impl AppState {
         let entry = self.session_autonomy_mut(session_id);
         entry.goal = goal;
         entry.goal_transition_actor = transition_actor;
+    }
+
+    /// #1959 — decide whether to APPLY an incoming goal chip event, advancing
+    /// the per-session generation watermark. Returns `false` (DROP) when the
+    /// event's `generation` does not strictly exceed the last applied one, so a
+    /// stale `SessionGoalUpdated` that races behind a `SessionGoalCleared`
+    /// cannot resurrect the cleared chip regardless of server send order. A
+    /// legacy/unstamped `generation == 0` always applies and never advances the
+    /// watermark (an old backend never stamps, so gating on it would wedge the
+    /// chip).
+    pub fn goal_event_generation_admits(
+        &mut self,
+        session_id: &SessionKey,
+        generation: u64,
+    ) -> bool {
+        if generation == 0 {
+            return true;
+        }
+        let entry = self.session_autonomy_mut(session_id);
+        if generation <= entry.last_goal_event_generation {
+            return false;
+        }
+        entry.last_goal_event_generation = generation;
+        true
     }
 
     /// Ctrl+P: flip the ◆ Goal banner objective between folded and unfolded.

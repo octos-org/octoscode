@@ -11183,6 +11183,14 @@ impl Store {
                 None
             }
             UiNotification::SessionGoalUpdated(event) => {
+                // #1959 — drop a stale/out-of-order goal update so it can't
+                // resurrect a chip a newer clear/update already superseded.
+                if !self
+                    .state
+                    .goal_event_generation_admits(&event.session_id, event.generation)
+                {
+                    return None;
+                }
                 let objective = event.goal.objective.clone();
                 let status_label = event.goal.status.clone();
                 // Toast every STATUS TRANSITION distinctly — the chip
@@ -11230,6 +11238,16 @@ impl Store {
                 None
             }
             UiNotification::SessionGoalCleared(event) => {
+                // #1959 — order the clear against updates by generation too, so
+                // a stale update arriving after this clear is dropped (its
+                // generation is lower). A clear carries a generation strictly
+                // above any update it supersedes.
+                if !self
+                    .state
+                    .goal_event_generation_admits(&event.session_id, event.generation)
+                {
+                    return None;
+                }
                 let actor = event.transition_actor.clone();
                 if event.cleared {
                     self.state
@@ -35734,6 +35752,7 @@ now analyzing the bus module"
                 profile_id: Some("coding".into()),
                 goal: goal("active"),
                 transition_actor: "user".into(),
+                generation: 0,
             },
         )));
         // active -> blocked: distinct toast with the recovery hint.
@@ -35743,6 +35762,7 @@ now analyzing the bus module"
                 profile_id: Some("coding".into()),
                 goal: goal("blocked"),
                 transition_actor: "backend".into(),
+                generation: 0,
             },
         )));
         assert!(
@@ -35757,6 +35777,7 @@ now analyzing the bus module"
                 profile_id: Some("coding".into()),
                 goal: goal("blocked"),
                 transition_actor: "backend".into(),
+                generation: 0,
             },
         )));
         assert!(
@@ -36661,6 +36682,7 @@ now analyzing the bus module"
                 profile_id: Some("coding".into()),
                 goal: goal.clone(),
                 transition_actor: "user".into(),
+                generation: 0,
             },
         )));
         let mirror = store
@@ -36701,6 +36723,7 @@ now analyzing the bus module"
                     profile_id: Some("coding".into()),
                     goal: mk(status),
                     transition_actor: "backend".into(),
+                    generation: 0,
                 },
             )));
         }
@@ -36734,6 +36757,7 @@ now analyzing the bus module"
                 profile_id: Some("coding".into()),
                 goal: goal2,
                 transition_actor: "user".into(),
+                generation: 0,
             },
         )));
         let goal_rows_after: usize = store
@@ -36772,6 +36796,7 @@ now analyzing the bus module"
                     updated_at_ms: 2,
                 },
                 transition_actor: "user".into(),
+                generation: 0,
             },
         )));
         // Now clear with cleared=true.
@@ -36782,6 +36807,7 @@ now analyzing the bus module"
                 cleared: true,
                 goal: None,
                 transition_actor: "user".into(),
+                generation: 0,
             },
         )));
         let mirror = store
@@ -36789,6 +36815,91 @@ now analyzing the bus module"
             .session_autonomy_for(&session_id)
             .expect("mirror");
         assert!(mirror.goal.is_none());
+    }
+
+    // #1959 — a stale SessionGoalUpdated that arrives AFTER a clear (server send
+    // order is not atomic) must be dropped by generation, not resurrect the chip.
+    #[test]
+    fn session_goal_stale_generation_update_is_dropped_after_clear() {
+        use octos_core::ui_protocol::{
+            SessionGoalClearedEvent, SessionGoalUpdatedEvent, UiGoalRecord,
+        };
+        let mut store = protocol_store_with_autonomy();
+        let session_id = SessionKey("local:test".into());
+        let goal = |status: &str| UiGoalRecord {
+            profile_id: None,
+            goal_id: "g1".into(),
+            objective: "foo".into(),
+            status: status.into(),
+            token_budget: 1000,
+            tokens_used: 0,
+            time_used_seconds: 0,
+            created_at_ms: 1,
+            updated_at_ms: 2,
+        };
+        let updated = |generation: u64, status: &str| {
+            AppUiEvent::Protocol(UiNotification::SessionGoalUpdated(
+                SessionGoalUpdatedEvent {
+                    session_id: session_id.clone(),
+                    profile_id: None,
+                    goal: goal(status),
+                    transition_actor: "user".into(),
+                    generation,
+                },
+            ))
+        };
+        // The turn snapshots an update at generation 5 (applied).
+        store.apply_event(updated(5, "active"));
+        assert!(
+            store
+                .state
+                .session_autonomy_for(&session_id)
+                .unwrap()
+                .goal
+                .is_some()
+        );
+        // A racing clear (generation 6) removes the goal.
+        store.apply_event(AppUiEvent::Protocol(UiNotification::SessionGoalCleared(
+            SessionGoalClearedEvent {
+                session_id: session_id.clone(),
+                profile_id: None,
+                cleared: true,
+                goal: None,
+                transition_actor: "user".into(),
+                generation: 6,
+            },
+        )));
+        assert!(
+            store
+                .state
+                .session_autonomy_for(&session_id)
+                .unwrap()
+                .goal
+                .is_none()
+        );
+        // The stale update (generation 5) now arrives — MUST be dropped, so the
+        // chip stays cleared instead of resurrecting the goal.
+        store.apply_event(updated(5, "active"));
+        assert!(
+            store
+                .state
+                .session_autonomy_for(&session_id)
+                .unwrap()
+                .goal
+                .is_none(),
+            "stale gen-5 update after gen-6 clear must NOT resurrect the goal"
+        );
+        // A genuinely newer update (generation 7) still applies.
+        store.apply_event(updated(7, "active"));
+        assert!(
+            store
+                .state
+                .session_autonomy_for(&session_id)
+                .unwrap()
+                .goal
+                .is_some(),
+            "a newer generation must still apply"
+        );
     }
 
     #[test]
