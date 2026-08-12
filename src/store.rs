@@ -201,13 +201,11 @@ enum ResumeResolution {
 }
 
 /// Compact token-count for the compaction activity notice: `31200` -> `31.2k`,
-/// small counts stay verbatim.
+/// `2_000_000` -> `2.0M`, small counts verbatim. Delegates to the crate's one
+/// implementation — this was a byte-identical copy of it, and so inherited the
+/// same `k`-is-the-ceiling bug independently.
 fn humanize_token_count(tokens: usize) -> String {
-    if tokens >= 1000 {
-        format!("{:.1}k", tokens as f64 / 1000.0)
-    } else {
-        tokens.to_string()
-    }
+    crate::app::humanize_token_count(tokens as u64)
 }
 
 fn push_unique_summary(values: &mut Vec<String>, value: String) {

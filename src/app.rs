@@ -3698,34 +3698,45 @@ const TOKEN_UNITS: [(u64, char); 4] = [
     (1_000, 'K'),
 ];
 
+/// The ladder unit `tokens` should render in at `decimals` places: the largest
+/// one that leaves a mantissa of at least 1, so the rendered number is always
+/// under four digits. `None` below 1K — there is no smaller unit, so the caller
+/// decides how a bare count reads.
+///
+/// The one place the carry rule lives. Rounding can push a value past its own
+/// unit — 999_999_999 is under 1G, yet renders `1000.0M` — so this promotes to
+/// the next unit up rather than emit the four-digit mantissa the ladder exists
+/// to avoid. The check is on the *rendered* string, not a float threshold, so it
+/// cannot disagree with what is actually displayed. At most one promotion is
+/// ever possible.
+fn token_unit_for(tokens: u64, decimals: usize) -> Option<(u64, char)> {
+    let index = TOKEN_UNITS.iter().position(|(scale, _)| tokens >= *scale)?;
+    let mantissa = format!(
+        "{:.*}",
+        decimals,
+        tokens as f64 / TOKEN_UNITS[index].0 as f64
+    );
+    Some(if index > 0 && mantissa.starts_with("1000") {
+        TOKEN_UNITS[index - 1]
+    } else {
+        TOKEN_UNITS[index]
+    })
+}
+
 /// Human-readable token count for the goal chip and context-window display:
-/// `128K`, `1M`, `1.5M`, `20G`, `20T`. Picks the largest unit that leaves a
-/// mantissa of at least 1, so the rendered number is always under four digits.
+/// `128K`, `1M`, `1.5M`, `20G`, `20T`.
 ///
 /// `K` stays integral (`45K`, never `45.2K`) — it delegates to
 /// [`format_tokens_k`], which is how the chip and the `/context` subtitle have
 /// always read at that scale.
 pub(crate) fn format_tokens_human(tokens: u64) -> String {
-    let Some(index) = TOKEN_UNITS.iter().position(|(scale, _)| tokens >= *scale) else {
-        // Below 1K there is no smaller unit to fall back to.
+    let Some((scale, unit)) = token_unit_for(tokens, 1) else {
         return format_tokens_k(tokens);
     };
-    let mantissa = |scale: u64| format!("{:.1}", tokens as f64 / scale as f64);
-    // One-decimal rounding can carry past the unit — 999_999_999 is under 1G,
-    // yet renders `1000.0M`. Promote to the next unit up (`1G`) rather than
-    // print the four-digit mantissa the ladder exists to avoid. Checked on the
-    // rendered string, not a float threshold, so it cannot disagree with what
-    // is actually displayed. At most one promotion is ever possible.
-    let index = if index > 0 && mantissa(TOKEN_UNITS[index].0).starts_with("1000") {
-        index - 1
-    } else {
-        index
-    };
-    let (scale, unit) = TOKEN_UNITS[index];
     if scale == 1_000 {
         return format_tokens_k(tokens);
     }
-    let rendered = mantissa(scale);
+    let rendered = format!("{:.1}", tokens as f64 / scale as f64);
     format!("{}{unit}", rendered.strip_suffix(".0").unwrap_or(&rendered))
 }
 
@@ -4696,13 +4707,26 @@ fn agent_strip_lines(app: &AppState, palette: Palette, agent_rows: u16) -> Vec<L
 /// `token_estimate` as a glanceable budget bar in the harness status row.
 const DEFAULT_CONTEXT_WINDOW_TOKENS: usize = 128_000;
 
-/// Compact token count for the harness row: `34211` -> `34.2k`.
-fn humanize_token_count(tokens: u64) -> String {
-    if tokens >= 1000 {
-        format!("{:.1}k", tokens as f64 / 1000.0)
-    } else {
-        tokens.to_string()
-    }
+/// Compact token count for the harness row and the compaction notice: `34211`
+/// -> `34.2k`, `2_000_000` -> `2.0M`. Counts under 1k stay verbatim.
+///
+/// Same ladder as [`format_tokens_human`], SI casing (lowercase kilo, uppercase
+/// mega and up) — these rows have always read `34.2k`, and only the units above
+/// it are new. Before, `k` was the ceiling, so a compaction of a 2M-token
+/// context reported `2000.0k`.
+///
+/// The single implementation for the whole crate: `store.rs` and
+/// `transcript_build.rs` render the same compaction notice and previously each
+/// carried their own copy of this, which is how they each inherited the same
+/// missing units.
+pub(crate) fn humanize_token_count(tokens: u64) -> String {
+    let Some((scale, unit)) = token_unit_for(tokens, 1) else {
+        return tokens.to_string();
+    };
+    // SI writes kilo lowercase; the ladder is keyed on the uppercase form the
+    // goal chip uses.
+    let unit = if unit == 'K' { 'k' } else { unit };
+    format!("{:.1}{unit}", tokens as f64 / scale as f64)
 }
 
 /// True when the harness has live state worth surfacing in the dedicated

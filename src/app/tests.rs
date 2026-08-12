@@ -9595,6 +9595,85 @@ mod tests {
     }
 
     #[test]
+    fn compaction_notice_scales_a_multi_million_token_context() {
+        use octos_core::app_ui::AppUiEvent;
+        use octos_core::ui_protocol::{
+            ContextCompactionCompletedEvent, UiContextCompactionRecord, UiContextState,
+            UiNotification,
+        };
+        // End-to-end through the store's notice builder (its own copy of the
+        // helper is what made this bug reachable from two directions).
+        let session_id = SessionKey("local:test".into());
+        let turn_id = TurnId::new();
+        let mut store = Store {
+            state: AppState::new(
+                vec![SessionView {
+                    id: session_id.clone(),
+                    title: "test".into(),
+                    profile_id: Some("coding".into()),
+                    messages: vec![Message::user("do heavy work")],
+                    tasks: vec![],
+                    live_reply: Some(crate::model::LiveReply {
+                        turn_id,
+                        text: String::new(),
+                    }),
+                }],
+                0,
+                "ready".into(),
+                None,
+                false,
+            ),
+        };
+
+        store.apply_event(AppUiEvent::Protocol(
+            UiNotification::ContextCompactionCompleted(ContextCompactionCompletedEvent {
+                session_id: session_id.clone(),
+                context_state: UiContextState {
+                    session_id: session_id.clone(),
+                    thread_id: None,
+                    generation: 4,
+                    transcript_hash: "abc123".into(),
+                    item_count: 42,
+                    token_estimate: 800_000,
+                    recovery_state: "healthy".into(),
+                    last_checkpoint_id: None,
+                    last_compaction_id: Some("comp-001".into()),
+                },
+                compaction: UiContextCompactionRecord {
+                    compaction_id: "comp-001".into(),
+                    checkpoint_id: "chk-001".into(),
+                    status: "applied".into(),
+                    policy_id: "default".into(),
+                    trigger: "token_budget".into(),
+                    input_generation: 3,
+                    output_generation: Some(4),
+                    input_transcript_hash: "input-h".into(),
+                    replacement_transcript_hash: Some("abc123".into()),
+                    installed_transcript_hash: Some("abc123".into()),
+                    input_item_count: 130,
+                    retained_count: 42,
+                    dropped_count: 88,
+                    summary_item_id: Some("sum-1".into()),
+                    token_estimate_before: 2_000_000,
+                    token_estimate_after: Some(800_000),
+                    error: None,
+                },
+            }),
+        ));
+
+        store.state.expanded_tool_outputs = true;
+        let text = rendered_text(&store.state);
+        assert!(
+            text.contains("2.0M → 800.0k tokens"),
+            "the notice must scale past kilo, got:\n{text}"
+        );
+        assert!(
+            !text.contains("2000.0k"),
+            "no four-digit kilo count, got:\n{text}"
+        );
+    }
+
+    #[test]
     fn format_tokens_human_scales_past_millions() {
         // Regression: goal budgets are not context-window sized. Pinned to K,
         // a 20-trillion-token budget rendered `20000000000K` in the goal chip.
