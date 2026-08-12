@@ -8521,6 +8521,39 @@ mod tests {
         app
     }
 
+    #[test]
+    fn goal_chip_scales_a_huge_budget_past_k() {
+        // Regression: the chip pinned both counts to K, so a 20-trillion-token
+        // budget rendered "101K/20000000000K tokens" — eleven digits in the one
+        // line that must stay short.
+        let mut app = autonomy_app_with_goal("read2 README.md");
+        app.set_session_goal(
+            &SessionKey("local:test".into()),
+            Some(octos_core::ui_protocol::UiGoalRecord {
+                profile_id: Some("coding".into()),
+                goal_id: "goal_01".into(),
+                objective: "read2 README.md".into(),
+                status: "complete".into(),
+                token_budget: 20_000_000_000_000,
+                tokens_used: 101_000,
+                time_used_seconds: 0,
+                created_at_ms: 1,
+                updated_at_ms: 2,
+            }),
+            Some("user".into()),
+        );
+
+        let text = rendered_text(&app);
+        assert!(
+            text.contains("101K/20T tokens"),
+            "the budget must scale to its own unit: {text:?}"
+        );
+        assert!(
+            !text.contains("20000000000K"),
+            "no eleven-digit K count: {text:?}"
+        );
+    }
+
     fn sample_agent(id: &str, status: &str) -> octos_core::ui_protocol::UiAgentRecord {
         octos_core::ui_protocol::UiAgentRecord {
             agent_id: id.into(),
@@ -9549,20 +9582,62 @@ mod tests {
 
     #[test]
     fn format_tokens_human_switches_to_millions_above_1m() {
-        // Below 1M it delegates to the K formatter, so a 128k/256k window in
-        // the `/context` subtitle reads the same way as the goal chip.
+        // Below 1K there is no unit to scale to, and K stays integral.
         assert_eq!(format_tokens_human(0), "0K");
         assert_eq!(format_tokens_human(45_231), "45K");
         assert_eq!(format_tokens_human(128_000), "128K");
         assert_eq!(format_tokens_human(256_000), "256K");
-        // The switch is on the raw value, not the rounded-K value, so a hair
-        // under 1M still renders in K (rounding up to `1000K`).
-        assert_eq!(format_tokens_human(999_999), "1000K");
         // At/above 1M it switches to millions and drops a trailing `.0` so a
         // 1,000,000-token window reads `1M`, not `1000K` or `1.0M`.
         assert_eq!(format_tokens_human(1_000_000), "1M");
         assert_eq!(format_tokens_human(1_500_000), "1.5M");
         assert_eq!(format_tokens_human(2_000_000), "2M");
+    }
+
+    #[test]
+    fn format_tokens_human_scales_past_millions() {
+        // Regression: goal budgets are not context-window sized. Pinned to K,
+        // a 20-trillion-token budget rendered `20000000000K` in the goal chip.
+        assert_eq!(format_tokens_human(20_000_000_000_000), "20T");
+        assert_eq!(format_tokens_human(20_000_000_000), "20G");
+        assert_eq!(format_tokens_human(1_000_000_000), "1G");
+        assert_eq!(format_tokens_human(1_500_000_000), "1.5G");
+        assert_eq!(format_tokens_human(1_000_000_000_000), "1T");
+        assert_eq!(format_tokens_human(2_500_000_000_000), "2.5T");
+
+        // Rounding that carries past the unit promotes instead of printing a
+        // four-digit mantissa: 999_999_999 is under 1G but rounds to `1000.0M`.
+        assert_eq!(format_tokens_human(999_999), "1M");
+        assert_eq!(format_tokens_human(999_999_999), "1G");
+        assert_eq!(format_tokens_human(999_999_999_999), "1T");
+
+        // Every value renders with a mantissa of at most three digits, so the
+        // chip can never blow out its width again. (Above 1T there is nothing
+        // to promote to, so the ceiling is exempt.)
+        for tokens in [
+            1_u64,
+            999,
+            1_000,
+            999_499,
+            1_048_576,
+            123_456_789,
+            87_654_321_000,
+            9_876_543_210_000,
+        ] {
+            let rendered = format_tokens_human(tokens);
+            let digits = rendered
+                .split('.')
+                .next()
+                .unwrap()
+                .trim_end_matches(char::is_alphabetic);
+            assert!(
+                digits.len() <= 3,
+                "{tokens} rendered as {rendered:?}, mantissa is not short"
+            );
+        }
+
+        // No overflow / panic at the u64 ceiling; `T` is the top of the ladder.
+        assert!(format_tokens_human(u64::MAX).ends_with('T'));
     }
 
     #[test]
@@ -9797,7 +9872,7 @@ mod tests {
         assert!(text.contains("Goal:"), "folded row keeps the goal label");
         assert!(text.contains('…'), "folded row shows a truncation ellipsis");
         assert!(
-            text.contains("2000K"),
+            text.contains("2M"),
             "status/budget parenthetical stays on-screen"
         );
         assert!(text.contains("Ctrl+P"), "folded row hints Ctrl+P expands");

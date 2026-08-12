@@ -3368,15 +3368,19 @@ fn goal_objective_body_width(width: u16) -> usize {
 }
 
 /// The status/budget parenthetical trailing the objective (e.g.
-/// "(active · 0K/2000K tokens)"). Built in ONE place so the height reservation
+/// "(active · 0K/2M tokens)"). Built in ONE place so the height reservation
 /// and the render agree on its width when deciding whether it fits the last row.
+///
+/// Uses the full unit ladder, not K alone: goal budgets run far past the
+/// context-window scale, and a 20-trillion-token budget pinned to `K` read
+/// `20000000000K` — eleven digits, in the one chip that has to stay short.
 fn goal_meta_parenthetical(goal: &octos_core::ui_protocol::UiGoalRecord) -> String {
     let (_, status_label) = goal_status_display(&goal.status);
     t!(
         "app.autonomy.goal_meta",
         status = status_label,
-        used = format_tokens_k(goal.tokens_used),
-        budget = format_tokens_k(goal.token_budget)
+        used = format_tokens_human(goal.tokens_used),
+        budget = format_tokens_human(goal.token_budget)
     )
     .into_owned()
 }
@@ -3683,21 +3687,46 @@ fn format_tokens_k(tokens: u64) -> String {
     format!("{k}K")
 }
 
-/// Human-readable token count for context-window display: `128K`, `256K`,
-/// `1M`, `1.5M`. Reuses [`format_tokens_k`] below 1M; switches to `M` above so
-/// a 1,000,000-token window renders `1M` rather than `1000K`.
+/// Token-count unit ladder, largest scale first. `G`/`T` exist because goal
+/// budgets are not context-window sized: a 20-trillion-token budget rendered
+/// `20000000000K` when `K` was the only unit — technically true, unreadable in
+/// practice, and the digit count is exactly what a unit is supposed to hide.
+const TOKEN_UNITS: [(u64, char); 4] = [
+    (1_000_000_000_000, 'T'),
+    (1_000_000_000, 'G'),
+    (1_000_000, 'M'),
+    (1_000, 'K'),
+];
+
+/// Human-readable token count for the goal chip and context-window display:
+/// `128K`, `1M`, `1.5M`, `20G`, `20T`. Picks the largest unit that leaves a
+/// mantissa of at least 1, so the rendered number is always under four digits.
+///
+/// `K` stays integral (`45K`, never `45.2K`) — it delegates to
+/// [`format_tokens_k`], which is how the chip and the `/context` subtitle have
+/// always read at that scale.
 pub(crate) fn format_tokens_human(tokens: u64) -> String {
-    if tokens >= 1_000_000 {
-        let millions = tokens as f64 / 1_000_000.0;
-        let rendered = format!("{millions:.1}");
-        let rendered = rendered
-            .strip_suffix(".0")
-            .map(str::to_owned)
-            .unwrap_or(rendered);
-        format!("{rendered}M")
+    let Some(index) = TOKEN_UNITS.iter().position(|(scale, _)| tokens >= *scale) else {
+        // Below 1K there is no smaller unit to fall back to.
+        return format_tokens_k(tokens);
+    };
+    let mantissa = |scale: u64| format!("{:.1}", tokens as f64 / scale as f64);
+    // One-decimal rounding can carry past the unit — 999_999_999 is under 1G,
+    // yet renders `1000.0M`. Promote to the next unit up (`1G`) rather than
+    // print the four-digit mantissa the ladder exists to avoid. Checked on the
+    // rendered string, not a float threshold, so it cannot disagree with what
+    // is actually displayed. At most one promotion is ever possible.
+    let index = if index > 0 && mantissa(TOKEN_UNITS[index].0).starts_with("1000") {
+        index - 1
     } else {
-        format_tokens_k(tokens)
+        index
+    };
+    let (scale, unit) = TOKEN_UNITS[index];
+    if scale == 1_000 {
+        return format_tokens_k(tokens);
     }
+    let rendered = mantissa(scale);
+    format!("{}{unit}", rendered.strip_suffix(".0").unwrap_or(&rendered))
 }
 
 /// Per-status glyph + localized label for the goal chip: every status the
