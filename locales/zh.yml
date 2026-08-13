@@ -741,6 +741,7 @@ menu:
     enter_run_esc_close: 回车 执行 | Esc 关闭
     esc_back: Esc 返回
     esc_close: Esc 关闭
+    preview_scroll_esc_close: PgUp/PgDn 滚动预览 | Esc 关闭
     multi: "上/下 移动 | Enter 确认 | Esc 取消"
     select: "Enter 确认 | Esc 取消 | 上/下 移动"
   help:

@@ -41,13 +41,20 @@ impl MenuSurface {
         let search_query = frame
             .map(|frame| frame.search_query.clone())
             .filter(|query| !query.is_empty());
+        let preview_scroll = frame.map(|frame| frame.preview_scroll).unwrap_or(0);
         let view = match &spec.mode {
-            MenuMode::MultiSelect { allow_reorder, .. } => MenuView::MultiSelect(
-                multi_select_view_from_spec(spec, selected, search_query, *allow_reorder),
-            ),
-            MenuMode::SingleSelect | MenuMode::Loading | MenuMode::Message => {
-                MenuView::Selection(selection_view_from_spec(spec, selected, search_query))
+            MenuMode::MultiSelect { allow_reorder, .. } => {
+                MenuView::MultiSelect(multi_select_view_from_spec(
+                    spec,
+                    selected,
+                    search_query,
+                    preview_scroll,
+                    *allow_reorder,
+                ))
             }
+            MenuMode::SingleSelect | MenuMode::Loading | MenuMode::Message => MenuView::Selection(
+                selection_view_from_spec(spec, selected, search_query, preview_scroll),
+            ),
         };
         Self { stack_path, view }
     }
@@ -130,6 +137,7 @@ fn selection_view_from_spec(
     spec: &MenuSpec,
     selected: usize,
     search_query: Option<String>,
+    preview_scroll: usize,
 ) -> SelectionView {
     let mut view = SelectionView::new(
         spec.title.clone(),
@@ -143,7 +151,10 @@ fn selection_view_from_spec(
             .unwrap_or_else(|| t!("menu.filter.placeholder").into_owned())
     });
     view.footer_hint = spec.footer_hint.clone();
-    view.preview = spec.preview.as_ref().map(selection_preview_from_spec);
+    view.preview = spec
+        .preview
+        .as_ref()
+        .map(|preview| selection_preview_from_spec(preview, preview_scroll));
     view.selected = selected;
     view
 }
@@ -167,6 +178,7 @@ fn multi_select_view_from_spec(
     spec: &MenuSpec,
     selected: usize,
     search_query: Option<String>,
+    preview_scroll: usize,
     allow_reorder: bool,
 ) -> MultiSelectView {
     let mut checked_order = 0;
@@ -193,7 +205,10 @@ fn multi_select_view_from_spec(
             .unwrap_or_else(|| t!("menu.filter.placeholder").into_owned())
     });
     view.footer_hint = spec.footer_hint.clone();
-    view.preview = spec.preview.as_ref().map(multi_select_preview_from_spec);
+    view.preview = spec
+        .preview
+        .as_ref()
+        .map(|preview| multi_select_preview_from_spec(preview, preview_scroll));
     view.selected = selected;
     view.reorder_enabled = allow_reorder;
     view
@@ -218,21 +233,23 @@ fn multi_select_item_from_spec(
     }
 }
 
-fn selection_preview_from_spec(preview: &SpecPreview) -> SelectionPreview {
+fn selection_preview_from_spec(preview: &SpecPreview, scroll: usize) -> SelectionPreview {
     let (title, lines, single_line) = preview_lines(preview);
     SelectionPreview {
         title,
         lines,
         single_line,
+        scroll,
     }
 }
 
-fn multi_select_preview_from_spec(preview: &SpecPreview) -> MultiSelectPreview {
+fn multi_select_preview_from_spec(preview: &SpecPreview, scroll: usize) -> MultiSelectPreview {
     let (title, lines, single_line) = preview_lines(preview);
     MultiSelectPreview {
         title,
         lines,
         single_line,
+        scroll,
     }
 }
 

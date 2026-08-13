@@ -829,7 +829,9 @@ fn status_menu(ctx: &MenuContext<'_>) -> MenuSpec {
         tabs: Vec::new(),
         searchable: false,
         search_placeholder: None,
-        footer_hint: Some(t!("menu.footer.esc_close").into_owned()),
+        // The Snapshot pane routinely holds more rows than fit, so the footer
+        // advertises the scroll keys rather than Esc alone.
+        footer_hint: Some(t!("menu.footer.preview_scroll_esc_close").into_owned()),
         preview: Some(MenuPreview::KeyValues {
             title: Some(t!("menu.status.preview_title").into_owned()),
             rows: status_preview_rows(ctx),

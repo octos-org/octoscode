@@ -27,6 +27,7 @@ use crate::{
     cli::Cli,
     client_event::ClientEvent,
     insert_history::insert_history_lines_with_size,
+    menu::preview_layout,
     model::{AppState, AppUiCommand, ApprovalModalAction, FocusPane},
     store::Store,
     theme::Palette,
@@ -2128,6 +2129,16 @@ fn handle_menu_key(store: &mut Store, key: KeyEvent) -> KeyAction {
         KeyCode::Up | KeyCode::Char('k') => {
             store.select_prev_menu_item();
         }
+        // The preview pane (the Snapshot rows) scrolls on PgUp/PgDn — menus
+        // bind neither, so Up/Down/j/k keep driving the item selection on the
+        // left while these move the pane on the right. Rows below the pane
+        // used to be simply unreachable.
+        KeyCode::PageUp => {
+            scroll_menu_preview(store, -(preview_layout::PREVIEW_SCROLL_STEP as isize));
+        }
+        KeyCode::PageDown => {
+            scroll_menu_preview(store, preview_layout::PREVIEW_SCROLL_STEP as isize);
+        }
         // RIGHT fires the selected row's quick secondary action (e.g. the
         // loops list's pause⇄resume toggle) and keeps the menu open. Rows
         // without a `right_action` leave the key a no-op, as before.
@@ -2246,6 +2257,31 @@ fn slash_help_should_capture_char(store: &Store, ch: char) -> bool {
     // so a user who opened the popup but hasn't started filtering can move the
     // selection. Any other first letter starts the inline filter immediately.
     slash_help_capture_active(store) && (store.state.composer.len() > 1 || !matches!(ch, 'j' | 'k'))
+}
+
+/// Move the active frame's preview scroll, clamped to the SAME bound the
+/// renderer uses ([`preview_layout::max_preview_scroll`]) — so a keypress
+/// either moves the pane or is a genuine no-op at an end, never a press that
+/// silently ticks a counter the renderer has already clamped away.
+fn scroll_menu_preview(store: &mut Store, delta: isize) {
+    let max = preview_layout::max_preview_scroll(active_menu_preview_row_count(store)) as isize;
+    if let Some(frame) = store.state.menu_stack.active_mut() {
+        let next = frame.preview_scroll as isize + delta;
+        frame.preview_scroll = next.clamp(0, max) as usize;
+    }
+}
+
+/// Rows the active menu's preview would render, counted the same way
+/// `menu::render::preview_lines` splits them.
+fn active_menu_preview_row_count(store: &Store) -> usize {
+    let Some(crate::menu::MenuBuildResult::Ready(spec)) = store.state.active_menu.as_ref() else {
+        return 0;
+    };
+    match spec.preview.as_ref() {
+        Some(crate::menu::MenuPreview::Text { body, .. }) => body.lines().count(),
+        Some(crate::menu::MenuPreview::KeyValues { rows, .. }) => rows.len(),
+        None => 0,
+    }
 }
 
 fn slash_help_menu_active(store: &Store) -> bool {
@@ -3610,6 +3646,95 @@ mod tests {
         assert_eq!(
             store.state.composer, "",
             "a trailing space is not an argument"
+        );
+    }
+
+    fn status_menu_store() -> Store {
+        let mut store = store_with_sessions(1);
+        store.state.focus = FocusPane::Composer;
+        store.open_menu(crate::menu::MenuId::from(
+            crate::menu::registry::MENU_STATUS,
+        ));
+        store
+    }
+
+    fn frame_preview_scroll(store: &Store) -> usize {
+        store
+            .state
+            .menu_stack
+            .active()
+            .expect("active frame")
+            .preview_scroll
+    }
+
+    /// PgUp/PgDn scroll the preview pane. Rows past the pane's height used to
+    /// be unreachable entirely — the Snapshot pane silently dropped them.
+    #[test]
+    fn page_keys_scroll_the_menu_preview_and_clamp_at_both_ends() {
+        let mut store = status_menu_store();
+        let rows = active_menu_preview_row_count(&store);
+        assert!(
+            rows > 1,
+            "precondition: the Snapshot preview has rows to scroll, got {rows}"
+        );
+
+        handle_key(&mut store, key(KeyCode::PageDown));
+        assert_eq!(
+            frame_preview_scroll(&store),
+            preview_layout::PREVIEW_SCROLL_STEP.min(rows - 1)
+        );
+
+        // Paging past the end clamps to the shared bound, never beyond.
+        for _ in 0..50 {
+            handle_key(&mut store, key(KeyCode::PageDown));
+        }
+        assert_eq!(
+            frame_preview_scroll(&store),
+            preview_layout::max_preview_scroll(rows),
+            "scrolling stops with the last row at the top of the pane"
+        );
+
+        // And back to the top, without going negative.
+        for _ in 0..50 {
+            handle_key(&mut store, key(KeyCode::PageUp));
+        }
+        assert_eq!(frame_preview_scroll(&store), 0);
+    }
+
+    /// The two axes are independent: item navigation must not disturb the
+    /// preview's scroll, and scrolling must not move the selection.
+    #[test]
+    fn preview_scroll_and_item_selection_are_independent() {
+        let mut store = status_menu_store();
+
+        handle_key(&mut store, key(KeyCode::PageDown));
+        let scrolled = frame_preview_scroll(&store);
+        assert!(scrolled > 0, "precondition: the pane scrolled");
+
+        handle_key(&mut store, key(KeyCode::Down));
+        assert_eq!(
+            frame_preview_scroll(&store),
+            scrolled,
+            "Down leaves the pane where it was"
+        );
+        let selected = store
+            .state
+            .menu_stack
+            .active()
+            .expect("active frame")
+            .selected_index;
+        assert_eq!(selected, 1, "and still moves the selection");
+
+        handle_key(&mut store, key(KeyCode::PageUp));
+        assert_eq!(
+            store
+                .state
+                .menu_stack
+                .active()
+                .expect("active frame")
+                .selected_index,
+            selected,
+            "PgUp scrolls the pane without moving the selection"
         );
     }
 

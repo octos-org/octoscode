@@ -535,6 +535,7 @@ added without a row here.
 | `src/menu/availability.rs` | 695 | Capability gating — which menus the connected server advertises. |
 | `src/menu/mod.rs` | 21 | Menu framework model and generic render surfaces. |
 | `src/menu/multi_select_view.rs` | 487 | Multi-select menu surface. |
+| `src/menu/preview_layout.rs` | 133 | Preview-pane scroll window, row truncation and the range indicator, shared by both menu surfaces. |
 | `src/menu/providers.rs` | 11355 | Local and capability-backed menu providers for the M9.34 framework. |
 | `src/menu/registry.rs` | 1583 | The canonical slash-command registry: names, aliases and capability gating. |
 | `src/menu/render.rs` | 427 | Generic menu renderer shared by every provider. |
