@@ -12675,7 +12675,8 @@ impl Store {
         let targets_active = self.event_targets_active_session(&event.session_id);
         let follow_tail = self.state.transcript_scroll == 0;
         let complete_live_plan = self.turn_had_completion_activity(&event.turn_id);
-        let fallback_summary = self.turn_completion_fallback_message(&event.turn_id);
+        let fallback_summary =
+            self.turn_completion_fallback_message(&event.session_id, &event.turn_id);
         let partial_fallback_summary =
             self.turn_partial_completion_fallback_message(&event.turn_id);
         let interrupt_truncation_note =
@@ -13640,7 +13641,7 @@ impl Store {
             .remove(&(session_id.clone(), prior_turn.clone()))
             .filter(|reasoning| !reasoning.trim().is_empty());
         let complete_live_plan = self.turn_had_completion_activity(&prior_turn);
-        let fallback_summary = self.turn_completion_fallback_message(&prior_turn);
+        let fallback_summary = self.turn_completion_fallback_message(session_id, &prior_turn);
         let partial_fallback_summary = self.turn_partial_completion_fallback_message(&prior_turn);
         let follow_tail = self.state.transcript_scroll == 0;
         let mut committed = false;
@@ -13685,15 +13686,41 @@ impl Store {
         }
     }
 
-    fn turn_completion_fallback_message(&self, turn_id: &TurnId) -> String {
+    /// #532 (defect 3): the void turn summary. "Turn completed, but the TUI did
+    /// not receive a final assistant answer / 0 action(s) recorded" is literally
+    /// true for a master turn that ends while its peer fleet runs — and reads as
+    /// a crash. It is not one: the turn ended BY DESIGN and octos's
+    /// `evaluate_peer_fleet_synthesis` wake re-enters the master once the last
+    /// peer is DONE and SETTLED. When peers are still outstanding, say that
+    /// instead; a genuinely void turn (no fleet, or a fully landed one) keeps
+    /// the original diagnostic card.
+    fn turn_completion_fallback_message(
+        &self,
+        session_id: &octos_core::SessionKey,
+        turn_id: &TurnId,
+    ) -> String {
         let summary = self.summarize_turn_activity(turn_id);
+        let files =
+            format_limited_list(&summary.files_changed, &t!("status.summary_none_observed"));
+        let validation =
+            format_limited_list(&summary.validation, &t!("status.summary_not_reported"));
+        if let Some(fleet) = crate::app::master_fleet_wait(&self.state, session_id) {
+            return t!(
+                "status.summary_waiting_on_fleet",
+                landed = fleet.landed,
+                total = fleet.total,
+                peers = fleet.outstanding_label(),
+                count = summary.action_count,
+                files = files,
+                validation = validation,
+            )
+            .into_owned();
+        }
         t!(
             "status.summary_completed_no_answer",
             count = summary.action_count,
-            files =
-                format_limited_list(&summary.files_changed, &t!("status.summary_none_observed")),
-            validation =
-                format_limited_list(&summary.validation, &t!("status.summary_not_reported")),
+            files = files,
+            validation = validation,
         )
         .into_owned()
     }
@@ -28832,6 +28859,157 @@ now analyzing the bus module"
         );
         assert!(message.content.contains("cargo test"));
         assert_eq!(store.state.run_state.label(), "done");
+    }
+
+    /// #532 helper: record a peer on the durable dock roster. `landed` stamps
+    /// `finished_at`, which is what `peer_is_done` reads.
+    fn stage_fleet_peer(store: &mut Store, slug: &str, landed: bool) -> SessionKey {
+        let key = SessionKey(format!("local:tui#peer-{slug}"));
+        store.state.peer_session_meta.insert(
+            key.clone(),
+            crate::model::PeerMeta {
+                slug: slug.into(),
+                brief_path: format!("/tmp/{slug}.md"),
+                agent_staged: true,
+                created: std::time::Instant::now(),
+                finished_at: landed.then(std::time::Instant::now),
+            },
+        );
+        key
+    }
+
+    /// #532 (defect 3): a master turn that ends while its peer fleet is still
+    /// running is NOT a void turn — it ended BY DESIGN and octos's
+    /// `evaluate_peer_fleet_synthesis` wake re-enters once the last peer lands.
+    /// The old card ("the TUI did not receive a final assistant answer / 0
+    /// action(s) recorded") read as a crash at exactly that moment.
+    #[test]
+    fn turn_completed_while_the_peer_fleet_runs_reports_the_wait_not_a_void_summary() {
+        let turn_id = TurnId::new();
+        let mut store = store_with_empty_session();
+        let session_id = store.state.sessions[0].id.clone();
+        for slug in ["dsh-arch", "dsh-sec", "dsh-agent"] {
+            stage_fleet_peer(&mut store, slug, true);
+        }
+        stage_fleet_peer(&mut store, "dstui-review", false);
+
+        store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
+            TurnCompletedEvent {
+                session_id,
+                topic: None,
+                turn_id,
+                cursor: None,
+                tokens_in: None,
+                tokens_out: None,
+                session_result: None,
+            },
+        )));
+
+        let message = store.state.sessions[0]
+            .messages
+            .last()
+            .expect("fallback assistant message");
+        let content = &message.content;
+        assert!(
+            content.contains("Session Summary"),
+            "still a summary card (locale-independent title): {content}"
+        );
+        assert!(
+            !content.contains("did not receive a final assistant answer"),
+            "the void-turn wording must not fire while the fleet is live: {content}"
+        );
+        assert!(
+            content.contains("3 of 4 peers landed"),
+            "the card reports fleet progress: {content}"
+        );
+        assert!(
+            content.contains("dstui-review"),
+            "the card names the outstanding peer: {content}"
+        );
+        assert!(
+            content.contains("when the fleet lands"),
+            "the card says the master resumes on its own: {content}"
+        );
+    }
+
+    /// #532: the wait card is scoped to a live fleet. A fully landed fleet (or
+    /// no fleet) keeps the classic no-answer card, so the diagnostic value of
+    /// the old wording is not lost for a genuinely void turn.
+    #[test]
+    fn turn_completed_with_a_landed_fleet_keeps_the_classic_no_answer_card() {
+        let turn_id = TurnId::new();
+        let mut store = store_with_empty_session();
+        let session_id = store.state.sessions[0].id.clone();
+        stage_fleet_peer(&mut store, "dsh-arch", true);
+        stage_fleet_peer(&mut store, "dsh-sec", true);
+
+        store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
+            TurnCompletedEvent {
+                session_id,
+                topic: None,
+                turn_id,
+                cursor: None,
+                tokens_in: None,
+                tokens_out: None,
+                session_result: None,
+            },
+        )));
+
+        let content = &store.state.sessions[0]
+            .messages
+            .last()
+            .expect("fallback assistant message")
+            .content;
+        assert!(
+            content.contains("did not receive a final assistant answer"),
+            "a landed fleet keeps the classic card: {content}"
+        );
+    }
+
+    /// #532: a PEER's own turn ending must not claim the peer is waiting on the
+    /// fleet it belongs to — the wait belongs to the master.
+    #[test]
+    fn peer_turn_completed_keeps_the_classic_no_answer_card() {
+        let turn_id = TurnId::new();
+        let mut store = store_with_empty_session();
+        let peer = stage_fleet_peer(&mut store, "dstui-review", false);
+        stage_fleet_peer(&mut store, "dsh-arch", true);
+        store.state.opened_peer_sessions.insert(peer.clone());
+        store.state.sessions.push(SessionView {
+            id: peer.clone(),
+            title: "dstui-review".into(),
+            profile_id: Some("coding".into()),
+            messages: vec![],
+            tasks: vec![],
+            live_reply: None,
+        });
+
+        store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
+            TurnCompletedEvent {
+                session_id: peer.clone(),
+                topic: None,
+                turn_id,
+                cursor: None,
+                tokens_in: None,
+                tokens_out: None,
+                session_result: None,
+            },
+        )));
+
+        let content = &store
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == peer)
+            .expect("peer session")
+            .messages
+            .last()
+            .expect("fallback assistant message")
+            .content;
+        assert!(
+            content.contains("did not receive a final assistant answer"),
+            "a peer's own turn keeps the classic card: {content}"
+        );
     }
 
     #[test]

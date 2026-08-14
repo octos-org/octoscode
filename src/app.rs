@@ -3370,8 +3370,23 @@ fn goal_objective_body_width(width: u16) -> usize {
 /// The status/budget parenthetical trailing the objective (e.g.
 /// "(active · 0K/2000K tokens)"). Built in ONE place so the height reservation
 /// and the render agree on its width when deciding whether it fits the last row.
-fn goal_meta_parenthetical(goal: &octos_core::ui_protocol::UiGoalRecord) -> String {
+///
+/// #532 (defect 2): a bare `⚠ budget limited` read as "everything stopped" —
+/// two experienced readers concluded the master had died and one recommended
+/// raising the budget, which was unnecessary. The budget only halts SELF-PACED
+/// `GoalContinue` ticks; octos's goal-status gate admits BOTH
+/// `"active" | "budget_limited"`, so external wakes (fleet synthesis,
+/// peer-awaiting-input, child-completed) stay schedulable. While the focused
+/// master still has peers in flight, the chip says so instead of reading as a
+/// terminal state.
+fn goal_meta_parenthetical(app: &AppState, goal: &octos_core::ui_protocol::UiGoalRecord) -> String {
     let (_, status_label) = goal_status_display(&goal.status);
+    let status_label =
+        if goal.status == "budget_limited" && focused_master_fleet_wait(app).is_some() {
+            t!("app.autonomy.status_budget_limited_fleet").into_owned()
+        } else {
+            status_label
+        };
     t!(
         "app.autonomy.goal_meta",
         status = status_label,
@@ -3462,7 +3477,7 @@ fn autonomy_indicator_height(app: &AppState, width: u16) -> u16 {
                 let obj_rows = if goal_objective_folded(app, &goal.objective, width) {
                     1
                 } else {
-                    let tail = goal_meta_parenthetical(goal).chars().count();
+                    let tail = goal_meta_parenthetical(app, goal).chars().count();
                     goal_objective_chunks(&goal.objective, width, tail)
                         .len()
                         .max(1)
@@ -3723,7 +3738,7 @@ fn autonomy_indicator_lines(app: &AppState, palette: Palette, width: u16) -> Vec
     let mut lines = Vec::new();
     if let Some(goal) = state.goal.as_ref() {
         let (glyph, _status_label) = goal_status_display(&goal.status);
-        let parenthetical = goal_meta_parenthetical(goal);
+        let parenthetical = goal_meta_parenthetical(app, goal);
         // Folded (default for a long objective, or after Ctrl+P): ONE compact
         // row. The fold decision MUST match `autonomy_indicator_height` — both
         // call `goal_objective_folded` with the same width (reserve==render).
@@ -4220,6 +4235,127 @@ pub(crate) fn peer_dock_counts(app: &AppState) -> (usize, usize, usize, usize) {
     (total, live, blocked, unread)
 }
 
+/// #532: how many outstanding peer slugs a one-row label names before it
+/// collapses the rest into `+N`.
+const FLEET_OUTSTANDING_NAMES: usize = 2;
+
+/// #532: the peer fleet's landing progress, derived ENTIRELY client-side from
+/// the durable dock roster the TUI already keeps — no new protocol field.
+///
+/// A peer has LANDED when its last turn terminated and it is neither live nor
+/// blocked ([`AppState::peer_is_done`]). That is deliberately the same
+/// condition octos's `evaluate_peer_fleet_synthesis` holds on ("every owned
+/// peer must be DONE (has a result) and SETTLED (not mid-turn)"), so
+/// `landed`/`total` tracks the gate that actually decides when the master
+/// wakes to synthesize — rather than inventing a second notion of progress.
+pub(crate) struct FleetProgress {
+    /// Roster peers plus still-opening kickoffs.
+    pub total: usize,
+    /// Peers whose turn terminated and that are neither live nor blocked.
+    pub landed: usize,
+    /// Slugs of the roster peers that have NOT landed, in roster order. Shorter
+    /// than [`Self::outstanding_count`] when peers are still opening — a
+    /// pending kickoff has no slug yet.
+    pub outstanding: Vec<String>,
+}
+
+impl FleetProgress {
+    /// Peers the master is still waiting on, including still-opening kickoffs.
+    pub(crate) fn outstanding_count(&self) -> usize {
+        self.total.saturating_sub(self.landed)
+    }
+
+    /// The outstanding peers as one row-sized label: up to
+    /// [`FLEET_OUTSTANDING_NAMES`] slugs, then `+N`. Never empty — a fleet whose
+    /// outstanding members are all still opening reuses the dock's `opening…`
+    /// wording rather than rendering a blank.
+    pub(crate) fn outstanding_label(&self) -> String {
+        if self.outstanding.is_empty() {
+            return t!("app.hint.peer_dock_row_opening").into_owned();
+        }
+        let shown = self
+            .outstanding
+            .iter()
+            .take(FLEET_OUTSTANDING_NAMES)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let hidden = self
+            .outstanding
+            .len()
+            .saturating_sub(FLEET_OUTSTANDING_NAMES);
+        if hidden > 0 {
+            format!("{shown} +{hidden}")
+        } else {
+            shown
+        }
+    }
+}
+
+/// #532: [`FleetProgress`] for the current roster, or `None` when no peers
+/// exist at all. Says nothing about WHO is waiting — see
+/// [`master_fleet_wait`].
+pub(crate) fn fleet_progress(app: &AppState) -> Option<FleetProgress> {
+    let roster = peer_dock_roster(app);
+    let total = roster.len() + app.pending_peer_kickoffs.len();
+    if total == 0 {
+        return None;
+    }
+    let mut landed = 0usize;
+    let mut outstanding = Vec::new();
+    for (session_id, meta) in &roster {
+        if app.peer_is_done(session_id) {
+            landed += 1;
+        } else {
+            outstanding.push(meta.slug.clone());
+        }
+    }
+    Some(FleetProgress {
+        total,
+        landed,
+        outstanding,
+    })
+}
+
+/// #532: the fleet `session_id` — a MASTER — is still waiting on, or `None`
+/// when there is nothing to wait for (no peers / fully landed) or when
+/// `session_id` is itself a peer.
+///
+/// The wait belongs to the master: a peer is a read-only watch surface and must
+/// never claim to be waiting on the fleet it is a member of. Peer identity uses
+/// the durable `opened_peer_sessions` set (see
+/// [`AppState::focused_session_is_peer`]) rather than the mutable dock roster.
+pub(crate) fn master_fleet_wait(
+    app: &AppState,
+    session_id: &octos_core::SessionKey,
+) -> Option<FleetProgress> {
+    if app.opened_peer_sessions.contains(session_id) {
+        return None;
+    }
+    fleet_progress(app).filter(|fleet| fleet.outstanding_count() > 0)
+}
+
+/// #532: [`master_fleet_wait`] for the FOCUSED session — the surfaces that
+/// paint the active window (status bar, goal chip) read this.
+pub(crate) fn focused_master_fleet_wait(app: &AppState) -> Option<FleetProgress> {
+    let session = app.active_session()?;
+    master_fleet_wait(app, &session.id)
+}
+
+/// #532: the `N/M landed` segment for the Peer Dock's title row and collapsed
+/// pill — "3 of 5 landed" was derivable client-side and shown nowhere.
+fn fleet_landed_segment(app: &AppState) -> Option<String> {
+    let fleet = fleet_progress(app)?;
+    Some(
+        t!(
+            "app.hint.peer_dock_landed",
+            landed = fleet.landed,
+            total = fleet.total
+        )
+        .into_owned(),
+    )
+}
+
 /// #407: the collapsed Peer Dock pill — one glanceable line mirroring the
 /// agent dock pill: `👥 N peers · M live · K⚠ waiting · J● unread — Ctrl+J`.
 /// The `blocked` and `unread` segments appear only when non-zero so a calm
@@ -4235,6 +4371,15 @@ pub(crate) fn peer_dock_pill_line(app: &AppState, palette: Palette) -> Line<'sta
         .into_owned(),
         palette.text().bg(palette.surface),
     )];
+    // #532 (defect 4): fleet landing progress — the collapsed pill is all the
+    // user sees of the fleet when the dock is folded, so "3/5 landed" has to
+    // ride here too, not only on the expanded title row.
+    if let Some(landed) = fleet_landed_segment(app) {
+        spans.push(Span::styled(
+            format!(" · {landed}"),
+            palette.muted().bg(palette.surface),
+        ));
+    }
     if blocked > 0 {
         spans.push(Span::styled(
             t!(
@@ -4374,6 +4519,16 @@ pub(crate) fn peer_strip_lines(
         t!("app.hint.peer_dock_title").into_owned(),
         palette.muted().bg(palette.surface),
     )];
+    // #532 (defect 4): "3 of 5 landed" is derivable from the roster the dock
+    // already draws, and was shown nowhere. It rides the title row so the
+    // fleet's progress reads without counting glyphs down the rows (which the
+    // PEER_STRIP_MAX_PEER_ROWS cap can hide anyway).
+    if let Some(landed) = fleet_landed_segment(app) {
+        title_spans.push(Span::styled(
+            format!("{landed} "),
+            palette.muted().bg(palette.surface),
+        ));
+    }
     if hidden > 0 {
         title_spans.push(Span::styled(
             format!(" +{hidden} "),
@@ -5336,6 +5491,26 @@ fn status_bar_work_text(app: &AppState) -> String {
     if background_tasks > 0 {
         parts.push(t!("app.statusbar.background_tasks", count = background_tasks).into_owned());
         parts.push(t!("app.statusbar.ps_to_view").into_owned());
+    }
+    // #532 (defect 1): a master that has staged peers goes SILENT while it
+    // holds for the fleet — octos's `evaluate_peer_fleet_synthesis` waits for
+    // every owned peer to be DONE and SETTLED before it wakes to synthesize.
+    // Nothing surfaced that hold, so the master read as dead ("apparently
+    // master agent stopped working even it said it would continue"). Shown only
+    // while the master's OWN turn is settled — that idle window IS the one that
+    // looks broken; mid-turn the spinner already says it is alive.
+    if app.active_turn().is_none() {
+        if let Some(fleet) = focused_master_fleet_wait(app) {
+            parts.push(
+                t!(
+                    "app.statusbar.awaiting_fleet",
+                    outstanding = fleet.outstanding_count(),
+                    total = fleet.total,
+                    peers = fleet.outstanding_label()
+                )
+                .into_owned(),
+            );
+        }
     }
     if active_session_has_pending_decision(app) {
         // Turn parked on YOUR decision; the approval/question card may have

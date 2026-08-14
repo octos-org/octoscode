@@ -8906,13 +8906,16 @@ mod tests {
     /// compresses a fixed row (clipped composer / scrollback ghosts).
     #[test]
     fn live_ui_height_reserves_peer_strip_rows() {
-        // Width 120, not 80: opening a peer also lengthens the STATUS line,
-        // which at 80 cols crosses the wrap threshold (1 -> 2 rows, measured
-        // by `status_bar_height` on both sides of reserve==render). This test
-        // pins the PEER DOCK term, so use a width where the status height is
-        // identical in both states and the delta isolates the dock.
+        // Wide, not 80: opening a peer also lengthens the STATUS line, which at
+        // narrow widths crosses the wrap threshold (1 -> 2 rows, measured by
+        // `status_bar_height` on both sides of reserve==render). This test pins
+        // the PEER DOCK term, so use a width where the status height is
+        // identical in both states and the delta isolates the dock. Widened
+        // from 120 for #532: the status line now also carries the
+        // awaiting-fleet segment ("waiting on N of M peers: …") once a peer is
+        // staged, which pushed 120 back over the wrap threshold.
         let mut app = autonomy_app_state();
-        let without = live_ui_height(&app, 120, 40);
+        let without = live_ui_height(&app, 200, 40);
         app.peer_session_meta.insert(
             SessionKey("local:tui#peer-ci-red".into()),
             crate::model::PeerMeta {
@@ -8926,7 +8929,7 @@ mod tests {
         let expected = peer_strip_height(&app, 40);
         assert!(expected > 0, "an open peer occupies dock rows");
         assert_eq!(
-            live_ui_height(&app, 120, 40),
+            live_ui_height(&app, 200, 40),
             without + expected,
             "the reservation basis must grow by exactly the dock's rendered rows"
         );
@@ -11128,6 +11131,296 @@ mod tests {
             after.contains("Alt+Y approve · Alt+N deny"),
             "a stashed peer approval renders the approve/deny affordance; got: {after}"
         );
+    }
+
+    /// #532 helper: record a peer on the durable dock roster. `landed` stamps
+    /// `finished_at` so `peer_is_done` reports it as landed (turn terminated,
+    /// not live, not blocked).
+    fn stage_peer(app: &mut AppState, slug: &str, landed: bool) -> SessionKey {
+        let key = SessionKey(format!("local:tui#peer-{slug}"));
+        app.peer_session_meta.insert(
+            key.clone(),
+            crate::model::PeerMeta {
+                slug: slug.into(),
+                brief_path: format!("/tmp/{slug}.md"),
+                agent_staged: true,
+                created: std::time::Instant::now(),
+                finished_at: landed.then(std::time::Instant::now),
+            },
+        );
+        key
+    }
+
+    /// #532 (defect 4): "3 of 5 landed" appeared nowhere. Both dock surfaces —
+    /// the expanded title row and the collapsed pill — now carry the fleet's
+    /// landing progress, so a master waiting on the last peer is legible
+    /// whether or not the dock is expanded.
+    #[test]
+    fn peer_dock_surfaces_fleet_landing_progress() {
+        let mut app = autonomy_app_state();
+        for slug in ["dsh-arch", "dsh-sec", "dsh-agent"] {
+            stage_peer(&mut app, slug, true);
+        }
+        let running = stage_peer(&mut app, "dstui-review", false);
+        app.pre_token_turns
+            .insert(running.clone(), std::time::Instant::now());
+
+        app.peer_dock_collapsed = false;
+        let expanded = lines_text(&peer_strip_lines(&app, Palette::for_theme(app.theme), 4));
+        assert!(
+            expanded.contains("3/4 landed"),
+            "the expanded dock title row shows fleet progress; got: {expanded}"
+        );
+
+        app.peer_dock_collapsed = true;
+        let pill = lines_text(&peer_strip_lines(&app, Palette::for_theme(app.theme), 4));
+        assert!(
+            pill.contains("3/4 landed"),
+            "the collapsed pill shows fleet progress; got: {pill}"
+        );
+    }
+
+    /// #532: the derivation itself — "landed" is `peer_is_done` (turn
+    /// terminated, not live, not blocked), which mirrors octos's
+    /// `evaluate_peer_fleet_synthesis` hold ("DONE and SETTLED"). A peer still
+    /// OPENING has no slug yet, so it counts toward `total`/outstanding without
+    /// appearing in the name list; the label caps names and never renders blank.
+    #[test]
+    fn fleet_progress_counts_landed_and_names_outstanding_peers() {
+        let mut app = autonomy_app_state();
+        assert!(
+            fleet_progress(&app).is_none(),
+            "no peers at all is not a fleet"
+        );
+
+        stage_peer(&mut app, "dsh-arch", true);
+        for slug in ["dstui-review", "dsh-sec", "dsh-agent"] {
+            stage_peer(&mut app, slug, false);
+        }
+        // A never-run peer is NOT landed — it has no result yet.
+        let blocked = stage_peer(&mut app, "dsh-docs", true);
+        app.pending_session_approvals.insert(
+            blocked.clone(),
+            crate::model::ApprovalModalState::from_event(
+                octos_core::ui_protocol::ApprovalRequestedEvent::generic(
+                    blocked,
+                    octos_core::ui_protocol::ApprovalId::new(),
+                    octos_core::ui_protocol::TurnId::new(),
+                    "shell",
+                    "Run shell command?",
+                    "run: cargo test",
+                ),
+            ),
+        );
+
+        let fleet = fleet_progress(&app).expect("fleet");
+        assert_eq!(fleet.total, 5);
+        assert_eq!(fleet.landed, 1, "a blocked peer has not landed");
+        assert_eq!(fleet.outstanding_count(), 4);
+        let label = fleet.outstanding_label();
+        assert!(
+            label.ends_with("+2"),
+            "the label caps names then counts the rest; got: {label}"
+        );
+
+        // A still-OPENING peer has no slug — it must still count, and the label
+        // must not render blank when every outstanding peer is unnamed.
+        let mut opening = autonomy_app_state();
+        opening.pending_peer_kickoffs.insert(
+            SessionKey("local:tui#peer-opening".into()),
+            crate::model::PeerKickoff {
+                brief: "audit".into(),
+                brief_path: "/tmp/audit.md".into(),
+                go: true,
+                agent_staged: true,
+                created: std::time::Instant::now(),
+            },
+        );
+        let fleet = fleet_progress(&opening).expect("pending-only fleet");
+        assert_eq!(
+            (fleet.total, fleet.landed, fleet.outstanding_count()),
+            (1, 0, 1)
+        );
+        assert!(
+            !fleet.outstanding_label().trim().is_empty(),
+            "an unnamed outstanding peer still gets a label"
+        );
+    }
+
+    /// #532 (defect 1): the master looked dead while it correctly held for the
+    /// last peer. The status bar — the one chrome that never scrolls away —
+    /// now names the wait and the outstanding peer.
+    #[test]
+    fn status_bar_reports_the_master_waiting_on_its_peer_fleet() {
+        let mut app = autonomy_app_state();
+        for slug in ["dsh-arch", "dsh-sec", "dsh-agent"] {
+            stage_peer(&mut app, slug, true);
+        }
+        stage_peer(&mut app, "dstui-review", false);
+
+        let text = status_bar_work_text(&app);
+        assert!(
+            text.contains("waiting on 1 of 4 peers"),
+            "status bar names the outstanding count; got: {text}"
+        );
+        assert!(
+            text.contains("dstui-review"),
+            "status bar names the peer being waited on; got: {text}"
+        );
+    }
+
+    /// #532: a fully landed fleet is not a wait — no segment. Guards against a
+    /// permanent banner once the fleet is home.
+    #[test]
+    fn status_bar_drops_the_fleet_wait_once_every_peer_has_landed() {
+        let mut app = autonomy_app_state();
+        for slug in ["dsh-arch", "dsh-sec"] {
+            stage_peer(&mut app, slug, true);
+        }
+        let text = status_bar_work_text(&app);
+        assert!(
+            !text.contains("waiting on"),
+            "a landed fleet shows no wait segment; got: {text}"
+        );
+    }
+
+    /// #532: the wait is the MASTER's state. Focused on a peer (a read-only
+    /// watch surface), the segment must not claim that peer is waiting on the
+    /// fleet it belongs to.
+    #[test]
+    fn status_bar_omits_the_fleet_wait_while_a_peer_is_focused() {
+        let mut app = autonomy_app_state();
+        stage_peer(&mut app, "dsh-arch", true);
+        stage_peer(&mut app, "dstui-review", false);
+        // Focus a peer: it becomes the active session AND is recorded in the
+        // durable peer identity set.
+        let peer = SessionKey("local:tui#peer-dstui-review".into());
+        app.sessions.push(SessionView {
+            id: peer.clone(),
+            title: "dstui-review".into(),
+            profile_id: None,
+            messages: vec![],
+            tasks: vec![],
+            live_reply: None,
+        });
+        app.opened_peer_sessions.insert(peer);
+        app.selected_session = app.sessions.len() - 1;
+
+        let text = status_bar_work_text(&app);
+        assert!(
+            !text.contains("waiting on"),
+            "a focused peer must not render the master's fleet wait; got: {text}"
+        );
+    }
+
+    /// #532 (defect 2): `⚠ budget limited` read as "everything stopped". It is
+    /// not: budget only halts SELF-PACED goal ticks — external wakes (fleet
+    /// synthesis, peer-awaiting-input, child-completed) stay schedulable at
+    /// `budget_limited` in octos. While peers are live the chip says so.
+    #[test]
+    fn budget_limited_goal_chip_says_peers_are_still_running() {
+        let mut app = autonomy_app_with_goal("review the dashboard");
+        app.set_session_goal(
+            &SessionKey("local:test".into()),
+            Some(octos_core::ui_protocol::UiGoalRecord {
+                profile_id: Some("coding".into()),
+                goal_id: "goal_01".into(),
+                objective: "review the dashboard".into(),
+                status: "budget_limited".into(),
+                token_budget: 2_000_000,
+                tokens_used: 3_406_000,
+                time_used_seconds: 0,
+                created_at_ms: 1,
+                updated_at_ms: 2,
+            }),
+            Some("user".into()),
+        );
+        stage_peer(&mut app, "dsh-arch", true);
+        stage_peer(&mut app, "dstui-review", false);
+
+        let text = lines_text(&autonomy_indicator_lines(
+            &app,
+            Palette::for_theme(ThemeName::Codex),
+            100,
+        ));
+        assert!(
+            text.contains("budget limited"),
+            "the budget state is still reported; got: {text}"
+        );
+        assert!(
+            text.contains("peers still running"),
+            "the chip must not read as terminal while peers are live; got: {text}"
+        );
+    }
+
+    /// #532: with no fleet in flight the budget chip keeps its terse wording —
+    /// the softener is scoped to a live fleet, not applied unconditionally.
+    #[test]
+    fn budget_limited_goal_chip_stays_terse_without_a_live_fleet() {
+        let mut app = autonomy_app_with_goal("review the dashboard");
+        app.set_session_goal(
+            &SessionKey("local:test".into()),
+            Some(octos_core::ui_protocol::UiGoalRecord {
+                profile_id: Some("coding".into()),
+                goal_id: "goal_01".into(),
+                objective: "review the dashboard".into(),
+                status: "budget_limited".into(),
+                token_budget: 2_000_000,
+                tokens_used: 3_406_000,
+                time_used_seconds: 0,
+                created_at_ms: 1,
+                updated_at_ms: 2,
+            }),
+            Some("user".into()),
+        );
+        stage_peer(&mut app, "dsh-arch", true);
+
+        let text = lines_text(&autonomy_indicator_lines(
+            &app,
+            Palette::for_theme(ThemeName::Codex),
+            100,
+        ));
+        assert!(text.contains("budget limited"), "got: {text}");
+        assert!(
+            !text.contains("peers still running"),
+            "a landed fleet must not soften the chip; got: {text}"
+        );
+    }
+
+    /// #532: reserve==render for the goal banner survives the fleet-aware
+    /// parenthetical — the height reservation and the render must agree on the
+    /// row count with a live fleet in play (the banner's standing discipline).
+    #[test]
+    fn goal_banner_height_matches_rendered_rows_with_a_live_fleet() {
+        let objective = "review the dashboard end to end and report every regression you find";
+        let mut app = autonomy_app_with_goal(objective);
+        app.set_session_goal(
+            &SessionKey("local:test".into()),
+            Some(octos_core::ui_protocol::UiGoalRecord {
+                profile_id: Some("coding".into()),
+                goal_id: "goal_01".into(),
+                objective: objective.into(),
+                status: "budget_limited".into(),
+                token_budget: 2_000_000,
+                tokens_used: 3_406_000,
+                time_used_seconds: 0,
+                created_at_ms: 1,
+                updated_at_ms: 2,
+            }),
+            Some("user".into()),
+        );
+        app.goal_objective_fold = crate::model::GoalObjectiveFold::Unfolded;
+        stage_peer(&mut app, "dstui-review", false);
+
+        for width in [60u16, 80, 100, 120] {
+            let rendered =
+                autonomy_indicator_lines(&app, Palette::for_theme(ThemeName::Codex), width).len();
+            assert_eq!(
+                autonomy_indicator_height(&app, width) as usize,
+                rendered,
+                "reserve==render at width {width}"
+            );
+        }
     }
 
     #[test]

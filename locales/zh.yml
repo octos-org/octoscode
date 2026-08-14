@@ -99,6 +99,9 @@ app:
     status_active: "进行中"
     status_paused: "已暂停"
     status_budget_limited: "预算已用尽"
+    # octoscode#532：预算用尽只会停止目标的自驱动轮询；舰队汇总、peer 等待输入、
+    # 子任务完成这些外部唤醒仍会触发，所以不能读作"已终止"。
+    status_budget_limited_fleet: "预算已用尽 · peer 仍在运行"
     status_blocked: "已阻塞"
     status_complete: "已完成"
   statusbar:
@@ -115,6 +118,8 @@ app:
     ps_to_view: "/ps 查看"
     esc_interrupt: "Esc 中断"
     stop_to_close: "/stop 关闭"
+    # octoscode#532：主 agent 等待舰队时会长时间沉默，仅在其自身轮次已结束时显示。
+    awaiting_fleet: "等待 %{total} 个 peer 中的 %{outstanding} 个：%{peers}"
     pending_decision_help: "等待你的确认 — Ctrl+R/Alt+A 应答 · Ctrl+C 中断"
     parked_decision_banner: "⚠ 已等待你 %{elapsed} — Ctrl+R/Alt+A 应答 · Ctrl+C 中断"
     tool_output_expanded: "工具输出已展开"
@@ -171,6 +176,8 @@ app:
     peer_dock_pill_unread: " · %{count}● 未读"
     peer_dock_toggle_hint: "Alt+P/Ctrl+L 预览"
     peer_dock_title: " peers "
+    # octoscode#532：舰队落地进度——"5 个中已落地 3 个"此前无处可见。
+    peer_dock_landed: "已落地 %{landed}/%{total}"
     peer_dock_row_blocked: "等你确认：%{reason}"
     peer_dock_row_idle: "空闲"
     peer_dock_row_opening: "打开中…"
@@ -1661,6 +1668,9 @@ status:
   quota_card_provider_unknown: "当前提供商"
   summary_completed_no_answer: "会话摘要\n- 结果：轮次已完成，但 TUI 未收到最终的助手回答。\n- 活动：已记录 %{count} 个操作。\n- 文件改动：%{files}。\n- 验证：%{validation}。\n- 风险 / 后续：请查看上方活动，若所需回答不完整，请继续该轮次。"
   summary_partial_answer: "会话摘要\n- 结果：轮次已完成，但 TUI 仅收到部分实时回答。\n- 活动：已记录 %{count} 个操作。\n- 文件改动：%{files}。\n- 验证：%{validation}。\n- 风险 / 后续：服务器可能已持久化更完整的回答；若可见回答不完整，请继续。"
+  # octoscode#532：主 agent 的轮次在 peer 舰队仍在运行时结束——这是设计使然，
+  # 等最后一个 peer 落地后会自动唤醒并汇总，因此不能再用"未收到回答"的措辞。
+  summary_waiting_on_fleet: "会话摘要\n- 结果：轮次已结束，但 peer 舰队仍在运行。主 agent 并未停止——舰队全部落地后它会自动唤醒并汇总。\n- 舰队：%{total} 个 peer 中已落地 %{landed} 个 · 仍在等待 %{peers}。\n- 活动：已记录 %{count} 个操作。\n- 文件改动：%{files}。\n- 验证：%{validation}。\n- 风险 / 后续：无需操作——Alt+P 可查看 peer 面板；最后一个 peer 落地后主 agent 会汇报。"
   summary_failed: "会话摘要\n- 结果：轮次在产生最终回答前失败。\n- 错误：%{code}：%{message}\n- 活动：已记录 %{count} 个操作。\n- 失败：%{failed}。\n- 风险 / 后续：请修复上方错误，或用更具体的指令继续该轮次。"
   summary_none_observed: "未观察到"
   summary_not_reported: "未报告"

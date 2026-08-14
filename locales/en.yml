@@ -108,6 +108,11 @@ app:
     status_active: "active"
     status_paused: "paused"
     status_budget_limited: "budget limited"
+    # octoscode#532: a bare "budget limited" reads as "the goal is dead". It is
+    # not — the budget only halts SELF-PACED goal ticks; external wakes (fleet
+    # synthesis, peer-awaiting-input, child-completed) stay schedulable because
+    # octos's goal-status gate admits both "active" and "budget_limited".
+    status_budget_limited_fleet: "budget limited · peers still running"
     status_blocked: "blocked"
     status_complete: "complete"
   statusbar:
@@ -124,6 +129,9 @@ app:
     ps_to_view: "/ps to view"
     esc_interrupt: "Esc interrupt"
     stop_to_close: "/stop to close"
+    # octoscode#532: the master goes silent while it holds for its fleet. Shown
+    # only while the master's own turn is settled — the window that looked dead.
+    awaiting_fleet: "waiting on %{outstanding} of %{total} peers: %{peers}"
     pending_decision_help: "Waiting on you — Ctrl+R/Alt+A answer · Ctrl+C interrupt"
     parked_decision_banner: "⚠ Parked on you for %{elapsed} — Ctrl+R/Alt+A answer · Ctrl+C interrupt"
     tool_output_expanded: "tool output expanded"
@@ -183,6 +191,9 @@ app:
     peer_dock_pill_unread: " · %{count}● unread"
     peer_dock_toggle_hint: "Alt+P/Ctrl+L peek"
     peer_dock_title: " peers "
+    # octoscode#532: fleet landing progress — "3 of 5 landed" was derivable
+    # client-side and rendered nowhere.
+    peer_dock_landed: "%{landed}/%{total} landed"
     peer_dock_row_blocked: "waiting on you: %{reason}"
     peer_dock_row_idle: "idle"
     peer_dock_row_opening: "opening…"
@@ -909,6 +920,12 @@ status:
   quota_card_provider_unknown: "the active provider"
   summary_completed_no_answer: "Session Summary\n- Result: Turn completed, but the TUI did not receive a final assistant answer.\n- Activity: %{count} action(s) recorded.\n- Files changed: %{files}.\n- Validation: %{validation}.\n- Risks / follow-up: Review the activity above and continue the turn if the requested answer is incomplete."
   summary_partial_answer: "Session Summary\n- Result: Turn completed, but the TUI only received a partial live answer.\n- Activity: %{count} action(s) recorded.\n- Files changed: %{files}.\n- Validation: %{validation}.\n- Risks / follow-up: The server may have persisted a fuller answer; continue if the visible answer is incomplete."
+  # octoscode#532: replaces `summary_completed_no_answer` when the master's turn
+  # ends while its peer fleet is still running. That turn ended BY DESIGN — the
+  # fleet-synthesis wake re-enters the master once every peer is done+settled —
+  # so the void-turn wording read as a crash at the exact moment the fleet was
+  # doing its most impressive work.
+  summary_waiting_on_fleet: "Session Summary\n- Result: Turn ended while the peer fleet is still running. The master is NOT stopped — it wakes and synthesizes when the fleet lands.\n- Fleet: %{landed} of %{total} peers landed · waiting on %{peers}.\n- Activity: %{count} action(s) recorded.\n- Files changed: %{files}.\n- Validation: %{validation}.\n- Risks / follow-up: Nothing to do — Alt+P peeks the peer dock. The master reports once the last peer lands."
   summary_failed: "Session Summary\n- Result: Turn failed before producing a final answer.\n- Error: %{code}: %{message}\n- Activity: %{count} action(s) recorded.\n- Failures: %{failed}.\n- Risks / follow-up: Fix the error above or continue the turn with a more specific instruction."
   summary_none_observed: "none observed"
   summary_not_reported: "not reported"
