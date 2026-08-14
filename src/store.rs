@@ -7805,6 +7805,14 @@ impl Store {
             ClientEvent::PeerPrepared(event) => self.apply_peer_prepared_event(event),
             ClientEvent::TurnSteered(event) => self.apply_turn_steered_event(event),
             ClientEvent::PeerStaged(event) => self.apply_peer_staged_event(event),
+            // octos#2019: file the background event under the session that OWNS
+            // its emitter. No fallback to the focused session — an unroutable
+            // row is dropped by `push_background_activity` rather than
+            // misattributed (octos-tui#461 / #466 / #483).
+            ClientEvent::BackgroundActivity(event) => {
+                self.state.push_background_activity(event);
+                None
+            }
             ClientEvent::PeerClosed(e) => self.apply_peer_closed_event(e),
             ClientEvent::PeerGathered(event) => self.apply_peer_gathered_event(event),
             ClientEvent::SubProvidersMutation(event) => {

@@ -2541,7 +2541,8 @@ fn appui_feature_header_for(old_server: bool) -> String {
         );
     }
     format!(
-        "{UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1}, {UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1}, {UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1}, {UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1}, {UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1}, {UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1}, {UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1}, {UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1}, {UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1}, {UI_PROTOCOL_FEATURE_USER_QUESTION_V1}, {UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1}, {UI_PROTOCOL_FEATURE_PLAN_TODOS_V1}, {UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2}"
+        "{UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1}, {UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1}, {UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1}, {UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1}, {UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1}, {UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1}, {UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1}, {UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1}, {UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1}, {UI_PROTOCOL_FEATURE_USER_QUESTION_V1}, {UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1}, {UI_PROTOCOL_FEATURE_PLAN_TODOS_V1}, {}, {UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2}",
+        crate::model::APPUI_FEATURE_BACKGROUND_ACTIVITY_V1
     )
 }
 
@@ -2883,6 +2884,14 @@ fn rpc_value_to_app_event(
         }
         if method == crate::model::APPUI_METHOD_PEER_CLOSED {
             return Ok(Some(peer_closed_notification_to_client_event(params)));
+        }
+        // octos#2019: `background/activity` is decoded tui-locally for the same
+        // reason — the pinned octos-core rev predates the variant, so the
+        // vendored decoder would degrade it to an `unknown_notification` error.
+        if method == crate::model::APPUI_METHOD_BACKGROUND_ACTIVITY {
+            return Ok(Some(background_activity_notification_to_client_event(
+                params,
+            )));
         }
         return Ok(Some(notification_to_app_event(method, params).into()));
     }
@@ -4278,6 +4287,25 @@ fn peer_staged_notification_to_client_event(params: Value) -> ClientEvent {
             format!(
                 "failed to decode UI protocol params for {}: {err}",
                 crate::model::APPUI_METHOD_PEER_STAGED
+            ),
+        )
+        .into(),
+    }
+}
+
+/// octos#2019: decodes the durable `background/activity` notification into the
+/// typed [`ClientEvent::BackgroundActivity`] via the tui-local
+/// [`crate::model::BackgroundActivityParams`] mirror (the vendored octos-core
+/// rev has no `UiNotification` variant for it yet). Malformed params surface as
+/// the standard `invalid_params` error event rather than wedging the stream.
+fn background_activity_notification_to_client_event(params: Value) -> ClientEvent {
+    match serde_json::from_value::<crate::model::BackgroundActivityParams>(params) {
+        Ok(event) => ClientEvent::BackgroundActivity(event),
+        Err(err) => app_error(
+            "invalid_params",
+            format!(
+                "failed to decode UI protocol params for {}: {err}",
+                crate::model::APPUI_METHOD_BACKGROUND_ACTIVITY
             ),
         )
         .into(),
@@ -7220,6 +7248,117 @@ mod tests {
     /// vendored octos-core rev predates the `UiNotification` variant, so
     /// routing it through `from_method_and_params` would degrade it to an
     /// `unknown_notification` error event.
+    #[test]
+    fn should_decode_background_activity_onto_the_owning_session_when_the_frame_arrives() {
+        // octos#2019 — the wire frame's `session_id` is the ROUTING key and
+        // must survive decode intact. A decoder that lost it would force the
+        // store to fall back to the focused session (octos-tui#461/#466/#483).
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "method": "background/activity",
+            "params": {
+                "session_id": "coding:local:tui#coding",
+                "profile_id": "coding",
+                "origin_kind": "monitor",
+                "origin_id": "monitor_01",
+                "origin_label": "ci-tail",
+                "text": "ERROR bus test flaked",
+                "emitted_at_ms": 1_760_000_000_000i64,
+                "suppressed": false
+            }
+        })
+        .to_string();
+        let event = rpc_text_to_app_event_with_pending(&frame, &mut HashMap::new())
+            .expect("frame decodes")
+            .expect("client event");
+        let ClientEvent::BackgroundActivity(activity) = event else {
+            panic!("expected background activity event, got {event:?}");
+        };
+        assert_eq!(
+            activity.session_id,
+            SessionKey("coding:local:tui#coding".into()),
+            "the owning session is the routing key"
+        );
+        assert_eq!(activity.origin_kind, "monitor");
+        assert_eq!(activity.origin_id, "monitor_01");
+        assert_eq!(activity.display_origin(), "ci-tail");
+        assert_eq!(activity.text, "ERROR bus test flaked");
+        assert!(!activity.suppressed);
+        assert!(activity.dropped_count.is_none());
+    }
+
+    /// octos#2019 — the cap's drop marker decodes with its total intact, so
+    /// the client can say so out loud instead of truncating silently.
+    #[test]
+    fn should_decode_the_drop_marker_when_background_activity_was_capped() {
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "method": "background/activity",
+            "params": {
+                "session_id": "coding:local:tui",
+                "origin_kind": "monitor",
+                "origin_id": "monitor_01",
+                "text": "further events from this origin are suppressed",
+                "emitted_at_ms": 1_760_000_000_001i64,
+                "dropped_count": 12,
+                "suppressed": true
+            }
+        })
+        .to_string();
+        let event = rpc_text_to_app_event_with_pending(&frame, &mut HashMap::new())
+            .expect("frame decodes")
+            .expect("client event");
+        let ClientEvent::BackgroundActivity(activity) = event else {
+            panic!("expected background activity event, got {event:?}");
+        };
+        assert!(activity.suppressed);
+        assert_eq!(activity.dropped_count, Some(12));
+        // No label on the wire ⇒ attribution falls back to the origin id, so a
+        // row is never unattributed.
+        assert_eq!(activity.display_origin(), "monitor_01");
+    }
+
+    /// Malformed `background/activity` params surface as the standard
+    /// `invalid_params` error event instead of the `unknown_notification`
+    /// trap or wedging the durable replay stream.
+    #[test]
+    fn should_report_invalid_params_when_background_activity_is_malformed() {
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "method": "background/activity",
+            "params": { "origin_kind": "monitor" }
+        })
+        .to_string();
+        let event = rpc_text_to_app_event_with_pending(&frame, &mut HashMap::new())
+            .expect("frame decodes")
+            .expect("client event");
+        let ClientEvent::App(app_event) = event else {
+            panic!("expected an app error event, got {event:?}");
+        };
+        let AppUiEvent::Error(error) = *app_event else {
+            panic!("expected an error event, got {app_event:?}");
+        };
+        assert_eq!(error.code, "invalid_params");
+        assert!(error.message.contains("background/activity"));
+    }
+
+    /// octos#2019 — the client must ADVERTISE the capability, or the server
+    /// (which gates the notification on it) never sends the frame and the
+    /// human sink is silently dead.
+    #[test]
+    fn should_advertise_background_activity_when_negotiating_features() {
+        let header = appui_feature_header_for(false);
+        assert!(
+            header.contains(crate::model::APPUI_FEATURE_BACKGROUND_ACTIVITY_V1),
+            "modern feature header must request the human sink: {header}"
+        );
+        assert!(
+            !appui_feature_header_for(true)
+                .contains(crate::model::APPUI_FEATURE_BACKGROUND_ACTIVITY_V1),
+            "the old-server baseline must not request it"
+        );
+    }
+
     #[test]
     fn peer_staged_notification_decodes_to_client_event() {
         let frame = json!({

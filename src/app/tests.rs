@@ -75,6 +75,211 @@ mod tests {
         viewport::ScrollbackTracker,
     };
 
+    // ── background/activity — the human sink (octos#2019) ────────────────
+
+    fn background_activity_row(
+        session: &str,
+        origin_id: &str,
+        label: &str,
+        text: &str,
+    ) -> crate::model::BackgroundActivityParams {
+        crate::model::BackgroundActivityParams {
+            session_id: SessionKey(session.into()),
+            profile_id: Some("dev".into()),
+            origin_kind: "monitor".into(),
+            origin_id: origin_id.into(),
+            origin_label: Some(label.into()),
+            text: text.into(),
+            emitted_at_ms: 1_760_000_000_000,
+            dropped_count: None,
+            suppressed: false,
+        }
+    }
+
+    fn background_activity_lines(app: &AppState, session: &SessionView) -> Vec<String> {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        push_background_activity_section(
+            &mut lines,
+            Palette::for_theme(ThemeName::Codex),
+            app,
+            session,
+            80,
+        );
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    fn two_session_app() -> AppState {
+        AppState::new(
+            vec![
+                SessionView {
+                    id: SessionKey("dev:local:a".into()),
+                    title: "a".into(),
+                    profile_id: None,
+                    messages: vec![],
+                    tasks: vec![],
+                    live_reply: None,
+                },
+                SessionView {
+                    id: SessionKey("dev:local:b".into()),
+                    title: "b".into(),
+                    profile_id: None,
+                    messages: vec![],
+                    tasks: vec![],
+                    live_reply: None,
+                },
+            ],
+            0,
+            "ready".into(),
+            None,
+            false,
+        )
+    }
+
+    /// octos#2019 — background events render under the session that OWNS the
+    /// emitter, NOT under whichever session happens to be focused. That
+    /// failure mode has shipped three times (octos-tui#461, #466, #483), so
+    /// this asserts ROUTING: session B's line must be absent from session A's
+    /// transcript while A is focused, and vice versa.
+    #[test]
+    fn should_render_background_activity_only_under_its_own_session_when_another_is_focused() {
+        let mut app = two_session_app();
+        app.push_background_activity(background_activity_row(
+            "dev:local:a",
+            "monitor_01",
+            "ci-tail",
+            "A: build failed",
+        ));
+        app.push_background_activity(background_activity_row(
+            "dev:local:b",
+            "monitor_02",
+            "deploy-tail",
+            "B: rollout stalled",
+        ));
+
+        let session_a = app.sessions[0].clone();
+        let session_b = app.sessions[1].clone();
+        // Session A is focused.
+        assert_eq!(app.selected_session, 0);
+
+        let a_lines = background_activity_lines(&app, &session_a);
+        assert!(
+            a_lines.iter().any(|line| line.contains("A: build failed")),
+            "the owning session must show its own event: {a_lines:?}"
+        );
+        assert!(
+            !a_lines
+                .iter()
+                .any(|line| line.contains("B: rollout stalled")),
+            "another session's event must never render here: {a_lines:?}"
+        );
+
+        let b_lines = background_activity_lines(&app, &session_b);
+        assert!(
+            b_lines
+                .iter()
+                .any(|line| line.contains("B: rollout stalled")),
+            "session B keeps its own event: {b_lines:?}"
+        );
+        assert!(
+            !b_lines.iter().any(|line| line.contains("A: build failed")),
+            "session A's event must not leak into B: {b_lines:?}"
+        );
+    }
+
+    /// octos#2019 — a 50-round loop must be ONE foldable group, not 50 loose
+    /// lines, and every group must name its origin (an unattributed line reads
+    /// as the master speaking).
+    #[test]
+    fn should_fold_background_activity_into_one_attributed_group_when_collapsed() {
+        let mut app = two_session_app();
+        for i in 0..50 {
+            app.push_background_activity(background_activity_row(
+                "dev:local:a",
+                "monitor_01",
+                "ci-tail",
+                &format!("round {i}"),
+            ));
+        }
+        let session = app.sessions[0].clone();
+
+        let collapsed = background_activity_lines(&app, &session);
+        assert_eq!(
+            collapsed.len(),
+            2,
+            "collapsed = one header + the newest line: {collapsed:?}"
+        );
+        // ATTRIBUTION + count on the header.
+        assert!(collapsed[0].contains("monitor ci-tail"), "{collapsed:?}");
+        assert!(collapsed[0].contains("50 event(s)"), "{collapsed:?}");
+        assert!(collapsed[1].contains("round 49"), "{collapsed:?}");
+
+        app.expanded_tool_outputs = true;
+        let expanded = background_activity_lines(&app, &session);
+        assert!(
+            expanded.len() > collapsed.len(),
+            "ctrl+o expands the group: {}",
+            expanded.len()
+        );
+        assert!(expanded.iter().any(|line| line.contains("round 0")));
+        assert!(expanded.iter().any(|line| line.contains("round 49")));
+    }
+
+    /// octos#2019 — a capped stream must SAY it was capped. Silent truncation
+    /// reads as "nothing more happened".
+    #[test]
+    fn should_show_the_drop_marker_when_background_activity_was_capped() {
+        let mut app = two_session_app();
+        app.push_background_activity(background_activity_row(
+            "dev:local:a",
+            "monitor_01",
+            "ci-tail",
+            "first",
+        ));
+        let mut marker = background_activity_row(
+            "dev:local:a",
+            "monitor_01",
+            "ci-tail",
+            "further events \
+             from this origin are suppressed",
+        );
+        marker.suppressed = true;
+        marker.dropped_count = Some(37);
+        app.push_background_activity(marker);
+        let session = app.sessions[0].clone();
+
+        let lines = background_activity_lines(&app, &session);
+        assert!(
+            lines[0].contains("37 dropped"),
+            "the header states the drop total out loud: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("suppressed")),
+            "the marker row itself is visible: {lines:?}"
+        );
+    }
+
+    /// octos#2019 — a row with no routing key would have to fall back to the
+    /// focused session (the octos-tui#461/#466/#483 bug). Drop it instead.
+    #[test]
+    fn should_drop_background_activity_when_it_carries_no_session_key() {
+        let mut app = two_session_app();
+        app.push_background_activity(background_activity_row("   ", "monitor_01", "ci", "orphan"));
+        assert!(
+            app.background_activity.is_empty(),
+            "an unroutable row is never stored"
+        );
+        let session = app.sessions[0].clone();
+        assert!(background_activity_lines(&app, &session).is_empty());
+    }
+
     #[test]
     fn user_message_block_uses_bright_gutter_and_reverse_video_body() {
         // Reverse video is theme-independent and SSH-portable — assert it on

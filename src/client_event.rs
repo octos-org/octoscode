@@ -80,6 +80,12 @@ pub enum ClientEvent {
     /// the session switcher (Ctrl+S). Durable ⇒ replayed on reconnect, so the
     /// store handler is idempotent (an already-removed peer is a no-op).
     PeerClosed(crate::model::PeerClosedParams),
+    /// octos#2019: durable `background/activity` notification — one background
+    /// event that woke the model (a monitor event line, a claimed fleet outbox
+    /// event), surfaced to the HUMAN. The store files it under the session that
+    /// OWNS the emitter. Durable ⇒ replayed on reconnect, so a client that
+    /// disconnected mid-loop sees the whole run rather than losing its middle.
+    BackgroundActivity(crate::model::BackgroundActivityParams),
     /// octos#1801 v2: `peer/gather` result — the peer blackboard rows
     /// (brief + latest result per staged peer). The store composes the
     /// `/gather` synthesis prompt from these and submits it into the CURRENT

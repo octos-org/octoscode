@@ -91,6 +91,15 @@ pub const APPUI_METHOD_PEER_STAGED: &str = "peer/staged";
 /// tui-locally in the transport because the vendored octos-core rev predates
 /// the variant, mirroring [`APPUI_METHOD_PEER_STAGED`].
 pub const APPUI_METHOD_PEER_CLOSED: &str = "peer/closed";
+/// octos#2019: durable SERVER→CLIENT notification — one background event that
+/// woke the model, surfaced to the HUMAN. Monitor event lines and claimed
+/// fleet outbox events already exist and are already durable, but their only
+/// consumer is the model, so a monitor that fires forty times during a loop is
+/// invisible to the user. Not a request method (never appears in
+/// `AppUiCommand::method()`); decoded tui-locally in the transport because the
+/// vendored octos-core rev predates the variant, mirroring
+/// [`APPUI_METHOD_PEER_STAGED`].
+pub const APPUI_METHOD_BACKGROUND_ACTIVITY: &str = "background/activity";
 /// octos#1807: `turn/steer` — mid-turn prompt injection into the ACTIVE
 /// turn. Params `{session_id, expected_turn_id?, input}`; result
 /// `{turn_id, steered}`. `steered:true` = the text joined the live turn
@@ -224,6 +233,13 @@ pub const APPUI_FEATURE_CODING_AUTONOMY_V1: &str = "coding.autonomy.v1";
 pub const APPUI_FEATURE_CODING_AGENT_CONTROL_V1: &str = "coding.agent_control.v1";
 pub const APPUI_FEATURE_CODING_GOAL_RUNTIME_V1: &str = "coding.goal_runtime.v1";
 pub const APPUI_FEATURE_CODING_LOOP_RUNTIME_V1: &str = "coding.loop_runtime.v1";
+
+/// octos#2019 human sink over background events that today only wake the
+/// model. When negotiated the server pushes `background/activity`; when it is
+/// NOT negotiated the server never sends the frame, so an older TUI can never
+/// receive a notification it cannot render. Tui-local mirror: the vendored
+/// octos-core rev predates the constant.
+pub const APPUI_FEATURE_BACKGROUND_ACTIVITY_V1: &str = "event.background_activity.v1";
 
 /// Additive `profile/local/create` capability: the server honors an optional
 /// `requested_id` (the meaningful profile name the user types, e.g. `glm`) and
@@ -3591,6 +3607,61 @@ pub struct PeerClosedParams {
     pub profile_id: String,
 }
 
+/// Params of the durable [`APPUI_METHOD_BACKGROUND_ACTIVITY`] notification
+/// (octos#2019): one background event that woke the model, surfaced to the
+/// HUMAN.
+///
+/// `session_id` is REQUIRED and is the routing key — the session that OWNS the
+/// emitter, never "whichever session is focused" (the octos-tui#461 / #466 /
+/// #483 bug class). `origin_kind` + `origin_id` (+ `origin_label`) attribute
+/// the line: an unattributed monitor line reads as the master speaking.
+/// `dropped_count` / `suppressed` carry the server-side per-origin cap's
+/// VISIBLE drop marker — silent truncation reads as "nothing more happened".
+///
+/// Tui-local wire mirror (the vendored octos-core rev predates the
+/// `UiNotification` variant), decoded in the transport exactly like
+/// [`PeerStagedParams`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundActivityParams {
+    pub session_id: SessionKey,
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    pub origin_kind: String,
+    pub origin_id: String,
+    #[serde(default)]
+    pub origin_label: Option<String>,
+    pub text: String,
+    #[serde(default)]
+    pub emitted_at_ms: i64,
+    #[serde(default)]
+    pub dropped_count: Option<u64>,
+    #[serde(default)]
+    pub suppressed: bool,
+}
+
+impl BackgroundActivityParams {
+    /// Stable grouping key: one foldable group per emitting origin, so a
+    /// 50-round monitor loop is ONE group rather than 50 loose lines.
+    pub fn origin_key(&self) -> (String, String) {
+        (self.origin_kind.clone(), self.origin_id.clone())
+    }
+
+    /// Human label for the group header. Falls back to the origin id so a row
+    /// is never unattributed.
+    pub fn display_origin(&self) -> &str {
+        self.origin_label
+            .as_deref()
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+            .unwrap_or(self.origin_id.as_str())
+    }
+}
+
+/// Per-session cap on retained background-activity rows. The SERVER already
+/// caps per origin with a visible drop marker; this is the client-side
+/// backstop so a long-lived session cannot grow the transcript without bound.
+pub const MAX_BACKGROUND_ACTIVITY_ROWS: usize = 200;
+
 /// `peer/gather` request (octos#1801 v2): read the peer blackboard.
 /// `slugs: None` = every staged peer; `session_id` carries the ACTIVE
 /// session so the server scopes the profile (mirrors
@@ -4621,6 +4692,16 @@ pub struct AppState {
     /// Renders the "Compacting conversation…" block with an honest
     /// fullness bar.
     pub live_compaction: std::collections::HashMap<SessionKey, LiveCompaction>,
+    /// octos#2019 human sink: background events that woke the model, keyed by
+    /// the session that OWNS the emitter.
+    ///
+    /// Deliberately a per-session map rather than one global `Vec` like
+    /// [`AppState::activity`]: the render path reads ONLY the rendered
+    /// session's bucket, so a row can never leak into whichever session
+    /// happens to be focused (octos-tui#461 / #466 / #483 — `flow_activity_items`
+    /// filters on `turn_id` alone and has exactly that failure mode). Routing
+    /// is structural here, not a filter that can be forgotten.
+    pub background_activity: std::collections::HashMap<SessionKey, Vec<BackgroundActivityParams>>,
     pub status: String,
     pub target: Option<String>,
     pub readonly: bool,
@@ -6641,6 +6722,7 @@ impl AppState {
             v2_turn_ids: std::collections::HashMap::new(),
             live_reasoning: std::collections::HashMap::new(),
             live_compaction: std::collections::HashMap::new(),
+            background_activity: std::collections::HashMap::new(),
             status,
             target,
             readonly,
@@ -8822,6 +8904,66 @@ impl AppState {
             Some(_) => false,
             None => self.active_turn().is_none(),
         }
+    }
+
+    /// octos#2019 — record one background event on the session that OWNS its
+    /// emitter. Never touches any other session's bucket, so the row cannot
+    /// render under whichever session happens to be focused.
+    ///
+    /// Rows with a blank routing key are DROPPED: an unroutable row is exactly
+    /// the octos-tui#461 / #466 / #483 bug (it would have to fall back to the
+    /// focused session), so refuse it rather than misattribute it.
+    pub fn push_background_activity(&mut self, event: BackgroundActivityParams) {
+        if event.session_id.0.trim().is_empty() {
+            return;
+        }
+        let rows = self
+            .background_activity
+            .entry(event.session_id.clone())
+            .or_default();
+        rows.push(event);
+        if rows.len() > MAX_BACKGROUND_ACTIVITY_ROWS {
+            let excess = rows.len() - MAX_BACKGROUND_ACTIVITY_ROWS;
+            rows.drain(0..excess);
+        }
+    }
+
+    /// octos#2019 — the background events for `session_id`, grouped by
+    /// emitting origin in first-seen order. One group per origin so a 50-round
+    /// monitor loop folds into ONE header rather than 50 loose lines.
+    ///
+    /// Reading is per-session by construction: a caller cannot accidentally
+    /// render another session's rows.
+    pub fn background_activity_groups(
+        &self,
+        session_id: &SessionKey,
+    ) -> Vec<(String, Vec<&BackgroundActivityParams>)> {
+        let Some(rows) = self.background_activity.get(session_id) else {
+            return Vec::new();
+        };
+        let mut order: Vec<(String, String)> = Vec::new();
+        let mut grouped: std::collections::HashMap<
+            (String, String),
+            Vec<&BackgroundActivityParams>,
+        > = std::collections::HashMap::new();
+        for row in rows {
+            let key = row.origin_key();
+            if !grouped.contains_key(&key) {
+                order.push(key.clone());
+            }
+            grouped.entry(key).or_default().push(row);
+        }
+        order
+            .into_iter()
+            .filter_map(|key| {
+                let rows = grouped.remove(&key)?;
+                let label = rows
+                    .first()
+                    .map(|row| row.display_origin().to_owned())
+                    .unwrap_or_else(|| key.1.clone());
+                Some((format!("{} {label}", key.0), rows))
+            })
+            .collect()
     }
 
     pub fn push_activity(&mut self, item: ActivityItem) {

@@ -1178,6 +1178,12 @@ pub(super) fn push_turn_flow(
         push_activity_section_with_finalization(lines, palette, app, live_finalization, width);
     }
 
+    // octos#2019: the human sink over background events that only wake the
+    // model. Rendered AFTER the turn's own activity (it is out-of-band by
+    // nature — a monitor fires between turns), attributed to its origin, and
+    // read from THIS session's bucket only.
+    push_background_activity_section(lines, palette, app, session, width);
+
     if live_turn_diff_preview_visible(app) {
         push_inline_diff_preview(
             lines,
@@ -2549,6 +2555,86 @@ pub(super) fn push_user_question_option_row(
         label_style,
         budget,
     );
+}
+
+/// octos#2019 — render the HUMAN sink over background events that today only
+/// wake the model: monitor event lines and claimed fleet outbox events.
+///
+/// Three properties the issue calls out, all structural here:
+/// - **Routing.** Rows are read from `session.id`'s own bucket, so a row can
+///   never render under whichever session happens to be focused
+///   (octos-tui#461 / #466 / #483 — `flow_activity_items` filters on `turn_id`
+///   alone and has exactly that failure mode).
+/// - **Attribution.** Every group is headed by its origin
+///   (`monitor ci-tail`, `fleet <id>`); an unattributed line reads as the
+///   master speaking.
+/// - **Folding.** ONE group per origin, collapsed to its header plus the most
+///   recent line, so a 50-round loop is one foldable group rather than 50 loose
+///   lines. Ctrl+O (the existing `expanded_tool_outputs` toggle) expands.
+///
+/// Visually distinct from assistant prose: dimmed, bulleted, and never styled
+/// as reply text. This stream is human-only — it is never fed back into model
+/// context.
+pub(super) fn push_background_activity_section(
+    lines: &mut Vec<Line<'static>>,
+    palette: Palette,
+    app: &AppState,
+    session: &SessionView,
+    width: usize,
+) {
+    let groups = app.background_activity_groups(&session.id);
+    if groups.is_empty() {
+        return;
+    }
+    let expanded = app.expanded_tool_outputs;
+    let budget = width.saturating_sub(6).max(20);
+    for (origin, rows) in groups {
+        let dropped: u64 = rows.iter().filter_map(|row| row.dropped_count).sum();
+        let mut header = format!("{origin} · {} event(s)", rows.len());
+        if dropped > 0 {
+            // The cap's drop total is stated OUT LOUD: silent truncation reads
+            // as "nothing more happened".
+            header.push_str(&format!(" · {dropped} dropped"));
+        }
+        if !expanded && rows.len() > 1 {
+            header.push_str(" · ctrl+o to expand");
+        }
+        lines.push(Line::from(vec![
+            Span::styled("◈ ", Style::default().fg(palette.accent)),
+            Span::styled(
+                header,
+                Style::default()
+                    .fg(palette.muted)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        // Collapsed: the header plus the newest line (so a live loop still
+        // shows movement). Expanded: every retained line.
+        let shown: Vec<&crate::model::BackgroundActivityParams> = if expanded {
+            rows.clone()
+        } else {
+            rows.iter().rev().take(1).rev().copied().collect()
+        };
+        for row in shown {
+            let style = if row.suppressed {
+                Style::default()
+                    .fg(palette.danger)
+                    .add_modifier(Modifier::ITALIC)
+            } else {
+                Style::default().fg(palette.muted)
+            };
+            for (idx, wrapped) in wrap_display_width(row.text.trim(), budget)
+                .into_iter()
+                .enumerate()
+            {
+                let prefix = if idx == 0 { "  ⎿ " } else { "    " };
+                lines.push(Line::from(vec![
+                    Span::styled(prefix, Style::default().fg(palette.frame)),
+                    Span::styled(wrapped, style),
+                ]));
+            }
+        }
+    }
 }
 
 pub(super) fn push_prefixed_line(
