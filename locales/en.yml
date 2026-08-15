@@ -1245,7 +1245,7 @@ menu:
     enter_run_esc_close: Enter run | Esc close
     esc_back: Esc back
     esc_close: Esc close
-    preview_scroll_esc_close: PgUp/PgDn preview | Esc close
+    preview_scroll_esc_close: "PgUp/PgDn or < > preview | Esc close"
     multi: "Up/Down move | Enter confirm | Esc cancel"
     select: "Enter accept | Esc cancel | Up/Down move"
   help:
