@@ -2012,6 +2012,15 @@ fn handle_menu_key(store: &mut Store, key: KeyEvent) -> KeyAction {
             KeyCode::Enter => {
                 return handle_composer_enter(store);
             }
+            // The page keys are not composer edits, and the preview pane is on
+            // screen behind this draft — scroll it rather than swallowing them.
+            // (`<`/`>` are NOT bound here: in this branch a character is text.)
+            KeyCode::PageUp => {
+                scroll_menu_preview(store, -(preview_layout::PREVIEW_SCROLL_STEP as isize));
+            }
+            KeyCode::PageDown => {
+                scroll_menu_preview(store, preview_layout::PREVIEW_SCROLL_STEP as isize);
+            }
             KeyCode::Char(ch) => {
                 store.state.insert_composer_char(ch);
             }
@@ -2133,10 +2142,23 @@ fn handle_menu_key(store: &mut Store, key: KeyEvent) -> KeyAction {
         // bind neither, so Up/Down/j/k keep driving the item selection on the
         // left while these move the pane on the right. Rows below the pane
         // used to be simply unreachable.
-        KeyCode::PageUp => {
+        //
+        // `<`/`>` (and the unshifted `,`/`.`) are the SAME scroll, bound
+        // because PgUp/PgDn are not reliably deliverable here: the chat runs
+        // in the terminal's NORMAL buffer (see `run` — inline viewport, no
+        // alternate screen), and terminals bind the page keys to their own
+        // scrollback in exactly that mode. VS Code is the case in hand — its
+        // `terminal.scrollUpPage`/`scrollDownPage` default to plain PgUp/PgDn
+        // on macOS, `when: terminalFocus && !terminalAltBufferActive`, and
+        // both sit in `commandsToSkipShell`, so the escape sequence never
+        // reaches this process. A plain character always does. Deliberately
+        // placed AFTER the search-capture arms, so in a SEARCHABLE menu these
+        // still type into the filter; previews live on the info menus, which
+        // are not searchable.
+        KeyCode::PageUp | KeyCode::Char('<') | KeyCode::Char(',') => {
             scroll_menu_preview(store, -(preview_layout::PREVIEW_SCROLL_STEP as isize));
         }
-        KeyCode::PageDown => {
+        KeyCode::PageDown | KeyCode::Char('>') | KeyCode::Char('.') => {
             scroll_menu_preview(store, preview_layout::PREVIEW_SCROLL_STEP as isize);
         }
         // RIGHT fires the selected row's quick secondary action (e.g. the
@@ -3699,6 +3721,69 @@ mod tests {
             handle_key(&mut store, key(KeyCode::PageUp));
         }
         assert_eq!(frame_preview_scroll(&store), 0);
+    }
+
+    /// `<`/`>` (and `,`/`.`) are the terminal-proof twin of PgUp/PgDn. The
+    /// chat runs in the terminal's NORMAL buffer, where emulators claim the
+    /// page keys for their own scrollback — VS Code's `terminal.scrollUpPage`
+    /// / `scrollDownPage` default to plain PgUp/PgDn on macOS, gated on
+    /// `!terminalAltBufferActive`, and are skipped from the shell — so the
+    /// escape sequence never reaches this process and the pane looked frozen.
+    /// A plain character always arrives.
+    #[test]
+    fn angle_keys_scroll_the_preview_when_the_terminal_eats_the_page_keys() {
+        let mut store = status_menu_store();
+        let rows = active_menu_preview_row_count(&store);
+        assert!(rows > 1, "precondition: rows to scroll, got {rows}");
+        let step = preview_layout::PREVIEW_SCROLL_STEP.min(rows - 1);
+
+        // `>` arrives as a SHIFTED character on a US layout; `.` is the same
+        // binding unshifted. Both must scroll, and both must come back.
+        for (down, up) in [('>', '<'), ('.', ',')] {
+            handle_key(
+                &mut store,
+                modified_key(KeyCode::Char(down), KeyModifiers::SHIFT),
+            );
+            assert_eq!(
+                frame_preview_scroll(&store),
+                step,
+                "`{down}` pages the preview down"
+            );
+            handle_key(&mut store, key(KeyCode::Char(up)));
+            assert_eq!(
+                frame_preview_scroll(&store),
+                0,
+                "`{up}` pages it back to the top"
+            );
+        }
+    }
+
+    /// A menu opened over a non-empty composer routes keystrokes to the draft,
+    /// which left the page keys dead there. They are not composer edits — the
+    /// pane is on screen and must still scroll — while `<`/`>` stay TEXT.
+    #[test]
+    fn page_keys_still_scroll_the_preview_over_a_composer_draft() {
+        let mut store = status_menu_store();
+        store.state.set_composer_text("half-typed prompt");
+        assert!(
+            menu_composer_edit_active(&store),
+            "precondition: draft branch"
+        );
+
+        handle_key(&mut store, key(KeyCode::PageDown));
+        assert!(
+            frame_preview_scroll(&store) > 0,
+            "PgDn scrolls the pane instead of being swallowed by the draft"
+        );
+
+        handle_key(
+            &mut store,
+            modified_key(KeyCode::Char('>'), KeyModifiers::SHIFT),
+        );
+        assert_eq!(
+            store.state.composer, "half-typed prompt>",
+            "but a character is still text while a draft is being edited"
+        );
     }
 
     /// The two axes are independent: item navigation must not disturb the
