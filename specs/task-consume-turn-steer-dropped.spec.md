@@ -54,6 +54,10 @@ octos F4 已让服务端在 turn 退出时把受理但未消费的 steer 输入�
   optimistic 记录（否则其 echo 无法 promote、会追加重复行）；snapshot/hydrate 路径的
   `restore_optimistic_user_messages()`（`drop_confirmed = true`）语义不变。
 - 新增用户可见文案同时落 `locales/en.yml` 与 `locales/zh.yml`。
+- 协议文档完整性：本次 octos-core re-pin 新增到 reducer exhaustive match 的
+  `TurnSteerDropped`、`MonitorUpdated`、`MonitorFired`、`MonitorExpired`、
+  `BackgroundActivity` 必须同步登记到 `docs/ARCHITECTURE.md` 的 Protocol
+  Notifications 清单，并由 `tests/docs_drift.rs` 的通知完整性测试守住。
 
 ## 边界
 
@@ -68,6 +72,7 @@ octos F4 已让服务端在 turn 退出时把受理但未消费的 steer 输入�
 - src/transport.rs
 - locales/en.yml
 - locales/zh.yml
+- docs/ARCHITECTURE.md
 - specs/task-consume-turn-steer-dropped.spec.md
 
 ### Forbidden
@@ -176,6 +181,11 @@ octos F4 已让服务端在 turn 退出时把受理但未消费的 steer 输入�
   测试: monitor_and_background_activity_notifications_are_ignored
   当 reducer 收到 `MonitorUpdated`/`MonitorFired`/`MonitorExpired`/`BackgroundActivity`
   那么 状态不变且不返回命令
+
+场景: 新 pin 引入的通知全部登记在架构文档
+  测试: architecture_documents_every_handled_notification
+  当 扫描 `Store::apply_notification` 处理的全部 `UiNotification` variant
+  那么 `docs/ARCHITECTURE.md` 的 Protocol Notifications 清单包含 `TurnSteerDropped`、`MonitorUpdated`、`MonitorFired`、`MonitorExpired`、`BackgroundActivity`
 
 场景: rev 与 release 配对常量同步
   测试: octos_release_pin_matches_cargo_core_rev

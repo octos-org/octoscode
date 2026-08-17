@@ -321,8 +321,23 @@ This list is kept complete by `tests/docs_drift.rs`.
 |---|---|
 | `TurnCompleted` | `turn/completed` |
 | `TurnError` | `turn/error` |
+| `TurnSteerDropped` | `turn/steer_dropped` |
 | `TurnSpawnComplete` | `turn/spawn_complete` |
 | `TurnStarted` | `turn/started` |
+
+### `monitor/`
+
+| Notification | Wire method |
+|---|---|
+| `MonitorExpired` | `monitor/expired` |
+| `MonitorFired` | `monitor/fired` |
+| `MonitorUpdated` | `monitor/updated` |
+
+### `background/`
+
+| Notification | Wire method |
+|---|---|
+| `BackgroundActivity` | `background/activity` |
 
 ### `approval/`
 
