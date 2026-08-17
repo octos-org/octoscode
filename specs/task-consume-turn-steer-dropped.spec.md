@@ -135,6 +135,14 @@ octos F4 已让服务端在 turn 退出时把受理但未消费的 steer 输入�
   那么 终态恰好返回未消费那条的 `SubmitPrompt`
   并且 已消费那条不出现在队列中，transcript 中每条文本只出现一次（`restore_optimistic_user_messages_inner(false)` 保住其 echo promotion）
 
+场景: 断线重连 replay：dropped → connection_closed 终态 → 恰好恢复一次（critical）
+  标签: critical
+  测试: replayed_connection_closed_terminal_after_dropped_recovers_exactly_once
+  假设 服务端广告 `event.turn_steer_dropped.v1`，一条 steer 在连接断开时仍在 buffer
+  当 重连后按 ledger 顺序 replay `TurnSteerDropped` 与 `TurnError(connection_closed)`
+  那么 终态恰好返回该文本的 `SubmitPrompt` 一次
+  并且 重复 replay 同样两帧不再提交
+
 ### Rule: routing-and-safety — 归属 session 与不注入
 场景: 后台 session 的返还进入其自身队列
   测试: steer_dropped_for_background_session_stays_in_its_own_queue

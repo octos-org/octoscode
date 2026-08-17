@@ -18590,6 +18590,57 @@ mod tests {
         assert_eq!(user_rows_with(&store, "unconsumed one"), 1, "{rows:?}");
     }
 
+    /// task-consume-turn-steer-dropped (review round 3): the connection-close
+    /// terminal outlet. The socket died with a steer still buffered; on
+    /// reconnect the client replays the ledger, which (octos 1fb44005) reads
+    /// steer_dropped → turn/error(connection_closed). Exactly one recovery.
+    #[test]
+    fn replayed_connection_closed_terminal_after_dropped_recovers_exactly_once() {
+        let mut store = steer_dropped_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "typed just before the socket died");
+
+        // Reconnect replay, in ledger order.
+        let dropped = store.apply_event(steer_dropped(
+            &session_id,
+            &live_turn,
+            &["typed just before the socket died"],
+            "interrupted",
+        ));
+        assert!(dropped.is_none());
+        let terminal = store.apply_event(AppUiEvent::Protocol(UiNotification::TurnError(
+            TurnErrorEvent {
+                session_id: session_id.clone(),
+                topic: None,
+                turn_id: live_turn.clone(),
+                code: "connection_closed".into(),
+                message: "connection closed before turn completed".into(),
+            },
+        )));
+
+        assert_eq!(
+            terminal.as_ref().and_then(submit_prompt_text),
+            Some("typed just before the socket died")
+        );
+        assert!(store.state.pending_messages.is_empty());
+        assert!(store.state.retained_steers.is_empty());
+        assert_eq!(
+            user_rows_with(&store, "typed just before the socket died"),
+            1
+        );
+
+        // A duplicate replay of the same two frames must not resubmit.
+        let again = store.apply_event(steer_dropped(
+            &session_id,
+            &live_turn,
+            &["typed just before the socket died"],
+            "interrupted",
+        ));
+        assert!(again.is_none());
+        assert!(store.state.pending_messages.is_empty());
+    }
+
     #[test]
     fn steer_dropped_status_keys_exist_in_both_locales() {
         for key in [
