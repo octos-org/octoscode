@@ -1322,6 +1322,7 @@ status:
   no_session_send_prompt: "没有打开的编码会话。发送提示前请运行 /onboard open-session。"
   message_staged: "消息已暂存；将在当前回合结束后提交。按 Esc 可中断/发送。"
   steered_into_turn: "已插入正在运行的回合。"
+  steer_restaged_after_turn_end: "回合在你插入的消息被采纳前就结束了——已重新入队，作为新回合发送。"
   btw_usage: "用法:/btw <问题> — 在当前回合继续运行时快速旁路提问"
   btw_answering: "btw:回答中…"
   btw_answered: "btw:已回答"
