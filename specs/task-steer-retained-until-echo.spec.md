@@ -24,7 +24,11 @@ steer 从 transcript 撤回并重新入队，由既有的终态 drain 作为新 
 - 确认（reap）：`apply_user_row_echo` 的 promotion 分支按 `(session_id, content)`
   取最早匹配的 retained 条目移除——与 `withdraw_steered_user_prompt` 一样以内容
   为唯一 join key（steer 没有 client_message_id，且与 live turn 共享 turn_id）。
-- 终态 re-stage：`commit_live_reply` 与 `fail_live_reply` 在
+- 协议分层（v2，随 octos `event.turn_steer_dropped.v1`）：服务端广告该 feature 时，
+  它保证未消费的 steer 在终态帧之前以 `turn/steer_dropped` 返还，因此终态处
+  **不再兜底 re-stage**，只把该 turn 剩余的 retained 视为已消费并清除（避免"已消费
+  但 echo 丢失"被误重提）；未广告（旧服务端）才执行下面的终态 re-stage。
+- 终态 re-stage（仅旧服务端）：`commit_live_reply` 与 `fail_live_reply` 在
   `release_staged_gate_for_turn` 之后、重复终态早退之前，取出该 `(session, turn)`
   的全部 retained 条目，逐条 `withdraw_steered_user_prompt` 后按原顺序放到队列
   **前部**（它们的输入时间早于任何终态后暂存的消息），写状态文案
@@ -109,6 +113,20 @@ steer 从 transcript 撤回并重新入队，由既有的终态 drain 作为新 
   当 同一 turn 的终态事件再次到达
   那么 `pending_messages` 不新增条目
   并且 `retained_steers` 为空
+
+场景: 新服务端：已消费但 echo 丢失的 steer 在终态时不重复提交（critical）
+  标签: critical
+  测试: consumed_steer_with_lost_echo_is_not_resubmitted_when_server_settles_steers
+  假设 服务端广告 `event.turn_steer_dropped.v1`，一个 live turn 已收到 `steered:true`、没有 echo、也没有 `turn/steer_dropped`
+  当 收到该 turn 的 `TurnCompleted`
+  那么 `commit_live_reply` 不返回 `SubmitPrompt`
+  并且 `retained_steers` 为空且 `pending_messages` 为空
+
+场景: 旧服务端：终态兜底仍然生效（兼容）
+  测试: legacy_server_without_steer_dropped_feature_keeps_terminal_restage
+  假设 服务端未广告 `event.turn_steer_dropped.v1`，一个未 echo 的 steer
+  当 收到该 turn 的 `TurnError(interrupted)`
+  那么 `fail_live_reply` 返回该 steer 文本的 `SubmitPrompt`
 
 场景: 与原 prompt 同内容的 steer 也能被正确 re-stage
   测试: same_content_steer_is_restaged_without_touching_original_row

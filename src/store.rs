@@ -13416,6 +13416,19 @@ impl Store {
     /// queue FRONT in dispatch order, withdrawing the optimistic transcript
     /// row so the re-submit renders once. Idempotent: entries are consumed.
     fn restage_unconfirmed_steers(&mut self, session_id: &SessionKey, turn_id: &TurnId) -> bool {
+        // task-consume-turn-steer-dropped (v2): a server that advertises
+        // `event.turn_steer_dropped.v1` returns every accepted-but-undrained
+        // steer as `turn/steer_dropped` BEFORE this terminal (and
+        // `apply_turn_steer_dropped` already re-staged those). Whatever is
+        // still retained here was therefore CONSUMED — its echo may merely be
+        // late or lost — so re-staging it would resubmit text the server
+        // already ran. Settle it as consumed and leave the queue alone.
+        if self.server_settles_steers_before_terminal() {
+            self.state
+                .retained_steers
+                .retain(|steer| !(&steer.session_id == session_id && &steer.turn_id == turn_id));
+            return false;
+        }
         let mut unconfirmed = Vec::new();
         self.state.retained_steers.retain(|steer| {
             if &steer.session_id == session_id && &steer.turn_id == turn_id {
@@ -13438,6 +13451,17 @@ impl Store {
             self.state.restage_staged_prompt_front(session_id, prompt);
         }
         true
+    }
+
+    /// task-consume-turn-steer-dropped: whether the connected server settles
+    /// `turn/steer` input before the terminal (`event.turn_steer_dropped.v1`).
+    fn server_settles_steers_before_terminal(&self) -> bool {
+        self.state
+            .capabilities
+            .as_ref()
+            .is_some_and(|capabilities| {
+                capabilities.supports_feature(crate::model::APPUI_FEATURE_TURN_STEER_DROPPED_V1)
+            })
     }
 
     /// Terminal tail drain that lets a steer re-stage notice outrank the
@@ -18185,7 +18209,7 @@ mod tests {
 
     #[test]
     fn steer_dropped_before_terminal_restages_once_and_terminal_does_not_resubmit() {
-        let mut store = steer_capable_store();
+        let mut store = steer_dropped_capable_store();
         let session_id = store.state.sessions[0].id.clone();
         let live_turn = start_live_turn(&mut store, "first prompt");
         steer_into_live_turn(&mut store, &live_turn, "also do X");
@@ -18457,6 +18481,113 @@ mod tests {
         }
         assert_eq!(store.state.status, before_status);
         assert_eq!(store.state.run_state, before_run_state);
+    }
+
+    /// A server that advertises `event.turn_steer_dropped.v1` (dropped-before-
+    /// terminal guarantee) — the real order for post-#2049 servers.
+    fn steer_dropped_capable_store() -> Store {
+        let mut store = steer_capable_store();
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods_and_features(
+            [crate::model::APPUI_METHOD_TURN_STEER],
+            [crate::model::APPUI_FEATURE_TURN_STEER_DROPPED_V1],
+        ));
+        store
+    }
+
+    #[test]
+    fn consumed_steer_with_lost_echo_is_not_resubmitted_when_server_settles_steers() {
+        // The server consumed the steer (it fed the loop) but the UserMessage
+        // echo never reached us; the turn then completes. A new server would
+        // have sent turn/steer_dropped BEFORE the terminal had the steer been
+        // unconsumed — it did not, so the terminal must NOT resubmit.
+        let mut store = steer_dropped_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "also do X");
+        assert_eq!(store.state.retained_steers.len(), 1);
+
+        let command = store.apply_event(completed_terminal(&session_id, &live_turn));
+
+        assert!(
+            command.is_none(),
+            "consumed steer must not be resubmitted: {command:?}"
+        );
+        assert!(
+            store.state.retained_steers.is_empty(),
+            "settled as consumed"
+        );
+        assert!(store.state.pending_messages.is_empty());
+        assert_eq!(
+            user_rows_with(&store, "also do X"),
+            1,
+            "the row the user saw stays"
+        );
+    }
+
+    #[test]
+    fn legacy_server_without_steer_dropped_feature_keeps_terminal_restage() {
+        let mut store = steer_capable_store(); // no event.turn_steer_dropped.v1
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "also do X");
+
+        let command = store.apply_event(interrupted_terminal(&session_id, &live_turn));
+
+        assert_eq!(
+            command.as_ref().and_then(submit_prompt_text),
+            Some("also do X")
+        );
+    }
+
+    #[test]
+    fn unconsumed_steer_is_recovered_exactly_once_in_real_server_order() {
+        use octos_core::ui_protocol::PayloadV2;
+        let mut store = steer_dropped_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "consumed one");
+        steer_into_live_turn(&mut store, &live_turn, "unconsumed one");
+        // The server drained "consumed one" and echoed it; "unconsumed one"
+        // was still buffered when the user interrupted.
+        store.apply_event(AppUiEvent::Protocol(envelope_v2_notification(
+            session_id.clone(),
+            1,
+            &live_turn.0.to_string(),
+            PayloadV2::UserMessage {
+                text: "consumed one".into(),
+                files: vec![],
+            },
+        )));
+        assert_eq!(store.state.retained_steers.len(), 1);
+
+        // Real server order: steer_dropped (only the unconsumed text) → terminal.
+        let dropped = store.apply_event(steer_dropped(
+            &session_id,
+            &live_turn,
+            &["unconsumed one"],
+            "interrupted",
+        ));
+        assert!(dropped.is_none());
+        assert_eq!(
+            store.state.pending_messages,
+            vec!["unconsumed one".to_string()]
+        );
+        let command = store.apply_event(interrupted_terminal(&session_id, &live_turn));
+
+        assert_eq!(
+            command.as_ref().and_then(submit_prompt_text),
+            Some("unconsumed one")
+        );
+        assert!(store.state.pending_messages.is_empty());
+        assert!(store.state.retained_steers.is_empty());
+        let rows: Vec<(String, bool)> = store.state.sessions[0]
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::User)
+            .map(|m| (m.content.clone(), m.thread_id.is_some()))
+            .collect();
+        assert_eq!(user_rows_with(&store, "consumed one"), 1, "{rows:?}");
+        assert_eq!(user_rows_with(&store, "unconsumed one"), 1, "{rows:?}");
     }
 
     #[test]

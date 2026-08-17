@@ -2541,8 +2541,9 @@ fn appui_feature_header_for(old_server: bool) -> String {
         );
     }
     format!(
-        "{UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1}, {UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1}, {UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1}, {UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1}, {UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1}, {UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1}, {UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1}, {UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1}, {UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1}, {UI_PROTOCOL_FEATURE_USER_QUESTION_V1}, {UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1}, {UI_PROTOCOL_FEATURE_PLAN_TODOS_V1}, {}, {UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2}",
-        crate::model::APPUI_FEATURE_BACKGROUND_ACTIVITY_V1
+        "{UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1}, {UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1}, {UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1}, {UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1}, {UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1}, {UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1}, {UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1}, {UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1}, {UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1}, {UI_PROTOCOL_FEATURE_USER_QUESTION_V1}, {UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1}, {UI_PROTOCOL_FEATURE_PLAN_TODOS_V1}, {}, {UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2}, {}",
+        crate::model::APPUI_FEATURE_BACKGROUND_ACTIVITY_V1,
+        crate::model::APPUI_FEATURE_TURN_STEER_DROPPED_V1
     )
 }
 
@@ -6974,6 +6975,21 @@ mod tests {
     /// dropped on the floor (`store.rs` `UiNotification::Envelope(_) => None`)
     /// and a dropped terminal leaves the UI spinning on "Working" forever with
     /// the answer only visible after a restart re-hydrates the session.
+    /// task-consume-turn-steer-dropped: the modern negotiation header asks the
+    /// server for the dropped-before-terminal steer guarantee; the old-server
+    /// baseline does not.
+    #[test]
+    fn feature_header_requests_turn_steer_dropped() {
+        assert!(
+            appui_feature_header_for(false)
+                .contains(crate::model::APPUI_FEATURE_TURN_STEER_DROPPED_V1)
+        );
+        assert!(
+            !appui_feature_header_for(true)
+                .contains(crate::model::APPUI_FEATURE_TURN_STEER_DROPPED_V1)
+        );
+    }
+
     /// task-consume-turn-steer-dropped: the REAL wire entry decodes the
     /// server's `turn/steer_dropped` into the typed protocol event.
     #[test]

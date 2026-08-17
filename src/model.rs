@@ -240,6 +240,13 @@ pub const APPUI_FEATURE_CODING_LOOP_RUNTIME_V1: &str = "coding.loop_runtime.v1";
 /// receive a notification it cannot render. Tui-local mirror: the vendored
 /// octos-core rev predates the constant.
 pub const APPUI_FEATURE_BACKGROUND_ACTIVITY_V1: &str = "event.background_activity.v1";
+/// task-consume-turn-steer-dropped: server guarantees that accepted-but-
+/// undrained `turn/steer` inputs are returned as `turn/steer_dropped` BEFORE
+/// the turn's terminal frame. When advertised, a terminal without a preceding
+/// `turn/steer_dropped` naming a retained steer means the server CONSUMED it —
+/// the client must not re-stage it (task-steer-retained-until-echo's terminal
+/// fallback is for servers without this feature only).
+pub const APPUI_FEATURE_TURN_STEER_DROPPED_V1: &str = "event.turn_steer_dropped.v1";
 
 /// Additive `profile/local/create` capability: the server honors an optional
 /// `requested_id` (the meaningful profile name the user types, e.g. `glm`) and
@@ -7634,10 +7641,19 @@ impl AppState {
             let excess = self.optimistic_user_messages.len() - MAX_OPTIMISTIC_USER_MESSAGES;
             self.optimistic_user_messages.drain(0..excess);
         }
-        self.restore_optimistic_user_messages();
+        self.restore_optimistic_user_messages_inner(false);
     }
 
     pub fn restore_optimistic_user_messages(&mut self) {
+        self.restore_optimistic_user_messages_inner(true);
+    }
+
+    /// `drop_confirmed`: when an optimistic row is already present, drop its
+    /// tracking entry (snapshot/hydrate replaced the list with canonical
+    /// rows — the echo already happened) or keep it (a sibling submit merely
+    /// re-ran the restore; the row is still OUR optimistic insert awaiting
+    /// its own echo, which must still be able to promote it).
+    fn restore_optimistic_user_messages_inner(&mut self, drop_confirmed: bool) {
         let mut retained = Vec::new();
         for optimistic in self.optimistic_user_messages.clone() {
             let Some(session) = self
@@ -7651,6 +7667,13 @@ impl AppState {
             if matching_user_message_count(session, &optimistic.content)
                 > optimistic.prior_matching_user_count
             {
+                if !drop_confirmed {
+                    // task-consume-turn-steer-dropped: with two steers in one
+                    // turn, the second steer's record used to run this restore
+                    // and DROP the first steer's entry — its echo then had no
+                    // entry to promote and appended a duplicate row.
+                    retained.push(optimistic);
+                }
                 continue;
             }
 

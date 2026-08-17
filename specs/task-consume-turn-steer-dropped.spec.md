@@ -38,15 +38,21 @@ octos F4 已让服务端在 turn 退出时把受理但未消费的 steer 输入�
 - 数量语义：同一文本出现 N 次时按 FIFO 精确消费 N 条 retained（不能用集合去重）；
   多余的返还文本视为未匹配。
 - 幂等：同一通知重复到达/replay 时，第二次已无 retained 可 reap，因此不新增队列项。
-- 与终态兜底的关系：先到者消费——`turn/steer_dropped` 先到则终态处的
-  `restage_unconfirmed_steers` 已无条目、只做 drain；终态先到则迟到的
-  `turn/steer_dropped` no-op。
+- 与终态的关系（v2）：客户端在 `appui_feature_header_for` 中请求
+  `event.turn_steer_dropped.v1`（`APPUI_FEATURE_TURN_STEER_DROPPED_V1`）；服务端广告
+  时，真实线序是 `turn/steer_dropped`（若有未消费）→ 终态：dropped 精确重排，终态只
+  清除剩余 retained（已消费）而不重排；未广告（旧服务端）则终态走 F5 兜底，此时
+  dropped 不会到达。两条路径互斥，同一文本只会重新提交一次。
 - `reason` 不改变防丢语义，只进入状态文案
   `status.steer_returned_by_server`（含条数与 reason）；未匹配时写
   `status.steer_returned_unmatched`（诊断，不改队列）。
 - 真实入口：transport 的 `notification_to_app_event` 把 `turn/steer_dropped` 解码为
   `AppUiEvent::Protocol(UiNotification::TurnSteerDropped)`；reducer 入口为
   `Store::apply_notification`。
+- 同一 turn 多条 steer 的 echo 去重：`record_submitted_user_prompt` 调用的
+  `restore_optimistic_user_messages_inner(false)` 不再因"行已存在"而丢弃兄弟 steer 的
+  optimistic 记录（否则其 echo 无法 promote、会追加重复行）；snapshot/hydrate 路径的
+  `restore_optimistic_user_messages()`（`drop_confirmed = true`）语义不变。
 - 新增用户可见文案同时落 `locales/en.yml` 与 `locales/zh.yml`。
 
 ## 边界
@@ -76,17 +82,17 @@ octos F4 已让服务端在 turn 退出时把受理但未消费的 steer 输入�
 场景: 通知先于终态到达：立即重新入队，终态不重复提交（critical）
   标签: critical
   测试: steer_dropped_before_terminal_restages_once_and_terminal_does_not_resubmit
-  假设 一个 live turn 已收到 `steered:true` 且未 echo
+  假设 服务端广告 `event.turn_steer_dropped.v1`，一个 live turn 已收到 `steered:true` 且未 echo
   当 `apply_notification` 收到该 turn 的 `TurnSteerDropped`，随后收到 `TurnError(interrupted)`
   那么 通知到达时该文本已在队列前部且 `retained_steers` 为空
   并且 终态返回的 `SubmitPrompt` 恰好是该文本一次
   并且 transcript 中该文本只出现一次
   并且 状态栏文案为 `status.steer_returned_by_server`
 
-场景: 终态先于通知到达：迟到通知 no-op（critical）
+场景: 终态先于通知到达（旧服务端线序）：迟到通知 no-op（critical）
   标签: critical
   测试: late_steer_dropped_after_terminal_is_a_noop
-  假设 一个未 echo 的 steer 已由终态兜底重新入队并提交
+  假设 服务端未广告该 feature，一个未 echo 的 steer 已由终态兜底重新入队并提交
   当 同一 turn 的 `TurnSteerDropped` 迟到到达
   那么 `pending_messages` 不新增条目
   并且 transcript 中该文本只出现一次
@@ -111,6 +117,23 @@ octos F4 已让服务端在 turn 退出时把受理但未消费的 steer 输入�
   假设 同一 live turn 上有 "A"、"B" 两条 retained steer
   当 `TurnSteerDropped` 以 `["A","B"]` 返还
   那么 `pending_messages` 前两项依次为 "A"、"B"
+
+### Rule: real-server-order — 真实线序下的端到端闭环（审查 P0）
+场景: 新服务端：已消费 + echo 缺失 + 终态 + 无 dropped → 不重复提交（critical）
+  标签: critical
+  测试: consumed_steer_with_lost_echo_is_not_resubmitted_when_server_settles_steers
+  假设 服务端广告 `event.turn_steer_dropped.v1`，一个 live turn 已收到 `steered:true`、没有 echo、也没有 `turn/steer_dropped`
+  当 收到该 turn 的 `TurnCompleted`
+  那么 不返回 `SubmitPrompt`
+  并且 `retained_steers` 为空且 `pending_messages` 为空
+
+场景: 新服务端：未消费 → dropped 先于终态 → 恰好恢复一次（critical）
+  标签: critical
+  测试: unconsumed_steer_is_recovered_exactly_once_in_real_server_order
+  假设 服务端广告 `event.turn_steer_dropped.v1`，一个 live turn 上有两条未 echo 的 steer，其中一条已被服务端消费（echo 已到）
+  当 依次收到只含未消费那条的 `TurnSteerDropped` 与 `TurnError(interrupted)`
+  那么 终态恰好返回未消费那条的 `SubmitPrompt`
+  并且 已消费那条不出现在队列中，transcript 中每条文本只出现一次（`restore_optimistic_user_messages_inner(false)` 保住其 echo promotion）
 
 ### Rule: routing-and-safety — 归属 session 与不注入
 场景: 后台 session 的返还进入其自身队列
@@ -150,6 +173,11 @@ octos F4 已让服务端在 turn 退出时把受理但未消费的 steer 输入�
   测试: octos_release_pin_matches_cargo_core_rev
   当 读取 `Cargo.toml` 的 octos-core rev
   那么 与 `REQUIRED_OCTOS_CORE_REV` 一致
+
+场景: 客户端在能力协商中请求该 feature
+  测试: feature_header_requests_turn_steer_dropped
+  当 构造现代 `X-Octos-Ui-Features` 头
+  那么 其中包含 `event.turn_steer_dropped.v1`；旧服务端基线头不包含
 
 场景: 文案在两种语言包中都存在
   测试: steer_dropped_status_keys_exist_in_both_locales
