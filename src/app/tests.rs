@@ -2977,7 +2977,7 @@ mod tests {
             "surplus removed line keeps a blank right column: {left_only:?}"
         );
         assert!(
-            rows.iter().any(|row| row.contains("Alt+V unified")),
+            rows.iter().any(|row| row.contains("Alt+V/Ctrl+V unified")),
             "footer hint advertises the toggle back to unified"
         );
     }
@@ -3036,8 +3036,9 @@ mod tests {
             "default mode stays unified: {removed_row:?}"
         );
         assert!(
-            rows.iter().any(|row| row.contains("Alt+V side-by-side")),
-            "footer hint advertises the side-by-side toggle"
+            rows.iter()
+                .any(|row| row.contains("Alt+V/Ctrl+V side-by-side")),
+            "footer hint advertises the side-by-side toggle and its portable Ctrl twin"
         );
     }
 

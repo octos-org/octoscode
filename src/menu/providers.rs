@@ -724,17 +724,17 @@ fn keymap_menu() -> MenuSpec {
         ),
         (
             "diff.open-toggle",
-            "Alt+V",
+            "Alt+V/Ctrl+V",
             t!("menu.keymap.item.diff_open_toggle.desc"),
         ),
         (
             "diff.stage-hunk",
-            "Alt+C",
+            "Alt+C/Ctrl+X",
             t!("menu.keymap.item.diff_stage_hunk.desc"),
         ),
         (
             "diff.next-hunk",
-            "Alt+H",
+            "Alt+H/Ctrl+N",
             t!("menu.keymap.item.diff_next_hunk.desc"),
         ),
     ];

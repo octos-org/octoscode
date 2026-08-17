@@ -892,13 +892,27 @@ pub(crate) fn handle_key(store: &mut Store, key: KeyEvent) -> KeyAction {
     // in. These modified binds are that way in.
     //
     // Alt+V is two-in-one: open the preview when closed, toggle
-    // unified <-> side-by-side when open. Alt+C stages the selected hunk,
-    // Alt+N / Alt+M walk hunks; those three are gated on the preview being
-    // active so the binds stay free otherwise.
+    // unified <-> side-by-side when open. Alt+C stages the selected hunk and
+    // Alt+H walks them; the latter two are gated on the preview being active so
+    // the binds stay free otherwise.
     //
     // NOT Alt+D — the composer readline layer claims it as
     // delete-word-forward (see the Agent Dock note below).
-    if is_alt_char(&key, 'v') {
+    //
+    // Ctrl+V/X/N are the portable twins (see `is_ctrl_char`): macOS Terminal.app
+    // only emits ALT with "Use Option as Meta key" enabled, so without a Ctrl
+    // alias this whole family is unreachable there. Remapping the chars Option
+    // *does* produce (Option+V → `√`, Option+C → `ç`) is not an option — `å`,
+    // `ç` and `ß` are ordinary letter keys on Nordic, French and German
+    // layouts, and stealing them would make those letters untypable.
+    //
+    // Ctrl+V/X/N are the only free slots left: the composer readline layer runs
+    // first and claims Ctrl+A/B/D/E/F/H/J/K/W, and Ctrl+C/G/L/O/P/Q/R/S/T/U/Y
+    // are bound above. Ctrl+I/M are Tab/Return at the wire level.
+    //
+    // Alt+Y/Alt+N (peer approve/deny) get no twin — no slot is left. Reach a
+    // peer's approval with Ctrl+S and answer y/n in the modal instead.
+    if is_alt_char(&key, 'v') || is_ctrl_char(&key, 'v') {
         if store.state.diff_preview.active {
             store.toggle_diff_view_mode();
             return KeyAction::Continue;
@@ -917,7 +931,8 @@ pub(crate) fn handle_key(store: &mut Store, key: KeyEvent) -> KeyAction {
         return KeyAction::Continue;
     }
 
-    if is_alt_char(&key, 'c') && store.state.diff_preview.active {
+    // Ctrl+X, not Ctrl+C — Ctrl+C is the interrupt and is claimed at the top.
+    if (is_alt_char(&key, 'c') || is_ctrl_char(&key, 'x')) && store.state.diff_preview.active {
         store.stage_selected_diff_context();
         return KeyAction::Continue;
     }
@@ -932,7 +947,12 @@ pub(crate) fn handle_key(store: &mut Store, key: KeyEvent) -> KeyAction {
     // as a pair anyway: Ctrl+M is carriage return, so it cannot be aliased for
     // terminals without Option-as-Meta. Alt+H also dodges the macOS dead keys
     // (Option+E/I/N/U compose accents and emit nothing on their own).
-    if is_alt_char(&key, 'h') && store.state.diff_preview.active {
+    //
+    // The Ctrl twin IS Ctrl+N ("next"), which does not reopen the Alt+N problem
+    // above: peer-deny is bound to Alt+N only, so the two never collide. Ctrl+H
+    // was unavailable anyway — the composer readline layer claims it as
+    // backspace before this arm runs.
+    if (is_alt_char(&key, 'h') || is_ctrl_char(&key, 'n')) && store.state.diff_preview.active {
         store.select_next_diff_hunk();
         return KeyAction::Continue;
     }
@@ -6584,6 +6604,122 @@ mod tests {
         assert_eq!(
             store.state.diff_preview.selected_hunk, before,
             "Alt+N must stay free for the peer-approval deny path"
+        );
+    }
+
+    /// macOS Terminal.app only sends ALT when "Use Option as Meta key" is on;
+    /// without it Option+V emits a bare `√` and the Alt binds are unreachable.
+    /// Ctrl+V/X/N are the layout-independent twins (see `is_ctrl_char`) — the
+    /// alternative, remapping the Option-produced chars, would steal `å`/`ç`
+    /// from Nordic and French layouts, where they are ordinary letter keys.
+    #[test]
+    fn ctrl_v_toggles_view_mode_from_composer_focus() {
+        let mut store = store_with_sessions(1);
+        store.state.focus = FocusPane::Composer;
+        let session_id = store.state.sessions[0].id.clone();
+        store
+            .state
+            .diff_preview
+            .apply_result(diff_result_with_two_hunks(session_id));
+        assert!(!store.state.diff_preview.side_by_side);
+
+        let action = handle_key(
+            &mut store,
+            modified_key(KeyCode::Char('v'), KeyModifiers::CONTROL),
+        );
+
+        assert!(matches!(action, KeyAction::Continue));
+        assert!(
+            store.state.diff_preview.side_by_side,
+            "Ctrl+V must be the Alt+V twin"
+        );
+        assert_eq!(
+            store.state.composer, "",
+            "Ctrl+V must not leak a literal 'v' into the composer"
+        );
+    }
+
+    #[test]
+    fn ctrl_x_stages_the_selected_hunk_from_composer_focus() {
+        let mut store = store_with_sessions(1);
+        store.state.focus = FocusPane::Composer;
+        let session_id = store.state.sessions[0].id.clone();
+        store
+            .state
+            .diff_preview
+            .apply_result(diff_result_with_two_hunks(session_id));
+
+        handle_key(
+            &mut store,
+            modified_key(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        );
+
+        assert!(
+            store.state.composer.contains("src/lib.rs"),
+            "Ctrl+X must stage the hunk like Alt+C, got: {:?}",
+            store.state.composer
+        );
+    }
+
+    #[test]
+    fn ctrl_n_cycles_hunks_and_wraps_from_composer_focus() {
+        let mut store = store_with_sessions(1);
+        store.state.focus = FocusPane::Composer;
+        let session_id = store.state.sessions[0].id.clone();
+        store
+            .state
+            .diff_preview
+            .apply_result(diff_result_with_two_hunks(session_id));
+
+        let ctrl_n = || modified_key(KeyCode::Char('n'), KeyModifiers::CONTROL);
+        let mut walk = vec![store.state.diff_preview.selected_hunk];
+        for _ in 0..4 {
+            handle_key(&mut store, ctrl_n());
+            walk.push(store.state.diff_preview.selected_hunk);
+        }
+
+        assert_eq!(
+            walk,
+            vec![0, 1, 0, 1, 0],
+            "Ctrl+N must cycle like Alt+H, not stop at the last hunk"
+        );
+    }
+
+    /// The Ctrl twins are gated on the preview exactly like their Alt originals,
+    /// so Ctrl+X/Ctrl+N stay free for the terminal otherwise.
+    #[test]
+    fn ctrl_hunk_keys_are_inert_when_no_preview_is_open() {
+        let mut store = store_with_sessions(1);
+        store.state.focus = FocusPane::Composer;
+        assert!(!store.state.diff_preview.active);
+
+        for ch in ['x', 'n'] {
+            handle_key(
+                &mut store,
+                modified_key(KeyCode::Char(ch), KeyModifiers::CONTROL),
+            );
+        }
+
+        assert!(!store.state.diff_preview.active);
+        assert_eq!(store.state.diff_preview.selected_hunk, 0);
+    }
+
+    /// Regression: a bare Option-produced char must reach the composer as
+    /// literal text. `å` is a dedicated letter key on Nordic layouts and `ç` on
+    /// French/Portuguese ones — remapping them to Alt binds made those letters
+    /// untypable, on every platform and regardless of what produced them.
+    #[test]
+    fn option_produced_chars_stay_literal_composer_text() {
+        let mut store = store_with_sessions(1);
+        store.state.focus = FocusPane::Composer;
+
+        for ch in ['©', 'å', '∆', '˚', '√', 'ç'] {
+            handle_key(&mut store, KeyEvent::from(KeyCode::Char(ch)));
+        }
+
+        assert_eq!(
+            store.state.composer, "©å∆˚√ç",
+            "unmodified chars must be composer text, never remapped to Alt binds"
         );
     }
 
