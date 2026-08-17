@@ -773,6 +773,11 @@ pub(crate) fn handle_key(store: &mut Store, key: KeyEvent) -> KeyAction {
         // any reply streams, so `active_turn()` — hence `interrupt_command()` —
         // is a no-op there. Route through the decision-aware interrupt so Ctrl+C
         // reliably cancels a parked turn (and tears down its server-side waiter).
+        // task-esc-reconciles-phantom-turn: a phantom InProgress session is
+        // handled INSIDE `interrupt_command()` (evidence → drain, probe, or
+        // user-decided reset). A reset with an empty queue yields no command
+        // but was still a real action — don't fall through to the quit hint.
+        let was_phantom = store.active_session_phantom_in_progress();
         let command = if app::active_session_has_pending_decision(&store.state) {
             store.interrupt_active_decision_command()
         } else {
@@ -781,6 +786,10 @@ pub(crate) fn handle_key(store: &mut Store, key: KeyEvent) -> KeyAction {
         if let Some(command) = command {
             store.state.ctrl_c_quit_armed = false;
             return KeyAction::send(command);
+        }
+        if was_phantom && !store.active_session_phantom_in_progress() {
+            store.state.ctrl_c_quit_armed = false;
+            return KeyAction::Continue;
         }
         // Nothing to interrupt. A silent no-op here left users trapped on
         // surfaces that eat plain keys (onboarding wizard/menus, where `q` and
@@ -1440,6 +1449,15 @@ fn handle_plain_key(store: &mut Store, key: KeyEvent) -> KeyAction {
                     store.interrupt_command()
                 };
                 if let Some(command) = command {
+                    return KeyAction::send(command);
+                }
+            } else if store.active_session_phantom_in_progress() {
+                // task-esc-reconciles-phantom-turn: no live turn but the chip
+                // says Working — the store's interrupt path owns the recovery
+                // (evidence → drain; else probe; else the user's repeated Esc
+                // is the decision). Without this arm the phantom shape was
+                // exactly the case the branch above skipped.
+                if let Some(command) = store.interrupt_command() {
                     return KeyAction::send(command);
                 }
             } else if let Some(command) = store.cancel_running_background_task_command() {
@@ -4065,6 +4083,127 @@ mod tests {
             matches!(sent_command(action), AppUiCommand::InterruptTurn(_)),
             "Ctrl+C on a parked decision must interrupt, not no-op"
         );
+    }
+
+    // ---- task-esc-reconciles-phantom-turn: the REAL key entry must reach the
+    // phantom recovery (the store method alone was a false green).
+
+    fn phantom_store() -> (Store, SessionKey) {
+        let mut store = store_with_sessions(1);
+        let session_id = store.state.sessions[0].id.clone();
+        store.state.set_run_state_in_progress();
+        store.state.run_state_started_at = Some(
+            std::time::Instant::now()
+                - std::time::Duration::from_secs(crate::store::PHANTOM_RUN_STATE_PROBE_SECS + 1),
+        );
+        assert!(store.phantom_in_progress(&session_id));
+        (store, session_id)
+    }
+
+    fn hydrate_caps() -> crate::menu::CapabilitySet {
+        crate::menu::CapabilitySet::from_methods_and_features(
+            [crate::model::APPUI_METHOD_SESSION_HYDRATE],
+            [crate::model::APPUI_FEATURE_SESSION_HYDRATE_V1],
+        )
+    }
+
+    #[test]
+    fn esc_key_in_phantom_state_probes_then_second_esc_resets() {
+        let (mut store, _session_id) = phantom_store();
+        store.state.capabilities = Some(hydrate_caps());
+
+        let first = handle_key(&mut store, key(KeyCode::Esc));
+        assert!(
+            matches!(first, KeyAction::Send(ref command) if matches!(**command, AppUiCommand::HydrateSession(_))),
+            "first Esc must probe"
+        );
+        assert_eq!(store.state.status, t!("status.phantom_turn_probing"));
+
+        let second = handle_key(&mut store, key(KeyCode::Esc));
+        assert!(matches!(second, KeyAction::Continue));
+        assert_eq!(store.state.run_state, crate::model::SessionRunState::Idle);
+        assert_eq!(store.state.status, t!("status.phantom_turn_reset_by_user"));
+    }
+
+    #[test]
+    fn esc_key_in_phantom_state_with_evidence_sends_drained_submit() {
+        let (mut store, session_id) = phantom_store();
+        // Turn-scoped evidence: the last started turn reached its terminal.
+        let turn_id = TurnId::new();
+        store.apply_event(AppUiEvent::Protocol(UiNotification::TurnStarted(
+            octos_core::ui_protocol::TurnStartedEvent {
+                session_id: session_id.clone(),
+                turn_id: turn_id.clone(),
+                timestamp: chrono::Utc::now(),
+                topic: None,
+            },
+        )));
+        store.apply_event(AppUiEvent::Protocol(UiNotification::TurnError(
+            octos_core::ui_protocol::TurnErrorEvent {
+                session_id: session_id.clone(),
+                topic: None,
+                turn_id,
+                code: "interrupted".into(),
+                message: "turn interrupted by client".into(),
+            },
+        )));
+        // The incident's late frame re-armed InProgress with nothing behind it.
+        store.state.sessions[0].live_reply = None;
+        store.state.pre_token_turns.clear();
+        store.state.run_state = crate::model::SessionRunState::InProgress;
+        store.state.run_state_started_at = Some(
+            std::time::Instant::now()
+                - std::time::Duration::from_secs(crate::store::PHANTOM_RUN_STATE_PROBE_SECS + 1),
+        );
+        store
+            .state
+            .pending_messages
+            .push("queued behind phantom".into());
+        assert!(store.phantom_in_progress(&session_id));
+
+        let action = handle_key(&mut store, key(KeyCode::Esc));
+
+        match action {
+            KeyAction::Send(command) => match *command {
+                AppUiCommand::SubmitPrompt(params) => {
+                    let text = params.input.iter().find_map(|item| match item {
+                        octos_core::ui_protocol::InputItem::Text { text } => Some(text.clone()),
+                        _ => None,
+                    });
+                    assert_eq!(text.as_deref(), Some("queued behind phantom"));
+                }
+                other => panic!("expected SubmitPrompt, got {other:?}"),
+            },
+            _ => panic!("expected Send"),
+        }
+        assert!(store.state.pending_messages.is_empty());
+    }
+
+    #[test]
+    fn ctrl_c_key_in_phantom_state_reaches_recovery() {
+        let (mut store, _session_id) = phantom_store();
+        store.state.capabilities = None;
+
+        let action = handle_key(
+            &mut store,
+            modified_key(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        );
+
+        assert!(matches!(action, KeyAction::Continue));
+        assert_eq!(store.state.run_state, crate::model::SessionRunState::Idle);
+        assert_eq!(store.state.status, t!("status.phantom_turn_reset_by_user"));
+    }
+
+    #[test]
+    fn esc_key_when_idle_refocuses_composer_without_command() {
+        let mut store = store_with_sessions(1);
+        assert_eq!(store.state.run_state, crate::model::SessionRunState::Idle);
+
+        let action = handle_key(&mut store, key(KeyCode::Esc));
+
+        assert!(matches!(action, KeyAction::Continue));
+        assert_eq!(store.state.run_state, crate::model::SessionRunState::Idle);
+        assert_eq!(store.state.focus, FocusPane::Composer);
     }
 
     #[test]

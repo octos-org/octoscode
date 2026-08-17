@@ -6715,6 +6715,13 @@ impl Store {
             .active_turn()
             .map(|(session_id, turn_id)| (session_id.clone(), turn_id.clone()))
         else {
+            // task-esc-reconciles-phantom-turn: no live turn, but the chip
+            // says Working and inputs are queueing — give Esc an exit instead
+            // of a dead-end status line. Evidence-first, then one probe, then
+            // the user's repeated request counts as the decision.
+            if let Some(command) = self.reconcile_phantom_on_user_interrupt() {
+                return command;
+            }
             self.state.status = t!("status.no_active_turn_interrupt").into_owned();
             return None;
         };
@@ -13502,6 +13509,15 @@ impl Store {
         true
     }
 
+    /// The active session is in the phantom InProgress shape (event-loop
+    /// convenience over [`Self::phantom_in_progress`]).
+    pub fn active_session_phantom_in_progress(&self) -> bool {
+        self.state
+            .active_session()
+            .map(|session| session.id.clone())
+            .is_some_and(|session_id| self.phantom_in_progress(&session_id))
+    }
+
     /// Turn-scoped server terminal evidence for a phantom session: the most
     /// recent turn the server started (`last_started_turn`) has reached its
     /// terminal (tombstoned in `completed_turns`) and nothing started since.
@@ -13531,6 +13547,40 @@ impl Store {
         // staged message" line — the user needs to know WHY the chip flipped.
         self.state.status = status;
         command
+    }
+
+    /// task-esc-reconciles-phantom-turn: Esc/Ctrl+C while the active session
+    /// is phantom InProgress. Returns `Some(command)` when the phantom path
+    /// handled the key (the inner `Option` is the command to send, if any);
+    /// `None` when the session is not phantom and the caller should fall back
+    /// to today's "no active turn" report.
+    ///
+    /// Order: server terminal evidence → reset + drain; no evidence and
+    /// `session/hydrate` advertised and not yet probed this episode → probe;
+    /// otherwise (probe already sent, or no hydrate) the user's explicit
+    /// request is the decision → reset + drain. The tick watchdog never takes
+    /// that last step on its own.
+    fn reconcile_phantom_on_user_interrupt(&mut self) -> Option<Option<AppUiCommand>> {
+        let session_id = self
+            .state
+            .active_session()
+            .map(|session| session.id.clone())?;
+        if !self.phantom_in_progress(&session_id) {
+            return None;
+        }
+        if self.phantom_terminal_evidence(&session_id) {
+            let status = t!("status.phantom_turn_reconciled").into_owned();
+            return Some(self.reset_phantom_run_state(&session_id, status));
+        }
+        if !self.state.phantom_probe_sent.contains(&session_id)
+            && let Some(command) = self.hydrate_session_state_command(&session_id)
+        {
+            self.state.phantom_probe_sent.insert(session_id);
+            self.state.status = t!("status.phantom_turn_probing").into_owned();
+            return Some(Some(command));
+        }
+        let status = t!("status.phantom_turn_reset_by_user").into_owned();
+        Some(self.reset_phantom_run_state(&session_id, status))
     }
 
     /// Tick-driven phantom-state watchdog (task-stuck-run-state-watchdog).
@@ -39453,6 +39503,127 @@ now analyzing the bus module"
     #[test]
     fn phantom_status_keys_exist_in_both_locales() {
         for key in ["status.phantom_turn_reconciled", "status.phantom_turn_hint"] {
+            for locale in ["en", "zh"] {
+                let text = t!(key, locale = locale).into_owned();
+                assert!(
+                    text != key && text != format!("{locale}.{key}") && !text.is_empty(),
+                    "{key} must be defined in locales/{locale}.yml (got {text:?})"
+                );
+            }
+        }
+    }
+
+    // ---- task-esc-reconciles-phantom-turn: Esc as the explicit exit ----
+
+    #[test]
+    fn esc_in_phantom_state_with_evidence_resets_and_drains() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        last_started_turn_terminal(&mut store, &session_id);
+        store
+            .state
+            .pending_messages
+            .push("queued behind phantom".into());
+
+        let command = store.interrupt_command();
+
+        assert!(!store.phantom_in_progress(&session_id));
+        assert_eq!(
+            command.as_ref().and_then(submit_prompt_text),
+            Some("queued behind phantom"),
+            "Esc with evidence drains the queue: {command:?}"
+        );
+        assert_eq!(store.state.status, t!("status.phantom_turn_reconciled"));
+    }
+
+    #[test]
+    fn esc_in_phantom_state_probes_then_second_esc_forces_idle() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+
+        let first = store.interrupt_command();
+        assert!(
+            matches!(first, Some(AppUiCommand::HydrateSession(_))),
+            "first Esc probes the server: {first:?}"
+        );
+        assert_eq!(store.state.status, t!("status.phantom_turn_probing"));
+        assert_eq!(store.state.run_state, SessionRunState::InProgress);
+        assert!(store.phantom_in_progress(&session_id));
+
+        let second = store.interrupt_command();
+        assert!(
+            second.is_none(),
+            "empty queue: nothing to submit: {second:?}"
+        );
+        assert_eq!(store.state.run_state, SessionRunState::Idle);
+        assert_eq!(store.state.status, t!("status.phantom_turn_reset_by_user"));
+    }
+
+    #[test]
+    fn esc_in_phantom_state_without_hydrate_resets_on_user_action() {
+        let (mut store, _session_id) = phantom_in_progress_store();
+        store.state.capabilities = None;
+
+        let command = store.interrupt_command();
+
+        assert!(command.is_none());
+        assert_eq!(store.state.run_state, SessionRunState::Idle);
+        assert_eq!(store.state.status, t!("status.phantom_turn_reset_by_user"));
+    }
+
+    #[test]
+    fn watchdog_never_forces_reset_without_evidence_even_after_probe() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+
+        // The watchdog probes once, then keeps its hands off.
+        store.reconcile_phantom_run_state(std::time::Instant::now());
+        assert!(store.state.phantom_probe_sent.contains(&session_id));
+        store.reconcile_phantom_run_state(std::time::Instant::now());
+        store.reconcile_phantom_run_state(std::time::Instant::now());
+        assert_eq!(store.state.run_state, SessionRunState::InProgress);
+
+        // Only the user's explicit Esc turns "probe already sent" into a reset.
+        let command = store.interrupt_command();
+        assert!(command.is_none());
+        assert_eq!(store.state.run_state, SessionRunState::Idle);
+        assert_eq!(store.state.status, t!("status.phantom_turn_reset_by_user"));
+    }
+
+    #[test]
+    fn esc_in_blocked_state_does_not_phantom_reset() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        last_started_turn_terminal(&mut store, &session_id);
+        store.state.set_run_state_blocked("approval pending");
+
+        let command = store.interrupt_command();
+
+        assert!(command.is_none());
+        assert!(matches!(
+            store.state.run_state,
+            SessionRunState::Blocked { .. }
+        ));
+        assert_eq!(store.state.status, t!("status.no_active_turn_interrupt"));
+    }
+
+    #[test]
+    fn slash_exit_requests_exit_while_phantom_in_progress() {
+        let (mut store, _session_id) = phantom_in_progress_store();
+        store.state.composer = "/exit".into();
+
+        let _ = store.compose_command();
+
+        assert!(
+            store.state.exit_requested,
+            "/exit must not be gated on the run-state"
+        );
+    }
+
+    #[test]
+    fn phantom_esc_status_keys_exist_in_both_locales() {
+        for key in [
+            "status.phantom_turn_probing",
+            "status.phantom_turn_reset_by_user",
+        ] {
             for locale in ["en", "zh"] {
                 let text = t!(key, locale = locale).into_owned();
                 assert!(
