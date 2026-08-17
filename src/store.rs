@@ -10433,6 +10433,20 @@ impl Store {
         } else {
             self.state.session_retry.remove(&event.session_id);
         }
+        // Turn terminals are monotonic (mirror `ToolStarted`/`ToolProgress`):
+        // an aborted tool process can still emit `progress/updated` frames
+        // after `turn/error`, and by then the interrupt marker and live reply
+        // have been reconciled, so the generic in-progress guard cannot see
+        // the dead turn. Consult the turn-scoped terminal tombstone before
+        // recording an activity row or touching the run-state. Session-level
+        // bookkeeping above (usage, retry) is turn-agnostic and stays.
+        if event
+            .turn_id
+            .as_ref()
+            .is_some_and(|turn_id| self.state.is_turn_completed(&event.session_id, turn_id))
+        {
+            return None;
+        }
         let status = progress_status(&event);
         let record_activity = should_record_progress_activity(&event);
         let diff_preview_request = event.metadata.file_mutation.as_ref().and_then(|notice| {
@@ -10887,6 +10901,18 @@ impl Store {
                 None
             }
             UiNotification::ToolStarted(event) => {
+                // Turn terminals are monotonic. An aborted tool process can
+                // emit lifecycle frames after `turn/error`; by then the
+                // interrupt marker and live reply have been reconciled, so the
+                // generic in-progress guard cannot identify the dead turn.
+                // Consult the turn-scoped terminal tombstone before creating a
+                // new running row or changing any global UI state.
+                if self
+                    .state
+                    .is_turn_completed(&event.session_id, &event.turn_id)
+                {
+                    return None;
+                }
                 self.state
                     .record_turn_prompt_anchor_from_latest_user(&event.session_id, &event.turn_id);
                 // A tool call starting means the current assistant CONTENT segment
@@ -10924,6 +10950,14 @@ impl Store {
                 None
             }
             UiNotification::ToolProgress(event) => {
+                // Mirror ToolStarted: progress from a terminal turn cannot
+                // update activity/status or resurrect the run-state.
+                if self
+                    .state
+                    .is_turn_completed(&event.session_id, &event.turn_id)
+                {
+                    return None;
+                }
                 let status = event
                     .progress_pct
                     .map(|pct| format!("{pct:.0}%"))
@@ -12105,6 +12139,12 @@ impl Store {
                 arguments_preview,
             } => {
                 let turn_id = self.resolve_v2_turn_id(&session_id, &wire_turn_id, false);
+                // Terminal tombstone (mirror `UiNotification::ToolStarted`): a
+                // late envelope frame for a terminated turn must not create a
+                // running row or resurrect the run-state.
+                if self.state.is_turn_completed(&session_id, &turn_id) {
+                    return None;
+                }
                 self.state
                     .record_turn_prompt_anchor_from_latest_user(&session_id, &turn_id);
                 self.finalize_live_reply_segment(&session_id, &turn_id);
@@ -12127,7 +12167,11 @@ impl Store {
                 tool_call_id,
                 message,
             } => {
-                let _ = self.resolve_v2_turn_id(&session_id, &wire_turn_id, false);
+                let turn_id = self.resolve_v2_turn_id(&session_id, &wire_turn_id, false);
+                // Terminal tombstone (mirror `UiNotification::ToolProgress`).
+                if self.state.is_turn_completed(&session_id, &turn_id) {
+                    return None;
+                }
                 self.state.update_tool_activity(
                     &tool_call_id,
                     "running",
@@ -32736,6 +32780,273 @@ now analyzing the bus module"
             store.state.run_state,
             SessionRunState::Idle,
             "a post-interrupt delta must not un-idle the turn"
+        );
+    }
+
+    #[test]
+    fn tool_events_after_interrupt_terminal_do_not_resurrect_the_turn() {
+        let turn_id = TurnId::new();
+        let mut store = store_with_live_reply(turn_id.clone(), "partial");
+        let session_id = store.state.sessions[0].id.clone();
+        store.state.set_run_state_in_progress();
+
+        store.interrupt_command().expect("interrupts");
+        store.apply_event(AppUiEvent::Protocol(UiNotification::TurnError(
+            TurnErrorEvent {
+                session_id: session_id.clone(),
+                topic: None,
+                turn_id: turn_id.clone(),
+                code: "interrupted".into(),
+                message: "turn interrupted by client".into(),
+            },
+        )));
+        assert!(store.state.is_turn_completed(&session_id, &turn_id));
+        assert_eq!(store.state.run_state, SessionRunState::Idle);
+        let activity_count = store.state.activity.len();
+
+        // The aborted tool process can emit its final lifecycle frames after
+        // the turn's terminal. Those frames belong to a dead turn and must not
+        // recreate either its liveness or a stranded `running` activity row.
+        store.apply_event(AppUiEvent::Protocol(UiNotification::ToolStarted(
+            ToolStartedEvent {
+                session_id: session_id.clone(),
+                topic: None,
+                turn_id: turn_id.clone(),
+                tool_call_id: "late-call".into(),
+                tool_name: "shell".into(),
+                arguments: Some(serde_json::json!({"command": "cargo test"})),
+            },
+        )));
+        store.apply_event(AppUiEvent::Protocol(UiNotification::ToolProgress(
+            octos_core::ui_protocol::ToolProgressEvent {
+                session_id: session_id.clone(),
+                topic: None,
+                turn_id,
+                tool_call_id: "late-call".into(),
+                message: Some("aborting".into()),
+                progress_pct: None,
+            },
+        )));
+
+        assert_eq!(
+            store.state.run_state,
+            SessionRunState::Idle,
+            "post-terminal tool events must not resurrect the interrupted turn"
+        );
+        assert_eq!(
+            store.state.activity.len(),
+            activity_count,
+            "a post-terminal ToolStarted must not leave an orphan running row"
+        );
+
+        let command = store.queue_or_start_prompt_turn("next prompt".into(), "sent".into());
+        assert!(
+            matches!(command, Some(AppUiCommand::SubmitPrompt(_))),
+            "the next prompt must start immediately after the terminal"
+        );
+        assert!(store.state.pending_messages.is_empty());
+    }
+
+    /// Shared fixture for the terminal-monotonicity regressions: a live turn
+    /// that the user interrupted and whose `turn_error(interrupted)` terminal
+    /// has already reconciled (tombstone written, live reply released,
+    /// interrupt marker cleared, run-state Idle). Returns the store plus the
+    /// activity count at the terminal so callers can assert no orphan rows.
+    fn interrupted_terminal_store() -> (Store, SessionKey, TurnId, usize) {
+        let turn_id = TurnId::new();
+        let mut store = store_with_live_reply(turn_id.clone(), "partial");
+        let session_id = store.state.sessions[0].id.clone();
+        store.state.set_run_state_in_progress();
+        store.interrupt_command().expect("interrupts");
+        store.apply_event(AppUiEvent::Protocol(UiNotification::TurnError(
+            TurnErrorEvent {
+                session_id: session_id.clone(),
+                topic: None,
+                turn_id: turn_id.clone(),
+                code: "interrupted".into(),
+                message: "turn interrupted by client".into(),
+            },
+        )));
+        assert!(store.state.is_turn_completed(&session_id, &turn_id));
+        assert!(!store.state.turn_locally_interrupted(&session_id, &turn_id));
+        assert_eq!(store.state.run_state, SessionRunState::Idle);
+        let activity_count = store.state.activity.len();
+        (store, session_id, turn_id, activity_count)
+    }
+
+    /// Every wire shape a dead turn's tool process can still produce after the
+    /// terminal. Each must be inert: no run-state change, no orphan activity,
+    /// and the next prompt starts immediately.
+    fn assert_late_turn_events_are_inert(
+        store: &mut Store,
+        session_id: &SessionKey,
+        turn_id: &TurnId,
+        activity_count: usize,
+        label: &str,
+    ) {
+        assert_eq!(
+            store.state.run_state,
+            SessionRunState::Idle,
+            "{label}: post-terminal events must not resurrect the interrupted turn"
+        );
+        assert!(
+            store.state.active_turn().is_none(),
+            "{label}: no live reply may be rebound after the terminal"
+        );
+        assert_eq!(
+            store.state.activity.len(),
+            activity_count,
+            "{label}: post-terminal events must not leave an orphan running row"
+        );
+        assert!(
+            !store.state.turn_locally_interrupted(session_id, turn_id),
+            "{label}: interrupt marker must stay cleared"
+        );
+        let command = store.queue_or_start_prompt_turn("next prompt".into(), "sent".into());
+        assert!(
+            matches!(command, Some(AppUiCommand::SubmitPrompt(_))),
+            "{label}: the next prompt must start immediately after the terminal"
+        );
+        assert!(
+            store.state.pending_messages.is_empty(),
+            "{label}: nothing staged"
+        );
+    }
+
+    fn send_late_progress_frames(store: &mut Store, session_id: &SessionKey, turn_id: &TurnId) {
+        // A tool_progress-shaped frame (records an activity row when live) and
+        // a status_word frame (the rotator that was still ticking in the
+        // incident ledger right up to the terminal).
+        let mut tool_progress = UiProgressMetadata::new("tool_progress");
+        tool_progress.label = Some("bash".into());
+        tool_progress.message = Some("aborting".into());
+        store.apply_event(AppUiEvent::Progress(UiProgressEvent::new(
+            session_id.clone(),
+            Some(turn_id.clone()),
+            tool_progress,
+        )));
+        let mut status_word =
+            UiProgressMetadata::new(octos_core::ui_protocol::progress_kinds::STATUS_WORD);
+        status_word.label = Some("Synthesizing".into());
+        store.apply_event(AppUiEvent::Progress(UiProgressEvent::new(
+            session_id.clone(),
+            Some(turn_id.clone()),
+            status_word,
+        )));
+    }
+
+    fn send_late_envelope_tool_frames(
+        store: &mut Store,
+        session_id: &SessionKey,
+        turn_id: &TurnId,
+    ) {
+        use octos_core::ui_protocol::PayloadV2;
+        let wire = turn_id.0.to_string();
+        store.apply_event(AppUiEvent::Protocol(envelope_v2_notification(
+            session_id.clone(),
+            900,
+            &wire,
+            PayloadV2::ToolStart {
+                tool_call_id: "late-envelope-call".into(),
+                name: "bash".into(),
+                arguments_preview: Some("cmd: \"./tools/parity/run_suite.sh\"".into()),
+            },
+        )));
+        store.apply_event(AppUiEvent::Protocol(envelope_v2_notification(
+            session_id.clone(),
+            901,
+            &wire,
+            PayloadV2::ToolProgress {
+                tool_call_id: "late-envelope-call".into(),
+                message: "aborting".into(),
+            },
+        )));
+    }
+
+    #[test]
+    fn late_progress_frames_after_interrupt_terminal_do_not_resurrect_the_turn() {
+        let (mut store, session_id, turn_id, activity_count) = interrupted_terminal_store();
+        send_late_progress_frames(&mut store, &session_id, &turn_id);
+        assert_late_turn_events_are_inert(
+            &mut store,
+            &session_id,
+            &turn_id,
+            activity_count,
+            "progress/updated",
+        );
+    }
+
+    #[test]
+    fn late_envelope_tool_frames_after_interrupt_terminal_do_not_resurrect_the_turn() {
+        let (mut store, session_id, turn_id, activity_count) = interrupted_terminal_store();
+        send_late_envelope_tool_frames(&mut store, &session_id, &turn_id);
+        assert_late_turn_events_are_inert(
+            &mut store,
+            &session_id,
+            &turn_id,
+            activity_count,
+            "envelope tool_start/tool_progress",
+        );
+    }
+
+    #[test]
+    fn late_turn_events_stay_inert_across_a_session_switch() {
+        let (mut store, session_id, turn_id, activity_count) = interrupted_terminal_store();
+        // Switch away and back between the terminal and the late frames — the
+        // run-state derivation on switch must not resurrect the dead turn, and
+        // the tombstone must survive the round-trip.
+        store.state.sessions.push(open_session_on("other"));
+        store.state.selected_session = 1;
+        store.state.refresh_run_state_from_selection();
+        store.state.selected_session = 0;
+        store.state.refresh_run_state_from_selection();
+        assert_eq!(store.state.run_state, SessionRunState::Idle);
+
+        store.apply_event(AppUiEvent::Protocol(UiNotification::ToolStarted(
+            ToolStartedEvent {
+                session_id: session_id.clone(),
+                topic: None,
+                turn_id: turn_id.clone(),
+                tool_call_id: "late-call".into(),
+                tool_name: "shell".into(),
+                arguments: None,
+            },
+        )));
+        send_late_progress_frames(&mut store, &session_id, &turn_id);
+        send_late_envelope_tool_frames(&mut store, &session_id, &turn_id);
+        assert_late_turn_events_are_inert(
+            &mut store,
+            &session_id,
+            &turn_id,
+            activity_count,
+            "after session switch",
+        );
+    }
+
+    #[test]
+    fn late_tool_events_for_a_dead_turn_do_not_touch_a_successor_turn() {
+        let (mut store, session_id, dead_turn, _) = interrupted_terminal_store();
+        // A successor turn is live; the dead turn's straggler frames must not
+        // disturb it (its run-state stays InProgress because of the successor,
+        // not because of the straggler) and must not attach activity to it.
+        let successor = TurnId::new();
+        store.apply_event(AppUiEvent::Protocol(UiNotification::TurnStarted(
+            TurnStartedEvent {
+                session_id: session_id.clone(),
+                turn_id: successor.clone(),
+                timestamp: chrono::Utc::now(),
+                topic: None,
+            },
+        )));
+        assert_eq!(store.state.run_state, SessionRunState::InProgress);
+        let activity_count = store.state.activity.len();
+        send_late_progress_frames(&mut store, &session_id, &dead_turn);
+        send_late_envelope_tool_frames(&mut store, &session_id, &dead_turn);
+        assert_eq!(store.state.activity.len(), activity_count);
+        assert_eq!(
+            store.state.active_turn().map(|(_, turn)| turn.clone()),
+            Some(successor),
+            "the successor turn stays the live one"
         );
     }
 
