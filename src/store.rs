@@ -11748,7 +11748,74 @@ impl Store {
             // octos-core is ahead of this crate and added `VoiceExit`; handling
             // it here keeps the match exhaustive so the workspace compiles.)
             UiNotification::VoiceExit(_) => None,
+            // task-consume-turn-steer-dropped: the server hands back `turn/steer`
+            // inputs it accepted but never drained. Only a matching retained
+            // steer earns a re-stage — whoever consumes it first (this arm or
+            // the terminal fallback) owns the re-queue; the other is a no-op.
+            UiNotification::TurnSteerDropped(event) => self.apply_turn_steer_dropped(event),
+            // New in the octos-core rev pinned by task-consume-turn-steer-dropped
+            // (monitor runtime + background activity feed). This client renders
+            // no UI for them yet — ignore explicitly so the match stays
+            // exhaustive without changing any state.
+            UiNotification::MonitorUpdated(_)
+            | UiNotification::MonitorFired(_)
+            | UiNotification::MonitorExpired(_)
+            | UiNotification::BackgroundActivity(_) => None,
         }
+    }
+
+    /// task-consume-turn-steer-dropped: consume a server `turn/steer_dropped`.
+    /// For each returned text, in order, reap ONE retained steer of that
+    /// `(session, turn, text)` (count-exact, FIFO — never a set), withdraw its
+    /// optimistic transcript row and re-stage it at the front of ITS session's
+    /// queue. Texts with no retained match are ignored: the server never
+    /// injects text into the local queue without a local record. Idempotent
+    /// under replay (nothing left to reap). No submit happens here — the turn
+    /// terminal's drain (or the idle backstop) sends the re-staged prompt.
+    fn apply_turn_steer_dropped(
+        &mut self,
+        event: octos_core::ui_protocol::TurnSteerDroppedEvent,
+    ) -> Option<AppUiCommand> {
+        let session_id = event.session_id.clone();
+        let mut restaged: Vec<String> = Vec::new();
+        let mut unmatched = 0usize;
+        for text in event.inputs {
+            let position = self.state.retained_steers.iter().position(|steer| {
+                steer.session_id == session_id
+                    && steer.turn_id == event.turn_id
+                    && steer.prompt == text
+            });
+            match position {
+                Some(index) => {
+                    let steer = self.state.retained_steers.remove(index);
+                    self.state.withdraw_steered_user_prompt(
+                        &session_id,
+                        &event.turn_id,
+                        &steer.prompt,
+                    );
+                    restaged.push(steer.prompt);
+                }
+                None => unmatched += 1,
+            }
+        }
+        if !restaged.is_empty() {
+            let count = restaged.len();
+            // Back-to-front so the FIRST returned text ends up at the very
+            // front of the queue (they were typed before anything staged after).
+            for prompt in restaged.into_iter().rev() {
+                self.state.restage_staged_prompt_front(&session_id, prompt);
+            }
+            self.state.status = t!(
+                "status.steer_returned_by_server",
+                count = count,
+                reason = event.reason
+            )
+            .into_owned();
+        } else if unmatched > 0 {
+            self.state.status =
+                t!("status.steer_returned_unmatched", count = unmatched).into_owned();
+        }
+        None
     }
 
     /// Shared live-delta path for legacy `message/delta` and canonical v2
@@ -18095,6 +18162,317 @@ mod tests {
         store.apply_client_event(ClientEvent::SessionHydrate(result));
 
         assert!(store.state.retained_steers.is_empty());
+    }
+
+    // ---- task-consume-turn-steer-dropped: server-returned steers ----
+
+    fn steer_dropped(
+        session_id: &SessionKey,
+        turn_id: &TurnId,
+        inputs: &[&str],
+        reason: &str,
+    ) -> AppUiEvent {
+        AppUiEvent::Protocol(UiNotification::TurnSteerDropped(
+            octos_core::ui_protocol::TurnSteerDroppedEvent {
+                session_id: session_id.clone(),
+                topic: None,
+                turn_id: turn_id.clone(),
+                inputs: inputs.iter().map(|s| (*s).to_string()).collect(),
+                reason: reason.into(),
+            },
+        ))
+    }
+
+    #[test]
+    fn steer_dropped_before_terminal_restages_once_and_terminal_does_not_resubmit() {
+        let mut store = steer_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "also do X");
+
+        let dropped = store.apply_event(steer_dropped(
+            &session_id,
+            &live_turn,
+            &["also do X"],
+            "interrupted",
+        ));
+        assert!(dropped.is_none(), "turn still live: nothing to submit yet");
+        assert_eq!(store.state.pending_messages, vec!["also do X".to_string()]);
+        assert!(
+            store.state.retained_steers.is_empty(),
+            "the notification consumed the retained steer"
+        );
+        assert_eq!(
+            user_rows_with(&store, "also do X"),
+            0,
+            "optimistic row withdrawn until resubmit"
+        );
+        assert_eq!(
+            store.state.status,
+            t!(
+                "status.steer_returned_by_server",
+                count = 1,
+                reason = "interrupted"
+            )
+        );
+
+        let command = store.apply_event(interrupted_terminal(&session_id, &live_turn));
+        assert_eq!(
+            command.as_ref().and_then(submit_prompt_text),
+            Some("also do X")
+        );
+        assert!(store.state.pending_messages.is_empty());
+        assert_eq!(
+            user_rows_with(&store, "also do X"),
+            1,
+            "re-recorded exactly once"
+        );
+    }
+
+    #[test]
+    fn late_steer_dropped_after_terminal_is_a_noop() {
+        let mut store = steer_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "also do X");
+        // F5 fallback: the terminal already re-staged and submitted it.
+        let command = store.apply_event(interrupted_terminal(&session_id, &live_turn));
+        assert_eq!(
+            command.as_ref().and_then(submit_prompt_text),
+            Some("also do X")
+        );
+        let pending_before = store.state.pending_messages.clone();
+        let rows_before = user_rows_with(&store, "also do X");
+
+        let late = store.apply_event(steer_dropped(
+            &session_id,
+            &live_turn,
+            &["also do X"],
+            "interrupted",
+        ));
+
+        assert!(late.is_none());
+        assert_eq!(store.state.pending_messages, pending_before);
+        assert_eq!(user_rows_with(&store, "also do X"), rows_before);
+        assert_eq!(rows_before, 1);
+    }
+
+    #[test]
+    fn duplicate_steer_dropped_is_idempotent() {
+        let mut store = steer_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "also do X");
+        store.apply_event(steer_dropped(
+            &session_id,
+            &live_turn,
+            &["also do X"],
+            "interrupted",
+        ));
+        assert_eq!(store.state.pending_messages.len(), 1);
+
+        store.apply_event(steer_dropped(
+            &session_id,
+            &live_turn,
+            &["also do X"],
+            "interrupted",
+        ));
+
+        assert_eq!(store.state.pending_messages.len(), 1);
+        assert!(store.state.retained_steers.is_empty());
+    }
+
+    #[test]
+    fn same_text_steers_are_consumed_by_count_not_by_set() {
+        let mut store = steer_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        for _ in 0..3 {
+            steer_into_live_turn(&mut store, &live_turn, "same");
+        }
+        assert_eq!(store.state.retained_steers.len(), 3);
+
+        store.apply_event(steer_dropped(
+            &session_id,
+            &live_turn,
+            &["same", "same"],
+            "turn_ended",
+        ));
+
+        assert_eq!(
+            store.state.pending_messages,
+            vec!["same".to_string(), "same".to_string()]
+        );
+        assert_eq!(
+            store.state.retained_steers.len(),
+            1,
+            "one still awaits its echo"
+        );
+    }
+
+    #[test]
+    fn steer_dropped_preserves_input_order_in_queue() {
+        let mut store = steer_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "A");
+        steer_into_live_turn(&mut store, &live_turn, "B");
+
+        store.apply_event(steer_dropped(
+            &session_id,
+            &live_turn,
+            &["A", "B"],
+            "interrupted",
+        ));
+
+        assert_eq!(
+            store.state.pending_messages,
+            vec!["A".to_string(), "B".to_string()]
+        );
+    }
+
+    #[test]
+    fn steer_dropped_for_background_session_stays_in_its_own_queue() {
+        let mut store = steer_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "background steer");
+        // Switch the user to another session; the steer's session is now background.
+        store.state.sessions.push(open_session_on("other"));
+        store.state.selected_session = 1;
+        store.state.refresh_run_state_from_selection();
+        let other_id = store.state.sessions[1].id.clone();
+        assert_eq!(
+            store.state.active_session().map(|s| s.id.clone()),
+            Some(other_id)
+        );
+
+        store.apply_event(steer_dropped(
+            &session_id,
+            &live_turn,
+            &["background steer"],
+            "interrupted",
+        ));
+
+        assert!(
+            store.state.pending_messages.is_empty(),
+            "the visible session's queue is untouched"
+        );
+        assert_eq!(
+            store.state.pending_messages_by_session.get(&session_id),
+            Some(&vec!["background steer".to_string()])
+        );
+    }
+
+    #[test]
+    fn unmatched_steer_dropped_text_is_never_injected() {
+        let mut store = steer_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        assert!(store.state.retained_steers.is_empty());
+        let rows_before = store.state.sessions[0].messages.len();
+
+        let command = store.apply_event(steer_dropped(
+            &session_id,
+            &live_turn,
+            &["rm -rf / (never typed here)"],
+            "interrupted",
+        ));
+
+        assert!(command.is_none());
+        assert!(store.state.pending_messages.is_empty());
+        assert!(store.state.pending_messages_by_session.is_empty());
+        assert_eq!(store.state.sessions[0].messages.len(), rows_before);
+        assert_eq!(
+            store.state.status,
+            t!("status.steer_returned_unmatched", count = 1)
+        );
+    }
+
+    #[test]
+    fn steer_dropped_reason_is_surfaced_but_does_not_change_behavior() {
+        for reason in ["interrupted", "turn_ended"] {
+            let mut store = steer_capable_store();
+            let session_id = store.state.sessions[0].id.clone();
+            let live_turn = start_live_turn(&mut store, "first prompt");
+            steer_into_live_turn(&mut store, &live_turn, "also do X");
+
+            store.apply_event(steer_dropped(
+                &session_id,
+                &live_turn,
+                &["also do X"],
+                reason,
+            ));
+
+            assert_eq!(
+                store.state.pending_messages,
+                vec!["also do X".to_string()],
+                "{reason}"
+            );
+            assert!(
+                store.state.status.contains(reason),
+                "{reason} surfaces in {:?}",
+                store.state.status
+            );
+        }
+    }
+
+    #[test]
+    fn monitor_and_background_activity_notifications_are_ignored() {
+        let mut store = store_with_empty_session();
+        let sid = store.state.sessions[0].id.0.clone();
+        let before_status = store.state.status.clone();
+        let before_run_state = store.state.run_state.clone();
+        let monitor = serde_json::json!({
+            "monitor_id": "m1", "session_id": sid, "name": "logs", "argv": ["tail"],
+            "mode": "stream", "batch_ms": 100, "max_events_per_hour": 10, "persistent": false,
+            "status": "active", "fires_used": 0, "created_at_ms": 0, "updated_at_ms": 0
+        });
+        let frames = [
+            (
+                "monitor/updated",
+                serde_json::json!({"session_id": sid, "monitor": monitor}),
+            ),
+            (
+                "monitor/fired",
+                serde_json::json!({"session_id": sid, "monitor_id": "m1"}),
+            ),
+            (
+                "monitor/expired",
+                serde_json::json!({"session_id": sid, "monitor_id": "m1"}),
+            ),
+            (
+                "background/activity",
+                serde_json::json!({
+                    "session_id": sid, "origin_kind": "monitor", "origin_id": "m1",
+                    "text": "line", "emitted_at_ms": 0
+                }),
+            ),
+        ];
+        for (method, params) in frames {
+            let notification = UiNotification::from_method_and_params(method, params)
+                .unwrap_or_else(|err| panic!("{method} decodes: {err:?}"));
+            let command = store.apply_event(AppUiEvent::Protocol(notification));
+            assert!(command.is_none(), "{method} must be ignored");
+        }
+        assert_eq!(store.state.status, before_status);
+        assert_eq!(store.state.run_state, before_run_state);
+    }
+
+    #[test]
+    fn steer_dropped_status_keys_exist_in_both_locales() {
+        for key in [
+            "status.steer_returned_by_server",
+            "status.steer_returned_unmatched",
+        ] {
+            for locale in ["en", "zh"] {
+                let text = t!(key, locale = locale, count = 1, reason = "interrupted").into_owned();
+                assert!(
+                    text != key && text != format!("{locale}.{key}") && !text.is_empty(),
+                    "{key} must be defined in locales/{locale}.yml (got {text:?})"
+                );
+            }
+        }
     }
 
     #[test]

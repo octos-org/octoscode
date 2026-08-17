@@ -1323,6 +1323,8 @@ status:
   message_staged: "消息已暂存；将在当前回合结束后提交。按 Esc 可中断/发送。"
   steered_into_turn: "已插入正在运行的回合。"
   steer_restaged_after_turn_end: "回合在你插入的消息被采纳前就结束了——已重新入队，作为新回合发送。"
+  steer_returned_by_server: "服务端返还了 %{count} 条未被采纳的插入消息（%{reason}）——已重新入队。"
+  steer_returned_unmatched: "服务端报告 %{count} 条被丢弃的插入消息但本地无记录——已忽略。"
   btw_usage: "用法:/btw <问题> — 在当前回合继续运行时快速旁路提问"
   btw_answering: "btw:回答中…"
   btw_answered: "btw:已回答"

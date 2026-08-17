@@ -565,6 +565,8 @@ status:
   message_staged: "Message staged; it will submit after the active turn. Press Esc to interrupt/send."
   steered_into_turn: "Steered into the running turn."
   steer_restaged_after_turn_end: "The turn ended before your steered message was taken up — it was re-queued and is sending as a new turn."
+  steer_returned_by_server: "Server returned %{count} steered message(s) it never took up (%{reason}) — re-queued."
+  steer_returned_unmatched: "Server reported %{count} dropped steer(s) with no local record — ignored."
   btw_usage: "Usage: /btw <question> — ask a quick aside while the turn keeps working"
   btw_answering: "btw: answering…"
   btw_answered: "btw: answered"
