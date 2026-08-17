@@ -4750,6 +4750,19 @@ pub struct AppState {
     /// warning. Cleared with the turn's terminal (and on backend relaunch,
     /// like `interrupted_turns`).
     pub interrupt_dropped_output: std::collections::HashSet<(SessionKey, TurnId)>,
+    /// task-stuck-run-state-watchdog: per session, the turn named by the most
+    /// recent server `TurnStarted`. Paired with `completed_turns` this gives
+    /// TURN-SCOPED terminal evidence: "the last turn the server told us about
+    /// has reached its terminal, and nothing started since". A session-level
+    /// `session_orchestration active=false` is deliberately NOT used as
+    /// evidence — it carries no turn identity, so a late frame from an old
+    /// turn A arriving after `TurnStarted(B)` would misfire on B.
+    pub last_started_turn: std::collections::HashMap<SessionKey, TurnId>,
+    /// task-stuck-run-state-watchdog: sessions for which the watchdog already
+    /// sent its one `session/hydrate` probe during the CURRENT phantom
+    /// episode. Cleared when the session leaves the phantom shape so the next
+    /// episode gets its own probe.
+    pub phantom_probe_sent: std::collections::HashSet<SessionKey>,
     /// #324 Phase C: per-session unread counters — turns that reached a
     /// terminal while the session was NOT focused. Incremented by the store's
     /// terminal appliers, cleared when the session gains focus.
@@ -6760,6 +6773,8 @@ impl AppState {
             interrupted_turns: std::collections::HashMap::new(),
             unhealthy_cursors: std::collections::HashSet::new(),
             interrupt_dropped_output: std::collections::HashSet::new(),
+            last_started_turn: std::collections::HashMap::new(),
+            phantom_probe_sent: std::collections::HashSet::new(),
             unread_turns: std::collections::HashMap::new(),
             pending_turn_steers: std::collections::VecDeque::new(),
             pending_peer_prepare: None,
@@ -10414,7 +10429,7 @@ fn is_plan_heading(line: &str) -> bool {
 /// How long a [`AppState::pre_token_turns`] marker stays authoritative. A
 /// submit whose turn/started never arrives within this window is treated as
 /// dead (mirrors the staged-gate TTL in `store.rs`).
-const PRE_TOKEN_TURN_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const PRE_TOKEN_TURN_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// How long a [`AppState::pending_peer_kickoffs`] entry stays live (#395). A
 /// prepared peer whose `session/opened` never arrives within this window is a

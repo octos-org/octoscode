@@ -274,6 +274,14 @@ pub fn run(cli: Cli) -> Result<()> {
             dirty = true;
         }
 
+        // task-stuck-run-state-watchdog: a phantom InProgress (run-state active
+        // with no live turn, no pre-token marker, no staged gate) is reconciled
+        // against server terminal evidence — or probed via session/hydrate —
+        // on this same tick cadence. Never resets on elapsed time alone.
+        if store.reconcile_phantom_run_state(std::time::Instant::now()) {
+            dirty = true;
+        }
+
         // Terminal sub-agent chips age out of the strip on this same tick
         // cadence (the loop already wakes every UI_EVENT_POLL_INTERVAL, so no
         // dedicated timer): finished/failed agents linger long enough to

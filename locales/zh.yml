@@ -1307,6 +1307,11 @@ status:
   activity_navigator_selected_session: 已选择会话：%{title}
   local_action_not_wired: 本地菜单操作 `%{name}` 尚未实现
   no_active_turn: 无活动回合可中断
+  # task-stuck-run-state-watchdog / task-esc-reconciles-phantom-turn
+  phantom_turn_reconciled: "服务端没有活跃回合——已清除残留的 Working 状态，排队消息正在发送。"
+  phantom_turn_probing: "显示 Working 但没有活跃回合——正在向服务端核对…"
+  phantom_turn_hint: "显示 Working 但没有活跃回合，也没有服务端证据——按 Esc 进行核对/复位。"
+  phantom_turn_reset_by_user: "已按你的指令清除残留的 Working 状态，排队消息正在发送。"
   readonly_turn_disabled: 只读模式：回合/启动已禁用
   statusline_layout_selected: 已选择状态栏布局：%{items}
   terminal_title_layout_selected: 已选择终端标题布局：%{items}

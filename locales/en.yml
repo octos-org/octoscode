@@ -540,6 +540,11 @@ status:
   readonly_turn_disabled: "Read-only mode: turn/start disabled"
   # /stop when no active turn
   no_active_turn: "No active turn to interrupt"
+  # task-stuck-run-state-watchdog / task-esc-reconciles-phantom-turn
+  phantom_turn_reconciled: "No live turn on the server — cleared the stale Working state; queued messages are sending."
+  phantom_turn_probing: "Working with no live turn — checking with the server…"
+  phantom_turn_hint: "Working with no live turn and no server evidence — press Esc to reconcile."
+  phantom_turn_reset_by_user: "Cleared the stale Working state on your request; queued messages are sending."
   # /theme feedback
   theme_set: "Theme: %{theme}"
   theme_unknown: "Unknown theme: %{theme}"

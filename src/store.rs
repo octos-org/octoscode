@@ -73,6 +73,13 @@ const PROVIDER_PENDING_TIMEOUT: std::time::Duration = std::time::Duration::from_
 /// enough that a stuck queue self-heals promptly.
 pub(crate) const STAGED_SUBMIT_GATE_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// task-stuck-run-state-watchdog: how long a session may sit in the phantom
+/// `InProgress` shape (run-state active, no live reply, no pre-token marker,
+/// no staged gate) before the tick watchdog ACTS — reset on server terminal
+/// evidence, or one `session/hydrate` probe when there is none. Elapsed time
+/// alone never resets the state (see the spec's Forbidden list).
+pub(crate) const PHANTOM_RUN_STATE_PROBE_SECS: u64 = 10;
+
 #[derive(Default)]
 struct TurnActivitySummary {
     action_count: usize,
@@ -9672,6 +9679,25 @@ impl Store {
             sections.join(", ")
         };
         self.state.status = t!("status.session_hydrated", summary = summary).into_owned();
+        // task-stuck-run-state-watchdog: an authoritative `turns` answer with
+        // NO Active/Interrupting entry is server evidence that nothing is
+        // live. If the local state is still the phantom InProgress shape (no
+        // live reply, no pre-token marker, no staged gate), reset it and drain
+        // the queue — the anti-wedge that `finalize_stale_hydrated_live_turn`
+        // provides for a latched live reply, extended to the run-state.
+        if let Some(turns) = result.turns.as_ref()
+            && !turns.iter().any(|turn| {
+                matches!(
+                    turn.state,
+                    TurnLifecycleState::Active | TurnLifecycleState::Interrupting
+                )
+            })
+            && self.phantom_in_progress(&session_id)
+        {
+            let status = t!("status.phantom_turn_reconciled").into_owned();
+            let command = self.reset_phantom_run_state(&session_id, status);
+            drain = drain.or(command);
+        }
         // A `SessionHydrateResult` carries a bare `UiCursor` (stream + seq) and
         // no health at all, and the only other probe on this path
         // (`probe_active_session_status_if_missing`) fires solely when NO status
@@ -10806,6 +10832,12 @@ impl Store {
                 None
             }
             UiNotification::TurnStarted(event) => {
+                // task-stuck-run-state-watchdog: remember the newest server-
+                // started turn; its tombstone is the turn-scoped evidence the
+                // phantom watchdog may act on.
+                self.state
+                    .last_started_turn
+                    .insert(event.session_id.clone(), event.turn_id.clone());
                 // The staged-drain submit (if any) has materialized into a
                 // real turn; from here live_reply gates further drains. Match
                 // on turn so a stale/continuation TurnStarted for a DIFFERENT
@@ -11644,6 +11676,9 @@ impl Store {
                     // Blocking bug 2 (belt-and-suspenders): the whole job is
                     // done — drop the indicator AND any stale retry so it cannot
                     // linger across the terminal orchestration boundary.
+                    // (task-stuck-run-state-watchdog: NOT recorded as terminal
+                    // evidence — this frame carries no turn identity and may be
+                    // a late frame from an older turn.)
                     self.state.orchestration.remove(&event.session_id);
                     self.state.session_retry.remove(&event.session_id);
                 }
@@ -13431,6 +13466,128 @@ impl Store {
     /// retries on the gate-TTL cadence instead, and structurally closes any
     /// remaining wake-site gap (idle active session + staged prompt always
     /// flows within a tick). O(1) when there is nothing to do.
+    /// task-stuck-run-state-watchdog: the incident's "phantom InProgress"
+    /// shape — the run-state says a turn is active, but nothing local backs
+    /// it: no live reply, no pre-token marker for our own submit, no staged
+    /// gate. `Blocked` is excluded on purpose (an approval/question wait is a
+    /// live turn no matter how long it sits).
+    pub fn phantom_in_progress(&self, session_id: &SessionKey) -> bool {
+        if !matches!(
+            self.state.run_state,
+            crate::model::SessionRunState::InProgress
+        ) {
+            return false;
+        }
+        if !self
+            .state
+            .active_session()
+            .is_some_and(|session| &session.id == session_id)
+        {
+            return false;
+        }
+        if self.state.active_turn().is_some() {
+            return false;
+        }
+        if self
+            .state
+            .pre_token_turns
+            .get(session_id)
+            .is_some_and(|armed| armed.elapsed() < crate::model::PRE_TOKEN_TURN_TTL)
+        {
+            return false;
+        }
+        if self.state.staged_submit_in_flight.contains_key(session_id) {
+            return false;
+        }
+        true
+    }
+
+    /// Turn-scoped server terminal evidence for a phantom session: the most
+    /// recent turn the server started (`last_started_turn`) has reached its
+    /// terminal (tombstoned in `completed_turns`) and nothing started since.
+    /// A session with no known started turn has no evidence.
+    fn phantom_terminal_evidence(&self, session_id: &SessionKey) -> bool {
+        self.state
+            .last_started_turn
+            .get(session_id)
+            .is_some_and(|turn_id| self.state.is_turn_completed(session_id, turn_id))
+    }
+
+    /// Reset a phantom InProgress session to Idle and drain its queue. Shared
+    /// by the tick watchdog (evidence path), the hydrate applier (all-terminal
+    /// turns) and the Esc exit (task-esc-reconciles-phantom-turn). Returns the
+    /// staged submit to send, if any. Never called without evidence or an
+    /// explicit user action — see the callers.
+    pub(crate) fn reset_phantom_run_state(
+        &mut self,
+        session_id: &SessionKey,
+        status: String,
+    ) -> Option<AppUiCommand> {
+        self.state.phantom_probe_sent.remove(session_id);
+        self.state.pre_token_turns.remove(session_id);
+        self.state.set_run_state_idle();
+        let command = self.submit_next_pending_if_idle();
+        // The reason for the reset outranks the drain's generic "submitted
+        // staged message" line — the user needs to know WHY the chip flipped.
+        self.state.status = status;
+        command
+    }
+
+    /// Tick-driven phantom-state watchdog (task-stuck-run-state-watchdog).
+    /// Acts only once the phantom shape has persisted for
+    /// [`PHANTOM_RUN_STATE_PROBE_SECS`]:
+    /// * server terminal evidence present → reset + drain (command goes to the
+    ///   follow-up queue, sent by the event loop this tick);
+    /// * no evidence, `session/hydrate` advertised → ONE probe per episode; the
+    ///   hydrate applier resets on an all-terminal `turns` answer;
+    /// * no evidence, no hydrate → status hint only. Elapsed time alone never
+    ///   flips the state.
+    ///
+    /// Returns true when it changed anything visible.
+    pub fn reconcile_phantom_run_state(&mut self, _now: std::time::Instant) -> bool {
+        let Some(session_id) = self
+            .state
+            .active_session()
+            .map(|session| session.id.clone())
+        else {
+            return false;
+        };
+        if !self.phantom_in_progress(&session_id) {
+            // Episode over (a turn is genuinely live, or we're idle): the next
+            // phantom episode earns its own probe.
+            self.state.phantom_probe_sent.remove(&session_id);
+            return false;
+        }
+        let elapsed = self.state.run_state_elapsed_secs().unwrap_or(0);
+        if elapsed < PHANTOM_RUN_STATE_PROBE_SECS {
+            return false;
+        }
+        if self.phantom_terminal_evidence(&session_id) {
+            let status = t!("status.phantom_turn_reconciled").into_owned();
+            if let Some(command) = self.reset_phantom_run_state(&session_id, status) {
+                self.state.enqueue_autonomy_hydration(command);
+            }
+            return true;
+        }
+        if self.state.phantom_probe_sent.contains(&session_id) {
+            return false;
+        }
+        if let Some(command) = self.hydrate_session_state_command(&session_id) {
+            self.state.phantom_probe_sent.insert(session_id.clone());
+            self.state.enqueue_autonomy_hydration(command);
+            self.state.status = t!("status.phantom_turn_probing").into_owned();
+            return true;
+        }
+        // No evidence and no way to ask: surface the contradiction so the
+        // user can Esc (task-esc-reconciles-phantom-turn), but do not guess.
+        let hint = t!("status.phantom_turn_hint").into_owned();
+        if self.state.status != hint {
+            self.state.status = hint;
+            return true;
+        }
+        false
+    }
+
     pub fn drain_staged_backstop(&mut self) -> bool {
         if let Some(command) = self.submit_next_pending_if_idle() {
             self.state.enqueue_autonomy_hydration(command);
@@ -38941,6 +39098,368 @@ now analyzing the bus module"
                 crate::model::ACTIVITY_STATUS_INTERRUPTED,
                 "a {terminal:?} hydrated turn's stranded running item must be reconciled"
             );
+        }
+    }
+
+    // ---- task-stuck-run-state-watchdog: evidence-driven phantom-state watchdog ----
+
+    /// A session in the incident's "phantom InProgress" shape: run-state
+    /// InProgress, no live reply, no pre-token marker, no staged gate, and the
+    /// run-state clock already past the probe threshold.
+    fn phantom_in_progress_store() -> (Store, SessionKey) {
+        let mut store = store_with_empty_session();
+        let session_id = store.state.sessions[0].id.clone();
+        store.state.set_run_state_in_progress();
+        store.state.run_state_started_at = Some(
+            std::time::Instant::now()
+                - std::time::Duration::from_secs(PHANTOM_RUN_STATE_PROBE_SECS + 1),
+        );
+        assert!(store.phantom_in_progress(&session_id));
+        (store, session_id)
+    }
+
+    fn hydrate_capabilities() -> crate::menu::CapabilitySet {
+        crate::menu::CapabilitySet::from_methods_and_features(
+            [crate::model::APPUI_METHOD_SESSION_HYDRATE],
+            [crate::model::APPUI_FEATURE_SESSION_HYDRATE_V1],
+        )
+    }
+
+    fn orchestration_settled(store: &mut Store, session_id: &SessionKey) {
+        store.apply_event(AppUiEvent::Protocol(UiNotification::SessionOrchestration(
+            octos_core::ui_protocol::SessionOrchestrationEvent {
+                session_id: session_id.clone(),
+                active: false,
+                running_agents: 0,
+                pending_continuations: 0,
+                phase: None,
+            },
+        )));
+    }
+
+    fn turn_started(store: &mut Store, session_id: &SessionKey, turn_id: &TurnId) {
+        store.apply_event(AppUiEvent::Protocol(UiNotification::TurnStarted(
+            TurnStartedEvent {
+                session_id: session_id.clone(),
+                turn_id: turn_id.clone(),
+                timestamp: chrono::Utc::now(),
+                topic: None,
+            },
+        )));
+    }
+
+    /// Turn-scoped terminal evidence: the session's most recently started
+    /// turn reached its terminal (tombstoned), and nothing started since.
+    fn last_started_turn_terminal(store: &mut Store, session_id: &SessionKey) {
+        let turn_id = TurnId::new();
+        turn_started(store, session_id, &turn_id);
+        store.apply_event(interrupted_terminal(session_id, &turn_id));
+        // Back into the phantom shape: something re-armed InProgress after the
+        // terminal (the incident's late tool frame), with nothing local backing it.
+        store.state.sessions[0].live_reply = None;
+        store.state.pre_token_turns.remove(session_id);
+        store.state.run_state = SessionRunState::InProgress;
+        store.state.run_state_started_at = Some(
+            std::time::Instant::now()
+                - std::time::Duration::from_secs(PHANTOM_RUN_STATE_PROBE_SECS + 1),
+        );
+        assert!(store.phantom_in_progress(session_id));
+        assert_eq!(
+            store.state.last_started_turn.get(session_id),
+            Some(&turn_id)
+        );
+    }
+
+    /// The text of a `SubmitPrompt` command's first input item.
+    fn submit_prompt_text(command: &AppUiCommand) -> Option<&str> {
+        match command {
+            AppUiCommand::SubmitPrompt(params) => params.input.iter().find_map(|item| match item {
+                InputItem::Text { text } => Some(text.as_str()),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
+    fn interrupted_terminal(session_id: &SessionKey, turn_id: &TurnId) -> AppUiEvent {
+        AppUiEvent::Protocol(UiNotification::TurnError(TurnErrorEvent {
+            session_id: session_id.clone(),
+            topic: None,
+            turn_id: turn_id.clone(),
+            code: "interrupted".into(),
+            message: "turn interrupted by client".into(),
+        }))
+    }
+
+    fn completed_terminal(session_id: &SessionKey, turn_id: &TurnId) -> AppUiEvent {
+        AppUiEvent::Protocol(UiNotification::TurnCompleted(TurnCompletedEvent {
+            session_id: session_id.clone(),
+            topic: None,
+            turn_id: turn_id.clone(),
+            cursor: None,
+            tokens_in: None,
+            tokens_out: None,
+            session_result: None,
+        }))
+    }
+
+    fn drain_followups(store: &mut Store) -> Vec<AppUiCommand> {
+        let mut out = Vec::new();
+        while let Some(command) = store.state.dequeue_autonomy_hydration() {
+            out.push(command);
+        }
+        out
+    }
+
+    fn hydrate_result_with_turns(
+        session_id: &SessionKey,
+        turns: Vec<HydratedTurn>,
+    ) -> SessionHydrateResult {
+        SessionHydrateResult {
+            replayed_tool_envelopes: None,
+            session_id: session_id.clone(),
+            cursor: octos_core::ui_protocol::UiCursor {
+                stream: session_id.0.clone(),
+                seq: 1,
+            },
+            context: None,
+            context_state: None,
+            messages: None,
+            threads: None,
+            turns: Some(turns),
+            pending_approvals: None,
+            pending_questions: None,
+            replayed_envelopes: None,
+        }
+    }
+
+    fn hydrated_turn(state: TurnLifecycleState) -> HydratedTurn {
+        HydratedTurn {
+            turn_id: TurnId::new(),
+            state,
+            started_at: None,
+            completed_at: None,
+            thread_id: None,
+        }
+    }
+
+    #[test]
+    fn watchdog_resets_phantom_in_progress_when_last_started_turn_is_terminal() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        last_started_turn_terminal(&mut store, &session_id);
+        store
+            .state
+            .pending_messages
+            .push("queued behind phantom".into());
+
+        assert!(store.reconcile_phantom_run_state(std::time::Instant::now()));
+
+        // The phantom is gone: what is InProgress now is OUR real submit
+        // (pre-token marker armed), not the stale state.
+        assert!(!store.phantom_in_progress(&session_id));
+        assert!(store.state.pre_token_turns.contains_key(&session_id));
+        let followups = drain_followups(&mut store);
+        assert_eq!(
+            followups.iter().map(submit_prompt_text).collect::<Vec<_>>(),
+            vec![Some("queued behind phantom")],
+            "the queued prompt drains as a SubmitPrompt: {followups:?}"
+        );
+        assert!(store.state.pending_messages.is_empty());
+        assert_eq!(store.state.status, t!("status.phantom_turn_reconciled"));
+    }
+
+    #[test]
+    fn watchdog_prefers_evidence_over_probe() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+        last_started_turn_terminal(&mut store, &session_id);
+
+        store.reconcile_phantom_run_state(std::time::Instant::now());
+
+        assert_eq!(store.state.run_state, SessionRunState::Idle);
+        let followups = drain_followups(&mut store);
+        assert!(
+            !followups
+                .iter()
+                .any(|command| matches!(command, AppUiCommand::HydrateSession(_))),
+            "evidence wins: no probe when the server already settled the job"
+        );
+    }
+
+    #[test]
+    fn hydrate_all_terminal_turns_resets_phantom_in_progress() {
+        use crate::client_event::ClientEvent;
+        let (mut store, session_id) = phantom_in_progress_store();
+        store
+            .state
+            .pending_messages
+            .push("queued behind phantom".into());
+
+        let command =
+            store.apply_client_event(ClientEvent::SessionHydrate(hydrate_result_with_turns(
+                &session_id,
+                vec![
+                    hydrated_turn(TurnLifecycleState::Completed),
+                    hydrated_turn(TurnLifecycleState::Interrupted),
+                ],
+            )));
+
+        assert!(!store.phantom_in_progress(&session_id));
+        assert!(store.state.pre_token_turns.contains_key(&session_id));
+        assert_eq!(
+            command.as_ref().and_then(submit_prompt_text),
+            Some("queued behind phantom"),
+            "hydrate evidence drains the queue: {command:?}"
+        );
+        assert!(store.state.pending_messages.is_empty());
+    }
+
+    #[test]
+    fn watchdog_probes_hydrate_once_when_no_terminal_evidence() {
+        let (mut store, _session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+
+        store.reconcile_phantom_run_state(std::time::Instant::now());
+        store.reconcile_phantom_run_state(std::time::Instant::now());
+
+        let followups = drain_followups(&mut store);
+        assert_eq!(
+            followups
+                .iter()
+                .filter(|command| matches!(command, AppUiCommand::HydrateSession(_)))
+                .count(),
+            1,
+            "exactly one probe per phantom episode: {followups:?}"
+        );
+        assert_eq!(store.state.run_state, SessionRunState::InProgress);
+    }
+
+    #[test]
+    fn hydrate_with_active_turn_keeps_in_progress() {
+        use crate::client_event::ClientEvent;
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.pending_messages.push("still queued".into());
+
+        let command =
+            store.apply_client_event(ClientEvent::SessionHydrate(hydrate_result_with_turns(
+                &session_id,
+                vec![
+                    hydrated_turn(TurnLifecycleState::Completed),
+                    hydrated_turn(TurnLifecycleState::Active),
+                ],
+            )));
+
+        assert_eq!(store.state.run_state, SessionRunState::InProgress);
+        assert!(command.is_none());
+        assert_eq!(
+            store.state.pending_messages,
+            vec!["still queued".to_string()]
+        );
+    }
+
+    #[test]
+    fn watchdog_without_evidence_or_hydrate_only_hints() {
+        let (mut store, _session_id) = phantom_in_progress_store();
+        store.state.capabilities = None;
+
+        store.reconcile_phantom_run_state(std::time::Instant::now());
+
+        assert_eq!(store.state.run_state, SessionRunState::InProgress);
+        assert_eq!(store.state.status, t!("status.phantom_turn_hint"));
+        assert!(drain_followups(&mut store).is_empty());
+    }
+
+    #[test]
+    fn watchdog_leaves_pre_token_turn_alone() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        last_started_turn_terminal(&mut store, &session_id);
+        store
+            .state
+            .pre_token_turns
+            .insert(session_id.clone(), std::time::Instant::now());
+        assert!(!store.phantom_in_progress(&session_id));
+
+        assert!(!store.reconcile_phantom_run_state(std::time::Instant::now()));
+
+        assert_eq!(store.state.run_state, SessionRunState::InProgress);
+        assert!(drain_followups(&mut store).is_empty());
+    }
+
+    #[test]
+    fn watchdog_leaves_blocked_turn_alone() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        last_started_turn_terminal(&mut store, &session_id);
+        store.state.set_run_state_blocked("approval pending");
+        store.state.run_state_started_at = Some(
+            std::time::Instant::now()
+                - std::time::Duration::from_secs(PHANTOM_RUN_STATE_PROBE_SECS + 1),
+        );
+
+        assert!(!store.reconcile_phantom_run_state(std::time::Instant::now()));
+
+        assert!(matches!(
+            store.state.run_state,
+            SessionRunState::Blocked { .. }
+        ));
+    }
+
+    #[test]
+    fn late_orchestration_settlement_after_new_turn_start_is_not_evidence() {
+        // Reviewer's ordering: TurnStarted(B) → old turn A's LATE
+        // session_orchestration(active=false) → B's pre-token marker expires
+        // while B is still running (no delta yet). A session-level settlement
+        // carries no turn identity, so it must NOT count as evidence for B.
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+        let turn_b = TurnId::new();
+        turn_started(&mut store, &session_id, &turn_b);
+        // B is live but pre-token: no delta yet, so no live_reply. Simulate
+        // the pre-token marker having expired.
+        store.state.sessions[0].live_reply = None;
+        store.state.pre_token_turns.remove(&session_id);
+        orchestration_settled(&mut store, &session_id); // late frame from A
+        store.state.run_state = SessionRunState::InProgress;
+        store.state.run_state_started_at = Some(
+            std::time::Instant::now()
+                - std::time::Duration::from_secs(PHANTOM_RUN_STATE_PROBE_SECS + 1),
+        );
+        store.state.pending_messages.push("must not race B".into());
+
+        store.reconcile_phantom_run_state(std::time::Instant::now());
+        store.reconcile_phantom_run_state(std::time::Instant::now());
+
+        assert_eq!(store.state.run_state, SessionRunState::InProgress);
+        let followups = drain_followups(&mut store);
+        assert!(
+            !followups
+                .iter()
+                .any(|command| matches!(command, AppUiCommand::SubmitPrompt(_))),
+            "no queued prompt may be submitted while B is unconfirmed: {followups:?}"
+        );
+        assert_eq!(
+            followups
+                .iter()
+                .filter(|command| matches!(command, AppUiCommand::HydrateSession(_)))
+                .count(),
+            1,
+            "the only allowed action is a single hydrate probe"
+        );
+        assert_eq!(
+            store.state.pending_messages,
+            vec!["must not race B".to_string()]
+        );
+    }
+
+    #[test]
+    fn phantom_status_keys_exist_in_both_locales() {
+        for key in ["status.phantom_turn_reconciled", "status.phantom_turn_hint"] {
+            for locale in ["en", "zh"] {
+                let text = t!(key, locale = locale).into_owned();
+                assert!(
+                    text != key && text != format!("{locale}.{key}") && !text.is_empty(),
+                    "{key} must be defined in locales/{locale}.yml (got {text:?})"
+                );
+            }
         }
     }
 
