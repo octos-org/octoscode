@@ -72,6 +72,12 @@ pub const MENU_COST: &str = "cost";
 /// `/resume` session picker menu.
 pub const MENU_RESUME: &str = "resume";
 pub const MENU_AGENTS: &str = "agents";
+/// `/loop` list menu — one row per loop in the active session (status, id,
+/// cadence, prompt) with pause/resume/delete/fire-now actions.
+pub const MENU_LOOPS: &str = "loops";
+/// Per-loop action submenu: one verb row (pause/resume/fire-now/delete) for
+/// the loop selected in `MENU_LOOPS`.
+pub const MENU_LOOP_ACTIONS: &str = "loop-actions";
 /// `/rewind` turn picker menu.
 pub const MENU_REWIND: &str = "rewind";
 pub const MENU_STATUS: &str = "status";
@@ -901,6 +907,15 @@ pub fn core_command_specs() -> Vec<CommandSpec> {
             entry: CommandEntry::LocalAction(LocalAction::SaveConfig),
         },
         CommandSpec {
+            name: "steer",
+            aliases: &["steer-mid-turn", "steermode"],
+            description: "command.steer.desc",
+            category: CommandCategory::Settings,
+            availability: CommandAvailability::always(),
+            inline_args: InlineArgMode::Optional,
+            entry: CommandEntry::LocalAction(LocalAction::SetSteerMidTurn),
+        },
+        CommandSpec {
             name: "vimmode",
             aliases: &["vim-mode"],
             description: "command.vimmode.desc",
@@ -1058,6 +1073,7 @@ pub fn core_command_specs() -> Vec<CommandSpec> {
             description: "command.loop.desc",
             category: CommandCategory::Runtime,
             availability: CommandAvailability::app_ui_read(&[])
+                .with_session(SessionRequirement::Any)
                 .with_required_methods_any(APPUI_LOOP_MENU_METHODS_ANY)
                 .with_required_features(AUTONOMY_FEATURES),
             inline_args: InlineArgMode::Optional,

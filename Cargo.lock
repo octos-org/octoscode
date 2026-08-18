@@ -401,6 +401,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap_complete"
+version = "4.6.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3be2ad0423bdbbb0e25bc89add796f3559706d4a95e1bc98e4d9662a957b6a19"
+dependencies = [
+ "clap",
+]
+
+[[package]]
 name = "clap_derive"
 version = "4.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1597,8 +1606,8 @@ dependencies = [
 
 [[package]]
 name = "octos-core"
-version = "2.0.2"
-source = "git+https://github.com/octos-org/octos?rev=b074918a38cd43e7bc2e1eab39c840e016e3dfd1#b074918a38cd43e7bc2e1eab39c840e016e3dfd1"
+version = "2.0.3-rc.2"
+source = "git+https://github.com/octos-org/octos?rev=57a60fd7eb56992b78c1d7929ff7eaaae0325363#57a60fd7eb56992b78c1d7929ff7eaaae0325363"
 dependencies = [
  "chrono",
  "eyre",
@@ -1610,8 +1619,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "octos-tui"
-version = "0.2.3-rc.1"
+name = "octoscode"
+version = "0.3.0-rc.4"
 dependencies = [
  "axoupdater",
  "chrono",
@@ -1634,6 +1643,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite",
+ "ttfx",
  "unicode-segmentation",
  "unicode-width 0.2.0",
  "zip",
@@ -2608,6 +2618,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "terminal_size"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
+dependencies = [
+ "rustix 1.1.4",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "thiserror"
 version = "2.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2901,6 +2921,16 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "ttfx"
+version = "0.3.1"
+source = "git+https://github.com/omacom-io/ttfx?rev=6e24dac78e3011d89bd7ff24d1ad91dd89e11d8a#6e24dac78e3011d89bd7ff24d1ad91dd89e11d8a"
+dependencies = [
+ "clap",
+ "clap_complete",
+ "terminal_size",
+]
 
 [[package]]
 name = "tungstenite"

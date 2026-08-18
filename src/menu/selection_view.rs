@@ -47,6 +47,11 @@ impl SelectionItem {
 pub(crate) struct SelectionPreview {
     pub title: String,
     pub lines: Vec<String>,
+    /// One line per row: overlong lines are ellipsized to the pane width
+    /// instead of wrapping. Set for key/value previews (the Snapshot pane),
+    /// where a wrapped row shunts every row below it down and off the bottom.
+    /// Prose bodies leave it false and wrap as before.
+    pub single_line: bool,
 }
 
 impl SelectionPreview {
@@ -54,6 +59,7 @@ impl SelectionPreview {
         Self {
             title: title.into(),
             lines,
+            single_line: false,
         }
     }
 }
@@ -386,12 +392,24 @@ fn render_preview(
             .lines
             .iter()
             .take(usize::from(area.height.saturating_sub(1)))
-            .map(|line| Line::from(Span::styled(line.clone(), palette.text()))),
+            .map(|line| {
+                let text = if preview.single_line {
+                    crate::app::truncate_to_display_width(line, usize::from(area.width))
+                } else {
+                    line.clone()
+                };
+                Line::from(Span::styled(text, palette.text()))
+            }),
     );
-    Paragraph::new(Text::from(lines))
-        .style(Style::default().fg(palette.text).bg(palette.surface_alt))
-        .wrap(Wrap { trim: false })
-        .render(area, buf);
+    let paragraph = Paragraph::new(Text::from(lines))
+        .style(Style::default().fg(palette.text).bg(palette.surface_alt));
+    // Truncated rows are already within the pane width; wrapping them would
+    // only re-introduce the overflow the truncation exists to prevent.
+    if preview.single_line {
+        paragraph.render(area, buf);
+    } else {
+        paragraph.wrap(Wrap { trim: false }).render(area, buf);
+    }
 }
 
 fn render_footer(
@@ -526,6 +544,80 @@ mod tests {
 
         assert_eq!(missing_style.fg, Some(palette.danger));
         assert_eq!(ready_style.fg, Some(palette.success));
+    }
+
+    fn render_rows(view: &SelectionView, width: u16, height: u16) -> Vec<String> {
+        let buffer = render_buffer(view, width, height, Palette::for_theme(ThemeName::Slate));
+        let width = usize::from(buffer.area.width);
+        (0..usize::from(buffer.area.height))
+            .map(|y| {
+                buffer.content[y * width..(y + 1) * width]
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// A key/value preview row is ONE row. Wrapping pushed every following row
+    /// down — a long `session_id` shoved `session:` and `health:` down the
+    /// Snapshot pane and off the bottom.
+    #[test]
+    fn single_line_preview_truncates_long_rows_instead_of_wrapping() {
+        let mut view = SelectionView::new("Status", vec![SelectionItem::new("refresh", "Refresh")]);
+        let mut preview = SelectionPreview::new(
+            "Snapshot",
+            vec![
+                format!("session_id: alan:local:tui#coding{}", "x".repeat(200)),
+                "session: Protocol session".into(),
+                "health: ok".into(),
+            ],
+        );
+        preview.single_line = true;
+        view.preview = Some(preview);
+
+        let rows = render_rows(&view, 120, 12);
+        let id_row = rows
+            .iter()
+            .position(|row| row.contains("session_id:"))
+            .expect("session_id row");
+
+        assert!(
+            rows[id_row].contains('…'),
+            "the long value is ellipsized: {:?}",
+            rows[id_row]
+        );
+        assert!(
+            rows[id_row + 1].contains("session: Protocol session"),
+            "the next row keeps its slot, got {:?}",
+            rows[id_row + 1]
+        );
+        assert!(
+            rows[id_row + 2].contains("health: ok"),
+            "and so does the one after it, got {:?}",
+            rows[id_row + 2]
+        );
+        assert_eq!(
+            rows.iter().filter(|row| row.contains('x')).count(),
+            1,
+            "the value occupies exactly one row — no wrapped remainder"
+        );
+    }
+
+    /// Text previews still wrap: their bodies are prose, not key/value rows.
+    #[test]
+    fn wrapping_preview_still_wraps_long_lines() {
+        let mut view = SelectionView::new("Theme", vec![SelectionItem::new("slate", "Slate")]);
+        view.preview = Some(SelectionPreview::new(
+            "Preview",
+            vec![format!("body {}", "y".repeat(200))],
+        ));
+
+        let rows = render_rows(&view, 120, 12);
+        assert!(
+            rows.iter().filter(|row| row.contains('y')).count() > 1,
+            "a Text preview body wraps across rows as before"
+        );
     }
 
     #[test]

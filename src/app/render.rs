@@ -85,10 +85,11 @@ pub fn render_viewport_with_finalization(
     // (originally composer+status only) let a tall slash menu overcommit the
     // layout, so Ratatui compressed a fixed row — the tail floor included, since
     // `Min(1)` yields before a `Length` when space is short.
+    let status_height = status_bar_height(app, area.width);
     let menu_available = area.height.saturating_sub(
         1 // Min(1) live-tail floor
             + composer_height
-            + 1 // status
+            + status_height
             + autonomy_height
             + harness_height
             + decision_height
@@ -108,7 +109,7 @@ pub fn render_viewport_with_finalization(
             Constraint::Length(composer_height),
             Constraint::Length(agent_strip_height),
             Constraint::Length(peer_strip_height),
-            Constraint::Length(1),
+            Constraint::Length(status_height),
         ])
         .split(area);
 
@@ -477,12 +478,13 @@ pub(super) fn render_onboarding_first_launch_layout(
     palette: Palette,
 ) {
     let composer_height = composer_height_for_size(app, frame.area().width, frame.area().height);
+    let status_height = status_bar_height(app, frame.area().width);
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(8),
             Constraint::Length(composer_height),
-            Constraint::Length(1),
+            Constraint::Length(status_height),
         ])
         .split(frame.area());
 
@@ -1607,6 +1609,35 @@ pub(super) fn render_harness_status_row(
     }
 }
 
+/// Style one logical line of a collapsed draft: the slice covered by `chip`
+/// (given in `display` byte offsets, `line_start` being this line's offset)
+/// takes the chip style, everything around it renders as ordinary draft text.
+/// The emitted spans concatenate to `line` verbatim so `split_highlighted_spans`
+/// can re-slice them across wrap chunks without touching a character.
+fn composer_chip_spans(
+    line: &str,
+    line_start: usize,
+    chip: &std::ops::Range<usize>,
+    base: Style,
+    chip_style: Style,
+) -> Vec<Span<'static>> {
+    // A chip entirely before this line clamps to 0..0, one entirely after
+    // clamps to len..len — either way the line renders wholly as base text.
+    let start = chip.start.saturating_sub(line_start).min(line.len());
+    let end = chip.end.saturating_sub(line_start).min(line.len());
+    let mut spans = Vec::with_capacity(3);
+    if start > 0 {
+        spans.push(Span::styled(line[..start].to_string(), base));
+    }
+    if end > start {
+        spans.push(Span::styled(line[start..end].to_string(), chip_style));
+    }
+    if end < line.len() {
+        spans.push(Span::styled(line[end..].to_string(), base));
+    }
+    spans
+}
+
 pub(super) fn render_composer(app: &AppState, palette: Palette, area: Rect) -> Paragraph<'static> {
     let mut lines = Vec::new();
     let composer = app.composer_presentation();
@@ -1617,7 +1648,16 @@ pub(super) fn render_composer(app: &AppState, palette: Palette, area: Rect) -> P
             area.width,
             area.height.saturating_sub(COMPOSER_CHROME_ROWS),
         )),
-        ComposerPresentation::Empty | ComposerPresentation::Collapsed(_) => None,
+        // A collapsed draft lays out from its display string — the chip glyph
+        // standing in for the pasted run — so text typed around the paste wraps
+        // and scrolls like any other draft.
+        ComposerPresentation::Collapsed(collapse) => Some(composer_input_view(
+            &collapse.display,
+            collapse.cursor,
+            area.width,
+            area.height.saturating_sub(COMPOSER_CHROME_ROWS),
+        )),
+        ComposerPresentation::Empty => None,
     };
     if app.focused_session_is_peer() {
         // A focused peer sends like any other session, so the box, draft, caret
@@ -1724,11 +1764,44 @@ pub(super) fn render_composer(app: &AppState, palette: Palette, area: Rect) -> P
                 }
             }
         }
-        ComposerPresentation::Collapsed(collapse) => lines.push(Line::from(vec![
-            Span::styled(" › ", palette.selected().bg(palette.surface)),
-            Span::styled("[paste] ", palette.selected().bg(palette.surface)),
-            Span::styled(collapse.summary.clone(), palette.text().bg(palette.surface)),
-        ])),
+        ComposerPresentation::Collapsed(collapse) => {
+            if let Some(view) = input_view.as_ref() {
+                let text_width = composer_text_width(area.width);
+                let base_style = palette.text().bg(palette.surface);
+                let chip_style = palette.selected().bg(palette.surface);
+                // Byte offset of the first VISIBLE logical line inside
+                // `display`, so the chip's byte range can be intersected with
+                // each line as it is drawn. `composer_input_view` splits on
+                // '\n', so every line costs its own length plus the separator.
+                let mut offset = collapse
+                    .display
+                    .split('\n')
+                    .take(view.first_line_index)
+                    .map(|line| line.len() + 1)
+                    .sum::<usize>();
+                let mut first_row = true;
+                for line in view.lines.iter() {
+                    let spans =
+                        composer_chip_spans(line, offset, &collapse.chip, base_style, chip_style);
+                    offset += line.len() + 1;
+                    let chunks = wrap_composer_line(line, text_width);
+                    for row_spans in
+                        markdown_highlight::split_highlighted_spans(&spans, &chunks, base_style)
+                    {
+                        let prefix = if first_row { " › " } else { "   " };
+                        let prefix_style = if first_row {
+                            palette.selected().bg(palette.surface)
+                        } else {
+                            palette.muted().bg(palette.surface)
+                        };
+                        let mut row = vec![Span::styled(prefix, prefix_style)];
+                        row.extend(row_spans);
+                        lines.push(Line::from(row));
+                        first_row = false;
+                    }
+                }
+            }
+        }
     }
 
     match composer {
@@ -1818,22 +1891,17 @@ pub(super) fn render_composer(app: &AppState, palette: Palette, area: Rect) -> P
         .block(block)
 }
 
+/// Rows the bottom status bar needs at `width`. The bar word-wraps instead of
+/// clipping (the tail — usually the key hints — used to silently vanish on
+/// narrow terminals), capped at 3 rows so a pathological status can never eat
+/// the viewport. Styling does not affect wrap width, so the app's current
+/// theme palette is fine for measurement.
+pub(super) fn status_bar_height(app: &AppState, width: u16) -> u16 {
+    let palette = Palette::for_theme(app.theme);
+    (render_status(app, palette).line_count(width.max(1)) as u16).clamp(1, 3)
+}
+
 pub(super) fn render_status(app: &AppState, palette: Palette) -> Paragraph<'static> {
-    let mode = if app.readonly {
-        t!("app.status.read_only").to_string()
-    } else {
-        t!("app.status.interactive").to_string()
-    };
-    let turn = app
-        .active_turn()
-        .map(|(_, turn_id)| {
-            t!(
-                "app.status.turn_active",
-                id = short_id(&turn_id.0.to_string())
-            )
-            .to_string()
-        })
-        .unwrap_or_else(|| t!("app.status.turn_idle").to_string());
     let profile = app
         .active_session()
         .and_then(|session| session.profile_id.as_deref())
@@ -1843,17 +1911,6 @@ pub(super) fn render_status(app: &AppState, palette: Palette) -> Paragraph<'stat
     } else {
         t!("app.status.approval_gated").to_string()
     };
-    let context = app
-        .active_session()
-        .map(|session| {
-            t!(
-                "app.statusbar.msgs_tasks",
-                msgs = session.messages.len(),
-                tasks = session.tasks.len()
-            )
-            .into_owned()
-        })
-        .unwrap_or_else(|| t!("app.status.no_session").to_string());
     // Loop chip: an ACTIVE loop fires real model turns on an interval —
     // the operator must see that at a glance, or a forgotten loop burns
     // tokens invisibly (it only ever showed in the server log). Paused
@@ -1865,15 +1922,23 @@ pub(super) fn render_status(app: &AppState, palette: Palette) -> Paragraph<'stat
         .filter(|(active, paused)| *active > 0 || *paused > 0)
         .map(|(active, paused)| {
             if active > 0 {
-                t!("app.statusbar.loops_active", count = active).into_owned()
+                // Compact live chip (spec task-loop-liveness-indicator): the
+                // countdown is the liveness signal; the old static hint was
+                // long AND said nothing about whether the loop was moving.
+                match crate::app::active_loop_countdown(app) {
+                    Some(remaining) => t!(
+                        "app.statusbar.loops_active_countdown",
+                        count = active,
+                        remaining = remaining
+                    )
+                    .into_owned(),
+                    None => t!("app.statusbar.loops_active", count = active).into_owned(),
+                }
             } else {
                 t!("app.statusbar.loops_paused", count = paused).into_owned()
             }
         });
-    let context = match loop_chip {
-        Some(chip) => format!("{context} | {chip}"),
-        None => context,
-    };
+
     let work = status_bar_work_text(app);
     let key_hint = hint_bar_text(hint_bar_model(app));
 
@@ -1901,6 +1966,18 @@ pub(super) fn render_status(app: &AppState, palette: Palette) -> Paragraph<'stat
             app.run_state,
             SessionRunState::InProgress | SessionRunState::Blocked { .. }
         );
+    // A degraded stream cursor is a CONDITION, not an event: replay may drop
+    // this session's events, so a live turn can sit silent forever and read as
+    // nothing worse than a slow agent. The store's one-shot warning row lands
+    // in a collapsed activity group (body hidden until Ctrl+O) and the copy it
+    // writes to the transient slot is overwritten by the next command's
+    // feedback — in the field, by `/status`'s own "Menu: status". So the chip
+    // holds the bar until the server reports the cursor recovered, on the same
+    // reasoning as the loop chip above.
+    let cursor_chip = active_session_id
+        .as_ref()
+        .is_some_and(|session_id| app.unhealthy_cursors.contains(session_id))
+        .then(|| t!("app.statusbar.cursor_degraded").into_owned());
     let (state_marker, state_label, state_style) = if waiting_on_operator {
         (
             "?".to_string(),
@@ -1919,6 +1996,16 @@ pub(super) fn render_status(app: &AppState, palette: Palette) -> Paragraph<'stat
             run_state_marker(&app.run_state).to_string(),
             t!("app.status.thinking").to_string(),
             run_state_style(&app.run_state, palette),
+        )
+    } else if matches!(app.run_state, SessionRunState::Error { .. }) && app.quota_exhausted {
+        // Quota exhaustion is an expected resource state (spec
+        // task-quota-exhausted-card): amber, not the generic red Error.
+        (
+            "⏳".to_string(),
+            t!("app.status.quota").to_string(),
+            Style::default()
+                .fg(palette.highlight)
+                .add_modifier(Modifier::BOLD),
         )
     } else {
         (
@@ -1940,20 +2027,36 @@ pub(super) fn render_status(app: &AppState, palette: Palette) -> Paragraph<'stat
         Span::styled(policy.to_string(), palette.text().bg(palette.surface_alt)),
         Span::styled(" | ", palette.muted().bg(palette.surface_alt)),
         Span::styled(profile.to_string(), palette.text().bg(palette.surface_alt)),
-        Span::styled(" | ", palette.muted().bg(palette.surface_alt)),
-        Span::styled(context, palette.muted().bg(palette.surface_alt)),
-        Span::styled(" | ", palette.muted().bg(palette.surface_alt)),
-        Span::styled(app.status.clone(), palette.muted().bg(palette.surface_alt)),
-        Span::styled(" | ", palette.muted().bg(palette.surface_alt)),
+        // Declutter (user report): the bar carried three segments nobody could
+        // act on — "N msgs/M tasks" (owned by /context and /ps), the constant
+        // "interactive" mode word (read-only already surfaces as "sends
+        // disabled" in the policy slot), and the active TURN id (developer
+        // debris; "Working" already says a turn is live). The loop chip stays
+        // because a forgotten loop burns tokens invisibly, and the transient
+        // status slot stays because it is every command's feedback channel.
         Span::styled(
-            format!("{mode} {turn}"),
+            loop_chip
+                .map(|chip| format!(" | {chip}"))
+                .unwrap_or_default(),
             palette.muted().bg(palette.surface_alt),
         ),
+        Span::styled(
+            cursor_chip
+                .map(|chip| format!(" | {chip}"))
+                .unwrap_or_default(),
+            Style::default()
+                .fg(palette.highlight)
+                .add_modifier(Modifier::BOLD)
+                .bg(palette.surface_alt),
+        ),
+        Span::styled(" | ", palette.muted().bg(palette.surface_alt)),
+        Span::styled(app.status.clone(), palette.muted().bg(palette.surface_alt)),
         // The cwd deliberately lives on the composer's bottom border, not here —
         // repeating it one line below the composer read as clutter.
         Span::styled(" | ", palette.muted().bg(palette.surface_alt)),
         Span::styled(key_hint, palette.selected().bg(palette.surface_alt)),
     ]))
+    .wrap(Wrap { trim: false })
     .style(Style::default().fg(palette.text).bg(palette.surface_alt))
 }
 

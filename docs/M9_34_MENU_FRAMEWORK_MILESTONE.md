@@ -4,7 +4,7 @@ Status: proposed
 
 ## Purpose
 
-Octos TUI currently has local one-off slash handlers for `/ps`, `/stop`, and
+Octoscode currently has local one-off slash handlers for `/ps`, `/stop`, and
 `/help`. That is not enough for Codex-style coding UX. Codex has a reusable
 command registry, slash autocomplete popup, selection-list framework,
 multi-select framework, nested submenu flow, and specialized menus for model
@@ -12,7 +12,7 @@ selection, status, theme, status line, title, keymap, permissions, MCP, and
 background terminals.
 
 This milestone defines the Octos-native framework needed to reach that UX
-without coupling `octos-tui` to Codex internals. The framework must let future
+without coupling `octoscode` to Codex internals. The framework must let future
 menus be added by registering menu content and actions, not by rewriting the
 composer, renderer, event loop, or AppUI transport.
 
@@ -48,7 +48,7 @@ and update notices.
 ## Non-Goals
 
 - Do not copy Codex UI branding or product names.
-- Do not make `octos-tui` own model/provider/runtime state that belongs to
+- Do not make `octoscode` own model/provider/runtime state that belongs to
   `octos serve`.
 - Do not introduce AppUI wire changes silently. Any server-backed menu that
   needs new runtime data must add an explicit AppUI contract change.

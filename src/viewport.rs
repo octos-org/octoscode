@@ -1,5 +1,5 @@
 //! Inline-viewport driver: owns the scrollback-flush bookkeeping that turns
-//! octos-tui's "rebuild everything every frame" model into codex's "finalized
+//! octoscode's "rebuild everything every frame" model into codex's "finalized
 //! history → scrollback, live UI → inline viewport" model.
 //!
 //! The event loop ([`crate::event_loop`]) calls [`ScrollbackTracker::sync`] each
@@ -43,6 +43,13 @@ pub struct ScrollbackTracker {
     /// messages) whose separator rows can become orphaned when that tail settles
     /// and shrinks away.
     live_tail_had_guarded_sections: bool,
+    /// Turn whose flushed activity group is the CURRENT scrollback tail, if
+    /// any. While it stays the tail, further settle batches of the same turn
+    /// append child rows under the existing header instead of opening a new
+    /// "Agent task completed" block per batch (the k3 header-spam). Any other
+    /// insert (reply text, committed history) clears it, so continuation rows
+    /// can never orphan under unrelated content.
+    tail_activity_turn: Option<String>,
 }
 
 /// What the event loop should do with scrollback before drawing the viewport.
@@ -78,6 +85,9 @@ impl ScrollbackTracker {
         self.last = CommittedFingerprint::default();
         self.flushed_messages = 0;
         self.last_flushed_ends_blank = false;
+        // The committed re-flush will write below the old tail; a group header
+        // up there is no longer the attach point for continuation rows.
+        self.tail_activity_turn = None;
     }
 
     /// Forget everything already flushed, so the next [`Self::sync`] re-emits
@@ -165,6 +175,7 @@ impl ScrollbackTracker {
             }
         }
 
+        let mut delta_activity_turn = None;
         if let Some(next) = next_live.as_ref() {
             let baseline = previous_live
                 .clone()
@@ -175,8 +186,21 @@ impl ScrollbackTracker {
                     activity_flushed_items: 0,
                     activity_flushed_keys: Vec::new(),
                 });
+            // Capsule continuation is only offered when nothing was inserted
+            // ahead of this delta in the SAME buffer (committed lines would
+            // land between the old header and the new child rows).
+            let append_to_flushed_group = lines_to_insert.is_empty()
+                && self.tail_activity_turn.as_deref() == Some(next.turn_id.as_str());
+            if next.activity_flushed_keys.len() > baseline.activity_flushed_keys.len() {
+                delta_activity_turn = Some(next.turn_id.clone());
+            }
             lines_to_insert.extend(app::finalized_live_turn_lines_between(
-                app, palette, wrap_width, &baseline, next,
+                app,
+                palette,
+                wrap_width,
+                &baseline,
+                next,
+                append_to_flushed_group,
             ));
         }
         self.active_live = next_live.filter(LiveTurnFinalization::has_flushed_content);
@@ -199,6 +223,17 @@ impl ScrollbackTracker {
             seam_seed,
             drop_orphaned_leading_blank_run,
         );
+
+        // Track whether the scrollback tail is now an activity group (the
+        // activity section is always the LAST content of a flush buffer). A
+        // flush that wrote anything else moves the tail off the group; an
+        // empty flush leaves it in place.
+        if reset {
+            self.tail_activity_turn = None;
+        }
+        if !lines_to_insert.is_empty() {
+            self.tail_activity_turn = delta_activity_turn;
+        }
 
         ScrollbackUpdate {
             lines_to_insert,

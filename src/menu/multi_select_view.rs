@@ -47,6 +47,8 @@ impl MultiSelectItem {
 pub(crate) struct MultiSelectPreview {
     pub title: String,
     pub lines: Vec<String>,
+    /// See [`crate::menu::selection_view::SelectionPreview::single_line`].
+    pub single_line: bool,
 }
 
 impl MultiSelectPreview {
@@ -54,6 +56,7 @@ impl MultiSelectPreview {
         Self {
             title: title.into(),
             lines,
+            single_line: false,
         }
     }
 }
@@ -374,12 +377,23 @@ fn render_preview(
             .lines
             .iter()
             .take(usize::from(area.height.saturating_sub(1)))
-            .map(|line| Line::from(Span::styled(line.clone(), palette.text()))),
+            .map(|line| {
+                let text = if preview.single_line {
+                    crate::app::truncate_to_display_width(line, usize::from(area.width))
+                } else {
+                    line.clone()
+                };
+                Line::from(Span::styled(text, palette.text()))
+            }),
     );
-    Paragraph::new(Text::from(lines))
-        .style(Style::default().fg(palette.text).bg(palette.surface_alt))
-        .wrap(Wrap { trim: false })
-        .render(area, buf);
+    let paragraph = Paragraph::new(Text::from(lines))
+        .style(Style::default().fg(palette.text).bg(palette.surface_alt));
+    // See the sibling renderer in `selection_view`.
+    if preview.single_line {
+        paragraph.render(area, buf);
+    } else {
+        paragraph.wrap(Wrap { trim: false }).render(area, buf);
+    }
 }
 
 fn render_footer(area: Rect, buf: &mut Buffer, palette: Palette, view: &MultiSelectView) {

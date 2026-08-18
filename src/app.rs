@@ -620,6 +620,7 @@ fn chat_layout_areas_for_menu(
     let harness_height = harness_status_height(app);
     let decision_height = decision_banner_height(app);
     let agent_strip_height = agent_strip_height(app, area.height);
+    let status_height = render::status_bar_height(app, area.width);
     let surface_budget = area.height.saturating_sub(
         min_transcript_height(area.height)
             + session_strip_height
@@ -628,7 +629,7 @@ fn chat_layout_areas_for_menu(
             + harness_height
             + decision_height
             + agent_strip_height
-            + 1,
+            + status_height,
     );
     let menu_height = desired_menu_height.min(surface_budget);
     let root = Layout::default()
@@ -642,7 +643,7 @@ fn chat_layout_areas_for_menu(
             Constraint::Length(decision_height),
             Constraint::Length(composer_height),
             Constraint::Length(agent_strip_height),
-            Constraint::Length(1),
+            Constraint::Length(status_height),
         ])
         .split(area);
 
@@ -910,7 +911,15 @@ fn composer_height_for_size(app: &AppState, terminal_width: u16, terminal_height
             COMPOSER_CHROME_ROWS
                 + composer_visible_input_rows(&text, terminal_width, terminal_height)
         }
-        ComposerPresentation::Empty | ComposerPresentation::Collapsed(_) => COMPOSER_MIN_HEIGHT,
+        // The collapsed draft is laid out from its display string (chip glyph in
+        // place of the pasted run), so a typed command around the chip gets the
+        // rows it needs. A paste-only draft is one chip on one row — exactly
+        // COMPOSER_MIN_HEIGHT, as before.
+        ComposerPresentation::Collapsed(collapse) => {
+            COMPOSER_CHROME_ROWS
+                + composer_visible_input_rows(&collapse.display, terminal_width, terminal_height)
+        }
+        ComposerPresentation::Empty => COMPOSER_MIN_HEIGHT,
     }
 }
 
@@ -990,8 +999,15 @@ fn is_running_activity(item: &ActivityItem) -> bool {
 
 /// True for a fresh session that has no messages yet — where we show the launch
 /// banner at the top of the transcript area (it scrolls away on the first turn).
+/// Visible client-local REPORTS dismiss it too: a `/loop list` result or a
+/// `!`-bang report (running or settled) in a fresh session must render instead
+/// of being covered by the banner. Deliberately NOT gated on plain activity:
+/// most `push_local_activity` rows are unstamped, and letting any of them
+/// suppress the banner while the idle turn flow renders none of them left a
+/// blank transcript area (codex on #513).
 fn launch_banner_active(app: &AppState) -> bool {
     app.pending_messages.is_empty()
+        && flow_report_items(app).is_empty()
         && app
             .active_session()
             .is_some_and(|session| session.messages.is_empty() && session.live_reply.is_none())
@@ -1599,13 +1615,88 @@ fn truncate_terminal_line(text: &str, max_chars: usize) -> String {
     preview
 }
 
+/// Marker joining the two surviving halves of an elided status message.
+const ELIDE_MARKER: &str = " ... ";
+
+/// Fit `text` into `max_chars` by eliding the MIDDLE instead of the tail, and
+/// only ever at a whitespace boundary.
+///
+/// Head-truncation ([`truncate_terminal_line`]) is actively misleading for
+/// decode diagnostics: serde reports the failure at the END of the string —
+/// ``failed to decode UI protocol result for session/goal/get: missing field
+/// `objective` `` — so cutting the tail leaves a *mangled identifier* (`` `obj
+/// ...``) that names no field the operator can look up. That is strictly worse
+/// than showing nothing: it sends them hunting for a key that does not exist.
+///
+/// A blind midpoint cut just moves the lie to the other half (`on/goal/get` is
+/// no more real a method than `obj` is a field), so the seam snaps to token
+/// boundaries: the tail grows backwards to the start of its token, and the head
+/// shrinks to the end of its own. Both the failing method and the full field
+/// name survive inside the same column budget:
+///
+/// ```text
+/// failed to decode UI protocol ... session/goal/get: missing field `objective`
+/// ```
+///
+/// The tail is the half that gets the boundary *guarantee* — it carries the
+/// diagnosis, and the elided head is generic boilerplate. A token longer than
+/// the whole budget (no boundary to snap to) is cut mid-token as a last resort;
+/// nothing else can fit.
+///
+/// Char-based (not byte-based) at both cuts, so it cannot panic on a multibyte
+/// boundary. The result is at most `max_chars` chars.
+fn elide_middle_terminal_line(text: &str, max_chars: usize) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        return text.to_string();
+    }
+    // Too narrow to keep two legible halves — a plain head cut reads better
+    // than two-or-three-char stumps either side of the marker.
+    if max_chars <= ELIDE_MARKER.chars().count() + 8 {
+        return truncate_terminal_line(text, max_chars);
+    }
+
+    let keep = max_chars - ELIDE_MARKER.chars().count();
+    // `i` starts a token when it opens the string or follows whitespace.
+    let starts_token = |i: usize| i == 0 || chars[i - 1].is_whitespace();
+
+    // The tail takes the larger half, then snaps to a token start. Prefer
+    // growing (search backwards, bounded by the budget) so the whole token is
+    // shown; only when no boundary fits does it shrink forwards, dropping the
+    // fragment rather than displaying it.
+    let earliest = chars.len() - keep;
+    let midpoint = chars.len() - keep.div_ceil(2);
+    let tail_start = (earliest..=midpoint)
+        .rev()
+        .find(|i| starts_token(*i))
+        .or_else(|| (midpoint..chars.len()).find(|i| starts_token(*i)))
+        .unwrap_or(midpoint);
+    let tail = chars[tail_start..].iter().collect::<String>();
+
+    // Whatever the tail left over goes to the head, trimmed back to a whole
+    // token (and of trailing whitespace, so the marker reads cleanly).
+    let head = chars[..keep - tail.chars().count()]
+        .iter()
+        .collect::<String>();
+    let head = match head.rsplit_once(char::is_whitespace) {
+        Some((whole_tokens, _partial)) => whole_tokens.trim_end(),
+        // A single token wider than the head budget: keep the prefix. The
+        // boundary guarantee is the tail's — the head is context.
+        None => head.as_str(),
+    };
+
+    format!("{head}{ELIDE_MARKER}{tail}")
+        .trim_start()
+        .to_string()
+}
+
 /// Truncate `text` to at most `max_cols` terminal *display* columns
 /// (unicode-width aware), appending a `…` when it overflows. Unlike
 /// [`truncate_terminal_line`] this counts double-width CJK/emoji glyphs as 2
 /// columns, so a row built from the result can never exceed its column budget
 /// and wrap. Never splits a char and never byte-slices, so it cannot panic on
 /// a multibyte boundary. The returned string's display width is `<= max_cols`.
-fn truncate_to_display_width(text: &str, max_cols: usize) -> String {
+pub(crate) fn truncate_to_display_width(text: &str, max_cols: usize) -> String {
     if text.width() <= max_cols {
         return text.to_string();
     }
@@ -2415,6 +2506,34 @@ fn is_active_group(app: &AppState, group_turn: Option<&octos_core::ui_protocol::
     }
 }
 
+/// Test-only: render `app` to a row-aware buffer string. Keeping row separators
+/// lets store-level tests prove that a multi-line report really occupies
+/// distinct terminal rows instead of merely finding its data in the model.
+#[cfg(test)]
+pub(crate) fn debug_render_text(app: &AppState) -> String {
+    debug_render_text_with_size(app, 120, 42)
+}
+
+#[cfg(test)]
+pub(crate) fn debug_render_text_with_size(app: &AppState, width: u16, height: u16) -> String {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|frame| render(frame, app, Palette::for_theme(crate::cli::ThemeName::Slate)))
+        .expect("render succeeds");
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer.cell((x, y)).map(|cell| cell.symbol()).unwrap_or(" "))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn flow_activity_items(app: &AppState) -> Vec<&ActivityItem> {
     let active_turn_id = app.active_turn().map(|(_, turn_id)| turn_id);
     let active_session_id = app.active_session().map(|session| &session.id);
@@ -2431,12 +2550,32 @@ fn flow_activity_items(app: &AppState) -> Vec<&ActivityItem> {
             (Some(_), None) => false,
             (None, _) => true,
         })
+        // Reports have their own full-fidelity transcript block. Feeding one
+        // into this collection would count it as an agent action and subject it
+        // to settled-group collapse before the report renderer can see it.
+        .filter(|item| item.kind != ActivityKind::Report)
         .filter(|item| match active_turn_id {
             Some(turn_id) => item.turn_id.as_ref() == Some(turn_id),
             // When no turn is active, turn-less running sub-agent progress is
             // folded into the orchestrating turn's chip (as children) — don't
             // also render it here as a separate turn-less "Orchestrating" chip.
             None => item.turn_id.is_none() && !is_subagent_progress(app, item),
+        })
+        .collect()
+}
+
+/// Client-local transcript reports visible in the current chat context.
+/// Unscoped reports (such as global `/loop list`) remain visible without a
+/// session; scoped reports follow their owning session and never bleed into a
+/// different session after the operator switches focus.
+fn flow_report_items(app: &AppState) -> Vec<&ActivityItem> {
+    let active_session_id = app.active_session().map(|session| &session.id);
+    app.activity
+        .iter()
+        .filter(|item| item.kind == ActivityKind::Report)
+        .filter(|item| match item.session_id.as_ref() {
+            Some(owner) => active_session_id == Some(owner),
+            None => true,
         })
         .collect()
 }
@@ -2500,7 +2639,33 @@ fn spinner_frame() -> &'static str {
     use std::time::Instant;
     static START: OnceLock<Instant> = OnceLock::new();
     let elapsed = START.get_or_init(Instant::now).elapsed().as_millis();
-    SPINNER_FRAMES[(elapsed / 160) as usize % SPINNER_FRAMES.len()]
+    SPINNER_FRAMES[(elapsed / turn_spinner_period_ms()) as usize % SPINNER_FRAMES.len()]
+}
+
+/// Frame period of the turn spinner, in milliseconds. Exposed so the loop
+/// indicator can prove it animates on a calmer cadence.
+pub(crate) fn turn_spinner_period_ms() -> u128 {
+    160
+}
+
+/// Frame period of the LOOP indicator's rotation. The autonomy row is
+/// permanently visible while a loop is armed, so it rotates ~3x slower than
+/// the turn spinner — liveness without visual noise (spec
+/// task-loop-liveness-indicator).
+pub(crate) fn loop_spinner_period_ms() -> u128 {
+    520
+}
+
+const LOOP_SPINNER_FRAMES: [&str; 4] = ["↻", "↺", "↻", "↺"];
+
+/// Current loop-rotation frame, riding the same process clock as
+/// `spinner_frame` but on the slower `loop_spinner_period_ms` cadence.
+fn loop_spinner_frame() -> &'static str {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static START: OnceLock<Instant> = OnceLock::new();
+    let elapsed = START.get_or_init(Instant::now).elapsed().as_millis();
+    LOOP_SPINNER_FRAMES[(elapsed / loop_spinner_period_ms()) as usize % LOOP_SPINNER_FRAMES.len()]
 }
 
 /// Seconds since process start — the same process clock `spinner_frame` rides,
@@ -2538,6 +2703,99 @@ fn gradient_sample(stops: &[(u8, u8, u8)], t: f32) -> (u8, u8, u8) {
             (mix(a.0, b.0), mix(a.1, b.1), mix(a.2, b.2))
         }
     }
+}
+
+/// Duration of the decrypt-style entrance a fresh status word plays before the
+/// steady water-wave gradient takes over (spec parity with ttfx's `decrypt`).
+pub(crate) const STATUS_WORD_DECRYPT_MS: u128 = 800;
+
+/// Deterministic cipher glyph for a not-yet-settled character: hash the
+/// (grapheme position, 33ms animation tick) pair with a splitmix64-style
+/// mixer, then map into a printable ASCII band. Deterministic per
+/// (position, tick) so the ~25ms redraw doesn't reshuffle mid-frame, and
+/// time-varying so unsettled cells scramble like ciphertext. Width-relevant:
+/// every cipher glyph is exactly one cell, and the entrance only swaps
+/// GLYPHS, never the grapheme count — so the fixed-width layout math the
+/// spinner label depends on is untouched.
+fn cipher_glyph(grapheme_index: usize, tick_33ms: u128) -> char {
+    let mut z = (grapheme_index as u64)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(tick_33ms as u64);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    // Printable ASCII minus space: '!'..='~' would include width-surprising
+    // glyphs none here — all are single-cell. Skew alnum-heavy for legibility.
+    const CIPHER: &[u8] = b"abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789#$%&*+=<>?@/\\|";
+    CIPHER[(z % CIPHER.len() as u64) as usize] as char
+}
+
+/// ttfx-`decrypt`-style entrance for a fresh persona status word: unsettled
+/// graphemes scramble as green ciphertext while a settle front sweeps
+/// left-to-right, locking each grapheme into its final glyph. Settled cells
+/// keep the wave gradient so the handoff to the steady state is seamless.
+///
+/// `word` is the full label already rendered for the steady state
+/// (`"{word}…"`); `shown_at` is when this word instance appeared. Returns
+/// `None` once the entrance has run its course, so callers fall through to
+/// the plain wave.
+fn decrypt_entrance_spans(
+    word: &str,
+    shown_at: std::time::Instant,
+    palette: Palette,
+) -> Option<Vec<Span<'static>>> {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+
+    let elapsed = shown_at.elapsed().as_millis();
+    if elapsed >= STATUS_WORD_DECRYPT_MS {
+        return None;
+    }
+    let graphemes: Vec<&str> = word.graphemes(true).collect();
+    let n = graphemes.len().max(1);
+    // Reserve the middle 60% of the window for the sweep; cells settle one by
+    // one across it, so short words still read as a decode rather than a pop.
+    let sweep_ms = STATUS_WORD_DECRYPT_MS as f32 * 0.6;
+    let start_ms = STATUS_WORD_DECRYPT_MS as f32 * 0.2;
+    let front = ((elapsed as f32 - start_ms) / sweep_ms * n as f32).clamp(0.0, n as f32) as usize;
+
+    // ttfx decrypt's ciphertext greens; settled cells take the theme's wave.
+    let cipher_lo = rgb_of(palette.muted); // dim green stand-in per theme
+    let cipher_hi = (0u8, 203u8, 0u8); // #00cb00 — ttfx default ciphertext mid
+    let tick = elapsed / 33; // ~30fps scramble cadence
+
+    let mut spans = Vec::with_capacity(n);
+    for (i, g) in graphemes.iter().enumerate() {
+        if i < front {
+            let (r, gg, b) = gradient_sample(&[cipher_lo, cipher_hi], 1.0);
+            spans.push(Span::styled(
+                g.to_string(),
+                Style::default()
+                    .fg(Color::Rgb(r, gg, b))
+                    .bg(palette.surface),
+            ));
+        } else {
+            let t = 0.5 + 0.5 * ((i as f32) * 0.7 + tick as f32 * 0.9).sin();
+            let (r, gg, b) = gradient_sample(&[cipher_lo, cipher_hi], t);
+            // Width invariant: one single-cell cipher glyph PER CELL of the
+            // original grapheme, so a 2-cell CJK persona word (拿捏中 …)
+            // renders the same row width mid-decrypt as settled — otherwise
+            // the spinner row jitters for the whole entrance on every
+            // rotation. Zero-width graphemes still get one glyph so the
+            // decode reads as text rather than a gap.
+            let cells = g.width().max(1);
+            let cipher: String = (0..cells)
+                .map(|cell| cipher_glyph(i * 3 + cell, tick))
+                .collect();
+            spans.push(Span::styled(
+                cipher,
+                Style::default()
+                    .fg(Color::Rgb(r, gg, b))
+                    .bg(palette.surface),
+            ));
+        }
+    }
+    Some(spans)
 }
 
 /// One `Span` per grapheme, each colored from a sine-driven sample point that
@@ -3013,7 +3271,18 @@ fn running_subagent_titles_for_chip(
             Some(task_turn) => task_turn == chip_turn,
             None => owns_unattributed,
         })
-        .map(|task| task.title.clone())
+        .map(|task| {
+            // Elapsed suffix (spec task-approval-ux-salience): the chip row
+            // must show a long-running sub-agent is aging, not frozen. The
+            // live chip repaints on the animation cadence, so this refreshes
+            // for free while the turn is active.
+            let elapsed = app
+                .task_first_seen
+                .get(&task.id)
+                .map(|seen| format!(" · {}", format_elapsed_secs(seen.elapsed().as_secs())))
+                .unwrap_or_default();
+            format!("{}{elapsed}", task.title)
+        })
         .collect()
 }
 
@@ -3272,15 +3541,34 @@ fn goal_objective_body_width(width: u16) -> usize {
 }
 
 /// The status/budget parenthetical trailing the objective (e.g.
-/// "(active · 0K/2000K tokens)"). Built in ONE place so the height reservation
+/// "(active · 0K/2M tokens)"). Built in ONE place so the height reservation
 /// and the render agree on its width when deciding whether it fits the last row.
-fn goal_meta_parenthetical(goal: &octos_core::ui_protocol::UiGoalRecord) -> String {
+///
+/// Uses the full unit ladder, not K alone: goal budgets run far past the
+/// context-window scale, and a 20-trillion-token budget pinned to `K` read
+/// `20000000000K` — eleven digits, in the one chip that has to stay short.
+///
+/// #532 (defect 2): a bare `⚠ budget limited` read as "everything stopped" —
+/// two experienced readers concluded the master had died and one recommended
+/// raising the budget, which was unnecessary. The budget only halts SELF-PACED
+/// `GoalContinue` ticks; octos's goal-status gate admits BOTH
+/// `"active" | "budget_limited"`, so external wakes (fleet synthesis,
+/// peer-awaiting-input, child-completed) stay schedulable. While the focused
+/// master still has peers in flight, the chip says so instead of reading as a
+/// terminal state.
+fn goal_meta_parenthetical(app: &AppState, goal: &octos_core::ui_protocol::UiGoalRecord) -> String {
     let (_, status_label) = goal_status_display(&goal.status);
+    let status_label =
+        if goal.status == "budget_limited" && focused_master_fleet_wait(app).is_some() {
+            t!("app.autonomy.status_budget_limited_fleet").into_owned()
+        } else {
+            status_label
+        };
     t!(
         "app.autonomy.goal_meta",
         status = status_label,
-        used = format_tokens_k(goal.tokens_used),
-        budget = format_tokens_k(goal.token_budget)
+        used = format_tokens_human(goal.tokens_used),
+        budget = format_tokens_human(goal.token_budget)
     )
     .into_owned()
 }
@@ -3298,13 +3586,16 @@ fn goal_objective_chunks(objective: &str, width: u16, tail_len: usize) -> Vec<St
         return Vec::new();
     }
     let body = goal_objective_body_width(width);
-    let chars: Vec<char> = objective.chars().collect();
-    let mut chunks: Vec<String> = chars
-        .chunks(body)
-        .take(GOAL_OBJECTIVE_MAX_ROWS)
-        .map(|c| c.iter().collect())
-        .collect();
-    if chars.len() > GOAL_OBJECTIVE_MAX_ROWS * body {
+    // Pack by GRAPHEME measured in display columns, not by `char`. `body` is a
+    // column budget: slicing `chars` into groups of `body` gave a CJK row twice
+    // its allowance (144 columns in a 72-column banner, clipped by ratatui) and
+    // could cut a multi-codepoint cluster — a family emoji landed half on one
+    // row and half on the next. `wrap_composer_line` is the primitive the
+    // composer already uses for exactly this.
+    let rows = wrap_composer_line(objective, body);
+    let row_count = rows.len();
+    let mut chunks: Vec<String> = rows.into_iter().take(GOAL_OBJECTIVE_MAX_ROWS).collect();
+    if row_count > GOAL_OBJECTIVE_MAX_ROWS {
         // Objective longer than the cap: mark the clip. The parenthetical rides
         // the (full) last row; the cap already bounds height.
         if let Some(last) = chunks.last_mut() {
@@ -3314,7 +3605,7 @@ fn goal_objective_chunks(objective: &str, width: u16, tail_len: usize) -> Vec<St
         // Objective fits: keep the status/budget parenthetical fully on-screen —
         // if it won't fit after the final objective row, give it its own indented
         // line (only while row budget remains).
-        let last_len = chunks.last().map(|c| c.chars().count()).unwrap_or(0);
+        let last_len = chunks.last().map(|c| c.width()).unwrap_or(0);
         if last_len + 1 + tail_len > body && chunks.len() < GOAL_OBJECTIVE_MAX_ROWS {
             chunks.push(String::new());
         }
@@ -3366,7 +3657,7 @@ fn autonomy_indicator_height(app: &AppState, width: u16) -> u16 {
                 let obj_rows = if goal_objective_folded(app, &goal.objective, width) {
                     1
                 } else {
-                    let tail = goal_meta_parenthetical(goal).chars().count();
+                    let tail = goal_meta_parenthetical(app, goal).chars().count();
                     goal_objective_chunks(&goal.objective, width, tail)
                         .len()
                         .max(1)
@@ -3426,6 +3717,149 @@ fn autonomy_loop_cadence(record: &octos_core::ui_protocol::UiLoopRecord) -> Stri
     }
 }
 
+/// Coarse duration for loop chips: hours+minutes past an hour, else the
+/// existing minute/second form. `format_elapsed_secs` alone renders three
+/// hours as "179m 59s", which reads as noise on a permanently visible row.
+pub(crate) fn format_loop_duration(secs: u64) -> String {
+    if secs >= 86_400 {
+        format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3600)
+    } else if secs >= 3600 {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    } else {
+        format_elapsed_secs(secs)
+    }
+}
+
+/// Milliseconds from now until `at_ms`, or `None` when the instant is absent
+/// or already past (a stale countdown is worse than none).
+fn millis_until(at_ms: Option<i64>) -> Option<u64> {
+    let target = at_ms?;
+    let now = chrono::Utc::now().timestamp_millis();
+    (target > now).then(|| (target - now) as u64)
+}
+
+/// Seconds until the loop's next run, when it has one scheduled.
+fn loop_next_run_secs(record: &octos_core::ui_protocol::UiLoopRecord) -> Option<u64> {
+    millis_until(record.next_run_at_ms).map(|ms| ms / 1000)
+}
+
+/// Seconds until the loop expires on its own.
+fn loop_expiry_secs(record: &octos_core::ui_protocol::UiLoopRecord) -> Option<u64> {
+    millis_until(Some(record.expires_at_ms)).map(|ms| ms / 1000)
+}
+
+/// The live detail suffix for a loop chip (spec task-loop-liveness-indicator):
+/// ` · 第 N 轮 · 下次 2m 14s · 剩 3h 0m`. Every segment is derived from real
+/// record data and omitted when that data is absent — no invented progress.
+fn autonomy_loop_detail(app: &AppState, record: &octos_core::ui_protocol::UiLoopRecord) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let fires = app
+        .loop_fire_counts
+        .get(&(record.session_id.clone(), record.loop_id.clone()))
+        .copied()
+        .unwrap_or(0);
+    if fires > 0 {
+        parts.push(t!("app.autonomy.loop_iteration", count = fires).into_owned());
+    }
+    if autonomy_loop_is_active(record) {
+        match loop_next_run_secs(record) {
+            Some(secs) => parts.push(
+                t!(
+                    "app.autonomy.loop_next_run",
+                    remaining = format_loop_duration(secs)
+                )
+                .into_owned(),
+            ),
+            None => parts.push(t!("app.autonomy.loop_next_run_pending").into_owned()),
+        }
+    }
+    if let Some(secs) = loop_expiry_secs(record) {
+        parts.push(
+            t!(
+                "app.autonomy.loop_expires_in",
+                remaining = format_loop_duration(secs)
+            )
+            .into_owned(),
+        );
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", parts.join(" · "))
+    }
+}
+
+/// Render the `/loop list` result as transcript lines (spec
+/// task-loop-list-transcript). Each row leads with the loop id — the four
+/// id-taking verbs (`pause` / `resume` / `delete` / `fire-now`) had no other
+/// source for it, which made them unusable from the UI.
+pub(crate) fn format_loop_list_block(
+    loops: &[octos_core::ui_protocol::UiLoopRecord],
+    // A GLOBAL list spans sessions, so each row names the session it belongs
+    // to. A SCOPED list shares one known session — repeating it every row is
+    // noise (spec task-loop-list-global-decode).
+    global: bool,
+) -> String {
+    if loops.is_empty() {
+        return t!("status.loop_list_empty_hint").into_owned();
+    }
+    loops
+        .iter()
+        .map(|record| {
+            let mut segments = vec![autonomy_loop_cadence(record)];
+            if let Some(secs) =
+                loop_next_run_secs(record).filter(|_| autonomy_loop_is_active(record))
+            {
+                segments.push(
+                    t!(
+                        "app.autonomy.loop_next_run",
+                        remaining = format_loop_duration(secs)
+                    )
+                    .into_owned(),
+                );
+            }
+            // Drop the profile prefix: in a global list every row shares
+            // the queried profile, so repeating it adds width without info.
+            let session = if global {
+                let key = &record.session_id;
+                let shown = key
+                    .profile_id()
+                    .and_then(|profile| {
+                        key.0
+                            .strip_prefix(profile)
+                            .map(|r| r.trim_start_matches(':'))
+                    })
+                    .unwrap_or(key.0.as_str());
+                format!("  [{shown}]")
+            } else {
+                String::new()
+            };
+            format!(
+                "{}  {}  {}  {}{}",
+                record.loop_id,
+                record.status,
+                segments.join(" · "),
+                autonomy_loop_label(record),
+                session
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Shortest next-run countdown across the active session's active loops,
+/// pre-formatted for the status bar chip. `None` when no active loop has a
+/// scheduled next run (a self-paced loop mid-turn).
+pub(crate) fn active_loop_countdown(app: &AppState) -> Option<String> {
+    active_session_autonomy(app)?
+        .loops
+        .iter()
+        .filter(|record| autonomy_loop_is_active(record))
+        .filter_map(loop_next_run_secs)
+        .min()
+        .map(format_loop_duration)
+}
+
 /// True when a loop is in the runnable `"active"` state. Paused / deleted
 /// loops still appear in the chip row but are dimmed.
 fn autonomy_loop_is_active(record: &octos_core::ui_protocol::UiLoopRecord) -> bool {
@@ -3444,21 +3878,57 @@ fn format_tokens_k(tokens: u64) -> String {
     format!("{k}K")
 }
 
-/// Human-readable token count for context-window display: `128K`, `256K`,
-/// `1M`, `1.5M`. Reuses [`format_tokens_k`] below 1M; switches to `M` above so
-/// a 1,000,000-token window renders `1M` rather than `1000K`.
-pub(crate) fn format_tokens_human(tokens: u64) -> String {
-    if tokens >= 1_000_000 {
-        let millions = tokens as f64 / 1_000_000.0;
-        let rendered = format!("{millions:.1}");
-        let rendered = rendered
-            .strip_suffix(".0")
-            .map(str::to_owned)
-            .unwrap_or(rendered);
-        format!("{rendered}M")
+/// Token-count unit ladder, largest scale first. `G`/`T` exist because goal
+/// budgets are not context-window sized: a 20-trillion-token budget rendered
+/// `20000000000K` when `K` was the only unit — technically true, unreadable in
+/// practice, and the digit count is exactly what a unit is supposed to hide.
+const TOKEN_UNITS: [(u64, char); 4] = [
+    (1_000_000_000_000, 'T'),
+    (1_000_000_000, 'G'),
+    (1_000_000, 'M'),
+    (1_000, 'K'),
+];
+
+/// The ladder unit `tokens` should render in at `decimals` places: the largest
+/// one that leaves a mantissa of at least 1, so the rendered number is always
+/// under four digits. `None` below 1K — there is no smaller unit, so the caller
+/// decides how a bare count reads.
+///
+/// The one place the carry rule lives. Rounding can push a value past its own
+/// unit — 999_999_999 is under 1G, yet renders `1000.0M` — so this promotes to
+/// the next unit up rather than emit the four-digit mantissa the ladder exists
+/// to avoid. The check is on the *rendered* string, not a float threshold, so it
+/// cannot disagree with what is actually displayed. At most one promotion is
+/// ever possible.
+fn token_unit_for(tokens: u64, decimals: usize) -> Option<(u64, char)> {
+    let index = TOKEN_UNITS.iter().position(|(scale, _)| tokens >= *scale)?;
+    let mantissa = format!(
+        "{:.*}",
+        decimals,
+        tokens as f64 / TOKEN_UNITS[index].0 as f64
+    );
+    Some(if index > 0 && mantissa.starts_with("1000") {
+        TOKEN_UNITS[index - 1]
     } else {
-        format_tokens_k(tokens)
+        TOKEN_UNITS[index]
+    })
+}
+
+/// Human-readable token count for the goal chip and context-window display:
+/// `128K`, `1M`, `1.5M`, `20G`, `20T`.
+///
+/// `K` stays integral (`45K`, never `45.2K`) — it delegates to
+/// [`format_tokens_k`], which is how the chip and the `/context` subtitle have
+/// always read at that scale.
+pub(crate) fn format_tokens_human(tokens: u64) -> String {
+    let Some((scale, unit)) = token_unit_for(tokens, 1) else {
+        return format_tokens_k(tokens);
+    };
+    if scale == 1_000 {
+        return format_tokens_k(tokens);
     }
+    let rendered = format!("{:.1}", tokens as f64 / scale as f64);
+    format!("{}{unit}", rendered.strip_suffix(".0").unwrap_or(&rendered))
 }
 
 /// Per-status glyph + localized label for the goal chip: every status the
@@ -3484,7 +3954,7 @@ fn autonomy_indicator_lines(app: &AppState, palette: Palette, width: u16) -> Vec
     let mut lines = Vec::new();
     if let Some(goal) = state.goal.as_ref() {
         let (glyph, _status_label) = goal_status_display(&goal.status);
-        let parenthetical = goal_meta_parenthetical(goal);
+        let parenthetical = goal_meta_parenthetical(app, goal);
         // Folded (default for a long objective, or after Ctrl+P): ONE compact
         // row. The fold decision MUST match `autonomy_indicator_height` — both
         // call `goal_objective_folded` with the same width (reserve==render).
@@ -3557,7 +4027,16 @@ fn autonomy_indicator_lines(app: &AppState, palette: Palette, width: u16) -> Vec
             .count();
         let paused = state.loops.iter().filter(|l| l.status == "paused").count();
         spans.push(Span::styled(
-            "↻ ",
+            // Slow rotation (spec task-loop-liveness-indicator): a permanently
+            // visible row must read as alive without becoming noise.
+            format!(
+                "{} ",
+                if running > 0 {
+                    loop_spinner_frame()
+                } else {
+                    "↻"
+                }
+            ),
             Style::default()
                 .fg(palette.accent)
                 .add_modifier(Modifier::BOLD)
@@ -3572,15 +4051,41 @@ fn autonomy_indicator_lines(app: &AppState, palette: Palette, width: u16) -> Vec
             palette.title().bg(palette.surface),
         ));
         spans.push(Span::styled("   ", palette.text().bg(palette.surface)));
+        // Width accounting for the whole-chip fit (spec
+        // task-loop-row-overflow): reserve room for the worst-case overflow
+        // hint so adding it can never push the row past `width`.
+        let mut used_width: usize = spans
+            .iter()
+            .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+            .sum();
+        let mut dropped_chips = 0usize;
+        let overflow_reserve = UnicodeWidthStr::width(
+            t!("app.autonomy.loops_overflow", count = state.loops.len()).as_ref(),
+        ) + 1;
+        let budget = (width as usize).saturating_sub(overflow_reserve);
         for record in &state.loops {
             let label = autonomy_loop_label(record);
             let cadence = autonomy_loop_cadence(record);
-            let chip = format!("[{cadence} {label}]");
+            let detail = autonomy_loop_detail(app, record);
+            let chip = if detail.is_empty() {
+                format!("[{cadence} {label}]")
+            } else {
+                format!("[{cadence}{detail} {label}]")
+            };
             let chip_style = if autonomy_loop_is_active(record) {
                 palette.text().bg(palette.surface)
             } else {
                 palette.muted().bg(palette.surface)
             };
+            // Spec task-loop-row-overflow: fit WHOLE chips. A chip that would
+            // not fit is folded into a trailing `+N more` instead of being
+            // hard-cut by ratatui, which used to drop its tail silently.
+            let chip_width = UnicodeWidthStr::width(chip.as_str()) + 1;
+            if used_width + chip_width > budget {
+                dropped_chips += 1;
+                continue;
+            }
+            used_width += chip_width;
             spans.push(Span::styled(chip, chip_style));
             spans.push(Span::styled(" ", palette.text().bg(palette.surface)));
         }
@@ -3588,7 +4093,16 @@ fn autonomy_indicator_lines(app: &AppState, palette: Palette, width: u16) -> Vec
         if matches!(spans.last(), Some(s) if s.content == " ") {
             spans.pop();
         }
-        lines.push(Line::from(spans));
+        if dropped_chips > 0 {
+            spans.push(Span::styled(
+                format!(
+                    " {}",
+                    t!("app.autonomy.loops_overflow", count = dropped_chips)
+                ),
+                palette.muted().bg(palette.surface),
+            ));
+        }
+        lines.push(Line::from(clip_line_spans(spans, width as usize)));
     }
     if let Some(plan) = state.plan.as_ref() {
         lines.extend(plan_indicator_lines(plan, palette));
@@ -3937,6 +4451,127 @@ pub(crate) fn peer_dock_counts(app: &AppState) -> (usize, usize, usize, usize) {
     (total, live, blocked, unread)
 }
 
+/// #532: how many outstanding peer slugs a one-row label names before it
+/// collapses the rest into `+N`.
+const FLEET_OUTSTANDING_NAMES: usize = 2;
+
+/// #532: the peer fleet's landing progress, derived ENTIRELY client-side from
+/// the durable dock roster the TUI already keeps — no new protocol field.
+///
+/// A peer has LANDED when its last turn terminated and it is neither live nor
+/// blocked ([`AppState::peer_is_done`]). That is deliberately the same
+/// condition octos's `evaluate_peer_fleet_synthesis` holds on ("every owned
+/// peer must be DONE (has a result) and SETTLED (not mid-turn)"), so
+/// `landed`/`total` tracks the gate that actually decides when the master
+/// wakes to synthesize — rather than inventing a second notion of progress.
+pub(crate) struct FleetProgress {
+    /// Roster peers plus still-opening kickoffs.
+    pub total: usize,
+    /// Peers whose turn terminated and that are neither live nor blocked.
+    pub landed: usize,
+    /// Slugs of the roster peers that have NOT landed, in roster order. Shorter
+    /// than [`Self::outstanding_count`] when peers are still opening — a
+    /// pending kickoff has no slug yet.
+    pub outstanding: Vec<String>,
+}
+
+impl FleetProgress {
+    /// Peers the master is still waiting on, including still-opening kickoffs.
+    pub(crate) fn outstanding_count(&self) -> usize {
+        self.total.saturating_sub(self.landed)
+    }
+
+    /// The outstanding peers as one row-sized label: up to
+    /// [`FLEET_OUTSTANDING_NAMES`] slugs, then `+N`. Never empty — a fleet whose
+    /// outstanding members are all still opening reuses the dock's `opening…`
+    /// wording rather than rendering a blank.
+    pub(crate) fn outstanding_label(&self) -> String {
+        if self.outstanding.is_empty() {
+            return t!("app.hint.peer_dock_row_opening").into_owned();
+        }
+        let shown = self
+            .outstanding
+            .iter()
+            .take(FLEET_OUTSTANDING_NAMES)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let hidden = self
+            .outstanding
+            .len()
+            .saturating_sub(FLEET_OUTSTANDING_NAMES);
+        if hidden > 0 {
+            format!("{shown} +{hidden}")
+        } else {
+            shown
+        }
+    }
+}
+
+/// #532: [`FleetProgress`] for the current roster, or `None` when no peers
+/// exist at all. Says nothing about WHO is waiting — see
+/// [`master_fleet_wait`].
+pub(crate) fn fleet_progress(app: &AppState) -> Option<FleetProgress> {
+    let roster = peer_dock_roster(app);
+    let total = roster.len() + app.pending_peer_kickoffs.len();
+    if total == 0 {
+        return None;
+    }
+    let mut landed = 0usize;
+    let mut outstanding = Vec::new();
+    for (session_id, meta) in &roster {
+        if app.peer_is_done(session_id) {
+            landed += 1;
+        } else {
+            outstanding.push(meta.slug.clone());
+        }
+    }
+    Some(FleetProgress {
+        total,
+        landed,
+        outstanding,
+    })
+}
+
+/// #532: the fleet `session_id` — a MASTER — is still waiting on, or `None`
+/// when there is nothing to wait for (no peers / fully landed) or when
+/// `session_id` is itself a peer.
+///
+/// The wait belongs to the master: a peer is a read-only watch surface and must
+/// never claim to be waiting on the fleet it is a member of. Peer identity uses
+/// the durable `opened_peer_sessions` set (see
+/// [`AppState::focused_session_is_peer`]) rather than the mutable dock roster.
+pub(crate) fn master_fleet_wait(
+    app: &AppState,
+    session_id: &octos_core::SessionKey,
+) -> Option<FleetProgress> {
+    if app.opened_peer_sessions.contains(session_id) {
+        return None;
+    }
+    fleet_progress(app).filter(|fleet| fleet.outstanding_count() > 0)
+}
+
+/// #532: [`master_fleet_wait`] for the FOCUSED session — the surfaces that
+/// paint the active window (status bar, goal chip) read this.
+pub(crate) fn focused_master_fleet_wait(app: &AppState) -> Option<FleetProgress> {
+    let session = app.active_session()?;
+    master_fleet_wait(app, &session.id)
+}
+
+/// #532: the `N/M landed` segment for the Peer Dock's title row and collapsed
+/// pill — "3 of 5 landed" was derivable client-side and shown nowhere.
+fn fleet_landed_segment(app: &AppState) -> Option<String> {
+    let fleet = fleet_progress(app)?;
+    Some(
+        t!(
+            "app.hint.peer_dock_landed",
+            landed = fleet.landed,
+            total = fleet.total
+        )
+        .into_owned(),
+    )
+}
+
 /// #407: the collapsed Peer Dock pill — one glanceable line mirroring the
 /// agent dock pill: `👥 N peers · M live · K⚠ waiting · J● unread — Ctrl+J`.
 /// The `blocked` and `unread` segments appear only when non-zero so a calm
@@ -3952,6 +4587,15 @@ pub(crate) fn peer_dock_pill_line(app: &AppState, palette: Palette) -> Line<'sta
         .into_owned(),
         palette.text().bg(palette.surface),
     )];
+    // #532 (defect 4): fleet landing progress — the collapsed pill is all the
+    // user sees of the fleet when the dock is folded, so "3/5 landed" has to
+    // ride here too, not only on the expanded title row.
+    if let Some(landed) = fleet_landed_segment(app) {
+        spans.push(Span::styled(
+            format!(" · {landed}"),
+            palette.muted().bg(palette.surface),
+        ));
+    }
     if blocked > 0 {
         spans.push(Span::styled(
             t!(
@@ -4141,6 +4785,16 @@ pub(crate) fn peer_strip_lines(
         t!("app.hint.peer_dock_title").into_owned(),
         palette.muted().bg(palette.surface),
     )];
+    // #532 (defect 4): "3 of 5 landed" is derivable from the roster the dock
+    // already draws, and was shown nowhere. It rides the title row so the
+    // fleet's progress reads without counting glyphs down the rows (which the
+    // PEER_STRIP_MAX_PEER_ROWS cap can hide anyway).
+    if let Some(landed) = fleet_landed_segment(app) {
+        title_spans.push(Span::styled(
+            format!("{landed} "),
+            palette.muted().bg(palette.surface),
+        ));
+    }
     if hidden > 0 {
         title_spans.push(Span::styled(
             format!(" +{hidden} "),
@@ -4452,13 +5106,26 @@ fn agent_strip_lines(app: &AppState, palette: Palette, agent_rows: u16) -> Vec<L
 /// `token_estimate` as a glanceable budget bar in the harness status row.
 const DEFAULT_CONTEXT_WINDOW_TOKENS: usize = 128_000;
 
-/// Compact token count for the harness row: `34211` -> `34.2k`.
-fn humanize_token_count(tokens: u64) -> String {
-    if tokens >= 1000 {
-        format!("{:.1}k", tokens as f64 / 1000.0)
-    } else {
-        tokens.to_string()
-    }
+/// Compact token count for the harness row and the compaction notice: `34211`
+/// -> `34.2k`, `2_000_000` -> `2.0M`. Counts under 1k stay verbatim.
+///
+/// Same ladder as [`format_tokens_human`], SI casing (lowercase kilo, uppercase
+/// mega and up) — these rows have always read `34.2k`, and only the units above
+/// it are new. Before, `k` was the ceiling, so a compaction of a 2M-token
+/// context reported `2000.0k`.
+///
+/// The single implementation for the whole crate: `store.rs` and
+/// `transcript_build.rs` render the same compaction notice and previously each
+/// carried their own copy of this, which is how they each inherited the same
+/// missing units.
+pub(crate) fn humanize_token_count(tokens: u64) -> String {
+    let Some((scale, unit)) = token_unit_for(tokens, 1) else {
+        return tokens.to_string();
+    };
+    // SI writes kilo lowercase; the ladder is keyed on the uppercase form the
+    // goal chip uses.
+    let unit = if unit == 'K' { 'k' } else { unit };
+    format!("{:.1}{unit}", tokens as f64 / scale as f64)
 }
 
 /// True when the harness has live state worth surfacing in the dedicated
@@ -4499,9 +5166,11 @@ pub(crate) fn context_window_usage(app: &AppState, session_id: &SessionKey) -> O
     Some((used, window))
 }
 
-/// Context-window fill ratio (0.0..=1.0) for the harness row `LineGauge`, or
-/// `None` when no `token_estimate` is known for the active session yet.
-fn harness_context_ratio(app: &AppState) -> Option<f64> {
+/// Raw context-window fill for the active session — UNCLAMPED, so an estimate
+/// over the window reads >1.0 (e.g. a server-rebuilt ledger published before
+/// its open/pre-turn compaction pass). `None` when no `token_estimate` is
+/// known for the active session yet.
+fn harness_context_fill(app: &AppState) -> Option<f64> {
     let session = app.active_session()?;
     let token_estimate = app
         .context_lifecycle_for(&session.id)?
@@ -4520,12 +5189,22 @@ fn harness_context_ratio(app: &AppState) -> Option<f64> {
     if window == 0 {
         return None;
     }
-    Some((token_estimate as f64 / window as f64).clamp(0.0, 1.0))
+    Some(token_estimate as f64 / window as f64)
 }
 
-/// Integer context-window percent (0..=100) for the `ctx N%` label.
+/// Context-window fill ratio (0.0..=1.0) for the harness row `LineGauge`, or
+/// `None` when no `token_estimate` is known for the active session yet.
+fn harness_context_ratio(app: &AppState) -> Option<f64> {
+    harness_context_fill(app).map(|fill| fill.clamp(0.0, 1.0))
+}
+
+/// Integer context-window percent for the `ctx N%` label. Deliberately NOT
+/// clamped at 100: the label prints the raw used/max counts next to it, and a
+/// clamped percent contradicts them (`ctx 1.2M/1M ~100%` — field report
+/// 2026-08-07). Saturates at 999 so a pathological estimate cannot blow the
+/// status row width open.
 fn harness_context_percent(app: &AppState) -> Option<u16> {
-    harness_context_ratio(app).map(|ratio| (ratio * 100.0).round() as u16)
+    harness_context_fill(app).map(|fill| ((fill * 100.0).round() as u64).min(999) as u16)
 }
 
 /// Full context-window label for the harness gauge/row: `ctx 128K/1M ~13%`.
@@ -4552,6 +5231,26 @@ fn harness_status_lines(
     palette: Palette,
     include_ctx_text: bool,
 ) -> Vec<Line<'static>> {
+    harness_status_lines_impl(app, palette, include_ctx_text, true)
+}
+
+/// Static, animation-free render for tests/snapshots: fresh status words
+/// render with the STEADY wave gradient, never mid-decrypt — the entrance is
+/// a pure visual layer and must not move any golden text.
+#[cfg(test)]
+fn harness_status_lines_static(
+    app: &AppState,
+    palette: Palette,
+    include_ctx_text: bool,
+) -> Vec<Line<'static>> {
+    harness_status_lines_impl(app, palette, include_ctx_text, false)
+}
+pub(crate) fn harness_status_lines_impl(
+    app: &AppState,
+    palette: Palette,
+    include_ctx_text: bool,
+    animate_entrance: bool,
+) -> Vec<Line<'static>> {
     if !harness_status_active(app) {
         return Vec::new();
     }
@@ -4576,10 +5275,17 @@ fn harness_status_lines(
     let persona_word = app
         .session_status_word
         .get(&session_id)
-        .filter(|(word_turn, _)| active_turn_id == Some(word_turn))
-        .map(|(_, word)| word.trim())
+        .filter(|(word_turn, _, _)| active_turn_id == Some(word_turn))
+        .map(|(_, word, _)| word.trim())
         .filter(|word| !word.is_empty())
         .map(|word| format!("{word}…"));
+    // When this word instance just landed, its decrypt entrance runs (fresh
+    // words only — the steady wave resumes after ~800ms).
+    let persona_word_shown_at = app
+        .session_status_word
+        .get(&session_id)
+        .filter(|(word_turn, _, _)| active_turn_id == Some(word_turn))
+        .map(|(_, _, shown_at)| *shown_at);
     let phase = match status.and_then(|s| s.phase.as_deref()) {
         Some("orchestrating") => t!("app.harness.orchestrating").to_string(),
         Some("re-entering") => t!("app.harness.re_entering").to_string(),
@@ -4595,7 +5301,7 @@ fn harness_status_lines(
     let mut spans: Vec<Span<'static>> = Vec::new();
     // Water-wave gradient on "spinner + phase" (e.g. "◠ Working"): a bright crest
     // ripples across the label, advanced by the ~25ms animation redraw via the
-    // shared process clock. Uses Color::Rgb like the rest of octos-tui's themes
+    // shared process clock. Uses Color::Rgb like the rest of octoscode's themes
     // (truecolor-assuming, so it works over SSH where COLORTERM isn't forwarded);
     // the non-RGB Terminal theme degrades to a neutral-grey ripple via rgb_of.
     let label = format!("{} {}", spinner_frame(), phase);
@@ -4604,12 +5310,39 @@ fn harness_status_lines(
         rgb_of(palette.accent),
         rgb_of(palette.highlight),
     ];
-    spans.extend(wave_gradient_spans(
-        &label,
-        anim_time_secs() * 3.0,
-        &stops,
-        palette.surface,
-    ));
+    // A persona word mid-entrance decodes from ciphertext instead of riding
+    // the wave; the whole label (spinner + space + word) goes through the
+    // entrance so the decode front sweeps the full row. Fall through to the
+    // wave when no entrance is in flight — or when the caller pinned a
+    // static render (tests/snapshots never see mid-animation glyphs).
+    let entrance = match (
+        animate_entrance,
+        persona_word.as_ref(),
+        persona_word_shown_at,
+    ) {
+        (true, Some(_), Some(shown_at)) => decrypt_entrance_spans(&label, shown_at, palette),
+        _ => None,
+    };
+    match entrance {
+        Some(entrance_spans) => spans.extend(entrance_spans),
+        None => spans.extend(wave_gradient_spans(
+            &label,
+            anim_time_secs() * 3.0,
+            &stops,
+            palette.surface,
+        )),
+    }
+
+    // Live action count (spec task-activity-compact-fold): a silent agentic
+    // turn (zero interleaved text) still shows a pulse here. Independent of
+    // the orchestration status block below.
+    let action_count = flow_activity_items(app).len();
+    if action_count > 0 {
+        spans.push(Span::styled(
+            format!(" · {}", t!("app.statusbar.actions", count = action_count)),
+            palette.muted().bg(palette.surface),
+        ));
+    }
 
     if let Some(status) = status {
         if status.running_agents > 0 {
@@ -4812,7 +5545,13 @@ fn composer_cursor_row_and_width(
             (view.cursor_row, view.cursor_width)
         }
         ComposerPresentation::Collapsed(collapse) => {
-            (0, "[paste] ".width() + collapse.summary.width())
+            let view = composer_input_view(
+                &collapse.display,
+                collapse.cursor,
+                area.width,
+                area.height.saturating_sub(COMPOSER_CHROME_ROWS),
+            );
+            (view.cursor_row, view.cursor_width)
         }
     }
 }
@@ -5086,7 +5825,10 @@ fn status_bar_work_text(app: &AppState) -> String {
         SessionRunState::Blocked { message } | SessionRunState::Error { message }
             if !message.trim().is_empty() =>
         {
-            parts.push(truncate_terminal_line(message, 80));
+            // Elide the middle, never the tail: a decode failure names the
+            // offending field last, and a head-only cut turns `objective` into
+            // `obj` — an identifier that does not exist.
+            parts.push(elide_middle_terminal_line(message, 80));
         }
         _ => {}
     }
@@ -5097,6 +5839,26 @@ fn status_bar_work_text(app: &AppState) -> String {
     if background_tasks > 0 {
         parts.push(t!("app.statusbar.background_tasks", count = background_tasks).into_owned());
         parts.push(t!("app.statusbar.ps_to_view").into_owned());
+    }
+    // #532 (defect 1): a master that has staged peers goes SILENT while it
+    // holds for the fleet — octos's `evaluate_peer_fleet_synthesis` waits for
+    // every owned peer to be DONE and SETTLED before it wakes to synthesize.
+    // Nothing surfaced that hold, so the master read as dead ("apparently
+    // master agent stopped working even it said it would continue"). Shown only
+    // while the master's OWN turn is settled — that idle window IS the one that
+    // looks broken; mid-turn the spinner already says it is alive.
+    if app.active_turn().is_none() {
+        if let Some(fleet) = focused_master_fleet_wait(app) {
+            parts.push(
+                t!(
+                    "app.statusbar.awaiting_fleet",
+                    outstanding = fleet.outstanding_count(),
+                    total = fleet.total,
+                    peers = fleet.outstanding_label()
+                )
+                .into_owned(),
+            );
+        }
     }
     if active_session_has_pending_decision(app) {
         // Turn parked on YOUR decision; the approval/question card may have

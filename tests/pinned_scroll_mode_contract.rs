@@ -9,13 +9,13 @@
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use octos_core::{Message, SessionKey};
-use octos_tui::app;
-use octos_tui::cli::{ScrollMode, ThemeName, load_config_file};
-use octos_tui::event_loop::handle_terminal_event;
-use octos_tui::model::{AppState, SessionView};
-use octos_tui::store::Store;
-use octos_tui::theme::Palette;
-use octos_tui::tui_terminal::FrameLike;
+use octoscode::app;
+use octoscode::cli::{ScrollMode, ThemeName, load_config_file};
+use octoscode::event_loop::handle_terminal_event;
+use octoscode::model::{AppState, SessionView};
+use octoscode::store::Store;
+use octoscode::theme::Palette;
+use octoscode::tui_terminal::FrameLike;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::widgets::Widget;
@@ -170,8 +170,11 @@ fn pinned_mode_wheel_up_enters_pager() {
         .iter()
         .position(|row| row.contains("Composer"))
         .expect("composer rendered");
+    // Margin allows for the word-wrapped status bar (2026-08-02): at 60 cols
+    // the status line takes up to 3 rows, lifting the composer accordingly —
+    // it still sits directly above the status region.
     assert!(
-        composer_row >= rows.len() - 6,
+        composer_row >= rows.len() - 8,
         "composer must sit in the bottom rows, found at row {composer_row}"
     );
 }
@@ -206,7 +209,7 @@ fn pinned_mode_wheel_down_at_bottom_exits_pager() {
 
 #[test]
 fn scroll_mode_parses_from_config_file() {
-    let dir = std::env::temp_dir().join(format!("octos-tui-scroll-mode-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("octoscode-scroll-mode-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
 
     let pinned_path = dir.join("pinned.json");

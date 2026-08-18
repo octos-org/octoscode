@@ -1,33 +1,33 @@
-class OctosTui < Formula
+class Octoscode < Formula
   desc "Terminal UI client for the Octos UI Protocol"
-  homepage "https://github.com/octos-org/octos-tui"
+  homepage "https://github.com/octos-org/octoscode"
   version "__VERSION__"
   if OS.mac? && Hardware::CPU.arm?
-    url "https://github.com/octos-org/octos-tui/releases/download/__TAG__/octos-tui-aarch64-apple-darwin.tar.xz"
+    url "https://github.com/octos-org/octoscode/releases/download/__TAG__/octoscode-aarch64-apple-darwin.tar.xz"
     sha256 "__SHA_DARWIN_ARM__"
   end
   if OS.linux?
     if Hardware::CPU.arm?
-      url "https://github.com/octos-org/octos-tui/releases/download/__TAG__/octos-tui-aarch64-unknown-linux-gnu.tar.xz"
+      url "https://github.com/octos-org/octoscode/releases/download/__TAG__/octoscode-aarch64-unknown-linux-gnu.tar.xz"
       sha256 "__SHA_LINUX_ARM__"
     end
     if Hardware::CPU.intel?
-      url "https://github.com/octos-org/octos-tui/releases/download/__TAG__/octos-tui-x86_64-unknown-linux-gnu.tar.xz"
+      url "https://github.com/octos-org/octoscode/releases/download/__TAG__/octoscode-x86_64-unknown-linux-gnu.tar.xz"
       sha256 "__SHA_LINUX_X64__"
     end
   end
   license "Apache-2.0"
 
-  # octos-tui is a CLIENT; a local launch spawns `octos serve --stdio` as its
+  # octoscode is a CLIENT; a local launch spawns `octos serve --stdio` as its
   # backend. We deliberately do NOT `depends_on "octos-org/octos/octos"`: Homebrew
   # does not auto-tap third-party dependency taps, so that would abort the
   # install with "tap must be installed explicitly". Instead the tui
   # auto-installs the octos server on first run if it's missing (see caveats).
   def caveats
     <<~EOS
-      octos-tui talks to the `octos` server backend. If octos isn't installed,
-      octos-tui installs the latest release automatically on first run
-      (set OCTOS_TUI_NO_AUTO_INSTALL=1 to disable). To install it up front:
+      octoscode talks to the `octos` server backend. If octos isn't installed,
+      octoscode installs the latest release automatically on first run
+      (set OCTOSCODE_NO_AUTO_INSTALL=1 to disable). To install it up front:
         brew install octos-org/octos/octos
     EOS
   end
@@ -55,9 +55,9 @@ class OctosTui < Formula
   end
 
   def install
-    bin.install "octos-tui" if OS.mac? && Hardware::CPU.arm?
-    bin.install "octos-tui" if OS.linux? && Hardware::CPU.arm?
-    bin.install "octos-tui" if OS.linux? && Hardware::CPU.intel?
+    bin.install "octoscode" if OS.mac? && Hardware::CPU.arm?
+    bin.install "octoscode" if OS.linux? && Hardware::CPU.arm?
+    bin.install "octoscode" if OS.linux? && Hardware::CPU.intel?
 
     install_binary_aliases!
 

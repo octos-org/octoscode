@@ -14,3 +14,8 @@
 # same live-sibling loop as the old path dependency.
 
 paths = ["../octos/crates/octos-core"]
+
+# Live-develop the splash animation engine against a local ttfx checkout by
+# adding its path to the list above, e.g.:
+#
+#     paths = ["../octos/crates/octos-core", "../../consult/ttfx"]

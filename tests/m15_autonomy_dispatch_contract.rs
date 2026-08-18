@@ -17,13 +17,13 @@ use octos_core::SessionKey;
 use octos_core::app_ui::AppUiEvent;
 use octos_core::ui_protocol::{SessionOpened, UiNotification};
 
-use octos_tui::menu::CapabilitySet;
-use octos_tui::model::{
+use octoscode::menu::CapabilitySet;
+use octoscode::model::{
     APPUI_FEATURE_CODING_AUTONOMY_V1, APPUI_METHOD_AGENT_LIST, APPUI_METHOD_LOOP_LIST,
     APPUI_METHOD_SESSION_GOAL_GET, AgentListParams, AppState, AppUiCommand, LoopListParams,
     SessionGoalGetParams, SessionView,
 };
-use octos_tui::store::Store;
+use octoscode::store::Store;
 
 fn store_with_autonomy_session() -> Store {
     let session = SessionView {
@@ -101,7 +101,13 @@ fn loop_list_slash_dispatches_loop_list_when_advertised() {
     let command = store.compose_command().expect("dispatched");
     match command {
         AppUiCommand::ListLoops(LoopListParams { session_id, .. }) => {
-            assert_eq!(session_id, SessionKey("coding:local:tui#coding".into()));
+            // `session_id` is optional now: a SCOPED query still carries the
+            // active session, while a global query omits it entirely so the
+            // server returns every loop (spec task-loop-list-global-decode).
+            assert_eq!(
+                session_id,
+                Some(SessionKey("coding:local:tui#coding".into()))
+            );
         }
         other => panic!("expected ListLoops, got {other:?}"),
     }

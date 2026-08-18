@@ -91,6 +91,15 @@ pub const APPUI_METHOD_PEER_STAGED: &str = "peer/staged";
 /// tui-locally in the transport because the vendored octos-core rev predates
 /// the variant, mirroring [`APPUI_METHOD_PEER_STAGED`].
 pub const APPUI_METHOD_PEER_CLOSED: &str = "peer/closed";
+/// octos#2019: durable SERVER→CLIENT notification — one background event that
+/// woke the model, surfaced to the HUMAN. Monitor event lines and claimed
+/// fleet outbox events already exist and are already durable, but their only
+/// consumer is the model, so a monitor that fires forty times during a loop is
+/// invisible to the user. Not a request method (never appears in
+/// `AppUiCommand::method()`); decoded tui-locally in the transport because the
+/// vendored octos-core rev predates the variant, mirroring
+/// [`APPUI_METHOD_PEER_STAGED`].
+pub const APPUI_METHOD_BACKGROUND_ACTIVITY: &str = "background/activity";
 /// octos#1807: `turn/steer` — mid-turn prompt injection into the ACTIVE
 /// turn. Params `{session_id, expected_turn_id?, input}`; result
 /// `{turn_id, steered}`. `steered:true` = the text joined the live turn
@@ -224,6 +233,13 @@ pub const APPUI_FEATURE_CODING_AUTONOMY_V1: &str = "coding.autonomy.v1";
 pub const APPUI_FEATURE_CODING_AGENT_CONTROL_V1: &str = "coding.agent_control.v1";
 pub const APPUI_FEATURE_CODING_GOAL_RUNTIME_V1: &str = "coding.goal_runtime.v1";
 pub const APPUI_FEATURE_CODING_LOOP_RUNTIME_V1: &str = "coding.loop_runtime.v1";
+
+/// octos#2019 human sink over background events that today only wake the
+/// model. When negotiated the server pushes `background/activity`; when it is
+/// NOT negotiated the server never sends the frame, so an older TUI can never
+/// receive a notification it cannot render. Tui-local mirror: the vendored
+/// octos-core rev predates the constant.
+pub const APPUI_FEATURE_BACKGROUND_ACTIVITY_V1: &str = "event.background_activity.v1";
 
 /// Additive `profile/local/create` capability: the server honors an optional
 /// `requested_id` (the meaningful profile name the user types, e.g. `glm`) and
@@ -552,14 +568,25 @@ pub struct LoopCreateResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopListParams {
-    pub session_id: SessionKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LoopListResult {
-    pub session_id: SessionKey,
+    /// Echoed back from the request. A GLOBAL query sends no `session_id`, and
+    /// the server echoes that as `null` — a non-Option field here made the
+    /// whole response undecodable, so the list came back permanently empty
+    /// (spec task-loop-list-global-decode).
+    #[serde(default)]
+    pub session_id: Option<SessionKey>,
+    /// The profile the server RESOLVED for this query. A global query is
+    /// authoritative exactly within this profile — it is what lets the client
+    /// clear stale mirrors without touching other profiles.
+    #[serde(default)]
+    pub profile_id: Option<String>,
     #[serde(default)]
     pub loops: Vec<octos_core::ui_protocol::UiLoopRecord>,
 }
@@ -596,6 +623,14 @@ pub struct SessionAutonomyState {
     pub agent_artifacts: Vec<AutonomyAgentArtifactCache>,
     pub goal: Option<octos_core::ui_protocol::UiGoalRecord>,
     pub goal_transition_actor: Option<String>,
+    /// #1959 — highest goal-event `generation` applied for this session. The
+    /// backend stamps every `SessionGoalUpdated`/`SessionGoalCleared` with a
+    /// monotonic generation; we DROP any goal event whose generation is not
+    /// greater than this, so a stale update that races behind a clear (server
+    /// send order is not atomic under a multi-thread runtime) can never
+    /// resurrect the cleared chip. `0` (legacy / unstamped backend) always
+    /// applies and never advances the watermark.
+    pub last_goal_event_generation: u64,
     pub loops: Vec<octos_core::ui_protocol::UiLoopRecord>,
     /// Latest model-authored plan/todo checklist (`plan/updated`). `None` until
     /// the agent calls `update_plan` this session.
@@ -629,6 +664,7 @@ impl SessionAutonomyState {
             agent_artifacts: Vec::new(),
             goal: None,
             goal_transition_actor: None,
+            last_goal_event_generation: 0,
             loops: Vec::new(),
             plan: None,
             plan_turn_id: None,
@@ -826,7 +862,7 @@ pub enum AppUiCommand {
     ResumeLoop(LoopIdParams),
     FireLoopNow(LoopIdParams),
     /// `!`-bang client-local shell exec (Claude Code's `!` model). Runs a
-    /// native shell command on the machine octos-tui runs on — NOT the
+    /// native shell command on the machine octoscode runs on — NOT the
     /// agent's sandboxed server `shell` tool — so it intentionally bypasses
     /// every server-side guard. Carries NO JSON-RPC method: the transport
     /// intercepts it directly, spawns the command on its tokio runtime, and
@@ -3571,6 +3607,61 @@ pub struct PeerClosedParams {
     pub profile_id: String,
 }
 
+/// Params of the durable [`APPUI_METHOD_BACKGROUND_ACTIVITY`] notification
+/// (octos#2019): one background event that woke the model, surfaced to the
+/// HUMAN.
+///
+/// `session_id` is REQUIRED and is the routing key — the session that OWNS the
+/// emitter, never "whichever session is focused" (the octos-tui#461 / #466 /
+/// #483 bug class). `origin_kind` + `origin_id` (+ `origin_label`) attribute
+/// the line: an unattributed monitor line reads as the master speaking.
+/// `dropped_count` / `suppressed` carry the server-side per-origin cap's
+/// VISIBLE drop marker — silent truncation reads as "nothing more happened".
+///
+/// Tui-local wire mirror (the vendored octos-core rev predates the
+/// `UiNotification` variant), decoded in the transport exactly like
+/// [`PeerStagedParams`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundActivityParams {
+    pub session_id: SessionKey,
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    pub origin_kind: String,
+    pub origin_id: String,
+    #[serde(default)]
+    pub origin_label: Option<String>,
+    pub text: String,
+    #[serde(default)]
+    pub emitted_at_ms: i64,
+    #[serde(default)]
+    pub dropped_count: Option<u64>,
+    #[serde(default)]
+    pub suppressed: bool,
+}
+
+impl BackgroundActivityParams {
+    /// Stable grouping key: one foldable group per emitting origin, so a
+    /// 50-round monitor loop is ONE group rather than 50 loose lines.
+    pub fn origin_key(&self) -> (String, String) {
+        (self.origin_kind.clone(), self.origin_id.clone())
+    }
+
+    /// Human label for the group header. Falls back to the origin id so a row
+    /// is never unattributed.
+    pub fn display_origin(&self) -> &str {
+        self.origin_label
+            .as_deref()
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+            .unwrap_or(self.origin_id.as_str())
+    }
+}
+
+/// Per-session cap on retained background-activity rows. The SERVER already
+/// caps per origin with a visible drop marker; this is the client-side
+/// backstop so a long-lived session cannot grow the transcript without bound.
+pub const MAX_BACKGROUND_ACTIVITY_ROWS: usize = 200;
+
 /// `peer/gather` request (octos#1801 v2): read the peer blackboard.
 /// `slugs: None` = every staged peer; `session_id` carries the ACTIVE
 /// session so the server scopes the profile (mirrors
@@ -4360,8 +4451,11 @@ pub struct AppState {
     /// "status_word"}` rotator, e.g. "Conjuring" / "正在炼丹"). Rendered in the
     /// harness gradient line above the composer only while it matches the
     /// active turn — so a stale word from a prior turn (or a server-started
-    /// continuation) is ignored rather than lingering.
-    pub session_status_word: std::collections::HashMap<SessionKey, (TurnId, String)>,
+    /// continuation) is ignored rather than lingering. The `Instant` is when
+    /// THIS word instance landed, keying the decrypt-style entrance animation
+    /// (fresh words decode from ciphertext before the wave gradient resumes).
+    pub session_status_word:
+        std::collections::HashMap<SessionKey, (TurnId, String, std::time::Instant)>,
     /// Per-session reasoning/thinking effort chosen via the `/thinking` command,
     /// keyed by `SessionKey` so each session keeps its own level. Attached to
     /// every `turn/start` for that session; absent = use the server
@@ -4458,12 +4552,58 @@ pub struct AppState {
     /// plain text field (equivalent to always-Insert); `composer_mode` is only
     /// consulted when this is true.
     pub vim_mode: bool,
+    /// octos#1807 steering as an OPT-IN: when true, a prompt typed while a
+    /// turn is running is injected into the LIVE turn via `turn/steer`. The
+    /// default is false — mid-turn prompts stage FIFO in `pending_messages`
+    /// and each drains as its OWN turn at turn-end, so every prompt is
+    /// processed to completion in the order it was typed. Steering makes the
+    /// model treat the newest instruction as superseding the work in
+    /// progress (the steer lands as a bare `role: user` message mid-loop),
+    /// which reads as "interrupt and pivot" — the right tool for a course
+    /// correction, the wrong default for "also do this next".
+    pub steer_mid_turn: bool,
     /// Current composer editing mode under Vim. Defaults to `Insert` so typing
     /// works immediately when Vim is enabled; `Esc` switches to `Normal`.
     pub composer_mode: ComposerMode,
     /// Pending Vim multi-key prefix in Normal mode (`g`/`d`/`c`), resolved or
     /// cleared by the next key. `None` when no sequence is in progress.
     pub composer_vim_pending: Option<char>,
+    /// Armed by an idle Ctrl+C (nothing to interrupt); the next consecutive
+    /// Ctrl+C quits the TUI. Any other key press disarms. Escape hatch for
+    /// surfaces that eat plain keys (onboarding wizard, menus), where `q` and
+    /// `/exit` type into a filter instead of quitting.
+    pub ctrl_c_quit_armed: bool,
+    /// Armed when an approval or AskUserQuestion ARRIVES (live server event);
+    /// the event loop drains it by writing BEL to the terminal exactly once.
+    /// Store stays I/O-free — same pattern as the pending-clipboard flush.
+    pub pending_decision_bell: bool,
+    /// Client-side first-seen clock per task id, for the sub-agent chip's
+    /// elapsed display (server events carry no wall-clock the TUI can trust
+    /// across hosts — same rationale as `PeerMeta.created`). Populated when a
+    /// task first shows up pending/running.
+    pub task_first_seen: std::collections::HashMap<TaskId, std::time::Instant>,
+    /// The last turn terminal was quota exhaustion (spec
+    /// task-quota-exhausted-card): the status bar shows an amber Quota state
+    /// instead of the generic red Error. Cleared when the next turn starts.
+    pub quota_exhausted: bool,
+    /// Client-side per-loop fire counter (spec task-loop-liveness-indicator):
+    /// how many times each loop has fired in this session. The server carries
+    /// no such counter, so this is a session-local approximation that resets
+    /// on restart — enough to answer "is it still going, and how far in".
+    pub loop_fire_counts: std::collections::HashMap<(SessionKey, String), u32>,
+    /// Turns known to have been started by a loop firing, so their activity
+    /// group can carry the `↻` attribution prefix.
+    pub loop_attributed_turns: std::collections::HashSet<(SessionKey, TurnId)>,
+    /// Session whose NEXT turn should be attributed to a loop: set when
+    /// `loop/fired` arrives, consumed when that session's next turn starts.
+    pub pending_loop_attribution: std::collections::HashSet<SessionKey>,
+    /// True while a USER-dispatched `/loop list` awaits its result. The
+    /// session-open hydration fires the same RPC silently; only an explicit
+    /// user query may pop the loops menu when the result lands.
+    pub pending_loop_list_menu: bool,
+    /// Loop id the `MENU_LOOP_ACTIONS` submenu is acting on (set when a
+    /// loops-list row is activated).
+    pub loop_actions_target: Option<String>,
     /// Path of the `--config` file this session launched from, retained so
     /// `/saveconfig` can persist runtime UI settings back. `None` when launched
     /// without `--config` (saving then falls back to the default path).
@@ -4493,7 +4633,7 @@ pub struct AppState {
     /// the `file-picker` menu build; rebuilt on every `@` (never stale-served).
     pub file_picker: Option<crate::file_picker::FilePickerState>,
     /// Cross-session command history for Up/Down recall (codex/claude-code
-    /// style); persisted to `~/.config/octos-tui/history.jsonl`. See
+    /// style); persisted to `~/.config/octoscode/history.jsonl`. See
     /// [`crate::history::ComposerHistory`].
     pub composer_history: crate::history::ComposerHistory,
     /// Prompts staged while the ACTIVE session's turn was running, submitted
@@ -4561,6 +4701,16 @@ pub struct AppState {
     /// Renders the "Compacting conversation…" block with an honest
     /// fullness bar.
     pub live_compaction: std::collections::HashMap<SessionKey, LiveCompaction>,
+    /// octos#2019 human sink: background events that woke the model, keyed by
+    /// the session that OWNS the emitter.
+    ///
+    /// Deliberately a per-session map rather than one global `Vec` like
+    /// [`AppState::activity`]: the render path reads ONLY the rendered
+    /// session's bucket, so a row can never leak into whichever session
+    /// happens to be focused (octos-tui#461 / #466 / #483 — `flow_activity_items`
+    /// filters on `turn_id` alone and has exactly that failure mode). Routing
+    /// is structural here, not a filter that can be forgotten.
+    pub background_activity: std::collections::HashMap<SessionKey, Vec<BackgroundActivityParams>>,
     pub status: String,
     pub target: Option<String>,
     pub readonly: bool,
@@ -4586,6 +4736,19 @@ pub struct AppState {
     /// the value is the interrupted turn id, so a LATER turn on the same
     /// session is never gated. Cleared on the turn's terminal.
     pub interrupted_turns: std::collections::HashMap<SessionKey, TurnId>,
+    /// Sessions whose last `session/status/read` reported `cursor.healthy:
+    /// false`. A latch, not a log: `session/status/read` is polled, so the
+    /// warning fires when a session ENTERS the state and again only after it
+    /// recovers — otherwise a persistently degraded stream would bury the
+    /// activity feed under identical rows.
+    ///
+    /// It is also the live truth the status bar's degraded-stream chip reads,
+    /// which is why membership must track the CURRENT report rather than
+    /// "already warned": the one-shot row renders inside a collapsed activity
+    /// group and the status slot it writes is overwritten by the next command,
+    /// so the chip is the only surface that survives to the moment the operator
+    /// wonders why a turn is silent.
+    pub unhealthy_cursors: std::collections::HashSet<SessionKey>,
 
     /// Turns whose output the freeze above ACTUALLY suppressed: a delta or a
     /// canonical persisted frame arrived after the Esc and was dropped.
@@ -4847,7 +5010,7 @@ impl ComposerPresentation {
         match self {
             Self::Empty => 0,
             Self::Inline(text) => text.rsplit('\n').next().unwrap_or("").width(),
-            Self::Collapsed(collapse) => "[paste] ".width() + collapse.summary.width(),
+            Self::Collapsed(collapse) => collapse.display.rsplit('\n').next().unwrap_or("").width(),
         }
     }
 }
@@ -4856,6 +5019,20 @@ impl ComposerPresentation {
 pub struct ComposerCollapse {
     pub summary: String,
     pub preview: String,
+    /// What the composer actually draws: the draft with the collapsed block
+    /// swapped for its `[paste N lines · M chars]` chip. Text typed around the
+    /// paste stays put, so the chip renders exactly where the paste landed
+    /// rather than at the head of the row with the typed command hidden inside
+    /// it. With no live paste span the chip stands for the whole draft and this
+    /// is just the chip.
+    pub display: String,
+    /// Byte range of the chip glyph inside [`Self::display`]. The renderer
+    /// styles this run as the chip and everything around it as ordinary text.
+    pub chip: std::ops::Range<usize>,
+    /// `composer_cursor_index` mapped into [`Self::display`]. A caret inside
+    /// the collapsed block pins to the chip's end — the block is atomic, there
+    /// is no position "within" it.
+    pub cursor: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5066,6 +5243,9 @@ impl From<SessionStatusReadResult> for SessionRuntimeStatus {
 pub enum ActivityKind {
     Tool,
     Progress,
+    /// A client-local, fully rendered transcript report. Unlike runtime
+    /// activity, reports never enter the agent-task grouping/collapse path.
+    Report,
     Approval,
     Warning,
     Error,
@@ -5076,6 +5256,7 @@ impl ActivityKind {
         match self {
             Self::Tool => "tool",
             Self::Progress => "progress",
+            Self::Report => "report",
             Self::Approval => "approval",
             Self::Warning => "warning",
             Self::Error => "error",
@@ -6543,8 +6724,18 @@ impl AppState {
             goal_objective_folded_effective: std::cell::Cell::new(false),
             pinned_scroll: false,
             vim_mode: false,
+            steer_mid_turn: false,
             composer_mode: ComposerMode::Insert,
             composer_vim_pending: None,
+            ctrl_c_quit_armed: false,
+            pending_decision_bell: false,
+            task_first_seen: std::collections::HashMap::new(),
+            quota_exhausted: false,
+            loop_fire_counts: std::collections::HashMap::new(),
+            loop_attributed_turns: std::collections::HashSet::new(),
+            pending_loop_attribution: std::collections::HashSet::new(),
+            pending_loop_list_menu: false,
+            loop_actions_target: None,
             config_path: None,
             activity_navigator: ActivityNavigatorState::default(),
             focus: FocusPane::Composer,
@@ -6568,6 +6759,7 @@ impl AppState {
             v2_turn_ids: std::collections::HashMap::new(),
             live_reasoning: std::collections::HashMap::new(),
             live_compaction: std::collections::HashMap::new(),
+            background_activity: std::collections::HashMap::new(),
             status,
             target,
             readonly,
@@ -6576,6 +6768,7 @@ impl AppState {
             run_state_started_at,
             pre_token_turns: std::collections::HashMap::new(),
             interrupted_turns: std::collections::HashMap::new(),
+            unhealthy_cursors: std::collections::HashSet::new(),
             interrupt_dropped_output: std::collections::HashSet::new(),
             unread_turns: std::collections::HashMap::new(),
             pending_turn_steers: std::collections::VecDeque::new(),
@@ -6888,6 +7081,30 @@ impl AppState {
         let entry = self.session_autonomy_mut(session_id);
         entry.goal = goal;
         entry.goal_transition_actor = transition_actor;
+    }
+
+    /// #1959 — decide whether to APPLY an incoming goal chip event, advancing
+    /// the per-session generation watermark. Returns `false` (DROP) when the
+    /// event's `generation` does not strictly exceed the last applied one, so a
+    /// stale `SessionGoalUpdated` that races behind a `SessionGoalCleared`
+    /// cannot resurrect the cleared chip regardless of server send order. A
+    /// legacy/unstamped `generation == 0` always applies and never advances the
+    /// watermark (an old backend never stamps, so gating on it would wedge the
+    /// chip).
+    pub fn goal_event_generation_admits(
+        &mut self,
+        session_id: &SessionKey,
+        generation: u64,
+    ) -> bool {
+        if generation == 0 {
+            return true;
+        }
+        let entry = self.session_autonomy_mut(session_id);
+        if generation <= entry.last_goal_event_generation {
+            return false;
+        }
+        entry.last_goal_event_generation = generation;
+        true
     }
 
     /// Ctrl+P: flip the ◆ Goal banner objective between folded and unfolded.
@@ -8375,6 +8592,17 @@ impl AppState {
             .unwrap_or(&[])
     }
 
+    /// Active-session loop roster for the `/loop` list menu — mirrors
+    /// `active_session_agents` but for `UiLoopRecord`s.
+    pub fn active_session_loops(&self) -> &[octos_core::ui_protocol::UiLoopRecord] {
+        let Some(session) = self.active_session() else {
+            return &[];
+        };
+        self.session_autonomy_for(&session.id)
+            .map(|state| state.loops.as_slice())
+            .unwrap_or(&[])
+    }
+
     /// Agent ids with unread terminal outcomes in the active session — the
     /// Agent Dock badge set (#323). Empty when there is no active session.
     pub fn active_session_unseen_agents(&self) -> &[String] {
@@ -8716,6 +8944,66 @@ impl AppState {
         }
     }
 
+    /// octos#2019 — record one background event on the session that OWNS its
+    /// emitter. Never touches any other session's bucket, so the row cannot
+    /// render under whichever session happens to be focused.
+    ///
+    /// Rows with a blank routing key are DROPPED: an unroutable row is exactly
+    /// the octos-tui#461 / #466 / #483 bug (it would have to fall back to the
+    /// focused session), so refuse it rather than misattribute it.
+    pub fn push_background_activity(&mut self, event: BackgroundActivityParams) {
+        if event.session_id.0.trim().is_empty() {
+            return;
+        }
+        let rows = self
+            .background_activity
+            .entry(event.session_id.clone())
+            .or_default();
+        rows.push(event);
+        if rows.len() > MAX_BACKGROUND_ACTIVITY_ROWS {
+            let excess = rows.len() - MAX_BACKGROUND_ACTIVITY_ROWS;
+            rows.drain(0..excess);
+        }
+    }
+
+    /// octos#2019 — the background events for `session_id`, grouped by
+    /// emitting origin in first-seen order. One group per origin so a 50-round
+    /// monitor loop folds into ONE header rather than 50 loose lines.
+    ///
+    /// Reading is per-session by construction: a caller cannot accidentally
+    /// render another session's rows.
+    pub fn background_activity_groups(
+        &self,
+        session_id: &SessionKey,
+    ) -> Vec<(String, Vec<&BackgroundActivityParams>)> {
+        let Some(rows) = self.background_activity.get(session_id) else {
+            return Vec::new();
+        };
+        let mut order: Vec<(String, String)> = Vec::new();
+        let mut grouped: std::collections::HashMap<
+            (String, String),
+            Vec<&BackgroundActivityParams>,
+        > = std::collections::HashMap::new();
+        for row in rows {
+            let key = row.origin_key();
+            if !grouped.contains_key(&key) {
+                order.push(key.clone());
+            }
+            grouped.entry(key).or_default().push(row);
+        }
+        order
+            .into_iter()
+            .filter_map(|key| {
+                let rows = grouped.remove(&key)?;
+                let label = rows
+                    .first()
+                    .map(|row| row.display_origin().to_owned())
+                    .unwrap_or_else(|| key.1.clone());
+                Some((format!("{} {label}", key.0), rows))
+            })
+            .collect()
+    }
+
     pub fn push_activity(&mut self, item: ActivityItem) {
         const MAX_ACTIVITY_ITEMS: usize = 80;
         // Preserving the scroll for a row that renders nowhere in the current
@@ -8854,6 +9142,9 @@ impl AppState {
         if !self.run_state.is_active() {
             self.run_state_started_at = Some(Instant::now());
         }
+        // A new turn supersedes the quota terminal (spec
+        // task-quota-exhausted-card).
+        self.quota_exhausted = false;
         self.run_state = SessionRunState::InProgress;
     }
 
@@ -9326,7 +9617,7 @@ impl AppState {
     /// without a valid span the whole draft clears (the #380 behavior).
     /// Returns true when the delete was handled here.
     fn take_collapsed_paste_block(&mut self) -> bool {
-        // A collapsed block (the `[paste] N lines · M chars` chip) is an ATOMIC
+        // A collapsed block (the `[paste N lines · M chars]` chip) is an ATOMIC
         // unit: one Backspace/Delete removes the whole block, never one char.
         // Gate on the Collapsed PRESENTATION, not `composer_pasted` — a paste
         // whose terminal delivered it as keystrokes (no bracketed-paste event,
@@ -9340,11 +9631,23 @@ impl AppState {
         ) {
             return false;
         }
-        match self
-            .composer_paste_span
-            .take()
-            .filter(|_| self.composer_pasted)
-        {
+        // NOT `.filter(|_| self.composer_pasted)`. The gate above deliberately
+        // keys on the Collapsed PRESENTATION rather than the flag, and adding
+        // the flag back here reintroduced exactly the dependency it was written
+        // to avoid — with a worse failure than the one it guarded against.
+        //
+        // The two desync by design. `insert_pasted_text` clears `composer_pasted`
+        // for a small fragment (so a tiny burst re-opens the composer inline and
+        // echoes) while KEEPING the recorded span. But clearing the flag only
+        // re-opens content under the TYPED thresholds — 32 lines / 4000 chars,
+        // versus 4 lines / 400 for a paste. Above those, the chip stays
+        // Collapsed with a perfectly valid span and a false flag, so this filter
+        // discarded the span and fell through to `_ =>`, which clears the ENTIRE
+        // draft. A 40-line paste with typed text around it lost the lot.
+        //
+        // The span's own bounds check below is what makes dropping it safe: a
+        // stale or malformed span still falls to `_ =>`.
+        match self.composer_paste_span.take() {
             Some(span)
                 if span.start < span.end
                     && span.end <= self.composer.len()
@@ -9623,7 +9926,12 @@ impl AppState {
     }
 
     pub fn composer_presentation(&self) -> ComposerPresentation {
-        composer_presentation_for_text(&self.composer, self.composer_pasted)
+        composer_presentation_for_text(
+            &self.composer,
+            self.composer_pasted,
+            self.composer_paste_span.clone(),
+            self.composer_cursor_index(),
+        )
     }
 
     fn clamp_composer_cursor(&self, cursor: usize) -> usize {
@@ -9785,7 +10093,12 @@ fn paste_should_collapse(text: &str) -> bool {
         || text.lines().count().max(1) >= PASTE_COLLAPSE_LINE_THRESHOLD
 }
 
-fn composer_presentation_for_text(text: &str, from_paste: bool) -> ComposerPresentation {
+fn composer_presentation_for_text(
+    text: &str,
+    from_paste: bool,
+    paste_span: Option<std::ops::Range<usize>>,
+    cursor: usize,
+) -> ComposerPresentation {
     const PREVIEW_CHARS: usize = 88;
 
     if text.is_empty() {
@@ -9795,7 +10108,9 @@ fn composer_presentation_for_text(text: &str, from_paste: bool) -> ComposerPrese
     let char_count = text.chars().count();
     let line_count = text.lines().count().max(1);
     // Pastes collapse aggressively; anything else only when huge (typed input is
-    // never collapsed at the low paste thresholds).
+    // never collapsed at the low paste thresholds). Note this decision is made
+    // over the WHOLE draft — narrowing the chip below never changes WHETHER the
+    // composer collapses, only which bytes the chip stands for.
     let should_collapse = if from_paste {
         paste_should_collapse(text)
     } else {
@@ -9806,21 +10121,62 @@ fn composer_presentation_for_text(text: &str, from_paste: bool) -> ComposerPrese
         return ComposerPresentation::Inline(text.to_string());
     }
 
-    // Renders after the `[paste] ` prefix, e.g. "[paste] 18 lines · 1240 chars".
-    let summary = if line_count > 1 {
-        format!("{line_count} lines · {char_count} chars")
+    // Which bytes the chip covers. A recorded paste span is usable only while it
+    // still addresses live, char-aligned bytes AND is itself worth boxing up —
+    // otherwise the chip falls back to the whole draft (the pre-span behavior,
+    // and what a restored/wholesale-set draft always gets since it carries no
+    // span). Covering just the pasted run is what keeps a typed prefix like
+    // "/mcp upsert server " rendering AHEAD of the chip instead of vanishing
+    // inside it.
+    let block = paste_span
+        .filter(|span| {
+            span.start < span.end
+                && span.end <= text.len()
+                && text.is_char_boundary(span.start)
+                && text.is_char_boundary(span.end)
+                && paste_should_collapse(&text[span.clone()])
+        })
+        .unwrap_or(0..text.len());
+    let block_text = &text[block.clone()];
+    let block_chars = block_text.chars().count();
+    let block_lines = block_text.lines().count().max(1);
+
+    // Rendered INSIDE the chip, e.g. "[paste 18 lines · 1240 chars]" — the
+    // counts belong to the bracket rather than trailing it as loose text, and
+    // they describe the PASTE, not any text typed around it.
+    let summary = if block_lines > 1 {
+        format!("{block_lines} lines · {block_chars} chars")
     } else {
-        format!("{char_count} chars")
+        format!("{block_chars} chars")
     };
-    let preview_source = text
+    let preview_source = block_text
         .lines()
         .find(|line| !line.trim().is_empty())
         .map(str::trim)
         .unwrap_or("<blank paste>");
 
+    let glyph = format!("[paste {summary}]");
+    let mut display = String::with_capacity(text.len() - block_text.len() + glyph.len());
+    display.push_str(&text[..block.start]);
+    let chip = display.len()..display.len() + glyph.len();
+    display.push_str(&glyph);
+    display.push_str(&text[block.end..]);
+
+    // The block is atomic: a caret anywhere inside it pins to the chip's end.
+    let cursor = if cursor <= block.start {
+        cursor
+    } else if cursor >= block.end {
+        chip.end + (cursor - block.end)
+    } else {
+        chip.end
+    };
+
     ComposerPresentation::Collapsed(ComposerCollapse {
         summary,
         preview: truncate_chars(preview_source, PREVIEW_CHARS),
+        display,
+        chip,
+        cursor,
     })
 }
 
@@ -10197,6 +10553,13 @@ fn estimated_activity_rows(item: &ActivityItem) -> usize {
                 2
             }
         }
+        ActivityKind::Report => {
+            1 + item
+                .detail
+                .as_deref()
+                .map(|body| body.lines().count().max(1))
+                .unwrap_or(0)
+        }
         ActivityKind::Approval | ActivityKind::Warning | ActivityKind::Error => 2,
     }
 }
@@ -10297,7 +10660,7 @@ mod tests {
         UiGitStatusItem, UiWorkspacePaneEntry, UiWorkspacePaneSnapshot,
     };
 
-    /// The client's LOCAL launch/resolve types (octos-tui pins an older
+    /// The client's LOCAL launch/resolve types (octoscode pins an older
     /// octos-core, so `LaunchResolveResult`/`LaunchDecisionKind` are hand
     /// mirrored) must decode the EXACT bytes a live `octos serve` emits —
     /// including the omitted `resolved_profile`/`existing_profiles` on the
@@ -11611,11 +11974,170 @@ mod tests {
         )
     }
 
+    /// A large paste followed by a SMALL paste event must not destroy the draft.
+    ///
+    /// `insert_pasted_text` clears `composer_pasted` for a small fragment (so a
+    /// tiny burst re-opens the composer inline and echoes) while keeping the
+    /// recorded span. But clearing the flag only re-opens content under the
+    /// TYPED thresholds — 32 lines / 4000 chars, versus 4 lines / 400 for a
+    /// paste. Above those the chip stays Collapsed with a valid span and a
+    /// false flag.
+    ///
+    /// `take_collapsed_paste_block` used to `.filter(|_| self.composer_pasted)`,
+    /// which discarded that valid span and fell through to "clear the whole
+    /// draft". Everything the user had typed around the paste went with it.
+    #[test]
+    fn small_paste_after_a_large_one_does_not_destroy_the_surrounding_draft() {
+        let mut state = AppState::new(
+            vec![SessionView {
+                id: SessionKey("local:test".into()),
+                title: "test".into(),
+                profile_id: Some("coding".into()),
+                messages: vec![Message::assistant("ready")],
+                tasks: vec![],
+                live_reply: None,
+            }],
+            0,
+            "ready".into(),
+            None,
+            false,
+        );
+
+        state.insert_composer_text("before ");
+        // 40 lines: above BOTH the paste thresholds and the 32-line typed one,
+        // so it stays Collapsed even once `composer_pasted` is cleared.
+        let block = (1..=40)
+            .map(|i| format!("pasted line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        state.insert_pasted_text(&block);
+        state.insert_composer_text(" after");
+        assert!(state.composer_paste_span.is_some(), "span recorded");
+
+        // A tiny fragment delivered as a Paste event (fast IME burst, or
+        // bracketed paste over SSH/tmux). This clears the flag but keeps the
+        // span, and the block is far too big to re-open inline.
+        state.insert_pasted_text("x");
+        assert!(
+            !state.composer_pasted,
+            "precondition: the small paste cleared the flag"
+        );
+        assert!(
+            matches!(
+                state.composer_presentation(),
+                ComposerPresentation::Collapsed(_)
+            ),
+            "precondition: 40 lines stays collapsed past the typed threshold"
+        );
+        assert!(
+            state.composer_paste_span.is_some(),
+            "precondition: the span survived the flag being cleared"
+        );
+
+        state.delete_composer_prev_char();
+
+        assert!(
+            state.composer.contains("before"),
+            "text typed BEFORE the paste must survive: {:?}",
+            state.composer
+        );
+        assert!(
+            state.composer.contains("after"),
+            "text typed AFTER the paste must survive: {:?}",
+            state.composer
+        );
+        assert!(
+            !state.composer.contains("pasted line 1"),
+            "the pasted block itself is what Backspace removes: {:?}",
+            state.composer
+        );
+    }
+
     fn big_paste_block() -> String {
         (1..=20)
             .map(|i| format!("pasted line {i}"))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// A paste that lands AFTER typed text must keep the chip WHERE THE PASTE
+    /// IS. The presentation used to swallow the whole draft into one chip
+    /// printed at the head of the row, so `/mcp upsert server ` + a pasted JSON
+    /// body read as if the paste came first and the command had vanished.
+    #[test]
+    fn collapsed_paste_renders_after_the_typed_command() {
+        let mut state = paste_test_state();
+        for ch in "/mcp upsert server ".chars() {
+            state.insert_composer_char(ch);
+        }
+        let block = "{\n  \"name\": \"docs\",\n  \"cmd\": \"npx docs-mcp\"\n}";
+        state.insert_pasted_text(block);
+
+        let ComposerPresentation::Collapsed(collapse) = state.composer_presentation() else {
+            panic!("a 4-line paste should collapse");
+        };
+        assert_eq!(
+            &collapse.display[..collapse.chip.start],
+            "/mcp upsert server ",
+            "the typed command renders inline, ahead of the chip"
+        );
+        assert_eq!(
+            &collapse.display[collapse.chip.clone()],
+            format!("[paste 4 lines · {} chars]", block.chars().count()),
+            "the chip counts the PASTE, not the whole draft"
+        );
+        assert_eq!(
+            &collapse.display[collapse.chip.end..],
+            "",
+            "nothing was typed after the paste"
+        );
+        assert_eq!(
+            collapse.preview, "{",
+            "the preview reads the pasted block, not the typed prefix"
+        );
+        assert_eq!(
+            collapse.cursor, collapse.chip.end,
+            "the caret sits just past the chip, where the paste ended"
+        );
+    }
+
+    /// Text on BOTH sides of the paste keeps its order — the chip is an atom
+    /// sitting between the two runs. Reachable by pasting into the middle of a
+    /// restored draft (a restored draft carries no paste span of its own).
+    #[test]
+    fn collapsed_paste_keeps_the_text_on_both_sides() {
+        let mut state = paste_test_state();
+        state.composer = "before  after".into();
+        state.composer_cursor = Some("before ".len());
+        state.insert_pasted_text(&big_paste_block());
+
+        let ComposerPresentation::Collapsed(collapse) = state.composer_presentation() else {
+            panic!("a 20-line paste should collapse");
+        };
+        assert_eq!(&collapse.display[..collapse.chip.start], "before ");
+        assert_eq!(&collapse.display[collapse.chip.end..], " after");
+        assert_eq!(
+            collapse.cursor, collapse.chip.end,
+            "the caret lands where the paste ended, not at the end of the draft"
+        );
+    }
+
+    /// With no recorded span (a draft restored or set wholesale) the chip still
+    /// stands for the ENTIRE draft — the pre-span behavior.
+    #[test]
+    fn collapsed_draft_without_a_paste_span_still_covers_everything() {
+        let mut state = paste_test_state();
+        state.composer = (1..=40)
+            .map(|idx| format!("line {idx}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let ComposerPresentation::Collapsed(collapse) = state.composer_presentation() else {
+            panic!("40 typed lines collapse via the typed threshold");
+        };
+        assert_eq!(collapse.chip.start, 0);
+        assert_eq!(collapse.chip.end, collapse.display.len());
+        assert!(collapse.summary.contains("40 lines"));
     }
 
     /// #382: the atomic delete drains ONLY the pasted span — typed text

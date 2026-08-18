@@ -1,4 +1,4 @@
-# octos-tui UI strings — 简体中文 (Simplified Chinese).
+# octoscode UI strings — 简体中文 (Simplified Chinese).
 # Mirror the key structure of en.yml. Native-speaker review welcome.
 composer:
   placeholder: "让 Octos 帮你改代码……"
@@ -26,9 +26,9 @@ app:
     threads: "线程"
     turn: "回合"
   empty:
+    no_session: "未选择会话"
     no_tasks: "暂无任务"
     no_artifacts: "快照中无制品"
-    no_session: "未选择会话"
     no_plan: "暂无活动计划"
     no_plan_hint: "计划文本从助手/实时回复中推断。"
     no_task_output: "此任务暂无输出"
@@ -36,6 +36,7 @@ app:
     no_file_changes: "无文件更改"
   approval:
     title: "请求审批"
+    risk_chip: "风险: %{risk}"
     action_once: "y = 本次批准此命令"
     action_session: "s = 本会话内批准此命令/范围"
     action_deny: "n = 拒绝"
@@ -60,7 +61,8 @@ app:
     completed: "智能体任务已完成"
     running: "运行中"
     preview_ready: "预览就绪"
-    older_actions: "... +%{count} 条更早操作"
+    older_actions: "◈ 还有 %{count} 条 · Ctrl+O 展开"
+    repeat_suffix: " ×%{count}"
     more_completed_active: "... +%{hidden} 条更多，%{completed} 已完成，%{active} 活动中"
     action_count: "%{count} 个操作"
     active_count: "%{count} 活动中"
@@ -74,9 +76,9 @@ app:
     title: "差异预览"
     inline_patch: "内联补丁"
     loading: "正在加载差异预览……"
-    select_stage_hint: "[/] 选择代码块 | c 暂存所选差异上下文"
-    toggle_side_by_side_hint: "v 并排视图"
-    toggle_unified_hint: "v 统一视图"
+    select_stage_hint: "Alt+H 下一个代码块 | Alt+C 暂存所选差异上下文"
+    toggle_side_by_side_hint: "Alt+V 并排视图"
+    toggle_unified_hint: "Alt+V 统一视图"
     side_by_side_too_narrow: "并排视图需要至少 %{min} 列"
     more_files_hidden: "还有 %{count} 个文件已隐藏"
     line_unavailable: "此更改无可用的行级差异"
@@ -85,6 +87,11 @@ app:
     more_hunks_hidden: "还有 %{count} 个代码块已隐藏（Ctrl+O 展开）"
   autonomy:
     goal_prefix: "目标："
+    loops_overflow: "+%{count} 个"
+    loop_iteration: "第 %{count} 轮"
+    loop_next_run: "下次 %{remaining}"
+    loop_next_run_pending: "本轮结束后"
+    loop_expires_in: "剩 %{remaining}"
     loops_running: "循环：%{count} 个活动中"
     loops_paused_suffix: " · %{count} 个已暂停"
     goal_meta: " (%{status} · %{used}/%{budget} Token)"
@@ -92,23 +99,30 @@ app:
     status_active: "进行中"
     status_paused: "已暂停"
     status_budget_limited: "预算已用尽"
+    # octoscode#532：预算用尽只会停止目标的自驱动轮询；舰队汇总、peer 等待输入、
+    # 子任务完成这些外部唤醒仍会触发，所以不能读作"已终止"。
+    status_budget_limited_fleet: "预算已用尽 · peer 仍在运行"
     status_blocked: "已阻塞"
     status_complete: "已完成"
   statusbar:
     agents: "%{count} 个智能体"
+    actions: "%{count} 个动作"
     re_entering: "重新进入中"
     retrying_attempt_max: "重试中（第 %{attempt}/%{max} 次）"
     retrying_attempt: "重试中（第 %{attempt} 次）"
     retrying: "重试中"
-    msgs_tasks: "%{msgs} 条消息/%{tasks} 个任务"
+    loops_active_countdown: "↻ %{count} 个循环 · 下次 %{remaining}"
     loops_active: "⟳ %{count} 个活动循环 — /loop pause 可停止"
     loops_paused: "%{count} 个已暂停循环 — /loop resume 可恢复"
     background_tasks: "%{count} 个后台任务"
     ps_to_view: "/ps 查看"
     esc_interrupt: "Esc 中断"
     stop_to_close: "/stop 关闭"
+    # octoscode#532：主 agent 等待舰队时会长时间沉默，仅在其自身轮次已结束时显示。
+    awaiting_fleet: "等待 %{total} 个 peer 中的 %{outstanding} 个：%{peers}"
     pending_decision_help: "等待你的确认 — Ctrl+R/Alt+A 应答 · Ctrl+C 中断"
     parked_decision_banner: "⚠ 已等待你 %{elapsed} — Ctrl+R/Alt+A 应答 · Ctrl+C 中断"
+    cursor_degraded: "⚠ 流已降级 — 重放可能丢失事件；请重新连接"
     tool_output_expanded: "工具输出已展开"
   btw:
     answering: "回答中…"
@@ -128,13 +142,11 @@ app:
     blocked: "已阻塞"
     done: "已完成"
     error: "错误"
+    quota: "额度用尽"
     interactive: "交互式"
     read_only: "只读"
     approval_gated: "审批管控"
     sends_disabled: "发送已禁用"
-    no_session: "无会话"
-    turn_active: "活动 %{id}"
-    turn_idle: "空闲"
   harness:
     orchestrating: "编排中"
     re_entering: "重新进入"
@@ -165,6 +177,8 @@ app:
     peer_dock_pill_unread: " · %{count}● 未读"
     peer_dock_toggle_hint: "Alt+P/Ctrl+L 预览"
     peer_dock_title: " peers "
+    # octoscode#532：舰队落地进度——"5 个中已落地 3 个"此前无处可见。
+    peer_dock_landed: "已落地 %{landed}/%{total}"
     peer_dock_row_blocked: "等你确认：%{reason}"
     peer_dock_row_idle: "空闲"
     peer_dock_row_opening: "打开中…"
@@ -500,11 +514,13 @@ command:
   theme:
     desc: 选择本地 TUI 主题
   saveconfig:
-    desc: "把当前主题/语言/滚动模式保存到配置文件。"
+    desc: "把当前主题/语言/滚动模式/Vim 模式/转向模式保存到配置文件。"
   scrollmode:
     desc: "切换滚轮滚动模式：/scrollmode [native|pinned]（不带参数为切换）。"
   vimmode:
     desc: "切换输入框的 Vim 模态编辑（Normal/Insert）。"
+  steer:
+    desc: "切换运行中按 Enter 的含义：/steer [on|off] —— on 注入当前轮次，off（默认）按顺序排队。"
   thinking:
     desc: 设置思考模型的思考强度：/thinking low|medium|high|max|default
   threads:
@@ -520,6 +536,22 @@ lang:
   unknown: 未知语言 '%{value}'。可选：en、zh。
   usage: 当前语言：%{current}。用法：/lang <en|zh>。
 menu:
+  loop_actions:
+    gone: "循环 %{id} 已不存在——被删除或已过期。"
+    no_target: 未选中任何循环。
+    title: 循环操作
+    title_for: "循环 %{id}"
+    verb:
+      delete: "✕ delete — 删除该循环(不可恢复)"
+      fire-now: "⚡ fire-now — 立即触发一轮"
+      pause: "⏸ pause — 暂停调度,直到恢复"
+      resume: "▶ resume — 恢复调度"
+  loops:
+    row_hint: "回车查看操作 · → 暂停/恢复"
+    subtitle: "%{count} 个循环 · %{active} 活跃 · %{paused} 暂停"
+    title: 循环
+    unavailable_empty: 本会话还没有循环——用 /loop <提示词> 创建,或 /loop <提示词> every <间隔>。
+    unavailable_title: 循环
   file_picker:
     title: "插入文件路径"
     search: "输入以筛选工作区文件"
@@ -744,6 +776,12 @@ menu:
         desc: 移动到下一行。
       menu_previous:
         desc: 移动到上一行。
+      diff_open_toggle:
+        desc: 打开 diff 预览；打开后切换 统一/并排 视图。
+      diff_stage_hunk:
+        desc: 将选中的 diff hunk 暂存为 composer 提示词。
+      diff_next_hunk:
+        desc: 循环到下一个 diff hunk（到末尾后回到开头）。
     preview_body: 此视图展示菜单层面的按键。持久化按键编辑将在后续版本提供。
     preview_title: 编辑
     search: 筛选按键绑定
@@ -860,9 +898,9 @@ menu:
     item:
       ready:
         label: "下一步：开始使用“%{profile}”的会话"
-        desc: "在此运行 `octos-tui`（此文件夹已为“%{profile}”激活），或在其他文件夹运行 `octos-tui --profile-id %{profile}`。"
+        desc: "在此运行 `octoscode`（此文件夹已为“%{profile}”激活），或在其他文件夹运行 `octoscode --profile-id %{profile}`。"
         label_generic: "下一步：开始一个会话"
-        desc_generic: "在此运行 `octos-tui` —— 此文件夹现已为你的大脑激活。"
+        desc_generic: "在此运行 `octoscode` —— 此文件夹现已为你的大脑激活。"
       open:
         label: "立即在此打开会话"
         desc: "立即在此文件夹使用“%{profile}”开始工作——无需重启。"
@@ -987,7 +1025,7 @@ menu:
         label: 创建本地档案
       exit:
         desc: "不创建档案直接退出。提示：启动时加 --profile-id <id> 可跳过此界面。"
-        label: "退出 octos-tui"
+        label: "退出 octoscode"
       local_email:
         desc: 使用 /onboard email <地址>。邮箱仅为本地元数据。
       local_name:
@@ -1122,6 +1160,8 @@ menu:
         label: 能力
       connection:
         label: 连接
+      cursor:
+        label: 流
       refresh:
         label: 刷新服务器状态
       server:
@@ -1303,6 +1343,7 @@ status:
   goal_objective_empty: "目标内容不能为空"
   setting_goal: "正在设置目标：%{objective}"
   clearing_goal: "正在清除目标"
+  images_attached: "已附加 %{count} 张图片到本轮"
   listing_loops: "正在列出循环"
   loop_interval_min: "循环间隔至少为 1 秒"
   creating_loop: "正在创建循环"
@@ -1465,7 +1506,7 @@ status:
   doctor_caps_not_received_recovery: "请等待 `config/capabilities/list` 或重新连接传输。"
   doctor_appui_target: "Octos UI 目标：%{target}"
   doctor_no_transport: "未配置 Octos UI 传输"
-  doctor_no_transport_recovery: "使用 octos tui --target <stdio:...|ws://...> 启动 TUI。"
+  doctor_no_transport_recovery: "请使用 octoscode --stdio-command \"octos serve --stdio\" 或 octoscode --endpoint ws://<host>:<port>/api/ui-protocol/ws 重新启动。"
   onboarding_doctor_summary: "引导诊断 — %{summary}"
   ps_active_turn: "活动回合 %{id}"
   ps_idle: "空闲"
@@ -1482,6 +1523,7 @@ status:
   no_staged_message: "没有可发送的暂存消息"
   interrupt_staged_submit: "已请求中断；当前回合停止后将提交暂存消息"
   no_active_turn_interrupt: "没有可中断的活动回合"
+  ctrl_c_quit_hint: "没有可中断的任务 — 再按一次 Ctrl+C 退出（Ctrl+Q 随时退出）"
   interrupt_requested_active_turn: "已请求中断当前回合"
   no_active_approval: "没有活动的审批请求"
   approval_action: "审批 %{action}：%{title}"
@@ -1541,6 +1583,8 @@ status:
   goal_cleared: "目标已清除"
   goal_clear_rejected: "目标清除被拒绝"
   loop_created: "循环 %{id} 已创建（%{mode}）"
+  loop_list_title: "↻ 循环列表"
+  loop_list_empty_hint: "当前会话没有循环。用 /loop <提示词> 创建自主循环,或 /loop every 10m <提示词> 创建定时循环。"
   loop_list_refreshed: "循环列表已刷新：%{count} 个循环"
   loop_mutation: "循环 %{id} %{verb} %{outcome}"
   cannot_transition_no_goal: "无法转换：服务器报告无目标。"
@@ -1581,6 +1625,8 @@ status:
   activity_skill_registry: "技能注册表"
   activity_permission_profile_mismatch: "权限档案不匹配"
   activity_runtime_status: "运行时状态"
+  activity_cursor_unhealthy: "游标异常"
+  cursor_unhealthy: "流游标异常：重放可能丢失事件；请重新连接以重新水合"
   activity_tool_config: "工具配置"
   activity_recovery_suggestion: "恢复建议"
   activity_agent_output: "智能体输出"
@@ -1623,8 +1669,13 @@ status:
   diff_hunk_prompt: "将选中的差异代码块用作下一个编码轮次的上下文。\nfile: %{path}\nstatus: %{status}\nhunk: %{hunk}\n```diff\n"
   summary_title: "会话摘要"
   summary_error_label: "错误"
+  quota_card: "⏳ 额度已用完 — %{provider}\n  该提供商本计费周期的用量已达上限,本回合未能完成。\n  现在可以:\n   ▸ 购买加量或升级套餐%{link}\n   ▸ /model — 切换到其他已配置模型继续当前会话\n   ▸ 等额度刷新后重发这条消息(草稿会保留)"
+  quota_card_provider_unknown: "当前提供商"
   summary_completed_no_answer: "会话摘要\n- 结果：轮次已完成，但 TUI 未收到最终的助手回答。\n- 活动：已记录 %{count} 个操作。\n- 文件改动：%{files}。\n- 验证：%{validation}。\n- 风险 / 后续：请查看上方活动，若所需回答不完整，请继续该轮次。"
   summary_partial_answer: "会话摘要\n- 结果：轮次已完成，但 TUI 仅收到部分实时回答。\n- 活动：已记录 %{count} 个操作。\n- 文件改动：%{files}。\n- 验证：%{validation}。\n- 风险 / 后续：服务器可能已持久化更完整的回答；若可见回答不完整，请继续。"
+  # octoscode#532：主 agent 的轮次在 peer 舰队仍在运行时结束——这是设计使然，
+  # 等最后一个 peer 落地后会自动唤醒并汇总，因此不能再用"未收到回答"的措辞。
+  summary_waiting_on_fleet: "会话摘要\n- 结果：轮次已结束，但 peer 舰队仍在运行。主 agent 并未停止——舰队全部落地后它会自动唤醒并汇总。\n- 舰队：%{total} 个 peer 中已落地 %{landed} 个 · 仍在等待 %{peers}。\n- 活动：已记录 %{count} 个操作。\n- 文件改动：%{files}。\n- 验证：%{validation}。\n- 风险 / 后续：无需操作——Alt+P 可查看 peer 面板；最后一个 peer 落地后主 agent 会汇报。"
   summary_failed: "会话摘要\n- 结果：轮次在产生最终回答前失败。\n- 错误：%{code}：%{message}\n- 活动：已记录 %{count} 个操作。\n- 失败：%{failed}。\n- 风险 / 后续：请修复上方错误，或用更具体的指令继续该轮次。"
   summary_none_observed: "未观察到"
   summary_not_reported: "未报告"
@@ -1646,6 +1697,11 @@ scrollmode:
 vimmode:
   enabled: "Vim 模式：开 —— Esc 进 Normal，i 进 Insert（当前 Insert）。"
   disabled: "Vim 模式：关 —— 输入框恢复为普通文本框。"
+steer:
+  enabled: "转向模式：开 —— 运行中输入的提示词会注入到正在进行的轮次。"
+  enabled_unsupported: "转向模式：开 —— 但当前服务器不支持 turn/steer；提示词仍会排队，连接到支持的服务器后生效。"
+  disabled: "转向模式：关 —— 运行中输入的提示词按顺序排队执行。"
+  unknown: "未知取值：%{value}。用法：/steer [on|off]（不带参数则切换）。"
 thinking:
   cleared: 已清除推理强度，使用服务器默认值。
   no_session: 没有活动会话——请先打开或选择一个会话。

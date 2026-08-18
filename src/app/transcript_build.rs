@@ -47,7 +47,7 @@ pub fn live_ui_height_with_finalization(
         + agent_strip_height
         + peer_strip_height
         + composer_height
-        + 1; // +1 status
+        + super::render::status_bar_height(app, width);
 
     let tail_height = live_tail_height_with_finalization(app, width, height, live_finalization);
     // The live-tail pane is laid out with `Constraint::Min(1)`, so it always
@@ -123,6 +123,7 @@ pub(super) fn live_tail_has_activity_section(
     app: &AppState,
     live_finalization: Option<&LiveTurnFinalization>,
 ) -> bool {
+    let has_reports = !flow_report_items(app).is_empty();
     let mut flow_activity = flow_activity_items(app);
     if let Some(finalization) = active_live_finalization(app, live_finalization) {
         flow_activity = flow_activity
@@ -136,7 +137,7 @@ pub(super) fn live_tail_has_activity_section(
             .map(|(_, item)| item)
             .collect();
     }
-    !flow_activity.is_empty()
+    has_reports || !flow_activity.is_empty()
 }
 
 pub(super) fn live_tail_lines_with_finalization(
@@ -146,46 +147,49 @@ pub(super) fn live_tail_lines_with_finalization(
     live_finalization: Option<&LiveTurnFinalization>,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    let Some(session) = app.active_session() else {
-        return lines;
-    };
     let active_finalization = active_live_finalization(app, live_finalization);
 
-    // `should_show_turn_flow` already covers the visible-approval and
-    // visible-question cases (it ORs them in), so a single branch suffices.
-    if should_show_turn_flow(app, session) {
-        let interactive_context_visible = app
-            .approval
-            .as_ref()
-            .is_some_and(|approval| approval.visible)
-            || app
-                .user_question
+    if let Some(session) = app.active_session() {
+        // `should_show_turn_flow` already covers the visible-approval and
+        // visible-question cases (it ORs them in), so a single branch suffices.
+        if should_show_turn_flow(app, session) {
+            let interactive_context_visible = app
+                .approval
                 .as_ref()
-                .is_some_and(|picker| picker.visible);
-        // The recent-user-context pin is only needed while an interactive overlay
-        // (approval / question) is visible — there it shows which prompt you're
-        // acting on. Otherwise the committed prompt is already in native scrollback
-        // just above the live tail, so pinning it again duplicates it (bug 2A: most
-        // visibly for a mid-turn-submitted prompt whose turn hasn't replied yet —
-        // the pin and the scrollback copy both sit on screen). The old
-        // `!has_flushed_content` clause showed the pin for every just-started turn,
-        // which is exactly the redundant case.
-        let show_recent_context = interactive_context_visible;
-        if show_recent_context
-            && let Some(prompt) = latest_user_message(session)
-                .filter(|prompt| !pending_messages_contains(&app.pending_messages, prompt))
-        {
-            push_recent_user_context(&mut lines, palette, prompt, wrap_width);
+                .is_some_and(|approval| approval.visible)
+                || app
+                    .user_question
+                    .as_ref()
+                    .is_some_and(|picker| picker.visible);
+            // The recent-user-context pin is only needed while an interactive overlay
+            // (approval / question) is visible — there it shows which prompt you're
+            // acting on. Otherwise the committed prompt is already in native scrollback
+            // just above the live tail, so pinning it again duplicates it (bug 2A: most
+            // visibly for a mid-turn-submitted prompt whose turn hasn't replied yet —
+            // the pin and the scrollback copy both sit on screen). The old
+            // `!has_flushed_content` clause showed the pin for every just-started turn,
+            // which is exactly the redundant case.
+            let show_recent_context = interactive_context_visible;
+            if show_recent_context
+                && let Some(prompt) = latest_user_message(session)
+                    .filter(|prompt| !pending_messages_contains(&app.pending_messages, prompt))
+            {
+                push_recent_user_context(&mut lines, palette, prompt, wrap_width);
+            }
+            push_turn_flow(
+                &mut lines,
+                palette,
+                app,
+                session,
+                wrap_width,
+                active_finalization,
+            );
         }
-        push_turn_flow(
-            &mut lines,
-            palette,
-            app,
-            session,
-            wrap_width,
-            active_finalization,
-        );
     }
+
+    // Reports are turn-independent local transcript output, so they remain
+    // visible while idle and even when no session exists.
+    push_report_section(&mut lines, palette, app, wrap_width);
 
     if !app.pending_messages.is_empty() {
         push_pending_messages_block(&mut lines, palette, &app.pending_messages, wrap_width);
@@ -537,6 +541,11 @@ pub fn finalized_live_turn_lines_between(
     wrap_width: usize,
     previous: &LiveTurnFinalization,
     next: &LiveTurnFinalization,
+    // True when the scrollback tail is already THIS turn's flushed activity
+    // group (tracked by the caller across flushes): a new activity batch then
+    // appends child rows under the existing header instead of opening another
+    // full "Agent task completed" block per settle batch (the k3 header-spam).
+    append_to_flushed_group: bool,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let Some((session_id, turn_id)) = app.active_turn() else {
@@ -576,6 +585,14 @@ pub fn finalized_live_turn_lines_between(
         .map(|(_, item)| item)
         .collect::<Vec<_>>();
     if !new_activity.is_empty() {
+        // Continuation batch: the scrollback tail is this turn's group (caller
+        // tracked it) AND this delta carries no reply lines of its own (the
+        // buffer is still empty), so the children may attach directly under
+        // the already-flushed header — no separator, no repeated header.
+        let continuation = append_to_flushed_group
+            && previous.matches_turn(session_id, turn_id)
+            && previous.activity_flushed_items > 0
+            && lines.is_empty();
         // Each scrollback delta flush builds a fresh buffer, so a pure-activity
         // delta (a sub-agent completing with no reply text ahead of it) reaches
         // the finalized section with an EMPTY buffer — which defeats that
@@ -585,7 +602,7 @@ pub fn finalized_live_turn_lines_between(
         // previous scrollback block. (A reply-delta-then-activity flush leaves
         // `lines` non-empty, so the section's guard handles that case and this
         // never double-blanks.)
-        if lines.is_empty() {
+        if lines.is_empty() && !continuation {
             lines.push(Line::from(""));
         }
         push_finalized_activity_items_section(
@@ -594,6 +611,7 @@ pub fn finalized_live_turn_lines_between(
             app,
             Some(turn_id),
             &new_activity,
+            continuation,
             wrap_width,
         );
     }
@@ -926,11 +944,14 @@ pub(super) fn transcript_render_model(
         if !app.pending_messages.is_empty() {
             push_pending_messages_block(&mut lines, palette, &app.pending_messages, wrap_width);
         }
-    } else {
+        push_report_section(&mut lines, palette, app, wrap_width);
+    } else if flow_report_items(app).is_empty() {
         lines.push(Line::from(Span::styled(
             t!("app.empty.no_session").to_string(),
             palette.muted(),
         )));
+    } else {
+        push_report_section(&mut lines, palette, app, wrap_width);
     }
 
     collapse_blank_runs(&mut lines);
@@ -1156,6 +1177,12 @@ pub(super) fn push_turn_flow(
     if app.active_menu.is_none() {
         push_activity_section_with_finalization(lines, palette, app, live_finalization, width);
     }
+
+    // octos#2019: the human sink over background events that only wake the
+    // model. Rendered AFTER the turn's own activity (it is out-of-band by
+    // nature — a monitor fires between turns), attributed to its origin, and
+    // read from THIS session's bucket only.
+    push_background_activity_section(lines, palette, app, session, width);
 
     if live_turn_diff_preview_visible(app) {
         push_inline_diff_preview(
@@ -2194,7 +2221,16 @@ pub(super) fn flush_markdown_table(
         // the pane (e.g. a many-column table in a narrow transcript), hard-cut
         // the row so ratatui never wraps it into a broken grid.
         lines.push(chat_line(clip_line_spans(spans, width), bg));
-        if header {
+        // A rule under EVERY row except the last, not just under the header.
+        // Markdown itself cannot express this — GFM has exactly one separator,
+        // between header and body — so whether body rows are divided is purely
+        // a rendering choice, and ruled rows stay legible when cells wrap or
+        // run long.
+        //
+        // The `header ||` arm is load-bearing for #479: a table with a `|---|`
+        // separator but NO body rows is a single-row table, so the row-index
+        // test alone would drop its header divider and undo that fix.
+        if header || row_idx + 1 < table.len() {
             lines.push(table_border_line(
                 indent, &widths, '├', '┼', '┤', border, bg, width,
             ));
@@ -2228,33 +2264,54 @@ pub(super) fn push_inline_approval_card(
     palette: Palette,
     approval: &ApprovalModalState,
 ) {
+    // Spec task-approval-ux-salience: a decision card must READ as a card —
+    // danger-tinted top/bottom caps + a left rail — instead of loose muted
+    // text that blends into the transcript stream. A full right border is
+    // deliberately not drawn: the body wraps at arbitrary widths and a ragged
+    // right rail is worse than none (same compromise as the table borders).
+    let danger = Style::default()
+        .fg(palette.danger)
+        .add_modifier(Modifier::BOLD);
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("  ", palette.muted()),
+    let mut header = vec![
+        Span::styled("  ┌─ ", danger),
+        Span::styled("⚠ ", danger),
         Span::styled(
             t!("app.approval.title").to_string(),
             palette.title().add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!("  {}", t!("app.approval.inline")), palette.muted()),
-    ]));
+        Span::styled(format!(" ── {}", approval.tool_name), palette.muted()),
+    ];
+    if let Some(risk) = approval.risk.as_deref() {
+        header.push(Span::styled(
+            format!(" · {}", t!("app.approval.risk_chip", risk = risk)),
+            danger,
+        ));
+    }
+    header.push(Span::styled(
+        format!("  {}", t!("app.approval.inline")),
+        palette.muted(),
+    ));
+    lines.push(Line::from(header));
     for line in approval_modal_lines(approval, palette) {
-        push_prefixed_line(lines, "    ", palette.muted(), line);
+        push_prefixed_line(lines, "  │ ", palette.muted(), line);
     }
     for action in approval_action_labels(approval) {
         lines.push(Line::from(vec![
-            Span::styled("    ", palette.muted()),
+            Span::styled("  │ ", danger),
             Span::styled(action, palette.selected()),
         ]));
     }
     if approval.diff_preview_id().is_some() {
         lines.push(Line::from(vec![
-            Span::styled("    ", palette.muted()),
+            Span::styled("  │ ", danger),
             Span::styled(
                 t!("app.approval.action_diff").to_string(),
                 palette.selected(),
             ),
         ]));
     }
+    lines.push(Line::from(Span::styled("  └──", danger)));
 }
 
 /// UPCR-2026-023: render the pending AskUserQuestion picker inline, mirroring
@@ -2500,6 +2557,86 @@ pub(super) fn push_user_question_option_row(
     );
 }
 
+/// octos#2019 — render the HUMAN sink over background events that today only
+/// wake the model: monitor event lines and claimed fleet outbox events.
+///
+/// Three properties the issue calls out, all structural here:
+/// - **Routing.** Rows are read from `session.id`'s own bucket, so a row can
+///   never render under whichever session happens to be focused
+///   (octos-tui#461 / #466 / #483 — `flow_activity_items` filters on `turn_id`
+///   alone and has exactly that failure mode).
+/// - **Attribution.** Every group is headed by its origin
+///   (`monitor ci-tail`, `fleet <id>`); an unattributed line reads as the
+///   master speaking.
+/// - **Folding.** ONE group per origin, collapsed to its header plus the most
+///   recent line, so a 50-round loop is one foldable group rather than 50 loose
+///   lines. Ctrl+O (the existing `expanded_tool_outputs` toggle) expands.
+///
+/// Visually distinct from assistant prose: dimmed, bulleted, and never styled
+/// as reply text. This stream is human-only — it is never fed back into model
+/// context.
+pub(super) fn push_background_activity_section(
+    lines: &mut Vec<Line<'static>>,
+    palette: Palette,
+    app: &AppState,
+    session: &SessionView,
+    width: usize,
+) {
+    let groups = app.background_activity_groups(&session.id);
+    if groups.is_empty() {
+        return;
+    }
+    let expanded = app.expanded_tool_outputs;
+    let budget = width.saturating_sub(6).max(20);
+    for (origin, rows) in groups {
+        let dropped: u64 = rows.iter().filter_map(|row| row.dropped_count).sum();
+        let mut header = format!("{origin} · {} event(s)", rows.len());
+        if dropped > 0 {
+            // The cap's drop total is stated OUT LOUD: silent truncation reads
+            // as "nothing more happened".
+            header.push_str(&format!(" · {dropped} dropped"));
+        }
+        if !expanded && rows.len() > 1 {
+            header.push_str(" · ctrl+o to expand");
+        }
+        lines.push(Line::from(vec![
+            Span::styled("◈ ", Style::default().fg(palette.accent)),
+            Span::styled(
+                header,
+                Style::default()
+                    .fg(palette.muted)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        // Collapsed: the header plus the newest line (so a live loop still
+        // shows movement). Expanded: every retained line.
+        let shown: Vec<&crate::model::BackgroundActivityParams> = if expanded {
+            rows.clone()
+        } else {
+            rows.iter().rev().take(1).rev().copied().collect()
+        };
+        for row in shown {
+            let style = if row.suppressed {
+                Style::default()
+                    .fg(palette.danger)
+                    .add_modifier(Modifier::ITALIC)
+            } else {
+                Style::default().fg(palette.muted)
+            };
+            for (idx, wrapped) in wrap_display_width(row.text.trim(), budget)
+                .into_iter()
+                .enumerate()
+            {
+                let prefix = if idx == 0 { "  ⎿ " } else { "    " };
+                lines.push(Line::from(vec![
+                    Span::styled(prefix, Style::default().fg(palette.frame)),
+                    Span::styled(wrapped, style),
+                ]));
+            }
+        }
+    }
+}
+
 pub(super) fn push_prefixed_line(
     lines: &mut Vec<Line<'static>>,
     prefix: &'static str,
@@ -2585,6 +2722,53 @@ pub(super) fn push_wrapped_card_text(
     }
 }
 
+/// Render client-local reports as full-fidelity transcript blocks. This path
+/// is deliberately separate from `push_agent_task_group`: reports are neither
+/// agent actions nor Tool previews, so they never collapse, count as actions,
+/// or inherit the one-line preview limit. Each source line is wrapped without
+/// truncation and keeps a hanging indent on narrow terminals.
+pub(super) fn push_report_section(
+    lines: &mut Vec<Line<'static>>,
+    palette: Palette,
+    app: &AppState,
+    wrap_width: usize,
+) {
+    for report in flow_report_items(app) {
+        if !lines.is_empty() && !line_is_blank(lines.last()) {
+            lines.push(Line::from(""));
+        }
+
+        let mut header = vec![
+            Span::styled("• ", palette.selected()),
+            Span::styled(
+                report.title.clone(),
+                palette.muted().add_modifier(Modifier::BOLD),
+            ),
+        ];
+        if !report.status.trim().is_empty() {
+            header.push(Span::styled(
+                format!("  {}", report.status),
+                palette.muted(),
+            ));
+        }
+        lines.push(Line::from(header));
+
+        if let Some(body) = report.detail.as_deref() {
+            let body_budget = wrap_width.saturating_sub(2).max(1);
+            for source_line in body.split('\n') {
+                push_wrapped_card_text(
+                    lines,
+                    vec![Span::styled("  ", palette.border())],
+                    "  ".to_string(),
+                    source_line,
+                    palette.text(),
+                    body_budget,
+                );
+            }
+        }
+    }
+}
+
 pub(super) fn push_activity_section_with_finalization(
     lines: &mut Vec<Line<'static>>,
     palette: Palette,
@@ -2612,13 +2796,26 @@ pub(super) fn push_activity_section_with_finalization(
         lines.push(Line::from(""));
     }
     let shown_limit = if app.expanded_tool_outputs { 12 } else { 3 };
-    let recent = flow_activity
-        .iter()
-        .rev()
-        .take(shown_limit)
-        .rev()
-        .copied()
-        .collect::<Vec<_>>();
+    // Cap by RENDERED rows, not raw items: a run of identical bare tool rows
+    // merges to one `⏺ Bash ×N` line (spec task-activity-compact-fold), so
+    // the whole run costs one row of the budget.
+    let recent = {
+        let mut taken = 0usize;
+        let mut rows = 0usize;
+        while taken < flow_activity.len() && rows < shown_limit {
+            let idx = flow_activity.len() - 1 - taken;
+            let item = flow_activity[idx];
+            let mut run = 1;
+            if activity_row_is_bare(item) {
+                while run <= idx && same_activity_run(item, flow_activity[idx - run]) {
+                    run += 1;
+                }
+            }
+            taken += run;
+            rows += 1;
+        }
+        flow_activity[flow_activity.len() - taken..].to_vec()
+    };
     let pending_continuations = active_session_pending_continuations(app);
     // The header counts tally the FULL per-turn set (from `flow_activity`), not
     // the display-capped `group` — so a chip header agrees with the sibling
@@ -2647,6 +2844,8 @@ pub(super) fn push_activity_section_with_finalization(
                     is_active_group(app, last_turn),
                     app.expanded_tool_outputs,
                     true,
+                    false,
+                    last_turn.is_some_and(|turn| loop_attributed_turn_in_any_session(app, turn)),
                     wrap_width,
                 );
                 group.clear();
@@ -2667,10 +2866,14 @@ pub(super) fn push_activity_section_with_finalization(
             is_active_group(app, last_turn),
             app.expanded_tool_outputs,
             true,
+            false,
+            last_turn.is_some_and(|turn| loop_attributed_turn_in_any_session(app, turn)),
             wrap_width,
         );
     }
     if flow_activity.len() > recent.len() {
+        // Prominent fold affordance (spec task-activity-compact-fold): the
+        // hidden tail must read as expandable, not as a dim afterthought.
         lines.push(Line::from(vec![
             Span::styled("     ", palette.muted()),
             Span::styled(
@@ -2679,7 +2882,7 @@ pub(super) fn push_activity_section_with_finalization(
                     count = flow_activity.len() - recent.len()
                 )
                 .to_string(),
-                palette.muted(),
+                palette.selected(),
             ),
         ]));
     }
@@ -2763,6 +2966,8 @@ pub(super) fn push_turn_activity_log_section(
             is_active,
             app.expanded_tool_outputs,
             collapse_settled,
+            false,
+            loop_attributed_turn_in_any_session(app, &log.turn_id),
             wrap_width,
         );
         if full.len() > shown.len() {
@@ -2820,6 +3025,9 @@ pub(super) fn push_turn_activity_log_section_unflushed(
         app,
         Some(&log.turn_id),
         &items,
+        // Late-activity flush: always a fresh block (its position in
+        // scrollback is not adjacent to the live group header).
+        false,
         wrap_width,
     );
     // The settling flush routes a still-covered log through this path, so emit
@@ -2856,6 +3064,10 @@ pub(super) fn push_finalized_activity_items_section(
     app: &AppState,
     turn_id: Option<&octos_core::ui_protocol::TurnId>,
     items: &[&ActivityItem],
+    // Append child rows under an already-flushed group header for the same
+    // turn instead of opening a fresh block (see the capsule continuation in
+    // `finalized_live_turn_lines_between`).
+    continuation: bool,
     wrap_width: usize,
 ) {
     // This section targets IMMUTABLE scrollback, which can never be reclaimed
@@ -2880,7 +3092,7 @@ pub(super) fn push_finalized_activity_items_section(
     if terminal_items.is_empty() {
         return;
     }
-    if !lines.is_empty() && !line_is_blank(lines.last()) {
+    if !continuation && !lines.is_empty() && !line_is_blank(lines.last()) {
         lines.push(Line::from(""));
     }
     push_agent_task_group(
@@ -2895,6 +3107,8 @@ pub(super) fn push_finalized_activity_items_section(
         app.expanded_tool_outputs,
         // Scrollback flush path: the archive never collapses.
         false,
+        continuation,
+        turn_id.is_some_and(|turn| loop_attributed_turn_in_any_session(app, turn)),
         wrap_width,
     );
 }
@@ -2920,10 +3134,30 @@ pub(super) fn push_agent_task_group(
     is_active_group: bool,
     expanded: bool,
     collapse_settled: bool,
+    // Scrollback capsule continuation: the group header for this turn is
+    // already in scrollback (immutable), so emit ONLY the child rows — no
+    // second header. `first`-child connectors are suppressed too: the `⎿`
+    // elbow belongs to the header line these rows attach under.
+    append_children_only: bool,
+    // This turn was started by a loop firing (spec
+    // task-loop-liveness-indicator) — render the `↻` attribution prefix.
+    loop_attributed: bool,
     wrap_width: usize,
 ) {
     let active_subagents = subagent_titles.len();
     if items.is_empty() && subagent_titles.is_empty() {
+        return;
+    }
+    if append_children_only {
+        push_agent_task_children(
+            lines,
+            palette,
+            items,
+            true,
+            expanded,
+            wrap_width,
+            !collapse_settled,
+        );
         return;
     }
     // Header counts tally the FULL turn set, not the display-capped `items`.
@@ -2962,12 +3196,19 @@ pub(super) fn push_agent_task_group(
     // a settled chip keeps the static bullet. Both are 1 col wide so the title
     // stays aligned whether running or done.
     let icon = if in_progress { spinner_frame() } else { "•" };
+    // Loop attribution (spec task-loop-liveness-indicator): a turn started by
+    // a loop firing is marked so unattended runs are distinguishable from the
+    // operator's own prompts.
+    let loop_prefix = if loop_attributed { "↻ " } else { "" };
     // Role-contrast: runtime/tool activity is the LOW tier of the transcript's
     // visual hierarchy — muted header (bold kept for grouping), status icons
     // keep their state colors (spinner/✓/✗ carry information).
     let spans = vec![
         Span::styled(format!("{icon} "), palette.selected()),
-        Span::styled(title, palette.muted().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{loop_prefix}{title}"),
+            palette.muted().add_modifier(Modifier::BOLD),
+        ),
         Span::styled(format!(" ({})", metadata.join(" · ")), palette.muted()),
     ];
     lines.push(Line::from(spans));
@@ -2981,17 +3222,15 @@ pub(super) fn push_agent_task_group(
         return;
     }
 
-    for (idx, item) in items.iter().enumerate() {
-        push_agent_task_child(
-            lines,
-            palette,
-            item,
-            idx == 0,
-            expanded,
-            wrap_width,
-            !collapse_settled,
-        );
-    }
+    push_agent_task_children(
+        lines,
+        palette,
+        items,
+        false,
+        expanded,
+        wrap_width,
+        !collapse_settled,
+    );
 
     // List this turn's running sub-agents (from session.tasks, attributed by
     // turn) as children, so their live progress shows under THIS chip instead
@@ -3012,6 +3251,94 @@ pub(super) fn push_agent_task_group(
             wrap_width,
         );
         lines.push(Line::from(spans));
+    }
+}
+
+/// Whether ANY session attributes this turn to a loop fire. The group
+/// renderer has no session id in scope; turn ids are unique, so matching on
+/// the turn alone is exact (spec task-loop-liveness-indicator).
+fn loop_attributed_turn_in_any_session(
+    app: &AppState,
+    turn_id: &octos_core::ui_protocol::TurnId,
+) -> bool {
+    app.loop_attributed_turns
+        .iter()
+        .any(|(_, attributed)| attributed == turn_id)
+}
+
+/// A tool row with no invocation text — the only kind that may run-length
+/// merge (spec task-activity-compact-fold): a bare `⏺ Bash` line carries no
+/// information beyond its name and status.
+fn activity_row_is_bare(item: &ActivityItem) -> bool {
+    item.kind == ActivityKind::Tool
+        && tool_invocation_text(item)
+            .map(|text| text.trim().is_empty())
+            .unwrap_or(true)
+}
+
+/// Whether `next` continues `item`'s mergeable run: both bare, same display
+/// name, same failed/running status, same originating turn.
+fn same_activity_run(item: &ActivityItem, next: &ActivityItem) -> bool {
+    activity_row_is_bare(next)
+        && tool_display_name(&next.title) == tool_display_name(&item.title)
+        && activity_is_failed(next) == activity_is_failed(item)
+        && is_running_activity(next) == is_running_activity(item)
+        && next.turn_id == item.turn_id
+}
+
+/// Emit a group's child rows with run-length merging (spec
+/// task-activity-compact-fold): consecutive items that share a display name,
+/// carry NO invocation text, and have the same failed/running status collapse
+/// to one `⏺ Bash ×N` row. Rows with a real invocation always render
+/// individually — the command IS the information.
+fn push_agent_task_children(
+    lines: &mut Vec<Line<'static>>,
+    palette: Palette,
+    items: &[&ActivityItem],
+    suppress_first_connector: bool,
+    expanded: bool,
+    wrap_width: usize,
+    show_output: bool,
+) {
+    let mut idx = 0;
+    let mut emitted = 0usize;
+    while idx < items.len() {
+        let item = items[idx];
+        let mut run = 1;
+        if activity_row_is_bare(item) {
+            while idx + run < items.len() && same_activity_run(item, items[idx + run]) {
+                run += 1;
+            }
+        }
+        if run > 1 {
+            let (bullet, bullet_style) = tool_card_bullet(item, palette);
+            let spans = clip_line_spans(
+                vec![
+                    Span::styled(TOOL_CARD_CHILD_INDENT, palette.border()),
+                    Span::styled(format!("{bullet} "), bullet_style),
+                    Span::styled(tool_display_name(&item.title), palette.text()),
+                    Span::styled(
+                        t!("app.activity.repeat_suffix", count = run).into_owned(),
+                        palette.muted(),
+                    ),
+                ],
+                wrap_width,
+            );
+            lines.push(Line::from(spans));
+        } else {
+            let first = emitted == 0 && !suppress_first_connector;
+            push_agent_task_child(
+                lines,
+                palette,
+                item,
+                first,
+                expanded,
+                wrap_width,
+                show_output,
+            );
+        }
+        emitted += 1;
+        idx += run;
     }
 }
 
@@ -3255,7 +3582,7 @@ pub(super) fn push_inline_diff_preview(
 ) {
     // C6: when there is no usable line diff ("line diff unavailable for this
     // mutation"), hide the box entirely instead of rendering an empty preview
-    // with a dead "[/] select hunk | c stage" UI. Loading/error stay visible.
+    // with a dead "select hunk | stage" UI. Loading/error stay visible.
     if !diff.has_renderable_diff() {
         return;
     }
@@ -3318,8 +3645,18 @@ pub(super) fn push_inline_diff_preview(
 
         if !preview.files.is_empty() {
             // Footer hint: hunk navigation/staging, plus the view-mode toggle
-            // — or, when the transcript is too narrow to split, why `v` is
-            // disabled.
+            // — or, when the transcript is too narrow to split, why the toggle
+            // is disabled.
+            //
+            // The hint advertises the Alt binds, NOT the plain `[`/`]`/`c`/`v`
+            // keys. The plain keys are gated on `focus != Composer` (#485,
+            // because a bare letter cannot be both text and a command), and
+            // the composer is the usual focus while a preview is open — so a
+            // hint naming them would be wrong exactly when it is read. The Alt
+            // family works from any focus. This function has no access to
+            // focus, so a focus-aware hint would mean plumbing it through both
+            // call sites for a string; advertising the universally-correct
+            // binds is the simpler honest answer.
             let mut hint = t!("app.diff.select_stage_hint").into_owned();
             hint.push_str(" | ");
             if side_by_side_available {

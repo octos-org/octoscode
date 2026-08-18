@@ -75,6 +75,211 @@ mod tests {
         viewport::ScrollbackTracker,
     };
 
+    // ── background/activity — the human sink (octos#2019) ────────────────
+
+    fn background_activity_row(
+        session: &str,
+        origin_id: &str,
+        label: &str,
+        text: &str,
+    ) -> crate::model::BackgroundActivityParams {
+        crate::model::BackgroundActivityParams {
+            session_id: SessionKey(session.into()),
+            profile_id: Some("dev".into()),
+            origin_kind: "monitor".into(),
+            origin_id: origin_id.into(),
+            origin_label: Some(label.into()),
+            text: text.into(),
+            emitted_at_ms: 1_760_000_000_000,
+            dropped_count: None,
+            suppressed: false,
+        }
+    }
+
+    fn background_activity_lines(app: &AppState, session: &SessionView) -> Vec<String> {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        push_background_activity_section(
+            &mut lines,
+            Palette::for_theme(ThemeName::Codex),
+            app,
+            session,
+            80,
+        );
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    fn two_session_app() -> AppState {
+        AppState::new(
+            vec![
+                SessionView {
+                    id: SessionKey("dev:local:a".into()),
+                    title: "a".into(),
+                    profile_id: None,
+                    messages: vec![],
+                    tasks: vec![],
+                    live_reply: None,
+                },
+                SessionView {
+                    id: SessionKey("dev:local:b".into()),
+                    title: "b".into(),
+                    profile_id: None,
+                    messages: vec![],
+                    tasks: vec![],
+                    live_reply: None,
+                },
+            ],
+            0,
+            "ready".into(),
+            None,
+            false,
+        )
+    }
+
+    /// octos#2019 — background events render under the session that OWNS the
+    /// emitter, NOT under whichever session happens to be focused. That
+    /// failure mode has shipped three times (octos-tui#461, #466, #483), so
+    /// this asserts ROUTING: session B's line must be absent from session A's
+    /// transcript while A is focused, and vice versa.
+    #[test]
+    fn should_render_background_activity_only_under_its_own_session_when_another_is_focused() {
+        let mut app = two_session_app();
+        app.push_background_activity(background_activity_row(
+            "dev:local:a",
+            "monitor_01",
+            "ci-tail",
+            "A: build failed",
+        ));
+        app.push_background_activity(background_activity_row(
+            "dev:local:b",
+            "monitor_02",
+            "deploy-tail",
+            "B: rollout stalled",
+        ));
+
+        let session_a = app.sessions[0].clone();
+        let session_b = app.sessions[1].clone();
+        // Session A is focused.
+        assert_eq!(app.selected_session, 0);
+
+        let a_lines = background_activity_lines(&app, &session_a);
+        assert!(
+            a_lines.iter().any(|line| line.contains("A: build failed")),
+            "the owning session must show its own event: {a_lines:?}"
+        );
+        assert!(
+            !a_lines
+                .iter()
+                .any(|line| line.contains("B: rollout stalled")),
+            "another session's event must never render here: {a_lines:?}"
+        );
+
+        let b_lines = background_activity_lines(&app, &session_b);
+        assert!(
+            b_lines
+                .iter()
+                .any(|line| line.contains("B: rollout stalled")),
+            "session B keeps its own event: {b_lines:?}"
+        );
+        assert!(
+            !b_lines.iter().any(|line| line.contains("A: build failed")),
+            "session A's event must not leak into B: {b_lines:?}"
+        );
+    }
+
+    /// octos#2019 — a 50-round loop must be ONE foldable group, not 50 loose
+    /// lines, and every group must name its origin (an unattributed line reads
+    /// as the master speaking).
+    #[test]
+    fn should_fold_background_activity_into_one_attributed_group_when_collapsed() {
+        let mut app = two_session_app();
+        for i in 0..50 {
+            app.push_background_activity(background_activity_row(
+                "dev:local:a",
+                "monitor_01",
+                "ci-tail",
+                &format!("round {i}"),
+            ));
+        }
+        let session = app.sessions[0].clone();
+
+        let collapsed = background_activity_lines(&app, &session);
+        assert_eq!(
+            collapsed.len(),
+            2,
+            "collapsed = one header + the newest line: {collapsed:?}"
+        );
+        // ATTRIBUTION + count on the header.
+        assert!(collapsed[0].contains("monitor ci-tail"), "{collapsed:?}");
+        assert!(collapsed[0].contains("50 event(s)"), "{collapsed:?}");
+        assert!(collapsed[1].contains("round 49"), "{collapsed:?}");
+
+        app.expanded_tool_outputs = true;
+        let expanded = background_activity_lines(&app, &session);
+        assert!(
+            expanded.len() > collapsed.len(),
+            "ctrl+o expands the group: {}",
+            expanded.len()
+        );
+        assert!(expanded.iter().any(|line| line.contains("round 0")));
+        assert!(expanded.iter().any(|line| line.contains("round 49")));
+    }
+
+    /// octos#2019 — a capped stream must SAY it was capped. Silent truncation
+    /// reads as "nothing more happened".
+    #[test]
+    fn should_show_the_drop_marker_when_background_activity_was_capped() {
+        let mut app = two_session_app();
+        app.push_background_activity(background_activity_row(
+            "dev:local:a",
+            "monitor_01",
+            "ci-tail",
+            "first",
+        ));
+        let mut marker = background_activity_row(
+            "dev:local:a",
+            "monitor_01",
+            "ci-tail",
+            "further events \
+             from this origin are suppressed",
+        );
+        marker.suppressed = true;
+        marker.dropped_count = Some(37);
+        app.push_background_activity(marker);
+        let session = app.sessions[0].clone();
+
+        let lines = background_activity_lines(&app, &session);
+        assert!(
+            lines[0].contains("37 dropped"),
+            "the header states the drop total out loud: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("suppressed")),
+            "the marker row itself is visible: {lines:?}"
+        );
+    }
+
+    /// octos#2019 — a row with no routing key would have to fall back to the
+    /// focused session (the octos-tui#461/#466/#483 bug). Drop it instead.
+    #[test]
+    fn should_drop_background_activity_when_it_carries_no_session_key() {
+        let mut app = two_session_app();
+        app.push_background_activity(background_activity_row("   ", "monitor_01", "ci", "orphan"));
+        assert!(
+            app.background_activity.is_empty(),
+            "an unroutable row is never stored"
+        );
+        let session = app.sessions[0].clone();
+        assert!(background_activity_lines(&app, &session).is_empty());
+    }
+
     #[test]
     fn user_message_block_uses_bright_gutter_and_reverse_video_body() {
         // Reverse video is theme-independent and SSH-portable — assert it on
@@ -970,6 +1175,108 @@ mod tests {
     }
 
     #[test]
+    fn status_work_text_keeps_the_full_missing_field_name_of_a_decode_error() {
+        // Regression: the status bar head-truncated the run-state message at 80
+        // chars, and serde puts the diagnosis LAST — so a real decode failure
+        // rendered as "... missing field `obj ...", naming a field that does not
+        // exist. The operator then hunts for `obj` instead of `objective`.
+        let session_id = SessionKey("local:test".into());
+        let mut app = AppState::new(
+            vec![SessionView {
+                id: session_id.clone(),
+                title: "t".into(),
+                profile_id: Some("coding".into()),
+                messages: vec![],
+                tasks: vec![],
+                live_reply: None,
+            }],
+            0,
+            "ready".into(),
+            None,
+            false,
+        );
+        let message =
+            "failed to decode UI protocol result for session/goal/get: missing field `objective`";
+        app.run_state = SessionRunState::Error {
+            message: message.into(),
+        };
+
+        let work = status_bar_work_text(&app);
+        assert!(
+            work.contains("missing field `objective`"),
+            "the missing field name must survive truncation: {work:?}"
+        );
+        assert!(
+            work.contains("session/goal/get"),
+            "the failing method must survive truncation whole: {work:?}"
+        );
+        assert!(
+            !work.contains("`obj ..."),
+            "a mangled identifier must never reach the status line: {work:?}"
+        );
+        assert!(
+            work.contains("... session/goal/get"),
+            "nor may the seam land inside the method name: {work:?}"
+        );
+        assert!(
+            work.contains("failed to decode"),
+            "the head still identifies the failure: {work:?}"
+        );
+
+        // Blocked messages take the same path.
+        app.run_state = SessionRunState::Blocked {
+            message: message.into(),
+        };
+        assert!(status_bar_work_text(&app).contains("missing field `objective`"));
+    }
+
+    #[test]
+    fn elide_middle_snaps_the_seam_to_token_boundaries() {
+        // Neither half may show a fragment of a token: a cut identifier names
+        // something that does not exist, in the head as much as in the tail.
+        let message =
+            "failed to decode UI protocol result for session/goal/get: missing field `objective`";
+        let elided = elide_middle_terminal_line(message, 80);
+        assert_eq!(
+            elided,
+            "failed to decode UI protocol ... session/goal/get: missing field `objective`"
+        );
+        assert!(elided.chars().count() <= 80);
+
+        // Every surviving token is a whole token of the original.
+        let words = message.split_whitespace().collect::<Vec<_>>();
+        for token in elided.split_whitespace().filter(|token| *token != "...") {
+            assert!(
+                words.contains(&token),
+                "{token:?} is not a whole token of the original: {elided:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn elide_middle_keeps_both_ends_within_budget() {
+        // Short enough → untouched.
+        assert_eq!(elide_middle_terminal_line("short", 80), "short");
+
+        let long = "a".repeat(60) + "TAIL_MARKER";
+        let elided = elide_middle_terminal_line(&long, 40);
+        assert!(elided.chars().count() <= 40, "budget respected: {elided:?}");
+        assert!(elided.starts_with("aaaa"), "head kept: {elided:?}");
+        assert!(elided.ends_with("TAIL_MARKER"), "tail kept: {elided:?}");
+        assert!(elided.contains(" ... "), "seam is marked: {elided:?}");
+
+        // Multibyte input must not panic and must not split a char.
+        let cjk = "日本語のとても長いエラーメッセージです".repeat(4);
+        let elided = elide_middle_terminal_line(&cjk, 30);
+        assert!(elided.chars().count() <= 30);
+        assert!(cjk.ends_with(elided.rsplit(" ... ").next().unwrap()));
+
+        // Budget too small for two halves → plain head cut, still no panic.
+        let narrow = elide_middle_terminal_line(&long, 10);
+        assert!(narrow.chars().count() <= 10, "narrow budget: {narrow:?}");
+    }
+
+    #[test]
     fn status_work_text_advertises_recovery_keys_when_a_decision_is_pending() {
         // Regression: a turn parked on an approval/question locks the composer and
         // its card can scroll off the clipped live tail — leaving a bare "Waiting"
@@ -1817,7 +2124,7 @@ mod tests {
 
         let text = rendered_text(&app);
 
-        assert!(!text.contains("Octos TUI"));
+        assert!(!text.contains("Octoscode"));
         assert!(!text.contains("Protocol session"));
         assert!(!text.contains("ws://"));
         assert!(!text.contains("Transcript"));
@@ -2670,7 +2977,7 @@ mod tests {
             "surplus removed line keeps a blank right column: {left_only:?}"
         );
         assert!(
-            rows.iter().any(|row| row.contains("v unified")),
+            rows.iter().any(|row| row.contains("Alt+V unified")),
             "footer hint advertises the toggle back to unified"
         );
     }
@@ -2729,7 +3036,7 @@ mod tests {
             "default mode stays unified: {removed_row:?}"
         );
         assert!(
-            rows.iter().any(|row| row.contains("v side-by-side")),
+            rows.iter().any(|row| row.contains("Alt+V side-by-side")),
             "footer hint advertises the side-by-side toggle"
         );
     }
@@ -3147,6 +3454,40 @@ mod tests {
     }
 
     #[test]
+    fn status_bar_wraps_instead_of_clipping_on_narrow_terminals() {
+        // Screenshot bug (2026-08-02): the bottom status bar was a fixed
+        // one-row Paragraph, so on narrow terminals the tail — often the key
+        // hints — silently clipped off the right edge. It must word-wrap into
+        // extra reserved rows instead (capped so it can never eat the screen).
+        let app = AppState::new(
+            vec![SessionView {
+                id: SessionKey("local:test".into()),
+                title: "test".into(),
+                profile_id: Some("a-rather-long-profile-name".into()),
+                messages: vec![Message::assistant("ready")],
+                tasks: vec![],
+                live_reply: None,
+            }],
+            0,
+            "Configured providers refreshed: none".into(),
+            None,
+            false,
+        );
+
+        let narrow = crate::app::render::status_bar_height(&app, 60);
+        assert!(
+            narrow > 1,
+            "a status line wider than 60 cols must reserve extra rows"
+        );
+        assert!(narrow <= 3, "wrap growth is capped at 3 rows");
+        assert_eq!(
+            crate::app::render::status_bar_height(&app, 600),
+            1,
+            "a wide terminal keeps the single-row bar"
+        );
+    }
+
+    #[test]
     fn render_status_uses_static_idle_label_without_spinner() {
         let app = AppState::new(
             vec![SessionView {
@@ -3169,6 +3510,96 @@ mod tests {
         for frame in ["◐", "◓", "◑", "◒"] {
             assert!(!text.contains(frame), "idle render must not animate");
         }
+    }
+
+    /// The store raises this on `cursor.healthy: false`; this is the other half
+    /// of that chain — that the warning and its remedy actually reach the
+    /// screen rather than sitting in state nobody paints. Without it the whole
+    /// point of the change (an operator can tell a broken stream from a slow
+    /// agent) rests on an untested assumption.
+    ///
+    /// It drives the render off `unhealthy_cursors` and leaves `status` at
+    /// "ready", because the earlier version of this test did neither: it pushed
+    /// the activity row AND set the status slot, then asserted on text both
+    /// carry — so the slot alone satisfied it. In the field the row turned out
+    /// to render inside a COLLAPSED activity group ("1 action(s)", body hidden
+    /// until Ctrl+O) and the slot was overwritten seconds later, leaving
+    /// nothing legible on screen while the assertion stayed green.
+    #[test]
+    fn render_shows_the_unhealthy_cursor_warning_and_its_remedy() {
+        let session_id = SessionKey("local:test".into());
+        let mut app = AppState::new(
+            vec![SessionView {
+                id: session_id.clone(),
+                title: "test".into(),
+                profile_id: Some("coding".into()),
+                messages: vec![Message::assistant("ready")],
+                tasks: vec![],
+                live_reply: None,
+            }],
+            0,
+            "ready".into(),
+            None,
+            false,
+        );
+        app.unhealthy_cursors.insert(session_id);
+
+        let text = rendered_text(&app);
+
+        assert!(
+            text.contains("reconnect"),
+            "the remedy must be on screen: {text}"
+        );
+        assert!(
+            text.contains("lossy"),
+            "the warning must name the risk: {text}"
+        );
+    }
+
+    /// The activity row fires once, on the transition into unhealthy, and the
+    /// status slot it also writes is overwritten by the next command's feedback
+    /// — in the field, by the `/status` menu's own "Menu: status". So minutes
+    /// later the screen is back to looking healthy while the stream is still
+    /// dropping events. The degraded state is a CONDITION, not an event: it
+    /// stays on the status bar until the server says the cursor recovered,
+    /// exactly like the loop chip.
+    #[test]
+    fn status_bar_holds_the_degraded_stream_chip_until_the_cursor_recovers() {
+        let session_id = SessionKey("local:test".into());
+        let mut app = AppState::new(
+            vec![SessionView {
+                id: session_id.clone(),
+                title: "test".into(),
+                profile_id: Some("coding".into()),
+                messages: vec![Message::assistant("ready")],
+                tasks: vec![],
+                live_reply: None,
+            }],
+            0,
+            "ready".into(),
+            None,
+            false,
+        );
+
+        assert!(
+            !rendered_text(&app).contains("stream degraded"),
+            "a healthy stream must not carry the chip"
+        );
+
+        app.unhealthy_cursors.insert(session_id.clone());
+        // Whatever the last command reported still owns the transient slot.
+        app.status = "Menu: status".into();
+        let text = rendered_text(&app);
+        assert!(
+            text.contains("stream degraded"),
+            "the chip must outlive the transient status: {text}"
+        );
+
+        app.unhealthy_cursors.remove(&session_id);
+        assert!(
+            !rendered_text(&app).contains("stream degraded"),
+            "recovery must clear the chip"
+        );
     }
 
     #[test]
@@ -3522,6 +3953,57 @@ mod tests {
         }
         // The old dashed header separator is gone (box-drawing replaces it).
         assert!(!text.contains("-+-"));
+    }
+
+    /// Every row except the last is followed by a rule, not just the header.
+    ///
+    /// Markdown cannot express this — GFM has exactly ONE separator, between
+    /// header and body — so the number of rules is entirely a rendering
+    /// decision, and no model output can change it.
+    #[test]
+    fn render_markdown_table_rules_every_row_but_the_last() {
+        let app = AppState::new(
+            vec![SessionView {
+                id: SessionKey("local:test".into()),
+                title: "test".into(),
+                profile_id: Some("coding".into()),
+                messages: vec![Message::assistant(
+                    "| A | B |\n|---|---|\n| r1 | x |\n| r2 | y |\n| r3 | z |",
+                )],
+                tasks: vec![],
+                live_reply: None,
+            }],
+            0,
+            "ready".into(),
+            None,
+            false,
+        );
+        let buffer = rendered_buffer(&app, Palette::for_theme(ThemeName::Codex));
+        let rows: Vec<String> = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect();
+
+        // Count only the TABLE's own rules: the composer draws a box too, but
+        // a single-column box has no `┼` (that glyph needs a column join).
+        let mid = rows.iter().filter(|r| r.contains('┼')).count();
+
+        // header + 3 body rows = 4 rows, so 3 interior rules — under the
+        // header and between the body rows, but NOT after the last row, which
+        // the bottom border closes.
+        assert_eq!(
+            mid,
+            3,
+            "expected a rule under the header AND between body rows, got {mid}\n{}",
+            rows.join("\n")
+        );
+        assert!(
+            rows.iter().any(|r| r.contains('┴')),
+            "table still closes with a bottom border"
+        );
     }
 
     #[test]
@@ -4710,11 +5192,61 @@ mod tests {
             .collect::<String>();
 
         assert!(text.contains("Large paste collapsed"));
-        assert!(text.contains("[paste] 40 lines"));
+        assert!(text.contains("[paste 40 lines"));
         assert!(text.contains("preview: paste-line-01"));
         assert!(!text.contains("paste-line-40"));
         assert!(text.contains("Composer"));
         assert!(text.contains("state"));
+    }
+
+    /// The `[paste …]` chip renders WHERE THE PASTE LANDED. A typed slash
+    /// command ahead of the paste used to be swallowed into a chip drawn at
+    /// column 0, so a `/mcp upsert server ` + pasted-JSON draft read as if the
+    /// paste came before the command and the command itself had vanished.
+    #[test]
+    fn render_composer_keeps_the_typed_command_ahead_of_the_paste_chip() {
+        let mut app = AppState::new(
+            vec![SessionView {
+                id: SessionKey("local:test".into()),
+                title: "test".into(),
+                profile_id: Some("coding".into()),
+                messages: vec![Message::assistant("ready")],
+                tasks: vec![],
+                live_reply: None,
+            }],
+            0,
+            "ready".into(),
+            None,
+            false,
+        );
+        for ch in "/mcp upsert server ".chars() {
+            app.insert_composer_char(ch);
+        }
+        app.insert_pasted_text("{\n  \"name\": \"docs\",\n  \"cmd\": \"npx docs-mcp\"\n}");
+
+        let (buffer, cursor) = rendered_buffer_and_cursor_with_size(
+            &app,
+            Palette::for_theme(ThemeName::Codex),
+            80,
+            24,
+        );
+        let rows = rendered_rows(&buffer);
+        let chip_row = row_index_containing(&rows, "[paste ");
+
+        assert!(
+            rows[chip_row].contains("/mcp upsert server [paste 4 lines"),
+            "the command must precede the chip on the same row, got {:?}",
+            rows[chip_row]
+        );
+        assert!(
+            rows.join("\n").contains("preview: {"),
+            "the preview still reads the pasted block"
+        );
+        assert_eq!(
+            chip_row,
+            usize::from(cursor.y),
+            "the caret sits on the chip row, just past the chip"
+        );
     }
 
     #[test]
@@ -4763,7 +5295,11 @@ mod tests {
         assert!(text.contains("state"));
         assert!(text.contains("running"));
         assert!(text.contains("approval"));
-        assert!(text.contains("1 msgs/0 tasks"));
+        // Status-line declutter: the msgs/tasks counter, the constant
+        // "interactive" word, and the turn id are gone — /context and /ps own
+        // the counts, and "Working" already says a turn is live.
+        assert!(!text.contains("msgs/"));
+        assert!(!text.contains("interactive active"));
     }
 
     /// Regression (indent-not-honored): the agent-task child row used to be one
@@ -7414,6 +7950,398 @@ mod tests {
     }
 
     #[test]
+    fn running_subagent_row_shows_elapsed_time() {
+        // Spec task-approval-ux-salience: "Orchestrating… Spawn" sat frozen
+        // for 5 minutes with zero feedback. The chip row must show the task
+        // is at least aging.
+        let turn_id = TurnId::new();
+        let task_id = TaskId::new();
+        let mut app = AppState::new(
+            vec![SessionView {
+                id: SessionKey("local:test".into()),
+                title: "test".into(),
+                profile_id: Some("coding".into()),
+                messages: vec![Message::user("write the book")],
+                tasks: vec![TaskView {
+                    id: task_id.clone(),
+                    title: "写第3章".into(),
+                    state: TaskRuntimeState::Running,
+                    runtime_detail: None,
+                    output_tail: String::new(),
+                    turn_id: Some(turn_id.clone()),
+                }],
+                live_reply: Some(crate::model::LiveReply {
+                    turn_id: turn_id.clone(),
+                    text: String::new(),
+                }),
+            }],
+            0,
+            "Working".into(),
+            None,
+            false,
+        );
+        app.set_run_state_in_progress();
+        // The chip needs at least one activity item to render its group.
+        app.activity
+            .push(capsule_tool_item(&turn_id, "c1", "cargo build"));
+        app.task_first_seen.insert(
+            task_id,
+            std::time::Instant::now() - std::time::Duration::from_secs(272),
+        );
+
+        let text = rendered_text(&app);
+
+        assert!(
+            text.contains("4m 32s"),
+            "sub-agent row carries elapsed time: {text}"
+        );
+    }
+
+    fn loop_record(
+        loop_id: &str,
+        next_in_secs: i64,
+        expires_in_secs: i64,
+    ) -> octos_core::ui_protocol::UiLoopRecord {
+        let now = chrono::Utc::now().timestamp_millis();
+        octos_core::ui_protocol::UiLoopRecord {
+            loop_id: loop_id.into(),
+            session_id: SessionKey("local:test".into()),
+            profile_id: Some("kimi".into()),
+            prompt: "请你完成这本书".into(),
+            mode: "self_paced".into(),
+            interval_seconds: None,
+            status: "active".into(),
+            next_run_at_ms: Some(now + next_in_secs * 1000),
+            last_run_at_ms: None,
+            expires_at_ms: now + expires_in_secs * 1000,
+            created_at_ms: now,
+            updated_at_ms: now,
+        }
+    }
+
+    fn app_with_active_loop() -> AppState {
+        let mut app = AppState::new(
+            vec![SessionView {
+                id: SessionKey("local:test".into()),
+                title: "test".into(),
+                profile_id: Some("kimi".into()),
+                messages: vec![Message::user("write the book")],
+                tasks: vec![],
+                live_reply: None,
+            }],
+            0,
+            "ready".into(),
+            None,
+            false,
+        );
+        app.upsert_session_loop(
+            &SessionKey("local:test".into()),
+            loop_record("loop-1", 134, 3 * 3600),
+        );
+        app
+    }
+
+    fn multi_loop_app(count: usize) -> AppState {
+        let mut app = AppState::new(
+            vec![SessionView {
+                id: SessionKey("local:test".into()),
+                title: "test".into(),
+                profile_id: Some("kimi".into()),
+                messages: vec![Message::user("go")],
+                tasks: vec![],
+                live_reply: None,
+            }],
+            0,
+            "ready".into(),
+            None,
+            false,
+        );
+        for idx in 0..count {
+            let mut record = loop_record(&format!("loop-{idx}"), 134, 3 * 3600);
+            record.prompt = format!("目标编号 {idx} 的一段较长提示词内容");
+            app.upsert_session_loop(&SessionKey("local:test".into()), record);
+        }
+        app
+    }
+
+    fn loops_row_text(app: &AppState, width: u16) -> String {
+        autonomy_indicator_lines(app, Palette::for_theme(ThemeName::Slate), width)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .find(|text| text.contains("Loops"))
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn loop_row_replaces_overflowing_chips_with_a_count() {
+        // Spec task-loop-row-overflow: a too-narrow row used to be hard-cut
+        // by ratatui — the tail of the last chip vanished with no hint that
+        // anything was missing.
+        let app = multi_loop_app(3);
+
+        let text = loops_row_text(&app, 60);
+
+        assert!(text.contains("more"), "overflow hint present: {text}");
+        assert!(
+            UnicodeWidthStr::width(text.as_str()) <= 60,
+            "row fits the width: {text}"
+        );
+    }
+
+    #[test]
+    fn loop_row_without_overflow_has_no_more_hint() {
+        let app = multi_loop_app(1);
+
+        let text = loops_row_text(&app, 200);
+
+        assert!(
+            !text.contains("more"),
+            "no hint when everything fits: {text}"
+        );
+    }
+
+    #[test]
+    fn loop_row_keeps_header_when_chips_overflow() {
+        let app = multi_loop_app(3);
+
+        let text = loops_row_text(&app, 34);
+
+        assert!(text.contains("Loops"), "header survives: {text}");
+    }
+
+    #[test]
+    fn loop_duration_rolls_over_into_days() {
+        // Spec task-loop-duration-days: a week-long expiry rendered as
+        // "167h 58m", forcing the reader to divide by 24.
+        assert_eq!(crate::app::format_loop_duration(604_680), "6d 23h");
+    }
+
+    #[test]
+    fn loop_duration_under_a_day_keeps_hours() {
+        let text = crate::app::format_loop_duration(10_800);
+        assert!(text.contains("3h"), "hours kept: {text}");
+        assert!(!text.contains('d'), "no day unit under 24h: {text}");
+    }
+
+    #[test]
+    fn loop_duration_under_an_hour_keeps_minutes() {
+        assert_eq!(crate::app::format_loop_duration(134), "2m 14s");
+    }
+
+    #[test]
+    fn loop_row_shows_countdown_iteration_and_expiry() {
+        // Spec task-loop-liveness-indicator: the loop row was static text —
+        // no countdown, no iteration, no expiry — so a running loop looked
+        // identical to a dead one.
+        let mut app = app_with_active_loop();
+        app.loop_fire_counts
+            .insert((SessionKey("local:test".into()), "loop-1".to_string()), 7);
+
+        let text = rendered_text(&app);
+
+        assert!(text.contains("7"), "iteration count present: {text}");
+        assert!(
+            text.contains("2m 14s") || text.contains("2m 13s"),
+            "next-run countdown present: {text}"
+        );
+        assert!(text.contains("2h 59m"), "expiry remaining present: {text}");
+    }
+
+    #[test]
+    fn loop_spinner_advances_slower_than_the_turn_spinner() {
+        // A permanently visible row must not spin at the turn spinner's
+        // 160ms cadence — that reads as noise, not liveness.
+        assert!(
+            crate::app::loop_spinner_period_ms() >= 3 * crate::app::turn_spinner_period_ms(),
+            "loop spinner must be at least 3x slower than the turn spinner"
+        );
+    }
+
+    #[test]
+    fn status_bar_shows_compact_loop_chip_with_countdown() {
+        let app = app_with_active_loop();
+
+        let text = rendered_text(&app);
+
+        assert!(
+            text.contains("loop"),
+            "status bar keeps a loop chip: {text}"
+        );
+        assert!(
+            text.contains("2m 14s") || text.contains("2m 13s"),
+            "chip carries the countdown: {text}"
+        );
+        assert!(
+            !text.contains("/loop pause to stop"),
+            "the verbose static hint is replaced: {text}"
+        );
+    }
+
+    #[test]
+    fn loop_triggered_turn_group_carries_attribution_prefix() {
+        let turn_id = TurnId::new();
+        let session_id = SessionKey("local:test".into());
+        let mut app = capsule_app(&session_id, &turn_id);
+        app.loop_attributed_turns
+            .insert((session_id.clone(), turn_id.clone()));
+
+        let text = rendered_text(&app);
+
+        assert!(
+            text.contains("↻"),
+            "loop-triggered turn group is attributed: {text}"
+        );
+    }
+
+    #[test]
+    fn manual_turn_group_has_no_attribution_prefix() {
+        let turn_id = TurnId::new();
+        let session_id = SessionKey("local:test".into());
+        let app = capsule_app(&session_id, &turn_id);
+
+        let text = rendered_text(&app);
+
+        assert!(
+            !text.contains("↻"),
+            "a manual turn must not be attributed to a loop: {text}"
+        );
+    }
+
+    #[test]
+    fn status_bar_shows_quota_state_after_quota_terminal() {
+        // Spec task-quota-exhausted-card: quota exhaustion is a distinct
+        // amber state, not the generic red Error.
+        let mut app = AppState::new(
+            vec![SessionView {
+                id: SessionKey("local:test".into()),
+                title: "test".into(),
+                profile_id: Some("kimi".into()),
+                messages: vec![Message::user("go")],
+                tasks: vec![],
+                live_reply: None,
+            }],
+            0,
+            "ready".into(),
+            None,
+            false,
+        );
+        app.run_state = SessionRunState::Error {
+            message: "quota".into(),
+        };
+        app.quota_exhausted = true;
+
+        let text = rendered_text(&app);
+
+        assert!(
+            text.contains("Quota") || text.contains("额度"),
+            "state chip must read Quota, not generic Error: {text}"
+        );
+    }
+
+    #[test]
+    fn spawn_originated_approval_flips_state_to_waiting() {
+        // Spec task-approval-ux-salience regression pin: approvals arrive on
+        // the MASTER session (live log 2026-08-02:
+        // session_id=kimi:local:tui#coding), so a visible approval during an
+        // in-progress turn must show Waiting, never Working.
+        let turn_id = TurnId::new();
+        let mut app = AppState::new(
+            vec![SessionView {
+                id: SessionKey("local:test".into()),
+                title: "test".into(),
+                profile_id: Some("coding".into()),
+                messages: vec![Message::user("go")],
+                tasks: vec![],
+                live_reply: Some(crate::model::LiveReply {
+                    turn_id: turn_id.clone(),
+                    text: "working".into(),
+                }),
+            }],
+            0,
+            "Working".into(),
+            None,
+            false,
+        );
+        app.set_run_state_in_progress();
+        app.approval = Some(ApprovalModalState {
+            session_id: SessionKey("local:test".into()),
+            approval_id: ApprovalId::new(),
+            turn_id,
+            tool_name: "bash".into(),
+            title: "Run build".into(),
+            body: "approve?".into(),
+            approval_kind: Some("command".into()),
+            risk: None,
+            typed_details: None,
+            render_hints: None,
+            visible: true,
+        });
+
+        let text = rendered_text(&app);
+
+        assert!(
+            text.contains("Waiting"),
+            "a visible approval for the active session must show Waiting: {text}"
+        );
+    }
+
+    #[test]
+    fn approval_card_renders_bordered_with_risk_chip() {
+        // Spec task-approval-ux-salience: the old card was loose muted text
+        // that blended into the stream ("授权 ui 做的很不好"). It must render
+        // as a bordered card with an explicit risk chip.
+        let turn_id = TurnId::new();
+        let mut app = AppState::new(
+            vec![SessionView {
+                id: SessionKey("local:test".into()),
+                title: "test".into(),
+                profile_id: Some("coding".into()),
+                messages: vec![Message::user("run the thing")],
+                tasks: vec![],
+                live_reply: Some(crate::model::LiveReply {
+                    turn_id: turn_id.clone(),
+                    text: "working".into(),
+                }),
+            }],
+            0,
+            "Working".into(),
+            None,
+            false,
+        );
+        app.approval = Some(ApprovalModalState {
+            session_id: SessionKey("local:test".into()),
+            approval_id: ApprovalId::new(),
+            turn_id,
+            tool_name: "shell".into(),
+            title: "Delete the database".into(),
+            body: "approve?".into(),
+            approval_kind: Some("command".into()),
+            risk: Some("high".into()),
+            typed_details: None,
+            render_hints: None,
+            visible: true,
+        });
+
+        let text = rendered_text(&app);
+
+        assert!(text.contains("┌"), "card has a top border: {text}");
+        assert!(text.contains("└"), "card has a bottom border: {text}");
+        assert!(
+            text.contains("risk: high") || text.contains("风险: high"),
+            "risk renders as an explicit chip: {text}"
+        );
+        assert!(
+            text.contains("Approval Requested"),
+            "title survives the restyle: {text}"
+        );
+    }
+
+    #[test]
     fn pending_decision_card_stays_visible_when_the_live_tail_overflows() {
         // The reported trap: a turn parked on an approval streams a wall of output
         // that pushes the (top-rendered) card off the height-clipped live tail, so
@@ -7454,8 +8382,11 @@ mod tests {
             visible: true,
         });
 
-        // A short viewport forces the live tail to clip.
-        let buffer = rendered_buffer_with_size(&app, Palette::for_theme(ThemeName::Slate), 120, 16);
+        // A short viewport forces the live tail to clip. (18 rows: +1 for the
+        // wrapped status bar at 120 cols, +1 for the bordered approval card's
+        // bottom cap — the card-survival property needs the same net tail
+        // budget as the original 16-row fixture.)
+        let buffer = rendered_buffer_with_size(&app, Palette::for_theme(ThemeName::Slate), 120, 18);
         let rows = rendered_rows(&buffer);
         let screen = rows.join("\n");
 
@@ -7632,7 +8563,7 @@ mod tests {
         // the hint line that immediately follows it) so the word "ready" in the
         // unrelated bottom status bar can't mask a regression.
         let title = text.find("Roman numeral patch").expect("title in header");
-        let hint = text.find("select hunk").expect("hint after header");
+        let hint = text.find("next hunk").expect("hint after header");
         let header_region = &text[title..hint];
         assert!(
             !header_region.contains("ready"),
@@ -8104,6 +9035,39 @@ mod tests {
         app
     }
 
+    #[test]
+    fn goal_chip_scales_a_huge_budget_past_k() {
+        // Regression: the chip pinned both counts to K, so a 20-trillion-token
+        // budget rendered "101K/20000000000K tokens" — eleven digits in the one
+        // line that must stay short.
+        let mut app = autonomy_app_with_goal("read2 README.md");
+        app.set_session_goal(
+            &SessionKey("local:test".into()),
+            Some(octos_core::ui_protocol::UiGoalRecord {
+                profile_id: Some("coding".into()),
+                goal_id: "goal_01".into(),
+                objective: "read2 README.md".into(),
+                status: "complete".into(),
+                token_budget: 20_000_000_000_000,
+                tokens_used: 101_000,
+                time_used_seconds: 0,
+                created_at_ms: 1,
+                updated_at_ms: 2,
+            }),
+            Some("user".into()),
+        );
+
+        let text = rendered_text(&app);
+        assert!(
+            text.contains("101K/20T tokens"),
+            "the budget must scale to its own unit: {text:?}"
+        );
+        assert!(
+            !text.contains("20000000000K"),
+            "no eleven-digit K count: {text:?}"
+        );
+    }
+
     fn sample_agent(id: &str, status: &str) -> octos_core::ui_protocol::UiAgentRecord {
         octos_core::ui_protocol::UiAgentRecord {
             agent_id: id.into(),
@@ -8489,8 +9453,16 @@ mod tests {
     /// compresses a fixed row (clipped composer / scrollback ghosts).
     #[test]
     fn live_ui_height_reserves_peer_strip_rows() {
+        // Wide, not 80: opening a peer also lengthens the STATUS line, which at
+        // narrow widths crosses the wrap threshold (1 -> 2 rows, measured by
+        // `status_bar_height` on both sides of reserve==render). This test pins
+        // the PEER DOCK term, so use a width where the status height is
+        // identical in both states and the delta isolates the dock. Widened
+        // from 120 for #532: the status line now also carries the
+        // awaiting-fleet segment ("waiting on N of M peers: …") once a peer is
+        // staged, which pushed 120 back over the wrap threshold.
         let mut app = autonomy_app_state();
-        let without = live_ui_height(&app, 80, 40);
+        let without = live_ui_height(&app, 200, 40);
         app.peer_session_meta.insert(
             SessionKey("local:tui#peer-ci-red".into()),
             crate::model::PeerMeta {
@@ -8504,7 +9476,7 @@ mod tests {
         let expected = peer_strip_height(&app, 40);
         assert!(expected > 0, "an open peer occupies dock rows");
         assert_eq!(
-            live_ui_height(&app, 80, 40),
+            live_ui_height(&app, 200, 40),
             without + expected,
             "the reservation basis must grow by exactly the dock's rendered rows"
         );
@@ -9127,20 +10099,141 @@ mod tests {
 
     #[test]
     fn format_tokens_human_switches_to_millions_above_1m() {
-        // Below 1M it delegates to the K formatter, so a 128k/256k window in
-        // the `/context` subtitle reads the same way as the goal chip.
+        // Below 1K there is no unit to scale to, and K stays integral.
         assert_eq!(format_tokens_human(0), "0K");
         assert_eq!(format_tokens_human(45_231), "45K");
         assert_eq!(format_tokens_human(128_000), "128K");
         assert_eq!(format_tokens_human(256_000), "256K");
-        // The switch is on the raw value, not the rounded-K value, so a hair
-        // under 1M still renders in K (rounding up to `1000K`).
-        assert_eq!(format_tokens_human(999_999), "1000K");
         // At/above 1M it switches to millions and drops a trailing `.0` so a
         // 1,000,000-token window reads `1M`, not `1000K` or `1.0M`.
         assert_eq!(format_tokens_human(1_000_000), "1M");
         assert_eq!(format_tokens_human(1_500_000), "1.5M");
         assert_eq!(format_tokens_human(2_000_000), "2M");
+    }
+
+    #[test]
+    fn compaction_notice_scales_a_multi_million_token_context() {
+        use octos_core::app_ui::AppUiEvent;
+        use octos_core::ui_protocol::{
+            ContextCompactionCompletedEvent, UiContextCompactionRecord, UiContextState,
+            UiNotification,
+        };
+        // End-to-end through the store's notice builder (its own copy of the
+        // helper is what made this bug reachable from two directions).
+        let session_id = SessionKey("local:test".into());
+        let turn_id = TurnId::new();
+        let mut store = Store {
+            state: AppState::new(
+                vec![SessionView {
+                    id: session_id.clone(),
+                    title: "test".into(),
+                    profile_id: Some("coding".into()),
+                    messages: vec![Message::user("do heavy work")],
+                    tasks: vec![],
+                    live_reply: Some(crate::model::LiveReply {
+                        turn_id,
+                        text: String::new(),
+                    }),
+                }],
+                0,
+                "ready".into(),
+                None,
+                false,
+            ),
+        };
+
+        store.apply_event(AppUiEvent::Protocol(
+            UiNotification::ContextCompactionCompleted(ContextCompactionCompletedEvent {
+                session_id: session_id.clone(),
+                context_state: UiContextState {
+                    session_id: session_id.clone(),
+                    thread_id: None,
+                    generation: 4,
+                    transcript_hash: "abc123".into(),
+                    item_count: 42,
+                    token_estimate: 800_000,
+                    recovery_state: "healthy".into(),
+                    last_checkpoint_id: None,
+                    last_compaction_id: Some("comp-001".into()),
+                },
+                compaction: UiContextCompactionRecord {
+                    compaction_id: "comp-001".into(),
+                    checkpoint_id: "chk-001".into(),
+                    status: "applied".into(),
+                    policy_id: "default".into(),
+                    trigger: "token_budget".into(),
+                    input_generation: 3,
+                    output_generation: Some(4),
+                    input_transcript_hash: "input-h".into(),
+                    replacement_transcript_hash: Some("abc123".into()),
+                    installed_transcript_hash: Some("abc123".into()),
+                    input_item_count: 130,
+                    retained_count: 42,
+                    dropped_count: 88,
+                    summary_item_id: Some("sum-1".into()),
+                    token_estimate_before: 2_000_000,
+                    token_estimate_after: Some(800_000),
+                    error: None,
+                },
+            }),
+        ));
+
+        store.state.expanded_tool_outputs = true;
+        let text = rendered_text(&store.state);
+        assert!(
+            text.contains("2.0M → 800.0k tokens"),
+            "the notice must scale past kilo, got:\n{text}"
+        );
+        assert!(
+            !text.contains("2000.0k"),
+            "no four-digit kilo count, got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn format_tokens_human_scales_past_millions() {
+        // Regression: goal budgets are not context-window sized. Pinned to K,
+        // a 20-trillion-token budget rendered `20000000000K` in the goal chip.
+        assert_eq!(format_tokens_human(20_000_000_000_000), "20T");
+        assert_eq!(format_tokens_human(20_000_000_000), "20G");
+        assert_eq!(format_tokens_human(1_000_000_000), "1G");
+        assert_eq!(format_tokens_human(1_500_000_000), "1.5G");
+        assert_eq!(format_tokens_human(1_000_000_000_000), "1T");
+        assert_eq!(format_tokens_human(2_500_000_000_000), "2.5T");
+
+        // Rounding that carries past the unit promotes instead of printing a
+        // four-digit mantissa: 999_999_999 is under 1G but rounds to `1000.0M`.
+        assert_eq!(format_tokens_human(999_999), "1M");
+        assert_eq!(format_tokens_human(999_999_999), "1G");
+        assert_eq!(format_tokens_human(999_999_999_999), "1T");
+
+        // Every value renders with a mantissa of at most three digits, so the
+        // chip can never blow out its width again. (Above 1T there is nothing
+        // to promote to, so the ceiling is exempt.)
+        for tokens in [
+            1_u64,
+            999,
+            1_000,
+            999_499,
+            1_048_576,
+            123_456_789,
+            87_654_321_000,
+            9_876_543_210_000,
+        ] {
+            let rendered = format_tokens_human(tokens);
+            let digits = rendered
+                .split('.')
+                .next()
+                .unwrap()
+                .trim_end_matches(char::is_alphabetic);
+            assert!(
+                digits.len() <= 3,
+                "{tokens} rendered as {rendered:?}, mantissa is not short"
+            );
+        }
+
+        // No overflow / panic at the u64 ceiling; `T` is the top of the ladder.
+        assert!(format_tokens_human(u64::MAX).ends_with('T'));
     }
 
     #[test]
@@ -9375,7 +10468,7 @@ mod tests {
         assert!(text.contains("Goal:"), "folded row keeps the goal label");
         assert!(text.contains('…'), "folded row shows a truncation ellipsis");
         assert!(
-            text.contains("2000K"),
+            text.contains("2M"),
             "status/budget parenthetical stays on-screen"
         );
         assert!(text.contains("Ctrl+P"), "folded row hints Ctrl+P expands");
@@ -9547,8 +10640,10 @@ mod tests {
         assert!(text.contains("Goal:"));
         assert!(text.contains("finish OAuth refactor"));
         assert!(text.contains("Loops: 2 active"));
-        assert!(text.contains("5m deploy-check"));
-        assert!(text.contains("self-paced PR-watch"));
+        // Loop chips now carry a live detail segment between cadence and
+        // label (spec task-loop-liveness-indicator), so assert on the parts.
+        assert!(text.contains("5m") && text.contains("deploy-check"));
+        assert!(text.contains("self-paced") && text.contains("PR-watch"));
     }
 
     #[test]
@@ -9652,6 +10747,209 @@ mod tests {
     }
 
     #[test]
+    fn harness_context_label_shows_true_percent_when_over_window() {
+        // Field report 2026-08-07: a rebuilt server ledger published a
+        // 1.17M-token estimate for a 1M-window model and the status row read
+        // `ctx 1.2M/1M ~100%` — the raw counts contradicted their own
+        // percent. The BAR stays clamped (a `LineGauge` ratio must be 0..=1)
+        // but the label must report the true fill.
+        let session_id = SessionKey("local:test".into());
+        let mut app = autonomy_app_state();
+        app.context_lifecycle_mut(&session_id).state = Some(crate::model::ContextLifecycleState {
+            session_id: session_id.clone(),
+            thread_id: None,
+            generation: 1,
+            transcript_hash: String::new(),
+            item_count: 4145,
+            token_estimate: 1_168_156,
+            recovery_state: "rebuilt".into(),
+            last_checkpoint_id: None,
+            last_compaction_id: None,
+        });
+        app.session_context_window
+            .insert(session_id.clone(), 1_048_576);
+
+        // 1_168_156 / 1_048_576 = 111.4% — the label says so...
+        assert_eq!(harness_context_percent(&app), Some(111));
+        let label = harness_context_label(&app).expect("label renders");
+        assert!(
+            label.ends_with("~111%"),
+            "over-window label must show the true percent, got: {label}"
+        );
+        // ...while the gauge bar itself stays clamped for the renderer.
+        assert_eq!(harness_context_ratio(&app), Some(1.0));
+    }
+
+    #[test]
+    fn harness_context_percent_is_capped_at_999() {
+        // A pathological estimate (or a wrong tiny window) must not blow the
+        // status row width open: the textual percent saturates at 999%.
+        let session_id = SessionKey("local:test".into());
+        let mut app = autonomy_app_state();
+        app.context_lifecycle_mut(&session_id).state = Some(crate::model::ContextLifecycleState {
+            session_id: session_id.clone(),
+            thread_id: None,
+            generation: 1,
+            transcript_hash: String::new(),
+            item_count: 10,
+            token_estimate: 64_000,
+            recovery_state: "healthy".into(),
+            last_checkpoint_id: None,
+            last_compaction_id: None,
+        });
+        app.session_context_window.insert(session_id.clone(), 1_000);
+        assert_eq!(harness_context_percent(&app), Some(999));
+    }
+
+    /// The entrance swaps glyphs, never cell width: a CJK status word
+    /// (2-cell graphemes — the persona words are Chinese) must render the
+    /// same total width mid-decrypt as settled, or the spinner row jitters
+    /// for 800ms on every rotation.
+    #[test]
+    fn harness_status_word_entrance_preserves_cell_width_for_wide_graphemes() {
+        use unicode_width::UnicodeWidthStr;
+        let session_id = SessionKey("local:test".into());
+        let mut app = autonomy_app_state();
+        let turn_id = octos_core::ui_protocol::TurnId::new();
+        app.sessions[0].live_reply = Some(crate::model::LiveReply {
+            turn_id: turn_id.clone(),
+            text: String::new(),
+        });
+        app.orchestration.insert(
+            session_id.clone(),
+            octos_core::ui_protocol::SessionOrchestrationEvent {
+                session_id: session_id.clone(),
+                active: true,
+                running_agents: 0,
+                pending_continuations: 0,
+                phase: Some("working".into()),
+            },
+        );
+        let width_of = |app: &crate::model::AppState| -> usize {
+            harness_status_lines(app, Palette::for_theme(ThemeName::Codex), true)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref().width())
+                .sum()
+        };
+        // Settled reference width.
+        app.session_status_word.insert(
+            session_id.clone(),
+            (
+                turn_id.clone(),
+                "遥遥领先中".into(),
+                std::time::Instant::now()
+                    - std::time::Duration::from_millis(
+                        crate::app::STATUS_WORD_DECRYPT_MS as u64 + 100,
+                    ),
+            ),
+        );
+        let settled = width_of(&app);
+        // Fresh (mid-entrance) width must be identical.
+        app.session_status_word.insert(
+            session_id.clone(),
+            (
+                turn_id.clone(),
+                "遥遥领先中".into(),
+                std::time::Instant::now(),
+            ),
+        );
+        let fresh = width_of(&app);
+        assert_eq!(
+            fresh, settled,
+            "decrypt entrance must not change the row width for CJK words"
+        );
+    }
+
+    #[test]
+    fn harness_status_word_decrypts_on_entrance_then_settles() {
+        use octos_core::ui_protocol::SessionOrchestrationEvent;
+        let session_id = SessionKey("local:test".into());
+        let mut app = autonomy_app_state();
+        let turn_id = octos_core::ui_protocol::TurnId::new();
+        app.sessions[0].live_reply = Some(crate::model::LiveReply {
+            turn_id: turn_id.clone(),
+            text: String::new(),
+        });
+        app.orchestration.insert(
+            session_id.clone(),
+            SessionOrchestrationEvent {
+                session_id: session_id.clone(),
+                active: true,
+                running_agents: 0,
+                pending_continuations: 0,
+                phase: Some("working".into()),
+            },
+        );
+
+        // The ANIMATED entry point is the production path (`harness_status_lines`
+        // is what render.rs calls every ~25ms); the static one pins snapshots.
+        let render_animated = |app: &crate::model::AppState| -> String {
+            harness_status_lines(app, Palette::for_theme(ThemeName::Codex), true)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect()
+        };
+
+        // Fresh word: mid-entrance the label is ciphertext — the final word
+        // must NOT yet read through.
+        app.session_status_word.insert(
+            session_id.clone(),
+            (
+                turn_id.clone(),
+                "Conjuring".into(),
+                std::time::Instant::now(),
+            ),
+        );
+        let text = render_animated(&app);
+        assert!(
+            !text.contains("Conjuring"),
+            "a fresh word is still ciphertext: {text:?}"
+        );
+
+        // After the entrance window the wave gradient owns the label again
+        // and the word reads verbatim.
+        app.session_status_word.insert(
+            session_id.clone(),
+            (
+                turn_id.clone(),
+                "Conjuring".into(),
+                std::time::Instant::now()
+                    - std::time::Duration::from_millis(
+                        crate::app::STATUS_WORD_DECRYPT_MS as u64 + 100,
+                    ),
+            ),
+        );
+        let text = render_animated(&app);
+        assert!(
+            text.contains("Conjuring…"),
+            "the settled word reads through: {text:?}"
+        );
+
+        // And the STATIC entry point never animates at all — even for a
+        // just-landed word, snapshot renders read the settled label.
+        app.session_status_word.insert(
+            session_id.clone(),
+            (
+                turn_id.clone(),
+                "Conjuring".into(),
+                std::time::Instant::now(),
+            ),
+        );
+        let text: String =
+            harness_status_lines_static(&app, Palette::for_theme(ThemeName::Codex), true)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect();
+        assert!(
+            text.contains("Conjuring…"),
+            "static renders skip the entrance: {text:?}"
+        );
+    }
+
+    #[test]
     fn harness_line_shows_the_persona_word_over_the_working_phase() {
         use octos_core::ui_protocol::SessionOrchestrationEvent;
         let session_id = SessionKey("local:test".into());
@@ -9672,14 +10970,21 @@ mod tests {
                 phase: Some("working".into()),
             },
         );
-        app.session_status_word
-            .insert(session_id.clone(), (turn_id.clone(), "Conjuring".into()));
+        app.session_status_word.insert(
+            session_id.clone(),
+            (
+                turn_id.clone(),
+                "Conjuring".into(),
+                std::time::Instant::now(),
+            ),
+        );
 
-        let text: String = harness_status_lines(&app, Palette::for_theme(ThemeName::Codex), true)
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.as_ref())
-            .collect();
+        let text: String =
+            harness_status_lines_static(&app, Palette::for_theme(ThemeName::Codex), true)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect();
         assert!(
             text.contains("Conjuring…"),
             "persona word shows with ellipsis: {text:?}"
@@ -9701,11 +11006,12 @@ mod tests {
                 phase: Some("orchestrating".into()),
             },
         );
-        let text: String = harness_status_lines(&app, Palette::for_theme(ThemeName::Codex), true)
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.as_ref())
-            .collect();
+        let text: String =
+            harness_status_lines_static(&app, Palette::for_theme(ThemeName::Codex), true)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect();
         assert!(
             text.contains("Orchestrating"),
             "orchestrating phase kept: {text:?}"
@@ -9725,7 +11031,10 @@ mod tests {
         // Idle: no orchestration, no active turn → row reserves no rows and is
         // absent from the render (so it cannot collide with the composer).
         assert_eq!(harness_status_height(&app), 0);
-        assert!(harness_status_lines(&app, Palette::for_theme(ThemeName::Codex), true).is_empty());
+        assert!(
+            harness_status_lines_static(&app, Palette::for_theme(ThemeName::Codex), true)
+                .is_empty()
+        );
 
         // Orchestrating: active, 2 running agents, 1 pending continuation.
         app.orchestration.insert(
@@ -9759,11 +11068,12 @@ mod tests {
             1,
             "active row reserves one row"
         );
-        let text: String = harness_status_lines(&app, Palette::for_theme(ThemeName::Codex), true)
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.to_string())
-            .collect();
+        let text: String =
+            harness_status_lines_static(&app, Palette::for_theme(ThemeName::Codex), true)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.to_string())
+                .collect();
         assert!(text.contains("Orchestrating"), "{text:?}");
         assert!(text.contains("2 agents"), "{text:?}");
         assert!(text.contains("re-entering"), "{text:?}");
@@ -9836,11 +11146,12 @@ mod tests {
             last_compaction_id: None,
         });
 
-        let text: String = harness_status_lines(&app, Palette::for_theme(ThemeName::Codex), true)
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.to_string())
-            .collect();
+        let text: String =
+            harness_status_lines_static(&app, Palette::for_theme(ThemeName::Codex), true)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.to_string())
+                .collect();
         assert!(
             text.contains("ctx 32K/128K ~25%"),
             "ctx label must carry the used/max counts and the approximate marker: {text:?}"
@@ -9879,11 +11190,12 @@ mod tests {
             .insert(session_id.clone(), 1_000_000);
 
         // Narrow terminal (text fallback) carries the full readout.
-        let text: String = harness_status_lines(&app, Palette::for_theme(ThemeName::Codex), true)
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.to_string())
-            .collect();
+        let text: String =
+            harness_status_lines_static(&app, Palette::for_theme(ThemeName::Codex), true)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.to_string())
+                .collect();
         assert!(
             text.contains("ctx 128K/1M ~13%"),
             "harness row shows used/max token counts + estimate percent: {text:?}"
@@ -9916,11 +11228,12 @@ mod tests {
         retry.attempt = Some(3);
         app.session_retry.insert(session_id, retry);
 
-        let text: String = harness_status_lines(&app, Palette::for_theme(ThemeName::Codex), true)
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.to_string())
-            .collect();
+        let text: String =
+            harness_status_lines_static(&app, Palette::for_theme(ThemeName::Codex), true)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.to_string())
+                .collect();
         assert!(
             text.to_lowercase().contains("retry") || text.to_lowercase().contains("retrying"),
             "retry state must render in the harness row: {text:?}"
@@ -10021,8 +11334,12 @@ mod tests {
 
         let layout = chat_layout_areas(&app, area);
 
-        assert_eq!(layout.status.y, area.y + area.height - 1);
-        assert_eq!(layout.status.height, 1);
+        // The status bar word-wraps on narrow terminals (2026-08-02), so its
+        // height is measured, not fixed — the invariants are that it hugs the
+        // bottom edge and the composer sits directly above it.
+        let status_height = crate::app::render::status_bar_height(&app, area.width);
+        assert_eq!(layout.status.y, area.y + area.height - status_height);
+        assert_eq!(layout.status.height, status_height);
         assert_eq!(
             layout.composer.y + layout.composer.height,
             layout.status.y,
@@ -10042,6 +11359,10 @@ mod tests {
 
         let layout = chat_layout_areas(&app, area);
 
+        // The wrapped status bar takes its extra rows from the transcript's
+        // slack above `Min(8)` at this geometry, so the menu clamp is
+        // unchanged; the bottom-anchoring below tracks the measured height.
+        let status_height = crate::app::render::status_bar_height(&app, area.width);
         assert_eq!(
             layout.menu.height, 4,
             "large menus are clamped by the available surface budget"
@@ -10050,7 +11371,7 @@ mod tests {
             layout.transcript.height >= min_transcript_height(area.height),
             "menu must not steal the transcript's minimum height"
         );
-        assert_eq!(layout.status.y, area.y + area.height - 1);
+        assert_eq!(layout.status.y, area.y + area.height - status_height);
         assert_eq!(layout.composer.y + layout.composer.height, layout.status.y);
     }
 
@@ -10653,6 +11974,296 @@ mod tests {
         );
     }
 
+    /// #532 helper: record a peer on the durable dock roster. `landed` stamps
+    /// `finished_at` so `peer_is_done` reports it as landed (turn terminated,
+    /// not live, not blocked).
+    fn stage_peer(app: &mut AppState, slug: &str, landed: bool) -> SessionKey {
+        let key = SessionKey(format!("local:tui#peer-{slug}"));
+        app.peer_session_meta.insert(
+            key.clone(),
+            crate::model::PeerMeta {
+                slug: slug.into(),
+                brief_path: format!("/tmp/{slug}.md"),
+                agent_staged: true,
+                created: std::time::Instant::now(),
+                finished_at: landed.then(std::time::Instant::now),
+            },
+        );
+        key
+    }
+
+    /// #532 (defect 4): "3 of 5 landed" appeared nowhere. Both dock surfaces —
+    /// the expanded title row and the collapsed pill — now carry the fleet's
+    /// landing progress, so a master waiting on the last peer is legible
+    /// whether or not the dock is expanded.
+    #[test]
+    fn peer_dock_surfaces_fleet_landing_progress() {
+        let mut app = autonomy_app_state();
+        for slug in ["dsh-arch", "dsh-sec", "dsh-agent"] {
+            stage_peer(&mut app, slug, true);
+        }
+        let running = stage_peer(&mut app, "dstui-review", false);
+        app.pre_token_turns
+            .insert(running.clone(), std::time::Instant::now());
+
+        app.peer_dock_collapsed = false;
+        let expanded = lines_text(&peer_strip_lines(&app, Palette::for_theme(app.theme), 4));
+        assert!(
+            expanded.contains("3/4 landed"),
+            "the expanded dock title row shows fleet progress; got: {expanded}"
+        );
+
+        app.peer_dock_collapsed = true;
+        let pill = lines_text(&peer_strip_lines(&app, Palette::for_theme(app.theme), 4));
+        assert!(
+            pill.contains("3/4 landed"),
+            "the collapsed pill shows fleet progress; got: {pill}"
+        );
+    }
+
+    /// #532: the derivation itself — "landed" is `peer_is_done` (turn
+    /// terminated, not live, not blocked), which mirrors octos's
+    /// `evaluate_peer_fleet_synthesis` hold ("DONE and SETTLED"). A peer still
+    /// OPENING has no slug yet, so it counts toward `total`/outstanding without
+    /// appearing in the name list; the label caps names and never renders blank.
+    #[test]
+    fn fleet_progress_counts_landed_and_names_outstanding_peers() {
+        let mut app = autonomy_app_state();
+        assert!(
+            fleet_progress(&app).is_none(),
+            "no peers at all is not a fleet"
+        );
+
+        stage_peer(&mut app, "dsh-arch", true);
+        for slug in ["dstui-review", "dsh-sec", "dsh-agent"] {
+            stage_peer(&mut app, slug, false);
+        }
+        // A never-run peer is NOT landed — it has no result yet.
+        let blocked = stage_peer(&mut app, "dsh-docs", true);
+        app.pending_session_approvals.insert(
+            blocked.clone(),
+            crate::model::ApprovalModalState::from_event(
+                octos_core::ui_protocol::ApprovalRequestedEvent::generic(
+                    blocked,
+                    octos_core::ui_protocol::ApprovalId::new(),
+                    octos_core::ui_protocol::TurnId::new(),
+                    "shell",
+                    "Run shell command?",
+                    "run: cargo test",
+                ),
+            ),
+        );
+
+        let fleet = fleet_progress(&app).expect("fleet");
+        assert_eq!(fleet.total, 5);
+        assert_eq!(fleet.landed, 1, "a blocked peer has not landed");
+        assert_eq!(fleet.outstanding_count(), 4);
+        let label = fleet.outstanding_label();
+        assert!(
+            label.ends_with("+2"),
+            "the label caps names then counts the rest; got: {label}"
+        );
+
+        // A still-OPENING peer has no slug — it must still count, and the label
+        // must not render blank when every outstanding peer is unnamed.
+        let mut opening = autonomy_app_state();
+        opening.pending_peer_kickoffs.insert(
+            SessionKey("local:tui#peer-opening".into()),
+            crate::model::PeerKickoff {
+                brief: "audit".into(),
+                brief_path: "/tmp/audit.md".into(),
+                go: true,
+                agent_staged: true,
+                created: std::time::Instant::now(),
+            },
+        );
+        let fleet = fleet_progress(&opening).expect("pending-only fleet");
+        assert_eq!(
+            (fleet.total, fleet.landed, fleet.outstanding_count()),
+            (1, 0, 1)
+        );
+        assert!(
+            !fleet.outstanding_label().trim().is_empty(),
+            "an unnamed outstanding peer still gets a label"
+        );
+    }
+
+    /// #532 (defect 1): the master looked dead while it correctly held for the
+    /// last peer. The status bar — the one chrome that never scrolls away —
+    /// now names the wait and the outstanding peer.
+    #[test]
+    fn status_bar_reports_the_master_waiting_on_its_peer_fleet() {
+        let mut app = autonomy_app_state();
+        for slug in ["dsh-arch", "dsh-sec", "dsh-agent"] {
+            stage_peer(&mut app, slug, true);
+        }
+        stage_peer(&mut app, "dstui-review", false);
+
+        let text = status_bar_work_text(&app);
+        assert!(
+            text.contains("waiting on 1 of 4 peers"),
+            "status bar names the outstanding count; got: {text}"
+        );
+        assert!(
+            text.contains("dstui-review"),
+            "status bar names the peer being waited on; got: {text}"
+        );
+    }
+
+    /// #532: a fully landed fleet is not a wait — no segment. Guards against a
+    /// permanent banner once the fleet is home.
+    #[test]
+    fn status_bar_drops_the_fleet_wait_once_every_peer_has_landed() {
+        let mut app = autonomy_app_state();
+        for slug in ["dsh-arch", "dsh-sec"] {
+            stage_peer(&mut app, slug, true);
+        }
+        let text = status_bar_work_text(&app);
+        assert!(
+            !text.contains("waiting on"),
+            "a landed fleet shows no wait segment; got: {text}"
+        );
+    }
+
+    /// #532: the wait is the MASTER's state. Focused on a peer (a read-only
+    /// watch surface), the segment must not claim that peer is waiting on the
+    /// fleet it belongs to.
+    #[test]
+    fn status_bar_omits_the_fleet_wait_while_a_peer_is_focused() {
+        let mut app = autonomy_app_state();
+        stage_peer(&mut app, "dsh-arch", true);
+        stage_peer(&mut app, "dstui-review", false);
+        // Focus a peer: it becomes the active session AND is recorded in the
+        // durable peer identity set.
+        let peer = SessionKey("local:tui#peer-dstui-review".into());
+        app.sessions.push(SessionView {
+            id: peer.clone(),
+            title: "dstui-review".into(),
+            profile_id: None,
+            messages: vec![],
+            tasks: vec![],
+            live_reply: None,
+        });
+        app.opened_peer_sessions.insert(peer);
+        app.selected_session = app.sessions.len() - 1;
+
+        let text = status_bar_work_text(&app);
+        assert!(
+            !text.contains("waiting on"),
+            "a focused peer must not render the master's fleet wait; got: {text}"
+        );
+    }
+
+    /// #532 (defect 2): `⚠ budget limited` read as "everything stopped". It is
+    /// not: budget only halts SELF-PACED goal ticks — external wakes (fleet
+    /// synthesis, peer-awaiting-input, child-completed) stay schedulable at
+    /// `budget_limited` in octos. While peers are live the chip says so.
+    #[test]
+    fn budget_limited_goal_chip_says_peers_are_still_running() {
+        let mut app = autonomy_app_with_goal("review the dashboard");
+        app.set_session_goal(
+            &SessionKey("local:test".into()),
+            Some(octos_core::ui_protocol::UiGoalRecord {
+                profile_id: Some("coding".into()),
+                goal_id: "goal_01".into(),
+                objective: "review the dashboard".into(),
+                status: "budget_limited".into(),
+                token_budget: 2_000_000,
+                tokens_used: 3_406_000,
+                time_used_seconds: 0,
+                created_at_ms: 1,
+                updated_at_ms: 2,
+            }),
+            Some("user".into()),
+        );
+        stage_peer(&mut app, "dsh-arch", true);
+        stage_peer(&mut app, "dstui-review", false);
+
+        let text = lines_text(&autonomy_indicator_lines(
+            &app,
+            Palette::for_theme(ThemeName::Codex),
+            100,
+        ));
+        assert!(
+            text.contains("budget limited"),
+            "the budget state is still reported; got: {text}"
+        );
+        assert!(
+            text.contains("peers still running"),
+            "the chip must not read as terminal while peers are live; got: {text}"
+        );
+    }
+
+    /// #532: with no fleet in flight the budget chip keeps its terse wording —
+    /// the softener is scoped to a live fleet, not applied unconditionally.
+    #[test]
+    fn budget_limited_goal_chip_stays_terse_without_a_live_fleet() {
+        let mut app = autonomy_app_with_goal("review the dashboard");
+        app.set_session_goal(
+            &SessionKey("local:test".into()),
+            Some(octos_core::ui_protocol::UiGoalRecord {
+                profile_id: Some("coding".into()),
+                goal_id: "goal_01".into(),
+                objective: "review the dashboard".into(),
+                status: "budget_limited".into(),
+                token_budget: 2_000_000,
+                tokens_used: 3_406_000,
+                time_used_seconds: 0,
+                created_at_ms: 1,
+                updated_at_ms: 2,
+            }),
+            Some("user".into()),
+        );
+        stage_peer(&mut app, "dsh-arch", true);
+
+        let text = lines_text(&autonomy_indicator_lines(
+            &app,
+            Palette::for_theme(ThemeName::Codex),
+            100,
+        ));
+        assert!(text.contains("budget limited"), "got: {text}");
+        assert!(
+            !text.contains("peers still running"),
+            "a landed fleet must not soften the chip; got: {text}"
+        );
+    }
+
+    /// #532: reserve==render for the goal banner survives the fleet-aware
+    /// parenthetical — the height reservation and the render must agree on the
+    /// row count with a live fleet in play (the banner's standing discipline).
+    #[test]
+    fn goal_banner_height_matches_rendered_rows_with_a_live_fleet() {
+        let objective = "review the dashboard end to end and report every regression you find";
+        let mut app = autonomy_app_with_goal(objective);
+        app.set_session_goal(
+            &SessionKey("local:test".into()),
+            Some(octos_core::ui_protocol::UiGoalRecord {
+                profile_id: Some("coding".into()),
+                goal_id: "goal_01".into(),
+                objective: objective.into(),
+                status: "budget_limited".into(),
+                token_budget: 2_000_000,
+                tokens_used: 3_406_000,
+                time_used_seconds: 0,
+                created_at_ms: 1,
+                updated_at_ms: 2,
+            }),
+            Some("user".into()),
+        );
+        app.goal_objective_fold = crate::model::GoalObjectiveFold::Unfolded;
+        stage_peer(&mut app, "dstui-review", false);
+
+        for width in [60u16, 80, 100, 120] {
+            let rendered =
+                autonomy_indicator_lines(&app, Palette::for_theme(ThemeName::Codex), width).len();
+            assert_eq!(
+                autonomy_indicator_height(&app, width) as usize,
+                rendered,
+                "reserve==render at width {width}"
+            );
+        }
+    }
+
     /// The Peer Dock caps at `PEER_STRIP_MAX_PEER_ROWS` rows. With a fleet
     /// larger than the cap the drawn window must FOLLOW the focused peer, the
     /// way `agent_strip_window` follows the selected agent — otherwise the dock
@@ -11099,6 +12710,7 @@ mod tests {
 
         // Steered: a busy goal + turn/steer advertised → the prompt is injected.
         let mut steered = running_goal_store();
+        steered.state.steer_mid_turn = true;
         steered.state.capabilities = Some(crate::menu::CapabilitySet::from_methods([
             crate::model::APPUI_METHOD_TURN_STEER,
         ]));
@@ -11372,6 +12984,7 @@ mod tests {
             100,
             &previous,
             &next,
+            false,
         ));
         let body = rendered
             .iter()
@@ -11749,6 +13362,7 @@ mod tests {
             wrap_width,
             &mid,
             &next,
+            false,
         );
         let texts = line_texts(&second_batch);
         assert!(
@@ -11772,6 +13386,274 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn capsule_tool_item(turn_id: &TurnId, call_id: &str, command: &str) -> ActivityItem {
+        ActivityItem::new(ActivityKind::Tool, "shell", "complete")
+            .with_turn(turn_id.clone())
+            .with_tool_call(call_id)
+            .with_detail(command)
+            .with_success(true)
+    }
+
+    fn capsule_app(session_id: &SessionKey, turn_id: &TurnId) -> AppState {
+        let mut app = AppState::new(
+            vec![SessionView {
+                id: session_id.clone(),
+                title: "test".into(),
+                profile_id: Some("coding".into()),
+                messages: vec![Message::user("explore the repo")],
+                tasks: vec![],
+                live_reply: Some(crate::model::LiveReply {
+                    turn_id: turn_id.clone(),
+                    text: String::new(),
+                }),
+            }],
+            0,
+            "Thinking".into(),
+            None,
+            false,
+        );
+        app.set_run_state_in_progress();
+        // The delta-flush lane reads the LIVE activity list, not the archived
+        // turn logs.
+        app.activity
+            .push(capsule_tool_item(turn_id, "call-1", "cargo build"));
+        app
+    }
+
+    fn bare_tool_item(turn_id: &TurnId, call_id: &str) -> ActivityItem {
+        ActivityItem::new(ActivityKind::Tool, "shell", "complete")
+            .with_turn(turn_id.clone())
+            .with_tool_call(call_id)
+            .with_success(true)
+    }
+
+    #[test]
+    fn consecutive_bare_tool_rows_merge_into_one_run_length_line() {
+        // Spec task-activity-compact-fold: five argument-less Bash rows are
+        // one "⏺ Bash ×5" line, not five identical lines.
+        let turn_id = TurnId::new();
+        let session_id = SessionKey("local:test".into());
+        let mut app = capsule_app(&session_id, &turn_id);
+        app.activity.clear();
+        for id in ["c1", "c2", "c3", "c4", "c5"] {
+            app.activity.push(bare_tool_item(&turn_id, id));
+        }
+
+        let text = rendered_text(&app);
+
+        assert!(text.contains("×5"), "run-length merged row: {text}");
+        assert_eq!(
+            text.matches("⏺ Bash").count(),
+            1,
+            "exactly one merged Bash row: {text}"
+        );
+    }
+
+    #[test]
+    fn harness_row_summarizes_live_action_count() {
+        // Spec task-activity-compact-fold: the harness row carries a live
+        // action count so a silent agentic turn still shows a pulse.
+        let turn_id = TurnId::new();
+        let session_id = SessionKey("local:test".into());
+        let mut app = capsule_app(&session_id, &turn_id);
+        for id in ["c2", "c3", "c4"] {
+            app.activity.push(bare_tool_item(&turn_id, id));
+        }
+
+        let text = rendered_text(&app);
+
+        assert!(
+            text.contains("4 actions") || text.contains("4 个动作"),
+            "harness row carries the running action count: {text}"
+        );
+    }
+
+    #[test]
+    fn folded_activity_renders_prominent_more_row_with_expand_hint() {
+        // Spec task-activity-compact-fold: the fold row must read as an
+        // affordance (◈ + Ctrl+O hint), not a dim afterthought.
+        let turn_id = TurnId::new();
+        let session_id = SessionKey("local:test".into());
+        let mut app = capsule_app(&session_id, &turn_id);
+        app.activity.clear();
+        for i in 0..15 {
+            app.activity.push(capsule_tool_item(
+                &turn_id,
+                &format!("c{i}"),
+                &format!("cmd-{i}"),
+            ));
+        }
+
+        let text = rendered_text(&app);
+
+        assert!(text.contains("◈"), "fold row uses the ◈ glyph: {text}");
+        assert!(
+            text.contains("more") || text.contains("还有"),
+            "fold row counts the rest: {text}"
+        );
+        assert!(
+            text.contains("Ctrl+O"),
+            "fold row advertises expand: {text}"
+        );
+    }
+
+    #[test]
+    fn rows_with_invocations_never_merge() {
+        // The command IS the information — rows with invocation text always
+        // render individually.
+        let turn_id = TurnId::new();
+        let session_id = SessionKey("local:test".into());
+        let mut app = capsule_app(&session_id, &turn_id);
+        app.activity.clear();
+        app.activity
+            .push(capsule_tool_item(&turn_id, "c1", "cargo build"));
+        app.activity
+            .push(capsule_tool_item(&turn_id, "c2", "cargo test"));
+
+        let text = rendered_text(&app);
+
+        assert!(text.contains("cargo build") && text.contains("cargo test"));
+        assert!(
+            !text.contains("×2"),
+            "distinct invocations stay separate: {text}"
+        );
+    }
+
+    /// Capsule flush (2026-08-02, kimi k3): an agentic turn settles tools in
+    /// many small batches, and each delta flush used to write a FULL group
+    /// block — blank + "Agent task completed (1 action(s) …)" header + child —
+    /// so one 19-action turn spammed ~16 headers into scrollback. When the
+    /// scrollback tail is already this turn's activity group, a continuation
+    /// batch must append ONLY child rows under the existing header.
+    #[test]
+    fn same_turn_activity_delta_appends_children_without_repeating_the_header() {
+        let turn_id = TurnId::new();
+        let session_id = SessionKey("local:test".into());
+        let mut app = capsule_app(&session_id, &turn_id);
+        let palette = Palette::for_theme(ThemeName::Slate);
+
+        let baseline = LiveTurnFinalization::new(&session_id, &turn_id);
+        let first = next_live_turn_finalization(&app, None).expect("first watermark");
+        let batch1 = line_texts(&finalized_live_turn_lines_between(
+            &app, palette, 100, &baseline, &first, false,
+        ));
+        assert!(
+            batch1
+                .iter()
+                .any(|line| line.contains("Agent task completed")),
+            "first flush opens the group with its header: {batch1:#?}"
+        );
+
+        app.activity
+            .push(capsule_tool_item(&turn_id, "call-2", "cargo test"));
+        let second = next_live_turn_finalization(&app, Some(&first)).expect("second watermark");
+        let batch2 = line_texts(&finalized_live_turn_lines_between(
+            &app, palette, 100, &first, &second, true,
+        ));
+
+        assert!(
+            !batch2
+                .iter()
+                .any(|line| line.contains("Agent task completed")),
+            "continuation flush must not repeat the group header: {batch2:#?}"
+        );
+        assert!(
+            batch2.iter().any(|line| line.contains("cargo test")),
+            "continuation flush still records the new child: {batch2:#?}"
+        );
+        assert!(
+            batch2.first().is_some_and(|line| !line.trim().is_empty()),
+            "continuation rows attach to the group above — no blank gap: {batch2:#?}"
+        );
+    }
+
+    #[test]
+    fn continuation_batch_of_bare_successes_flushes_as_one_digest_line() {
+        // Spec task-activity-compact-fold: >=3 settled, successful,
+        // invocation-less rows in one continuation batch compress to a single
+        // `⏺ Bash ×4` digest line in the immutable scrollback.
+        let turn_id = TurnId::new();
+        let session_id = SessionKey("local:test".into());
+        let mut app = capsule_app(&session_id, &turn_id);
+        let palette = Palette::for_theme(ThemeName::Slate);
+        let first = next_live_turn_finalization(&app, None).expect("first watermark");
+
+        for id in ["c2", "c3", "c4", "c5"] {
+            app.activity.push(bare_tool_item(&turn_id, id));
+        }
+        let second = next_live_turn_finalization(&app, Some(&first)).expect("second watermark");
+        let batch = line_texts(&finalized_live_turn_lines_between(
+            &app, palette, 100, &first, &second, true,
+        ));
+
+        assert_eq!(
+            batch.len(),
+            1,
+            "4 bare successes flush as ONE digest row: {batch:#?}"
+        );
+        assert!(
+            batch[0].contains("Bash ×4"),
+            "digest names the tools: {batch:#?}"
+        );
+    }
+
+    #[test]
+    fn continuation_batch_with_a_failure_keeps_per_row_detail() {
+        // Any failure forbids the digest — the immutable archive is the
+        // audit trail.
+        let turn_id = TurnId::new();
+        let session_id = SessionKey("local:test".into());
+        let mut app = capsule_app(&session_id, &turn_id);
+        let palette = Palette::for_theme(ThemeName::Slate);
+        let first = next_live_turn_finalization(&app, None).expect("first watermark");
+
+        for id in ["c2", "c3"] {
+            app.activity.push(bare_tool_item(&turn_id, id));
+        }
+        app.activity.push(
+            ActivityItem::new(ActivityKind::Tool, "shell", "complete")
+                .with_turn(turn_id.clone())
+                .with_tool_call("c4")
+                .with_success(false),
+        );
+        let second = next_live_turn_finalization(&app, Some(&first)).expect("second watermark");
+        let batch = line_texts(&finalized_live_turn_lines_between(
+            &app, palette, 100, &first, &second, true,
+        ));
+
+        assert!(
+            batch.len() >= 2,
+            "a failed row forbids the digest — detail survives: {batch:#?}"
+        );
+    }
+
+    /// When something else reached scrollback since the group header (reply
+    /// text, a committed message — signalled by `append_to_flushed_group =
+    /// false`), the next activity batch re-opens with a fresh header so child
+    /// rows are never orphaned under unrelated content.
+    #[test]
+    fn interleaved_scrollback_content_forces_a_fresh_group_header() {
+        let turn_id = TurnId::new();
+        let session_id = SessionKey("local:test".into());
+        let mut app = capsule_app(&session_id, &turn_id);
+        let palette = Palette::for_theme(ThemeName::Slate);
+
+        let first = next_live_turn_finalization(&app, None).expect("first watermark");
+        app.activity
+            .push(capsule_tool_item(&turn_id, "call-2", "cargo test"));
+        let second = next_live_turn_finalization(&app, Some(&first)).expect("second watermark");
+        let batch2 = line_texts(&finalized_live_turn_lines_between(
+            &app, palette, 100, &first, &second, false,
+        ));
+
+        assert!(
+            batch2
+                .iter()
+                .any(|line| line.contains("Agent task completed")),
+            "non-contiguous continuation re-opens with a header: {batch2:#?}"
+        );
     }
 
     /// Regression guard: the other roles keep their own prefix systems — no
@@ -11929,16 +13811,27 @@ mod tests {
             .enumerate()
             .filter_map(|(idx, text)| text.contains("Agent task completed").then_some(idx))
             .collect::<Vec<_>>();
+        // Capsule contract (2026-08-02): same-turn settle batches share ONE
+        // header; the second batch appends its child row directly under the
+        // first card instead of opening a blank-separated sibling card.
         assert_eq!(
             cards.len(),
-            2,
-            "both completions flush as their own scrollback card: {texts:#?}"
+            1,
+            "same-turn completions share one scrollback card: {texts:#?}"
         );
         assert!(
-            texts[cards[0] + 1..cards[1]]
+            texts.iter().any(|text| text.contains("first task")),
+            "first child recorded: {texts:#?}"
+        );
+        let second_child = texts
+            .iter()
+            .position(|text| text.contains("second task"))
+            .expect("second child recorded");
+        assert!(
+            texts[cards[0] + 1..second_child]
                 .iter()
-                .any(|text| text.trim().is_empty()),
-            "consecutive scrollback agent-task cards must be blank-separated: {texts:#?}"
+                .all(|text| !text.trim().is_empty()),
+            "continuation children attach without a blank gap: {texts:#?}"
         );
     }
 
@@ -11978,6 +13871,7 @@ mod tests {
             80,
             &previous,
             &fence,
+            false,
         );
         streamed.extend(finalized_live_turn_lines_between(
             &app,
@@ -11985,6 +13879,7 @@ mod tests {
             80,
             &fence,
             &next,
+            false,
         ));
 
         let rendered = streamed
@@ -13262,5 +15157,42 @@ fn activity_flow_excludes_other_sessions_items() {
         !titles.contains(&"peer agent"),
         "a background session's activity must NOT render in the focused \
          session's transcript: {titles:?}"
+    );
+}
+
+/// `goal_objective_chunks` sliced the objective with `chars.chunks(body)` where
+/// `body` is a COLUMN budget from `goal_objective_body_width`. For CJK every
+/// char is two columns wide, so each row was twice the width it was allotted
+/// and ratatui clipped it at the banner edge.
+#[test]
+fn goal_objective_rows_fit_the_column_budget_for_cjk() {
+    let width: u16 = 80;
+    let body = goal_objective_body_width(width);
+    let objective = "重构速率限制器并为并发请求增加背压控制".repeat(4);
+
+    for chunk in goal_objective_chunks(&objective, width, 0) {
+        assert!(
+            chunk.width() <= body,
+            "a goal row must fit its {body}-column budget, got {} columns: {chunk:?}",
+            chunk.width()
+        );
+    }
+}
+
+/// The same slice split grapheme clusters: `chars.chunks()` is unaware of ZWJ
+/// sequences and combining marks, so a family emoji landed half on one row and
+/// half on the next.
+#[test]
+fn goal_objective_rows_never_split_a_grapheme() {
+    let width: u16 = 80;
+    let body = goal_objective_body_width(width);
+    let objective = format!("{}{}", "a".repeat(body - 1), "👩‍👩‍👧‍👦 done");
+
+    let chunks = goal_objective_chunks(&objective, width, 0);
+    // Rejoining would hide the defect — the cluster must be intact within ONE
+    // row, because each row is drawn on its own line.
+    assert!(
+        chunks.iter().any(|c| c.contains("👩‍👩‍👧‍👦")),
+        "the family emoji must stay within a single row, got: {chunks:?}"
     );
 }

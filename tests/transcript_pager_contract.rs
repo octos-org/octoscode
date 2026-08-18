@@ -12,13 +12,13 @@
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use octos_core::ui_protocol::TurnId;
 use octos_core::{Message, SessionKey};
-use octos_tui::app;
-use octos_tui::cli::ThemeName;
-use octos_tui::event_loop::{KeyAction, handle_terminal_event};
-use octos_tui::model::{AppState, AppUiCommand, LiveReply, SessionView};
-use octos_tui::store::Store;
-use octos_tui::theme::Palette;
-use octos_tui::tui_terminal::FrameLike;
+use octoscode::app;
+use octoscode::cli::ThemeName;
+use octoscode::event_loop::{KeyAction, handle_terminal_event};
+use octoscode::model::{AppState, AppUiCommand, LiveReply, SessionView};
+use octoscode::store::Store;
+use octoscode::theme::Palette;
+use octoscode::tui_terminal::FrameLike;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::widgets::Widget;
@@ -159,9 +159,12 @@ fn pager_scroll_keeps_composer_pinned_at_bottom() {
     );
 
     // ...while the composer stays pinned at the bottom of the screen.
+    // Margin allows for the word-wrapped status bar (2026-08-02): at 60 cols
+    // the status line takes up to 3 rows, lifting the composer accordingly —
+    // it still sits directly above the status region.
     let composer_row = row_index_containing(&rows, "Composer");
     assert!(
-        composer_row >= rows.len() - 6,
+        composer_row >= rows.len() - 8,
         "composer must sit in the bottom rows, found at row {composer_row}"
     );
     let deepest_transcript_row = rows

@@ -80,6 +80,12 @@ pub enum ClientEvent {
     /// the session switcher (Ctrl+S). Durable ⇒ replayed on reconnect, so the
     /// store handler is idempotent (an already-removed peer is a no-op).
     PeerClosed(crate::model::PeerClosedParams),
+    /// octos#2019: durable `background/activity` notification — one background
+    /// event that woke the model (a monitor event line, a claimed fleet outbox
+    /// event), surfaced to the HUMAN. The store files it under the session that
+    /// OWNS the emitter. Durable ⇒ replayed on reconnect, so a client that
+    /// disconnected mid-loop sees the whole run rather than losing its middle.
+    BackgroundActivity(crate::model::BackgroundActivityParams),
     /// octos#1801 v2: `peer/gather` result — the peer blackboard rows
     /// (brief + latest result per staged peer). The store composes the
     /// `/gather` synthesis prompt from these and submits it into the CURRENT
@@ -99,7 +105,7 @@ pub enum ClientEvent {
     /// RPCs so the store can update its per-session autonomy mirror.
     Autonomy(AutonomyClientEvent),
     /// `!`-bang local-shell completion. Carries the captured output of a
-    /// client-local shell command (run where octos-tui runs, NOT the
+    /// client-local shell command (run where octoscode runs, NOT the
     /// agent's sandboxed server `shell` tool). Surfaced into the same
     /// `queue` that `next_event()` drains, so the synchronous render loop
     /// never blocks on a running command. The store folds this back into

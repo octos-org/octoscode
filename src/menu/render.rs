@@ -219,26 +219,40 @@ fn multi_select_item_from_spec(
 }
 
 fn selection_preview_from_spec(preview: &SpecPreview) -> SelectionPreview {
-    let (title, lines) = preview_lines(preview);
-    SelectionPreview { title, lines }
+    let (title, lines, single_line) = preview_lines(preview);
+    SelectionPreview {
+        title,
+        lines,
+        single_line,
+    }
 }
 
 fn multi_select_preview_from_spec(preview: &SpecPreview) -> MultiSelectPreview {
-    let (title, lines) = preview_lines(preview);
-    MultiSelectPreview { title, lines }
+    let (title, lines, single_line) = preview_lines(preview);
+    MultiSelectPreview {
+        title,
+        lines,
+        single_line,
+    }
 }
 
-fn preview_lines(preview: &SpecPreview) -> (String, Vec<String>) {
+/// The third element asks the renderer to keep one line per entry. Key/value
+/// rows say yes: each is a discrete `label: value` fact, and wrapping one of
+/// them (a long `session_id`) pushes every row below it down the pane. A text
+/// body is prose and keeps wrapping.
+fn preview_lines(preview: &SpecPreview) -> (String, Vec<String>, bool) {
     match preview {
         SpecPreview::Text { title, body } => (
             title.clone().unwrap_or_else(|| "Preview".into()),
             body.lines().map(str::to_string).collect(),
+            false,
         ),
         SpecPreview::KeyValues { title, rows } => (
             title.clone().unwrap_or_else(|| "Preview".into()),
             rows.iter()
                 .map(|row| format!("{}: {}", row.label, row.value))
                 .collect(),
+            true,
         ),
     }
 }

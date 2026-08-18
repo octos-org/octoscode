@@ -145,6 +145,12 @@ pub struct Cli {
     pub scroll_mode: ScrollMode,
     /// Vim modal editing for the composer (opt-in; default off).
     pub vim_mode: bool,
+    /// Mid-turn prompts steer the live turn instead of staging FIFO
+    /// (opt-in; default off — prompts queue and run in order).
+    pub steer_mid_turn: bool,
+    /// Skip the ttfx startup animation (also skipped for non-TTY/CI, or via
+    /// OCTOSCODE_NO_SPLASH).
+    pub no_splash: bool,
 }
 
 /// Version string like `0.2.2-rc.7 (94e43fd 2026-07-17)` — the Cargo version
@@ -154,11 +160,11 @@ pub struct Cli {
 /// outside a git checkout, in which case only the bare version is shown).
 fn version_string() -> &'static str {
     const VERSION: &str = env!("CARGO_PKG_VERSION");
-    const GIT_HASH: &str = match option_env!("OCTOS_TUI_GIT_HASH") {
+    const GIT_HASH: &str = match option_env!("OCTOSCODE_GIT_HASH") {
         Some(v) => v,
         None => "",
     };
-    const BUILD_DATE: &str = match option_env!("OCTOS_TUI_BUILD_DATE") {
+    const BUILD_DATE: &str = match option_env!("OCTOSCODE_BUILD_DATE") {
         Some(v) => v,
         None => "",
     };
@@ -172,15 +178,15 @@ fn version_string() -> &'static str {
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "octos-tui",
+    name = "octoscode",
     version = version_string(),
-    about = "Mock-backed Octos TUI prototype on the Octos UI Protocol boundary",
+    about = "Mock-backed Octoscode prototype on the Octos UI Protocol boundary",
     // These leading positionals are handled before clap (see `cmd::dispatch`),
     // so they don't appear as clap subcommands above. (Profiles are created in
     // the TUI — first-launch onboarding, or `/profiles` → "Create a new profile".)
     after_help = "Subcommands:\n  \
-        doctor   Diagnose octos-tui's environment, install, and connectivity\n  \
-        update   Update octos-tui in place (or print the upgrade command)\n  \
+        doctor   Diagnose octoscode's environment, install, and connectivity\n  \
+        update   Update octoscode in place (or print the upgrade command)\n  \
         config   Show or locate the TUI config file"
 )]
 struct CliArgs {
@@ -254,6 +260,17 @@ struct CliArgs {
     /// also toggled at runtime with `/vimmode`.
     #[arg(long = "vim-mode")]
     pub vim_mode: bool,
+
+    /// Steer a prompt typed mid-turn into the RUNNING turn (octos#1807)
+    /// instead of queueing it. Off by default: queued prompts each run as
+    /// their own turn, in the order typed. Also toggled at runtime with
+    /// `/steer` (persist with `/saveconfig`).
+    #[arg(long = "steer-mid-turn")]
+    pub steer_mid_turn: bool,
+
+    /// Skip the startup logo animation.
+    #[arg(long = "no-splash")]
+    pub no_splash: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -291,6 +308,9 @@ pub struct CliFileConfig {
 
     #[serde(alias = "vim_mode")]
     pub vim_mode: Option<bool>,
+
+    #[serde(alias = "steer_mid_turn")]
+    pub steer_mid_turn: Option<bool>,
 }
 
 impl Cli {
@@ -353,7 +373,7 @@ impl Cli {
 
         // Mode resolution: an explicit mode (CLI flag, then config) always
         // wins. With NO explicit mode, default to the real backend
-        // (`Protocol`) — a bare `octos-tui` launch spawns/auto-provisions
+        // (`Protocol`) — a bare `octoscode` launch spawns/auto-provisions
         // `octos serve --stdio` (see `backend_ensure`) rather than the mock
         // demo. The mock is now reachable only via an explicit `--mode mock`
         // or `"mode": "mock"` in config.
@@ -403,6 +423,10 @@ impl Cli {
             // "false"), so the CLI flag only force-enables; the config provides
             // the default when the flag is absent.
             vim_mode: args.vim_mode || file_config.vim_mode.unwrap_or(false),
+            steer_mid_turn: args.steer_mid_turn || file_config.steer_mid_turn.unwrap_or(false),
+            // Flag + OCTOSCODE_NO_SPLASH env only — no config-file key
+            // (CliFileConfig is deny_unknown_fields; spec gates via these two).
+            no_splash: args.no_splash,
         })
     }
 }
@@ -462,7 +486,7 @@ fn load_config_file_if_present(path: &Path) -> (Option<CliFileConfig>, Option<St
 
 /// Default config path used by `/saveconfig` when the session was launched
 /// without an explicit `--config`. Follows the XDG/CLI convention the backend
-/// adopted (`~/.config/octos-tui/config.json`). Falls back to `USERPROFILE` on
+/// adopted (`~/.config/octoscode/config.json`). Falls back to `USERPROFILE` on
 /// Windows, where `HOME` is usually unset, so `/saveconfig` still has a default
 /// home to write to there.
 pub fn default_config_path() -> Option<PathBuf> {
@@ -483,12 +507,13 @@ fn config_path_from_home(
     Some(
         PathBuf::from(base)
             .join(".config")
-            .join("octos-tui")
+            .join("octoscode")
             .join("config.json"),
     )
 }
 
-/// Persist the runtime UI settings (theme / lang / scroll-mode / vim-mode) back
+/// Persist the runtime UI settings (theme / lang / scroll-mode / vim-mode /
+/// steer-mid-turn) back
 /// into the config file, MERGING into whatever is already there: the existing
 /// JSON is read as a generic object and only these keys are patched, so
 /// transport keys (stdio-command, profile-id, session, endpoint, …) and any
@@ -500,12 +525,14 @@ pub fn save_ui_settings(
     lang: Lang,
     scroll_mode: ScrollMode,
     vim_mode: bool,
+    steer_mid_turn: bool,
 ) -> Result<()> {
     let mut entries = serde_json::Map::new();
     entries.insert("theme".into(), theme.as_str().into());
     entries.insert("lang".into(), lang.code().into());
     entries.insert("scroll-mode".into(), scroll_mode.as_str().into());
     entries.insert("vim-mode".into(), vim_mode.into());
+    entries.insert("steer-mid-turn".into(), steer_mid_turn.into());
     merge_into_config(path, &entries)
 }
 
@@ -515,7 +542,7 @@ pub fn save_ui_settings(
 /// (transport, UI, unknown) survive. A missing or empty file starts from an
 /// empty object. For each kebab key written, the legacy snake_case alias is
 /// dropped so the canonical key is authoritative. This is the one write path
-/// behind both `/saveconfig` (UI keys) and `octos-tui config` (all keys).
+/// behind both `/saveconfig` (UI keys) and `octoscode config` (all keys).
 pub fn merge_into_config(
     path: &Path,
     entries: &serde_json::Map<String, serde_json::Value>,
@@ -573,7 +600,7 @@ pub fn merge_into_config(
         .wrap_err_with(|| format!("failed to write TUI config {}", path.display()))
 }
 
-/// The clap `Command` for the top-level TUI args — exposed so `octos-tui config`
+/// The clap `Command` for the top-level TUI args — exposed so `octoscode config`
 /// can introspect every option (help text, defaults, enum choices) and stay in
 /// sync as flags are added, rather than hand-mirroring the list.
 pub fn cli_command() -> clap::Command {
@@ -624,7 +651,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("clock is valid")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("octos-tui-{name}-{nonce}.json"));
+        let path = std::env::temp_dir().join(format!("octoscode-{name}-{nonce}.json"));
         fs::write(&path, contents).expect("config writes");
         path
     }
@@ -646,7 +673,7 @@ mod tests {
         use super::config_path_from_home;
         use std::ffi::OsString;
 
-        let suffix: PathBuf = [".config", "octos-tui", "config.json"].iter().collect();
+        let suffix: PathBuf = [".config", "octoscode", "config.json"].iter().collect();
 
         // HOME wins when set.
         let from_home = config_path_from_home(Some(OsString::from("/home/u")), None)
@@ -672,9 +699,9 @@ mod tests {
 
     #[test]
     fn lang_flag_parses_and_defaults_to_en() {
-        let cli = Cli::try_parse_from(["octos-tui", "--lang", "zh"]).expect("parse --lang zh");
+        let cli = Cli::try_parse_from(["octoscode", "--lang", "zh"]).expect("parse --lang zh");
         assert_eq!(cli.lang, super::Lang::Zh);
-        let cli = Cli::try_parse_from(["octos-tui"]).expect("parse default");
+        let cli = Cli::try_parse_from(["octoscode"]).expect("parse default");
         // No flag/config/env override in this minimal invocation → English.
         assert!(matches!(cli.lang, super::Lang::En | super::Lang::Zh));
     }
@@ -748,7 +775,7 @@ mod tests {
     #[test]
     fn parses_snapshot_launch_flags() {
         let cli = Cli::try_parse_from([
-            "octos-tui",
+            "octoscode",
             "--mode",
             "protocol",
             "--endpoint",
@@ -785,7 +812,7 @@ mod tests {
     fn should_default_bare_launch_to_stdio_protocol() {
         // A bare launch (no mode, no transport, no config) now connects to the
         // real backend over stdio (auto-provisioned) instead of the mock demo.
-        let cli = Cli::try_parse_from(["octos-tui"]).expect("cli parses");
+        let cli = Cli::try_parse_from(["octoscode"]).expect("cli parses");
 
         assert_eq!(cli.mode, Mode::Protocol);
         assert!(cli.base_url.is_none());
@@ -799,7 +826,7 @@ mod tests {
     #[test]
     fn should_select_mock_only_via_explicit_mode() {
         // The mock demo is still reachable, but only explicitly.
-        let cli = Cli::try_parse_from(["octos-tui", "--mode", "mock"]).expect("cli parses");
+        let cli = Cli::try_parse_from(["octoscode", "--mode", "mock"]).expect("cli parses");
         assert_eq!(cli.mode, Mode::Mock);
         assert!(cli.stdio_command.is_none());
         assert!(cli.base_url.is_none());
@@ -811,7 +838,7 @@ mod tests {
     // infers Protocol.
     #[test]
     fn should_infer_protocol_mode_when_stdio_command_set_without_mode() {
-        let cli = Cli::try_parse_from(["octos-tui", "--stdio-command", "octos serve --stdio"])
+        let cli = Cli::try_parse_from(["octoscode", "--stdio-command", "octos serve --stdio"])
             .expect("cli parses");
 
         assert_eq!(cli.mode, Mode::Protocol);
@@ -820,7 +847,7 @@ mod tests {
 
     #[test]
     fn should_infer_protocol_mode_when_endpoint_set_without_mode() {
-        let cli = Cli::try_parse_from(["octos-tui", "--endpoint", "ws://127.0.0.1:1/ui"])
+        let cli = Cli::try_parse_from(["octoscode", "--endpoint", "ws://127.0.0.1:1/ui"])
             .expect("cli parses");
 
         assert_eq!(cli.mode, Mode::Protocol);
@@ -834,7 +861,7 @@ mod tests {
             r#"{ "stdio_command": "octos serve --stdio" }"#,
         );
 
-        let cli = Cli::try_parse_from(["octos-tui", "--config", path.to_str().unwrap()])
+        let cli = Cli::try_parse_from(["octoscode", "--config", path.to_str().unwrap()])
             .expect("cli parses");
 
         assert_eq!(cli.mode, Mode::Protocol);
@@ -843,7 +870,7 @@ mod tests {
     #[test]
     fn explicit_mock_mode_wins_over_transport_inference() {
         let cli = Cli::try_parse_from([
-            "octos-tui",
+            "octoscode",
             "--mode",
             "mock",
             "--stdio-command",
@@ -858,14 +885,14 @@ mod tests {
             "explicit-mock",
             r#"{ "mode": "mock", "stdio_command": "octos serve --stdio" }"#,
         );
-        let cli = Cli::try_parse_from(["octos-tui", "--config", path.to_str().unwrap()])
+        let cli = Cli::try_parse_from(["octoscode", "--config", path.to_str().unwrap()])
             .expect("cli parses");
         assert_eq!(cli.mode, Mode::Mock);
     }
 
     #[test]
     fn prints_package_version() {
-        let err = super::CliArgs::try_parse_from(["octos-tui", "--version"])
+        let err = super::CliArgs::try_parse_from(["octoscode", "--version"])
             .expect_err("version flag exits early");
 
         assert_eq!(err.kind(), ErrorKind::DisplayVersion);
@@ -875,7 +902,7 @@ mod tests {
     #[test]
     fn parses_stdio_command() {
         let cli = Cli::try_parse_from([
-            "octos-tui",
+            "octoscode",
             "--mode",
             "protocol",
             "--stdio-command",
@@ -890,7 +917,7 @@ mod tests {
 
     #[test]
     fn rejects_empty_stdio_command() {
-        let err = Cli::try_parse_from(["octos-tui", "--stdio-command", "   "])
+        let err = Cli::try_parse_from(["octoscode", "--stdio-command", "   "])
             .expect_err("empty stdio command should be rejected");
 
         assert!(err.to_string().contains("stdio command must not be empty"));
@@ -899,7 +926,7 @@ mod tests {
     #[test]
     fn rejects_endpoint_and_stdio_command_together() {
         let err = Cli::try_parse_from([
-            "octos-tui",
+            "octoscode",
             "--endpoint",
             "wss://example.test/ui-protocol",
             "--stdio-command",
@@ -910,16 +937,25 @@ mod tests {
         assert!(err.to_string().contains("cannot be used with"));
     }
 
+    /// specs/task-startup-splash.spec: --no-splash disables the startup animation.
+    #[test]
+    fn cli_parses_no_splash_flag() {
+        let cli = Cli::try_parse_from(["octoscode", "--no-splash"]).expect("cli parses");
+        assert!(cli.no_splash);
+        let cli = Cli::try_parse_from(["octoscode"]).expect("cli parses");
+        assert!(!cli.no_splash);
+    }
+
     #[test]
     fn parses_theme_choice() {
-        let cli = Cli::try_parse_from(["octos-tui", "--theme", "claude"]).expect("cli parses");
+        let cli = Cli::try_parse_from(["octoscode", "--theme", "claude"]).expect("cli parses");
 
         assert_eq!(cli.theme, ThemeName::Claude);
     }
 
     #[test]
     fn parses_terminal_theme_choice() {
-        let cli = Cli::try_parse_from(["octos-tui", "--theme", "terminal"]).expect("cli parses");
+        let cli = Cli::try_parse_from(["octoscode", "--theme", "terminal"]).expect("cli parses");
 
         assert_eq!(cli.theme, ThemeName::Terminal);
     }
@@ -927,7 +963,7 @@ mod tests {
     #[test]
     fn rejects_non_websocket_protocol_endpoint() {
         let err = Cli::try_parse_from([
-            "octos-tui",
+            "octoscode",
             "--mode",
             "protocol",
             "--endpoint",
@@ -955,7 +991,7 @@ mod tests {
         );
 
         let cli =
-            Cli::try_parse_from(["octos-tui", "--config", path.to_str().unwrap()]).expect("parses");
+            Cli::try_parse_from(["octoscode", "--config", path.to_str().unwrap()]).expect("parses");
 
         assert_eq!(cli.config.as_deref(), Some(path.as_path()));
         assert_eq!(cli.mode, Mode::Protocol);
@@ -986,7 +1022,7 @@ mod tests {
         );
 
         let cli = Cli::try_parse_from([
-            "octos-tui",
+            "octoscode",
             "--config",
             path.to_str().unwrap(),
             "--mode",
@@ -1025,7 +1061,7 @@ mod tests {
             }"#,
         );
 
-        let err = Cli::try_parse_from(["octos-tui", "--config", path.to_str().unwrap()])
+        let err = Cli::try_parse_from(["octoscode", "--config", path.to_str().unwrap()])
             .expect_err("conflicting config should fail");
 
         assert!(err.to_string().contains("choose one Octos UI transport"));
@@ -1043,7 +1079,7 @@ mod tests {
             }"#,
         );
 
-        let err = Cli::try_parse_from(["octos-tui", "--config", path.to_str().unwrap()])
+        let err = Cli::try_parse_from(["octoscode", "--config", path.to_str().unwrap()])
             .expect_err("model/provider should not be accepted by TUI config");
         let error = format!("{err:?}");
 

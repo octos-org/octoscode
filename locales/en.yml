@@ -1,4 +1,4 @@
-# octos-tui UI strings — English (source / fallback locale).
+# octoscode UI strings — English (source / fallback locale).
 #
 # Keys are dotted via nested YAML. Add a key here and its translation in
 # zh.yml (and any future locale). Use `%{var}` for interpolation, e.g.
@@ -35,9 +35,9 @@ app:
     threads: "Threads"
     turn: "Turn"
   empty:
+    no_session: "No session selected"
     no_tasks: "No tasks yet"
     no_artifacts: "No artifacts in snapshot"
-    no_session: "No session selected"
     no_plan: "No active plan"
     no_plan_hint: "Plan text is inferred from assistant/live replies."
     no_task_output: "No output loaded for this task yet"
@@ -45,6 +45,7 @@ app:
     no_file_changes: "No file changes"
   approval:
     title: "Approval Requested"
+    risk_chip: "risk: %{risk}"
     action_once: "y = approve this command once"
     action_session: "s = approve this command/scope for the session"
     action_deny: "n = deny it"
@@ -69,7 +70,8 @@ app:
     completed: "Agent task completed"
     running: "running"
     preview_ready: "preview ready"
-    older_actions: "... +%{count} older action(s)"
+    older_actions: "◈ %{count} more · Ctrl+O"
+    repeat_suffix: " ×%{count}"
     more_completed_active: "... +%{hidden} more, %{completed} completed, %{active} active"
     action_count: "%{count} action(s)"
     active_count: "%{count} active"
@@ -83,9 +85,9 @@ app:
     title: "Diff Preview"
     inline_patch: "Inline patch"
     loading: "Loading diff preview..."
-    select_stage_hint: "[/] select hunk | c stage selected diff context"
-    toggle_side_by_side_hint: "v side-by-side"
-    toggle_unified_hint: "v unified"
+    select_stage_hint: "Alt+H next hunk | Alt+C stage selected diff context"
+    toggle_side_by_side_hint: "Alt+V side-by-side"
+    toggle_unified_hint: "Alt+V unified"
     side_by_side_too_narrow: "side-by-side needs %{min}+ cols"
     more_files_hidden: "+%{count} more file(s) hidden"
     line_unavailable: "line diff unavailable for this mutation"
@@ -94,6 +96,11 @@ app:
     more_hunks_hidden: "+%{count} more hunk(s) hidden (Ctrl+O expand)"
   autonomy:
     goal_prefix: "Goal: "
+    loops_overflow: "+%{count} more"
+    loop_iteration: "run %{count}"
+    loop_next_run: "next %{remaining}"
+    loop_next_run_pending: "next after this turn"
+    loop_expires_in: "%{remaining} left"
     loops_running: "Loops: %{count} active"
     loops_paused_suffix: " · %{count} paused"
     goal_meta: " (%{status} · %{used}/%{budget} tokens)"
@@ -101,23 +108,33 @@ app:
     status_active: "active"
     status_paused: "paused"
     status_budget_limited: "budget limited"
+    # octoscode#532: a bare "budget limited" reads as "the goal is dead". It is
+    # not — the budget only halts SELF-PACED goal ticks; external wakes (fleet
+    # synthesis, peer-awaiting-input, child-completed) stay schedulable because
+    # octos's goal-status gate admits both "active" and "budget_limited".
+    status_budget_limited_fleet: "budget limited · peers still running"
     status_blocked: "blocked"
     status_complete: "complete"
   statusbar:
     agents: "%{count} agents"
+    actions: "%{count} actions"
     re_entering: "re-entering"
     retrying_attempt_max: "retrying (attempt %{attempt}/%{max})"
     retrying_attempt: "retrying (attempt %{attempt})"
     retrying: "retrying"
-    msgs_tasks: "%{msgs} msgs/%{tasks} tasks"
+    loops_active_countdown: "↻ %{count} loop · next %{remaining}"
     loops_active: "⟳ %{count} active loop(s) — /loop pause to stop"
     loops_paused: "%{count} paused loop(s) — /loop resume to re-arm"
     background_tasks: "%{count} background task(s)"
     ps_to_view: "/ps to view"
     esc_interrupt: "Esc interrupt"
     stop_to_close: "/stop to close"
+    # octoscode#532: the master goes silent while it holds for its fleet. Shown
+    # only while the master's own turn is settled — the window that looked dead.
+    awaiting_fleet: "waiting on %{outstanding} of %{total} peers: %{peers}"
     pending_decision_help: "Waiting on you — Ctrl+R/Alt+A answer · Ctrl+C interrupt"
     parked_decision_banner: "⚠ Parked on you for %{elapsed} — Ctrl+R/Alt+A answer · Ctrl+C interrupt"
+    cursor_degraded: "⚠ stream degraded — replay may be lossy; reconnect"
     tool_output_expanded: "tool output expanded"
   btw:
     answering: "Answering…"
@@ -137,13 +154,11 @@ app:
     blocked: "Blocked"
     done: "Done"
     error: "Error"
+    quota: "Quota"
     interactive: "interactive"
     read_only: "read-only"
     approval_gated: "approval gated"
     sends_disabled: "sends disabled"
-    no_session: "no session"
-    turn_active: "active %{id}"
-    turn_idle: "idle"
   harness:
     orchestrating: "Orchestrating"
     re_entering: "Re-entering"
@@ -177,6 +192,9 @@ app:
     peer_dock_pill_unread: " · %{count}● unread"
     peer_dock_toggle_hint: "Alt+P/Ctrl+L peek"
     peer_dock_title: " peers "
+    # octoscode#532: fleet landing progress — "3 of 5 landed" was derivable
+    # client-side and rendered nowhere.
+    peer_dock_landed: "%{landed}/%{total} landed"
     peer_dock_row_blocked: "waiting on you: %{reason}"
     peer_dock_row_idle: "idle"
     peer_dock_row_opening: "opening…"
@@ -473,6 +491,11 @@ scrollmode:
 vimmode:
   enabled: "Vim mode: on — Esc for Normal, i to insert (Insert mode now)."
   disabled: "Vim mode: off — the composer is a plain text field again."
+steer:
+  enabled: "Steer mode: on — a prompt typed mid-turn is injected into the RUNNING turn."
+  enabled_unsupported: "Steer mode: on — but this server lacks turn/steer; prompts still queue until a capable server connects."
+  disabled: "Steer mode: off — mid-turn prompts queue and run in order."
+  unknown: "Unknown value: %{value}. Usage: /steer [on|off] (bare toggles)."
 thinking:
   usage: "Reasoning effort: %{current}. Usage: /thinking <low|medium|high|max|default>."
   set: "Reasoning effort set to %{level}."
@@ -562,6 +585,7 @@ status:
   goal_objective_empty: "Goal objective cannot be empty"
   setting_goal: "Setting goal: %{objective}"
   clearing_goal: "Clearing goal"
+  images_attached: "%{count} image(s) attached to this turn"
   listing_loops: "Listing loops"
   loop_interval_min: "Loop interval must be at least 1 second"
   creating_loop: "Creating loop"
@@ -724,7 +748,7 @@ status:
   doctor_caps_not_received_recovery: "Wait for `config/capabilities/list` or reconnect the transport."
   doctor_appui_target: "Octos UI target: %{target}"
   doctor_no_transport: "no Octos UI transport configured"
-  doctor_no_transport_recovery: "Start the TUI with `octos tui --target <stdio:...|ws://...>`."
+  doctor_no_transport_recovery: "Relaunch with `octoscode --stdio-command \"octos serve --stdio\"` or `octoscode --endpoint ws://<host>:<port>/api/ui-protocol/ws`."
   onboarding_doctor_summary: "Onboarding doctor — %{summary}"
   ps_active_turn: "active turn %{id}"
   ps_idle: "idle"
@@ -741,6 +765,7 @@ status:
   no_staged_message: "No staged message to send"
   interrupt_staged_submit: "Interrupt requested; staged message will submit when the turn stops"
   no_active_turn_interrupt: "No active turn to interrupt"
+  ctrl_c_quit_hint: "Nothing to interrupt — press Ctrl+C again to quit (Ctrl+Q always quits)"
   interrupt_requested_active_turn: "Interrupt requested for active turn"
   no_active_approval: "No active approval request"
   approval_action: "Approval %{action}: %{title}"
@@ -800,6 +825,8 @@ status:
   goal_cleared: "Goal cleared"
   goal_clear_rejected: "Goal clear rejected"
   loop_created: "Loop %{id} created (%{mode})"
+  loop_list_title: "↻ Loops"
+  loop_list_empty_hint: "No loops in this session. Create one with /loop <prompt> (self-paced) or /loop every 10m <prompt>."
   loop_list_refreshed: "Loop list refreshed: %{count} loop(s)"
   loop_mutation: "Loop %{id} %{verb} %{outcome}"
   cannot_transition_no_goal: "Cannot transition: server reports no goal."
@@ -841,6 +868,8 @@ status:
   activity_skill_registry: "skill registry"
   activity_permission_profile_mismatch: "permission profile mismatch"
   activity_runtime_status: "runtime status"
+  activity_cursor_unhealthy: "cursor unhealthy"
+  cursor_unhealthy: "Stream cursor unhealthy: replay may be lossy; reconnect to rehydrate"
   activity_tool_config: "tool config"
   activity_recovery_suggestion: "Recovery suggestion"
   activity_agent_output: "agent output"
@@ -890,8 +919,16 @@ status:
   # Turn-completion fallback "Session Summary" assistant cards
   summary_title: "Session Summary"
   summary_error_label: "Error"
+  quota_card: "⏳ Quota exhausted — %{provider}\n  This provider's usage limit for the current billing cycle is reached; the turn could not finish.\n  What you can do now:\n   ▸ Purchase extra usage or upgrade your plan%{link}\n   ▸ /model — switch to another configured model and continue this session\n   ▸ Retry this message after the quota resets (your draft survives)"
+  quota_card_provider_unknown: "the active provider"
   summary_completed_no_answer: "Session Summary\n- Result: Turn completed, but the TUI did not receive a final assistant answer.\n- Activity: %{count} action(s) recorded.\n- Files changed: %{files}.\n- Validation: %{validation}.\n- Risks / follow-up: Review the activity above and continue the turn if the requested answer is incomplete."
   summary_partial_answer: "Session Summary\n- Result: Turn completed, but the TUI only received a partial live answer.\n- Activity: %{count} action(s) recorded.\n- Files changed: %{files}.\n- Validation: %{validation}.\n- Risks / follow-up: The server may have persisted a fuller answer; continue if the visible answer is incomplete."
+  # octoscode#532: replaces `summary_completed_no_answer` when the master's turn
+  # ends while its peer fleet is still running. That turn ended BY DESIGN — the
+  # fleet-synthesis wake re-enters the master once every peer is done+settled —
+  # so the void-turn wording read as a crash at the exact moment the fleet was
+  # doing its most impressive work.
+  summary_waiting_on_fleet: "Session Summary\n- Result: Turn ended while the peer fleet is still running. The master is NOT stopped — it wakes and synthesizes when the fleet lands.\n- Fleet: %{landed} of %{total} peers landed · waiting on %{peers}.\n- Activity: %{count} action(s) recorded.\n- Files changed: %{files}.\n- Validation: %{validation}.\n- Risks / follow-up: Nothing to do — Alt+P peeks the peer dock. The master reports once the last peer lands."
   summary_failed: "Session Summary\n- Result: Turn failed before producing a final answer.\n- Error: %{code}: %{message}\n- Activity: %{count} action(s) recorded.\n- Failures: %{failed}.\n- Risks / follow-up: Fix the error above or continue the turn with a more specific instruction."
   summary_none_observed: "none observed"
   summary_not_reported: "not reported"
@@ -977,11 +1014,13 @@ command:
   theme:
     desc: Choose the local TUI theme.
   saveconfig:
-    desc: "Save the active appearance, language and scroll-mode to the config file."
+    desc: "Save the active appearance, language, scroll-mode, vim-mode and steer-mode to the config file."
   scrollmode:
     desc: 'Switch wheel-scroll behavior: /scrollmode [native|pinned] (bare toggles).'
   vimmode:
     desc: "Toggle Vim modal editing in the composer (Normal/Insert)."
+  steer:
+    desc: "Switch what Enter means mid-turn: /steer [on|off] — on injects into the running turn, off (default) queues FIFO."
   thinking:
     desc: 'Set reasoning effort for thinking models: /thinking low|medium|high|max|default.'
   threads:
@@ -1103,6 +1142,22 @@ menu:
     title: Sub-agents
     unavailable_empty: No sub-agents in this session yet — they appear here when the model spawns workers.
     unavailable_title: Sub-agent dock
+  loop_actions:
+    gone: "Loop %{id} no longer exists — it was deleted or expired."
+    no_target: No loop selected.
+    title: Loop actions
+    title_for: "Loop %{id}"
+    verb:
+      delete: "✕ delete — remove this loop (cannot be undone)"
+      fire-now: "⚡ fire-now — trigger one run immediately"
+      pause: "⏸ pause — stop scheduling until resumed"
+      resume: "▶ resume — re-arm the schedule"
+  loops:
+    row_hint: "Enter actions · → pause/resume"
+    subtitle: "%{count} loops · %{active} active · %{paused} paused"
+    title: Loops
+    unavailable_empty: No loops in this session yet — create one with /loop <prompt> or /loop <prompt> every <interval>.
+    unavailable_title: Loops
   availability:
     approval_has_focus: approval modal has keyboard focus
     blocked_read_only: blocked in read-only mode
@@ -1217,6 +1272,12 @@ menu:
         desc: Move to next row.
       menu_previous:
         desc: Move to previous row.
+      diff_open_toggle:
+        desc: Open diff preview; toggle unified/side-by-side when open.
+      diff_stage_hunk:
+        desc: Stage the selected diff hunk as a composer prompt.
+      diff_next_hunk:
+        desc: Cycle to the next diff hunk (wraps at the end).
     preview_body: This slice exposes the menu surface. Persisted keymap editing remains a follow-up provider action.
     preview_title: Editing
     search: Filter key bindings
@@ -1333,9 +1394,9 @@ menu:
     item:
       ready:
         label: "Next: start a session with “%{profile}”"
-        desc: "Run `octos-tui` here (this folder is activated for “%{profile}”), or `octos-tui --profile-id %{profile}` from another folder."
+        desc: "Run `octoscode` here (this folder is activated for “%{profile}”), or `octoscode --profile-id %{profile}` from another folder."
         label_generic: "Next: start a session"
-        desc_generic: "Run `octos-tui` here — this folder is now activated for your brain."
+        desc_generic: "Run `octoscode` here — this folder is now activated for your brain."
       open:
         label: "Open a session here now"
         desc: "Start working with “%{profile}” in this folder right now — no relaunch needed."
@@ -1460,7 +1521,7 @@ menu:
         label: Create local profile
       exit:
         desc: "Quit without creating a profile. Tip: launch with --profile-id <id> to skip this screen."
-        label: Exit octos-tui
+        label: Exit octoscode
       local_email:
         desc: Use /onboard email <address>. Email is local metadata only.
       local_name:
@@ -1595,6 +1656,8 @@ menu:
         label: Capabilities
       connection:
         label: Connection
+      cursor:
+        label: Stream
       refresh:
         label: Refresh server status
       server:

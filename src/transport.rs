@@ -224,7 +224,7 @@ pub struct ProtocolAppUiBackend {
     /// Latched when the spawned backend refuses to start because another serve
     /// owns the data dir ([`DATA_DIR_LOCKED_MARKER`]). While set, reconnect is
     /// suppressed so we don't respawn a backend that will only crash again —
-    /// the fix for the "two octos-tui competing for the DB" silent crash-loop.
+    /// the fix for the "two octoscode competing for the DB" silent crash-loop.
     fatal_error: Option<String>,
     /// The session to re-open after a reconnect: the MOST RECENTLY opened
     /// session, which tracks the user's current selection (set by `/resume`, a
@@ -507,7 +507,7 @@ impl ProtocolExchange {
                 }
                 // Capture the server-confirmed workspace root so a respawn
                 // reopen scopes to the session's real workspace (#476), not
-                // `launch.cwd` (the shell's dir for a bare `octos-tui`).
+                // `launch.cwd` (the shell's dir for a bare `octoscode`).
                 if let Some(root) = &opened.workspace_root {
                     self.session_workspace_roots
                         .insert(opened.session_id.clone(), root.clone());
@@ -859,10 +859,10 @@ impl StdioTransportDriver {
                 let mut command = shell_command(&self.command);
                 // Multi-instance stdio: isolate this window's runtime (redb
                 // stores, sessions, goals, the serve flock) under a per-cwd
-                // instance dir so several octos-tui windows can run at once
+                // instance dir so several octoscode windows can run at once
                 // while sharing one profile registry. No-op for explicit
                 // --data-dir launches, remote launches, or when opted out via
-                // OCTOS_TUI_SHARED_INSTANCE. Re-spawns (reconnects) resolve to
+                // OCTOSCODE_SHARED_INSTANCE. Re-spawns (reconnects) resolve to
                 // the same dir, so a reconnect re-attaches, not forks.
                 if let Some(instance_dir) = crate::profiles::instance_data_dir_for_launch(
                     Some(&self.command),
@@ -1490,7 +1490,7 @@ impl ProtocolAppUiBackend {
     ///
     /// This intentionally bypasses every server-side guard (no SafePolicy /
     /// blocklist, no sandbox, no `BLOCKED_ENV_VARS` scrub) — that is the
-    /// Claude Code `!` model: the command runs on the machine octos-tui runs
+    /// Claude Code `!` model: the command runs on the machine octoscode runs
     /// on, with the TUI launch dir as cwd and the inherited environment. The
     /// activity card labels it as a local shell command (the mitigation).
     ///
@@ -1635,7 +1635,7 @@ impl ProtocolAppUiBackend {
 
         // The backend refused to start because another octos serve already owns
         // this data directory (redb single-writer). Respawning it would only
-        // crash again — the silent ~5s loop the user hit with two octos-tui
+        // crash again — the silent ~5s loop the user hit with two octoscode
         // windows. Latch a fatal state (suppresses reconnect in
         // `ensure_connected`) and surface one clear, terminal error INSTEAD OF
         // the raw stderr status (suppressed below). Latch once so a
@@ -1643,9 +1643,9 @@ impl ProtocolAppUiBackend {
         let is_fatal_conflict = message.contains(DATA_DIR_LOCKED_MARKER);
         if is_fatal_conflict && self.fatal_error.is_none() {
             let explanation =
-                "Another octos-tui is already running and using this data directory, so this \
+                "Another octoscode is already running and using this data directory, so this \
                  window can't start its own backend (the database allows only one at a time). \
-                 Close the other octos-tui window (or any `octos serve`), then restart this one. \
+                 Close the other octoscode window (or any `octos serve`), then restart this one. \
                  To run two at once, start this one in a workspace with its own data directory."
                     .to_string();
             self.fatal_error = Some(explanation.clone());
@@ -1755,7 +1755,7 @@ impl ProtocolAppUiBackend {
     /// `--session` when nothing has been opened yet.
     fn reopen_session_open_command(&self) -> Option<AppUiCommand> {
         // Prefer the session's server-confirmed workspace root for the reopen
-        // cwd: a bare `octos-tui` (no --cwd) falls back to the shell's
+        // cwd: a bare `octoscode` (no --cwd) falls back to the shell's
         // current_dir for `launch.cwd`, which may differ from the session's
         // workspace. Reopening with the shell's cwd rescopes the session to
         // the wrong `~cwd-<hash>` and presents an empty session (#476). The
@@ -2522,7 +2522,7 @@ fn websocket_request(
 /// Build the `X-Octos-Ui-Features` negotiation value.
 ///
 /// Normally the TUI advertises the full modern feature set. When
-/// `OCTOS_TUI_OLD_SERVER_FEATURES=1` is set it advertises only the
+/// `OCTOSCODE_OLD_SERVER_FEATURES=1` is set it advertises only the
 /// pre-autonomy baseline, dropping the coding autonomy / agent-control /
 /// goal / loop / harness-task-control features. This lets the onboarding
 /// soak exercise the genuine old-server fallback path (header-negotiated):
@@ -2530,7 +2530,7 @@ fn websocket_request(
 /// must hide those controls and never probe `review/start`, `task/list`,
 /// or `task/artifact/*`.
 fn appui_feature_header_value() -> String {
-    let old_server = std::env::var("OCTOS_TUI_OLD_SERVER_FEATURES").as_deref() == Ok("1");
+    let old_server = std::env::var("OCTOSCODE_OLD_SERVER_FEATURES").as_deref() == Ok("1");
     appui_feature_header_for(old_server)
 }
 
@@ -2541,7 +2541,8 @@ fn appui_feature_header_for(old_server: bool) -> String {
         );
     }
     format!(
-        "{UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1}, {UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1}, {UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1}, {UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1}, {UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1}, {UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1}, {UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1}, {UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1}, {UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1}, {UI_PROTOCOL_FEATURE_USER_QUESTION_V1}, {UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1}, {UI_PROTOCOL_FEATURE_PLAN_TODOS_V1}, {UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2}"
+        "{UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1}, {UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1}, {UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1}, {UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1}, {UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1}, {UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1}, {UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1}, {UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1}, {UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1}, {UI_PROTOCOL_FEATURE_USER_QUESTION_V1}, {UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1}, {UI_PROTOCOL_FEATURE_PLAN_TODOS_V1}, {}, {UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2}",
+        crate::model::APPUI_FEATURE_BACKGROUND_ACTIVITY_V1
     )
 }
 
@@ -2883,6 +2884,14 @@ fn rpc_value_to_app_event(
         }
         if method == crate::model::APPUI_METHOD_PEER_CLOSED {
             return Ok(Some(peer_closed_notification_to_client_event(params)));
+        }
+        // octos#2019: `background/activity` is decoded tui-locally for the same
+        // reason — the pinned octos-core rev predates the variant, so the
+        // vendored decoder would degrade it to an `unknown_notification` error.
+        if method == crate::model::APPUI_METHOD_BACKGROUND_ACTIVITY {
+            return Ok(Some(background_activity_notification_to_client_event(
+                params,
+            )));
         }
         return Ok(Some(notification_to_app_event(method, params).into()));
     }
@@ -4284,6 +4293,25 @@ fn peer_staged_notification_to_client_event(params: Value) -> ClientEvent {
     }
 }
 
+/// octos#2019: decodes the durable `background/activity` notification into the
+/// typed [`ClientEvent::BackgroundActivity`] via the tui-local
+/// [`crate::model::BackgroundActivityParams`] mirror (the vendored octos-core
+/// rev has no `UiNotification` variant for it yet). Malformed params surface as
+/// the standard `invalid_params` error event rather than wedging the stream.
+fn background_activity_notification_to_client_event(params: Value) -> ClientEvent {
+    match serde_json::from_value::<crate::model::BackgroundActivityParams>(params) {
+        Ok(event) => ClientEvent::BackgroundActivity(event),
+        Err(err) => app_error(
+            "invalid_params",
+            format!(
+                "failed to decode UI protocol params for {}: {err}",
+                crate::model::APPUI_METHOD_BACKGROUND_ACTIVITY
+            ),
+        )
+        .into(),
+    }
+}
+
 /// octos#1801 v3: decodes the durable `peer/closed` notification into the
 /// typed [`ClientEvent::PeerClosed`] via the tui-local
 /// [`crate::model::PeerClosedParams`] mirror (the vendored octos-core rev has
@@ -5203,7 +5231,7 @@ impl AppUiBackend for MockAppUiBackend {
 }
 
 fn mock_approval_kind() -> String {
-    std::env::var("OCTOS_TUI_MOCK_APPROVAL_KIND").unwrap_or_else(|_| approval_kinds::COMMAND.into())
+    std::env::var("OCTOSCODE_MOCK_APPROVAL_KIND").unwrap_or_else(|_| approval_kinds::COMMAND.into())
 }
 
 fn mock_model_status(selected: bool) -> ModelStatus {
@@ -6088,6 +6116,8 @@ mod tests {
         let request = rpc_request_from_command(
             "tui-7".into(),
             AppUiCommand::SubmitPrompt(TurnStartParams {
+                // Ordinary chat turn: context-scoped tools stay unadvertised.
+                tool_context: None,
                 session_id: SessionKey("local:test".into()),
                 turn_id: TurnId::new(),
                 input: vec![InputItem::Text {
@@ -6116,6 +6146,8 @@ mod tests {
         let request = rpc_request_from_command(
             "tui-9".into(),
             AppUiCommand::SubmitPrompt(TurnStartParams {
+                // Ordinary chat turn: context-scoped tools stay unadvertised.
+                tool_context: None,
                 session_id: SessionKey("local:test".into()),
                 turn_id: TurnId::new(),
                 input: vec![
@@ -6934,6 +6966,314 @@ mod tests {
         assert_eq!(remove.params["name"], "deep-search");
     }
 
+    /// The ws handshake advertises `projection.envelope.v2`, and a server that
+    /// honors it stops sending `message/delta` + `turn/completed` entirely —
+    /// the reply text and the turn terminal ride inside `projection/envelope`
+    /// instead. This is the exact frame a live server emits for a reasoning
+    /// delta; it has to reach the v2 notification, because the v1 arm is
+    /// dropped on the floor (`store.rs` `UiNotification::Envelope(_) => None`)
+    /// and a dropped terminal leaves the UI spinning on "Working" forever with
+    /// the answer only visible after a restart re-hydrates the session.
+    #[test]
+    fn projection_envelope_v2_frame_decodes_to_the_v2_notification() {
+        let mut pending = HashMap::new();
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "method": "projection/envelope",
+            "params": {
+                "session_id": "probe-features-2",
+                "thread_id": "09910166-03a0-4037-8d34-e27d634ef2a9",
+                "seq": 1,
+                "cursor": {"stream": "probe-features-2\u{0}~cwd-74427c29e62e0989", "seq": 7},
+                "turn_id": "09910166-03a0-4037-8d34-e27d634ef2a9",
+                "payload": {"type": "reasoning_delta", "data": {"text": "The"}}
+            }
+        })
+        .to_string();
+
+        let event = rpc_text_to_app_event_with_pending(&frame, &mut pending)
+            .expect("frame decodes")
+            .expect("client event");
+
+        let ClientEvent::App(app_event) = event else {
+            panic!("expected an app event");
+        };
+        let AppUiEvent::Protocol(notification) = *app_event else {
+            panic!("expected a protocol notification");
+        };
+        assert!(
+            matches!(notification, UiNotification::EnvelopeV2(_)),
+            "v2 wire payload must not decode to the dropped v1 arm: {notification:?}"
+        );
+    }
+
+    /// End-to-end repro of the ws-only stall, replayed from frames captured
+    /// off a live server. The client submits with its OWN turn id; the server
+    /// answers `turn/started` carrying a DIFFERENT (thread-shaped) id and then
+    /// streams every envelope under that server id. The reply must still land
+    /// and the turn must still settle — otherwise the composer spins on
+    /// "Working" forever and the answer only appears after a restart
+    /// re-hydrates the session, which is the reported symptom.
+    #[test]
+    fn envelope_v2_turn_under_a_server_assigned_turn_id_lands_and_settles() {
+        const SERVER_TURN: &str = "b6a0e44e-8336-4cc0-a9db-93439010b313";
+        let session = "probe-term-1";
+
+        let mut store = crate::store::Store::from_snapshot(AppUiSnapshot {
+            sessions: vec![AppUiSession {
+                id: SessionKey(session.into()),
+                title: "test".into(),
+                profile_id: Some("alan".into()),
+                messages: vec![],
+                tasks: vec![],
+                live_reply: None,
+            }],
+            selected_session: 0,
+            status: "ready".into(),
+            target: None,
+            readonly: false,
+        });
+
+        // The client's own submit: this is where the client-side turn id and
+        // the InProgress run state come from.
+        store.state.composer = "hello".into();
+        let command = store.compose_command().expect("submit starts a turn");
+        let AppUiCommand::SubmitPrompt(params) = command else {
+            panic!("expected a submit-prompt command");
+        };
+        assert_ne!(
+            params.turn_id.0.to_string(),
+            SERVER_TURN,
+            "repro requires the client and server to disagree on the turn id"
+        );
+
+        let mut pending = HashMap::new();
+        let frames = [
+            json!({"jsonrpc":"2.0","method":"turn/started","params":{
+                "session_id": session, "turn_id": SERVER_TURN,
+                "timestamp":"2026-08-10T07:50:12.385814Z"}}),
+            json!({"jsonrpc":"2.0","method":"projection/envelope","params":{
+                "session_id": session, "thread_id": SERVER_TURN, "seq": 33,
+                "cursor": {"stream": session, "seq": 39}, "turn_id": SERVER_TURN,
+                "payload": {"type":"assistant_delta","data":{
+                    "text":"Hello! ",
+                    "assistant_segment_id": "b6a0e44e-8336-4cc0-a9db-93439010b313:assistant:1"}}}}),
+            json!({"jsonrpc":"2.0","method":"projection/envelope","params":{
+                "session_id": session, "thread_id": SERVER_TURN, "seq": 43,
+                "cursor": {"stream": session, "seq": 52}, "turn_id": SERVER_TURN,
+                "payload": {"type":"assistant_persisted","data":{
+                    "text":"Hello! How can I help you today?",
+                    "assistant_segment_id": "b6a0e44e-8336-4cc0-a9db-93439010b313:assistant:1",
+                    "meta": {"message_id":"probe-term-1:1:1786348294194329000",
+                             "persisted_at":"2026-08-10T07:51:34.194329Z"}}}}}),
+            json!({"jsonrpc":"2.0","method":"projection/envelope","params":{
+                "session_id": session, "thread_id": SERVER_TURN, "seq": 44,
+                "cursor": {"stream": session, "seq": 53}, "turn_id": SERVER_TURN,
+                "payload": {"type":"turn_terminal","data":{
+                    "outcome":"completed",
+                    "token_usage":{"input_tokens":87,"output_tokens":43}}}}}),
+        ];
+
+        for frame in frames {
+            let event = rpc_text_to_app_event_with_pending(&frame.to_string(), &mut pending)
+                .expect("frame decodes")
+                .expect("client event");
+            let ClientEvent::App(app_event) = event else {
+                panic!("expected an app event for {frame}");
+            };
+            store.apply_event(*app_event);
+        }
+
+        let transcript = store.state.sessions[0]
+            .messages
+            .iter()
+            .map(|message| message.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            transcript.contains("How can I help you today?"),
+            "assistant answer never reached the transcript: {transcript:?}"
+        );
+        assert!(
+            store.state.sessions[0].live_reply.is_none(),
+            "terminal left the turn live, so the spinner never clears"
+        );
+        assert_ne!(
+            store.state.run_state,
+            crate::model::SessionRunState::InProgress,
+            "run state stuck InProgress after the turn terminal"
+        );
+    }
+
+    /// A `projection/envelope` frame WITHOUT `turn_id` decodes to the v1
+    /// `UiNotification::Envelope` arm. That arm used to return `None`, so a v1
+    /// server's reply text and turn terminal vanished silently: the composer
+    /// spun on "Working" forever and the answer only surfaced after a restart
+    /// re-hydrated the session. v1 carries the same payloads as v2 (minus the
+    /// segment id, and spelling the terminal `turn_completed`), so it must be
+    /// applied, not discarded.
+    #[test]
+    fn envelope_v1_turn_lands_and_settles_like_v2() {
+        const THREAD: &str = "b6a0e44e-8336-4cc0-a9db-93439010b313";
+        let session = "v1-envelope-session";
+
+        let mut store = crate::store::Store::from_snapshot(AppUiSnapshot {
+            sessions: vec![AppUiSession {
+                id: SessionKey(session.into()),
+                title: "test".into(),
+                profile_id: Some("alan".into()),
+                messages: vec![],
+                tasks: vec![],
+                live_reply: None,
+            }],
+            selected_session: 0,
+            status: "ready".into(),
+            target: None,
+            readonly: false,
+        });
+        store.state.composer = "hello".into();
+        store.compose_command().expect("submit starts a turn");
+
+        let mut pending = HashMap::new();
+        // No `turn_id` anywhere: this is the v1 wire shape.
+        let frames = [
+            json!({"jsonrpc":"2.0","method":"projection/envelope","params":{
+                "session_id": session, "thread_id": THREAD, "seq": 1,
+                "payload": {"type":"assistant_delta","data":{"text":"Hello! "}}}}),
+            json!({"jsonrpc":"2.0","method":"projection/envelope","params":{
+                "session_id": session, "thread_id": THREAD, "seq": 2,
+                "payload": {"type":"assistant_persisted","data":{
+                    "text":"Hello! How can I help you today?",
+                    "meta": {"message_id":"v1:1:1786348294194329000",
+                             "persisted_at":"2026-08-10T07:51:34.194329Z"}}}}}),
+            json!({"jsonrpc":"2.0","method":"projection/envelope","params":{
+                "session_id": session, "thread_id": THREAD, "seq": 3,
+                "payload": {"type":"turn_completed","data":{
+                    "token_usage":{"input_tokens":87,"output_tokens":43}}}}}),
+        ];
+
+        for frame in frames {
+            let event = rpc_text_to_app_event_with_pending(&frame.to_string(), &mut pending)
+                .expect("frame decodes")
+                .expect("client event");
+            let ClientEvent::App(app_event) = event else {
+                panic!("expected an app event for {frame}");
+            };
+            store.apply_event(*app_event);
+        }
+
+        let transcript = store.state.sessions[0]
+            .messages
+            .iter()
+            .map(|message| message.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            transcript.contains("How can I help you today?"),
+            "v1 assistant answer never reached the transcript: {transcript:?}"
+        );
+        assert!(
+            store.state.sessions[0].live_reply.is_none(),
+            "v1 terminal left the turn live, so the spinner never clears"
+        );
+        assert_ne!(
+            store.state.run_state,
+            crate::model::SessionRunState::InProgress,
+            "run state stuck InProgress after the v1 turn terminal"
+        );
+    }
+
+    /// Envelopes arrive with the session key SPLIT: `session_id` carries the
+    /// base key and the topic rides alongside in `topic` (verified against a
+    /// live server — opening `alan:local:tui#coding` yields
+    /// `session_id='alan:local:tui' topic='coding'`). The TUI keys its sessions
+    /// by the FULL key, so routing deltas on the bare `session_id` finds no
+    /// session and discards the whole turn: nothing renders, the spinner never
+    /// clears, and the answer only appears once a restart re-hydrates.
+    #[test]
+    fn envelope_with_split_session_topic_routes_to_the_full_key_session() {
+        const THREAD: &str = "aaae41c6-9491-4913-8167-4de07c2a57b1";
+        let full_key = "alan:local:tui#coding";
+        let base_key = "alan:local:tui";
+        let topic = "coding";
+
+        let mut store = crate::store::Store::from_snapshot(AppUiSnapshot {
+            sessions: vec![AppUiSession {
+                id: SessionKey(full_key.into()),
+                title: "coding".into(),
+                profile_id: Some("alan".into()),
+                messages: vec![],
+                tasks: vec![],
+                live_reply: None,
+            }],
+            selected_session: 0,
+            status: "ready".into(),
+            target: None,
+            readonly: false,
+        });
+        store.state.composer = "hello".into();
+        store.compose_command().expect("submit starts a turn");
+
+        let mut pending = HashMap::new();
+        let frames = [
+            json!({"jsonrpc":"2.0","method":"projection/envelope","params":{
+                "session_id": base_key, "topic": topic, "thread_id": THREAD,
+                "seq": 1, "turn_id": THREAD,
+                "payload": {"type":"assistant_delta","data":{
+                    "text":"Hello! ",
+                    "assistant_segment_id": "aaae41c6:assistant:1"}}}}),
+            json!({"jsonrpc":"2.0","method":"projection/envelope","params":{
+                "session_id": base_key, "topic": topic, "thread_id": THREAD,
+                "seq": 2, "turn_id": THREAD,
+                "payload": {"type":"assistant_persisted","data":{
+                    "text":"Hello! How can I help you today?",
+                    "assistant_segment_id": "aaae41c6:assistant:1",
+                    "meta": {"message_id":"m1","persisted_at":"2026-08-10T07:51:34.194329Z"}}}}}),
+            json!({"jsonrpc":"2.0","method":"projection/envelope","params":{
+                "session_id": base_key, "topic": topic, "thread_id": THREAD,
+                "seq": 3, "turn_id": THREAD,
+                "payload": {"type":"turn_terminal","data":{
+                    "outcome":"completed",
+                    "token_usage":{"input_tokens":87,"output_tokens":43}}}}}),
+        ];
+
+        for frame in frames {
+            let event = rpc_text_to_app_event_with_pending(&frame.to_string(), &mut pending)
+                .expect("frame decodes")
+                .expect("client event");
+            let ClientEvent::App(app_event) = event else {
+                panic!("expected an app event for {frame}");
+            };
+            store.apply_event(*app_event);
+        }
+
+        let session = store
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id.0 == full_key)
+            .expect("the topic-keyed session still exists");
+        let transcript = session
+            .messages
+            .iter()
+            .map(|message| message.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            transcript.contains("How can I help you today?"),
+            "answer never reached the topic-keyed session: {transcript:?}"
+        );
+        assert!(
+            session.live_reply.is_none(),
+            "terminal never settled the topic-keyed session's turn"
+        );
+        assert_ne!(
+            store.state.run_state,
+            crate::model::SessionRunState::InProgress,
+            "run state stuck InProgress: the spinner never clears"
+        );
+    }
+
     #[test]
     fn profile_skill_results_decode_to_client_events() {
         let mut pending = HashMap::new();
@@ -7216,6 +7556,117 @@ mod tests {
     /// vendored octos-core rev predates the `UiNotification` variant, so
     /// routing it through `from_method_and_params` would degrade it to an
     /// `unknown_notification` error event.
+    #[test]
+    fn should_decode_background_activity_onto_the_owning_session_when_the_frame_arrives() {
+        // octos#2019 — the wire frame's `session_id` is the ROUTING key and
+        // must survive decode intact. A decoder that lost it would force the
+        // store to fall back to the focused session (octos-tui#461/#466/#483).
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "method": "background/activity",
+            "params": {
+                "session_id": "coding:local:tui#coding",
+                "profile_id": "coding",
+                "origin_kind": "monitor",
+                "origin_id": "monitor_01",
+                "origin_label": "ci-tail",
+                "text": "ERROR bus test flaked",
+                "emitted_at_ms": 1_760_000_000_000i64,
+                "suppressed": false
+            }
+        })
+        .to_string();
+        let event = rpc_text_to_app_event_with_pending(&frame, &mut HashMap::new())
+            .expect("frame decodes")
+            .expect("client event");
+        let ClientEvent::BackgroundActivity(activity) = event else {
+            panic!("expected background activity event, got {event:?}");
+        };
+        assert_eq!(
+            activity.session_id,
+            SessionKey("coding:local:tui#coding".into()),
+            "the owning session is the routing key"
+        );
+        assert_eq!(activity.origin_kind, "monitor");
+        assert_eq!(activity.origin_id, "monitor_01");
+        assert_eq!(activity.display_origin(), "ci-tail");
+        assert_eq!(activity.text, "ERROR bus test flaked");
+        assert!(!activity.suppressed);
+        assert!(activity.dropped_count.is_none());
+    }
+
+    /// octos#2019 — the cap's drop marker decodes with its total intact, so
+    /// the client can say so out loud instead of truncating silently.
+    #[test]
+    fn should_decode_the_drop_marker_when_background_activity_was_capped() {
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "method": "background/activity",
+            "params": {
+                "session_id": "coding:local:tui",
+                "origin_kind": "monitor",
+                "origin_id": "monitor_01",
+                "text": "further events from this origin are suppressed",
+                "emitted_at_ms": 1_760_000_000_001i64,
+                "dropped_count": 12,
+                "suppressed": true
+            }
+        })
+        .to_string();
+        let event = rpc_text_to_app_event_with_pending(&frame, &mut HashMap::new())
+            .expect("frame decodes")
+            .expect("client event");
+        let ClientEvent::BackgroundActivity(activity) = event else {
+            panic!("expected background activity event, got {event:?}");
+        };
+        assert!(activity.suppressed);
+        assert_eq!(activity.dropped_count, Some(12));
+        // No label on the wire ⇒ attribution falls back to the origin id, so a
+        // row is never unattributed.
+        assert_eq!(activity.display_origin(), "monitor_01");
+    }
+
+    /// Malformed `background/activity` params surface as the standard
+    /// `invalid_params` error event instead of the `unknown_notification`
+    /// trap or wedging the durable replay stream.
+    #[test]
+    fn should_report_invalid_params_when_background_activity_is_malformed() {
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "method": "background/activity",
+            "params": { "origin_kind": "monitor" }
+        })
+        .to_string();
+        let event = rpc_text_to_app_event_with_pending(&frame, &mut HashMap::new())
+            .expect("frame decodes")
+            .expect("client event");
+        let ClientEvent::App(app_event) = event else {
+            panic!("expected an app error event, got {event:?}");
+        };
+        let AppUiEvent::Error(error) = *app_event else {
+            panic!("expected an error event, got {app_event:?}");
+        };
+        assert_eq!(error.code, "invalid_params");
+        assert!(error.message.contains("background/activity"));
+    }
+
+    /// octos#2019 — the client must ADVERTISE the capability, or the server
+    /// (which gates the notification on it) never sends the frame and the
+    /// human sink is silently dead.
+    #[test]
+    fn should_advertise_background_activity_when_negotiating_features() {
+        let header = appui_feature_header_for(false);
+        assert!(
+            header.contains(crate::model::APPUI_FEATURE_BACKGROUND_ACTIVITY_V1),
+            "modern feature header must request the human sink: {header}"
+        );
+        assert!(
+            !appui_feature_header_for(true)
+                .contains(crate::model::APPUI_FEATURE_BACKGROUND_ACTIVITY_V1),
+            "the old-server baseline must not request it"
+        );
+    }
+
     #[test]
     fn peer_staged_notification_decodes_to_client_event() {
         let frame = json!({
@@ -7703,6 +8154,8 @@ mod tests {
 
         let mutating_commands = [
             AppUiCommand::SubmitPrompt(TurnStartParams {
+                // Ordinary chat turn: context-scoped tools stay unadvertised.
+                tool_context: None,
                 session_id: session_id.clone(),
                 turn_id: TurnId::new(),
                 input: vec![InputItem::Text {
@@ -8183,7 +8636,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock is valid")
             .as_nanos();
-        let marker = std::env::temp_dir().join(format!("octos-tui-backoff-{nonce}.log"));
+        let marker = std::env::temp_dir().join(format!("octoscode-backoff-{nonce}.log"));
         let command = format!("echo spawned >> {}; exit 7", marker.display());
 
         let mut backend = ProtocolAppUiBackend::new(AppUiLaunch {
@@ -8627,6 +9080,8 @@ mod tests {
             lang: crate::cli::Lang::En,
             scroll_mode: crate::cli::ScrollMode::Native,
             vim_mode: false,
+            steer_mid_turn: false,
+            no_splash: false,
         };
 
         let launch = launch_from_cli(&cli);
@@ -8987,7 +9442,7 @@ mod tests {
         assert!(error.message.contains("transport closed for test"));
     }
 
-    /// Two octos-tui competing for the DB: the spawned backend refuses to start
+    /// Two octoscode competing for the DB: the spawned backend refuses to start
     /// (its stderr tail carries `DATA_DIR_LOCKED_MARKER`). The client must latch
     /// a fatal state — surface ONE clean terminal error (not the raw stderr
     /// status) and suppress reconnect so it stops the silent respawn crash-loop.
@@ -9018,7 +9473,7 @@ mod tests {
         };
         assert_eq!(error.code, DATA_DIR_LOCKED_CODE);
         assert!(
-            error.message.contains("Close the other octos-tui"),
+            error.message.contains("Close the other octoscode"),
             "message must be the actionable explanation; got: {}",
             error.message
         );
@@ -9300,6 +9755,8 @@ mod tests {
 
         let request = backend
             .build_tracked_request(AppUiCommand::SubmitPrompt(TurnStartParams {
+                // Ordinary chat turn: context-scoped tools stay unadvertised.
+                tool_context: None,
                 session_id: SessionKey("local:test".into()),
                 turn_id: TurnId::new(),
                 input: vec![InputItem::Text {
@@ -10025,6 +10482,8 @@ mod tests {
             lang: crate::cli::Lang::En,
             scroll_mode: crate::cli::ScrollMode::Native,
             vim_mode: false,
+            steer_mid_turn: false,
+            no_splash: false,
         };
 
         let launch = launch_from_cli(&cli);
@@ -10435,7 +10894,7 @@ mod tests {
 
     #[test]
     fn reopen_prefers_server_confirmed_workspace_root_over_launch_cwd() {
-        // Regression (#476): a bare `octos-tui` (no --cwd) falls back to the
+        // Regression (#476): a bare `octoscode` (no --cwd) falls back to the
         // shell's current_dir for `launch.cwd`, which may differ from the
         // session's real workspace. A respawn reopen must scope to the
         // server-confirmed `workspace_root` from `session/opened`, not
@@ -10651,6 +11110,8 @@ mod tests {
 
         backend
             .send(AppUiCommand::SubmitPrompt(TurnStartParams {
+                // Ordinary chat turn: context-scoped tools stay unadvertised.
+                tool_context: None,
                 session_id: session_id.clone(),
                 turn_id: TurnId::new(),
                 input: vec![InputItem::Text {
@@ -10713,6 +11174,8 @@ mod tests {
 
         backend
             .send(AppUiCommand::SubmitPrompt(TurnStartParams {
+                // Ordinary chat turn: context-scoped tools stay unadvertised.
+                tool_context: None,
                 session_id: session,
                 turn_id: TurnId::new(),
                 input: vec![InputItem::Text {
@@ -10746,6 +11209,8 @@ mod tests {
         let turn_id = TurnId::new();
         backend
             .send(AppUiCommand::SubmitPrompt(TurnStartParams {
+                // Ordinary chat turn: context-scoped tools stay unadvertised.
+                tool_context: None,
                 session_id: session_id.clone(),
                 turn_id: turn_id.clone(),
                 input: vec![InputItem::Text {
@@ -10898,6 +11363,8 @@ mod tests {
 
         backend
             .send(AppUiCommand::SubmitPrompt(TurnStartParams {
+                // Ordinary chat turn: context-scoped tools stay unadvertised.
+                tool_context: None,
                 session_id,
                 turn_id,
                 input: vec![InputItem::Text {

@@ -1,5 +1,5 @@
 use eyre::Result;
-use octos_tui::{backend_ensure, cli::Cli, cmd, event_loop};
+use octoscode::{backend_ensure, cli::Cli, cmd, event_loop};
 
 fn main() -> Result<()> {
     color_eyre::install()?;
@@ -20,6 +20,10 @@ fn main() -> Result<()> {
     // No-op for WebSocket/mock launches, a user-managed octos path/command, or
     // when a compatible backend is already present.
     backend_ensure::ensure_octos_backend(&mut cli)?;
+    // Startup splash: ttfx-rendered logo on the main screen, before the event
+    // loop claims the terminal. Gated (non-TTY/CI/--no-splash) and best-effort;
+    // see specs/task-startup-splash.spec.
+    octoscode::splash::play(&cli);
     event_loop::run(cli)
 }
 

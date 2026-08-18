@@ -1,7 +1,7 @@
-//! Auto-provision the `octos` server backend so a fresh octos-tui install
+//! Auto-provision the `octos` server backend so a fresh octoscode install
 //! "just works" without a separate manual `octos` download.
 //!
-//! octos-tui is a *client*: a local launch spawns `octos serve --stdio` as a
+//! octoscode is a *client*: a local launch spawns `octos serve --stdio` as a
 //! child (`--stdio-command`). Before the TUI takes over the terminal, this
 //! module makes sure `octos` is available and, if it is missing, installs it —
 //! **binary-only** by downloading the prebuilt server bundle for the EXACT octos
@@ -15,9 +15,9 @@
 //! service (a `sudo` daemon on Unix, an `OctosServe` scheduled task on Windows),
 //! which a stdio client neither needs nor should trigger.
 //!
-//! Two-channel note. octos-tui itself now ships prereleases on channels separate
-//! from stable — npm's `next` dist-tag (`@octos-org/octos-tui@next`) and a
-//! `octos-tui-dev` Homebrew formula (stable stays `latest` / `octos-tui`; see
+//! Two-channel note. octoscode itself now ships prereleases on channels separate
+//! from stable — npm's `next` dist-tag (`@octos-org/octoscode@next`) and a
+//! `octoscode-dev` Homebrew formula (stable stays `latest` / `octoscode`; see
 //! `dist-workspace.toml` and `cmd::update`). The octos SERVER installed HERE does
 //! NOT yet have that: its npm/brew publish only to `latest` / the stable formula,
 //! so a package manager can only ever fetch a stable server. That's another
@@ -30,7 +30,7 @@
 //! stdio command to the full path; on Windows we leave the command bare and the
 //! stdio transport prepends `~/.octos/bin` to the *child's* PATH (a quoted path
 //! in the command string is mangled by `cmd /C`). Either way we never mutate
-//! our own process PATH (octos-tui forbids `unsafe`).
+//! our own process PATH (octoscode forbids `unsafe`).
 //!
 //! Scope — it acts on a `Mode::Protocol` launch whose `--stdio-command`'s
 //! **leading program** is a bare `octos` (PATH-resolved). Trailing args may
@@ -41,7 +41,7 @@
 //! non-octos program is the user's own setup and is left untouched. An octos
 //! older than [`MIN_OCTOS_VERSION`] surfaces a clear "please update" error
 //! rather than guessing which package manager owns it. Opt out of install with
-//! `OCTOS_TUI_NO_AUTO_INSTALL=1`.
+//! `OCTOSCODE_NO_AUTO_INSTALL=1`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -50,13 +50,25 @@ use crate::cli::{Cli, Mode};
 use eyre::{Result, WrapErr, eyre};
 
 /// The minimum `octos` server version this build is known to speak with.
-/// octos-tui pins `octos-core` (the UI-Protocol crate) by git rev; this is the
+/// octoscode pins `octos-core` (the UI-Protocol crate) by git rev; this is the
 /// released server version carrying a compatible protocol. Bump it alongside
 /// the pinned `octos-core` rev whenever the protocol surface moves.
 pub(crate) const MIN_OCTOS_VERSION: &str = "1.1.0";
 
 /// Set to any value to disable auto-install (a missing backend then errors).
-const OPT_OUT_ENV: &str = "OCTOS_TUI_NO_AUTO_INSTALL";
+const OPT_OUT_ENV: &str = "OCTOSCODE_NO_AUTO_INSTALL";
+
+/// Pre-rename spelling of [`OPT_OUT_ENV`], still honoured.
+///
+/// This is the ONLY environment variable the binary reads that was part of the
+/// documented `octos-tui` contract (the other ~157 `OCTOS_TUI_*` names belong
+/// to the soak harness, and the two `_BIN`/`_DIR` ones are read by our own
+/// scripts — all renamed in lockstep). Someone with
+/// `OCTOS_TUI_NO_AUTO_INSTALL=1` in a CI job or shell profile would otherwise
+/// find auto-install silently switching itself back on, which is exactly the
+/// kind of quiet breakage a rename must not cause. Honour it, say so once,
+/// and drop it a release or two after the rename has settled.
+const OPT_OUT_ENV_LEGACY: &str = "OCTOS_TUI_NO_AUTO_INSTALL";
 
 /// Default Homebrew formula for the octos server, as `<user>/<tap>/<formula>`.
 /// This MUST reference the PUBLIC tap `octos-org/tap` (→ `github.com/octos-org/
@@ -65,12 +77,12 @@ const OPT_OUT_ENV: &str = "OCTOS_TUI_NO_AUTO_INSTALL";
 /// `could not read Username`. Override with [`BREW_FORMULA_ENV`].
 const DEFAULT_BREW_FORMULA: &str = "octos-org/tap/octos";
 /// Env var overriding the Homebrew formula (to install a fork or a local tap).
-const BREW_FORMULA_ENV: &str = "OCTOS_TUI_BREW_FORMULA";
+const BREW_FORMULA_ENV: &str = "OCTOSCODE_BREW_FORMULA";
 
 /// Default npm package for the octos server. Override with [`NPM_PACKAGE_ENV`].
 const DEFAULT_NPM_PACKAGE: &str = "@octos-org/octos";
 /// Env var overriding the npm package (to install a fork or from a private registry).
-const NPM_PACKAGE_ENV: &str = "OCTOS_TUI_NPM_PACKAGE";
+const NPM_PACKAGE_ENV: &str = "OCTOSCODE_NPM_PACKAGE";
 
 /// The Homebrew formula to install, from [`BREW_FORMULA_ENV`] or the default.
 fn brew_formula() -> String {
@@ -135,7 +147,7 @@ pub fn ensure_octos_backend(cli: &mut Cli) -> Result<()> {
                 eyre!(
                     "octos is installed at {} but isn't on PATH, and the launch command uses \
                      shell syntax we can't safely rewrite to that path. Add {} to PATH and \
-                     relaunch octos-tui.",
+                     relaunch octoscode.",
                     octos.display(),
                     octos
                         .parent()
@@ -167,7 +179,50 @@ enum Probe {
 }
 
 fn opted_out() -> bool {
-    std::env::var_os(OPT_OUT_ENV).is_some_and(|v| !v.is_empty())
+    match opt_out_from(
+        std::env::var_os(OPT_OUT_ENV),
+        std::env::var_os(OPT_OUT_ENV_LEGACY),
+    ) {
+        OptOut::No => false,
+        OptOut::Current => true,
+        OptOut::Legacy => {
+            // Warn once per process, not per probe — `opted_out` is called
+            // from several paths and a repeated notice would bury the real
+            // output.
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                eprintln!(
+                    "octoscode: {OPT_OUT_ENV_LEGACY} is deprecated — \
+                     rename it to {OPT_OUT_ENV}. Still honoured for now."
+                );
+            });
+            true
+        }
+    }
+}
+
+/// Which spelling (if either) opted out.
+#[derive(Debug, PartialEq, Eq)]
+enum OptOut {
+    No,
+    Current,
+    /// Only the pre-rename name was set — honour it, but say so.
+    Legacy,
+}
+
+/// Pure resolver behind [`opted_out`]: the current name wins, the pre-rename
+/// name still counts, and empty values are ignored (matching the original
+/// `!v.is_empty()` semantics — `FOO=` is not "set"). Split out so the
+/// back-compat is testable without mutating process env (`std::env::set_var`
+/// is `unsafe` under edition 2024 + `unsafe_code = deny`).
+fn opt_out_from(current: Option<std::ffi::OsString>, legacy: Option<std::ffi::OsString>) -> OptOut {
+    if current.is_some_and(|v| !v.is_empty()) {
+        return OptOut::Current;
+    }
+    if legacy.is_some_and(|v| !v.is_empty()) {
+        return OptOut::Legacy;
+    }
+    OptOut::No
 }
 
 /// Find a usable octos. `program` is the bare name the stdio command runs
@@ -228,7 +283,7 @@ fn resolve_backend(program: &str) -> Result<Resolved> {
     }
     Err(eyre!(
         "installed octos, but no working octos >= {MIN_OCTOS_VERSION} is on PATH or in {}. \
-         Open a new terminal so PATH picks it up, then relaunch octos-tui.",
+         Open a new terminal so PATH picks it up, then relaunch octoscode.",
         install_dir_octos()
             .and_then(|p| p.parent().map(|d| d.display().to_string()))
             .unwrap_or_else(|| "~/.octos/bin".to_owned())
@@ -237,7 +292,7 @@ fn resolve_backend(program: &str) -> Result<Resolved> {
 
 fn outdated_error(found: &str) -> eyre::Report {
     eyre!(
-        "octos {found} is older than the {MIN_OCTOS_VERSION} this octos-tui needs. \
+        "octos {found} is older than the {MIN_OCTOS_VERSION} this octoscode needs. \
          Update the octos server (`brew upgrade {}` or `npm install -g {}@latest`), \
          then relaunch.",
         brew_formula(),
@@ -518,11 +573,11 @@ fn run_installer() -> Result<()> {
             "octos server not found: no prebuilt bundle for this platform and no supported \
              installer (brew or npm) is available. Install octos (binary only, no service) \
              with one of:\n  brew install {brew}\n  npm install -g {npm}\n\
-             then relaunch octos-tui (or set --endpoint to a running server)."
+             then relaunch octoscode (or set --endpoint to a running server)."
         ));
     };
     eprintln!(
-        "octos-tui: octos backend not found; installing the octos server via {} \
+        "octoscode: octos backend not found; installing the octos server via {} \
          (set {OPT_OUT_ENV}=1 to skip)...",
         plan.how
     );
@@ -566,9 +621,9 @@ fn have(program: &str) -> bool {
     }
 }
 
-/// The octos **server release this octos-tui is built against** — the tag whose
+/// The octos **server release this octoscode is built against** — the tag whose
 /// bundle carries the exact `octos-core` protocol this client pins (see the
-/// `octos-core` rev in Cargo.toml). Each octos-tui dictates its matching octos:
+/// `octos-core` rev in Cargo.toml). Each octoscode dictates its matching octos:
 /// the Windows auto-installer downloads THIS exact release, so client and server
 /// protocols always agree — no stale `releases/latest` (too old) and no "newest"
 /// moving target (which could drift ahead of the pinned protocol).
@@ -576,9 +631,28 @@ fn have(program: &str) -> bool {
 /// **BUMP THIS whenever you bump the `octos-core` rev in Cargo.toml**, to the
 /// octos release tag that contains that rev. Override for a fork / pinned test
 /// build with [`OCTOS_RELEASE_ENV`].
-pub(crate) const REQUIRED_OCTOS_RELEASE: &str = "v2.0.2";
+///
+/// That instruction was followed by hand and drifted: the rev moved to
+/// v2.0.3-rc.1 while this stayed on v2.0.2, so a fresh install auto-provisioned
+/// a server whose protocol predated the client's. [`REQUIRED_OCTOS_CORE_REV`]
+/// and the test beside it now make the pair checkable instead of a comment.
+pub(crate) const REQUIRED_OCTOS_RELEASE: &str = "v2.0.3-rc.2";
+
+/// The `octos-core` rev that [`REQUIRED_OCTOS_RELEASE`] resolves to — i.e. the
+/// commit the release tag points at, and the rev Cargo.toml must pin.
+///
+/// These are two halves of one decision (which server protocol this client
+/// speaks) held in two files, with only a doc comment joining them. Recording
+/// the rev here lets `octos_release_pin_matches_cargo_core_rev` fail when they
+/// disagree, so bumping Cargo.toml without revisiting the release tag is caught
+/// at test time rather than by a user getting a mismatched auto-provision.
+///
+/// Test-only: its whole job is to be compared against Cargo.toml, so it would
+/// be dead weight in a real build.
+#[cfg(test)]
+pub(crate) const REQUIRED_OCTOS_CORE_REV: &str = "57a60fd7eb56992b78c1d7929ff7eaaae0325363";
 /// Env var overriding the octos release tag to install (fork / pinned build).
-const OCTOS_RELEASE_ENV: &str = "OCTOS_TUI_OCTOS_RELEASE";
+const OCTOS_RELEASE_ENV: &str = "OCTOSCODE_OCTOS_RELEASE";
 /// The octos server-bundle asset name for THIS build's target platform, or
 /// `None` if octos ships no prebuilt bundle for it (then we fall back to a
 /// package manager). Windows x64 is a `.zip`; macOS arm64 and Linux x64/arm64
@@ -630,7 +704,7 @@ fn install_octos_bundle() -> Result<()> {
     let (bundle_url, sha_url, tag) = bundle_urls(asset);
 
     eprintln!(
-        "octos-tui: octos backend not found; downloading the octos server bundle {tag} \
+        "octoscode: octos backend not found; downloading the octos server bundle {tag} \
          (set {OPT_OUT_ENV}=1 to skip)..."
     );
 
@@ -643,7 +717,7 @@ fn install_octos_bundle() -> Result<()> {
     match http_get_string(&sha_url) {
         Ok(published) => verify_sha256(&bytes, &published)?,
         Err(err) => eprintln!(
-            "octos-tui: could not fetch the bundle checksum ({err}); skipping verification"
+            "octoscode: could not fetch the bundle checksum ({err}); skipping verification"
         ),
     }
 
@@ -651,7 +725,7 @@ fn install_octos_bundle() -> Result<()> {
         .wrap_err("failed to extract the octos server bundle")?;
 
     eprintln!(
-        "octos-tui: installed the octos server to {}",
+        "octoscode: installed the octos server to {}",
         install_dir.display()
     );
     Ok(())
@@ -675,7 +749,7 @@ fn http_get_string(url: &str) -> Result<String> {
 
 fn http_client() -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
-        .user_agent(concat!("octos-tui/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("octoscode/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(Into::into)
 }
@@ -979,7 +1053,7 @@ mod tests {
             "FOO=1 octos serve",
             // Shell syntax in *arguments* must NOT disqualify provisioning — we
             // only need the leading program to probe/install (codex).
-            "octos serve --stdio --solo --data-dir ~/.octos-tui-data",
+            "octos serve --stdio --solo --data-dir ~/.octoscode-data",
             "octos serve --stdio --data-dir C:\\Users\\admin\\data",
             "octos serve --stdio | tee log",
             "octos serve && echo done",
@@ -1129,12 +1203,94 @@ mod tests {
 
     #[test]
     fn env_or_falls_back_to_default_when_unset() {
-        // An env var we never set → the baked-in default. (Read-only: octos-tui
+        // An env var we never set → the baked-in default. (Read-only: octoscode
         // forbids `unsafe`, so tests can't set_var to exercise the override; the
         // override path is covered via installer_plan's identifier params above.)
         assert_eq!(
-            env_or("OCTOS_TUI_UNSET_ENV_XYZZY_12345", "the-default"),
+            env_or("OCTOSCODE_UNSET_ENV_XYZZY_12345", "the-default"),
             "the-default"
+        );
+    }
+
+    /// The rename must not silently re-enable auto-install for anyone who set
+    /// the opt-out under the old name. This is the ONE documented env var the
+    /// binary reads that predates the rename.
+    #[test]
+    fn legacy_opt_out_env_is_still_honoured() {
+        use std::ffi::OsString;
+        let set = |v: &str| Some(OsString::from(v));
+
+        assert_eq!(opt_out_from(None, None), OptOut::No, "neither set");
+        assert_eq!(
+            opt_out_from(set("1"), None),
+            OptOut::Current,
+            "current name opts out"
+        );
+        assert_eq!(
+            opt_out_from(None, set("1")),
+            OptOut::Legacy,
+            "pre-rename name must STILL opt out, or a CI job that set it \
+             silently gets auto-install back"
+        );
+        assert_eq!(
+            opt_out_from(set("1"), set("1")),
+            OptOut::Current,
+            "current name wins so the deprecation notice stays quiet"
+        );
+
+        // Empty is not "set" — preserves the original `!v.is_empty()` rule.
+        assert_eq!(opt_out_from(set(""), None), OptOut::No, "empty current");
+        assert_eq!(opt_out_from(None, set("")), OptOut::No, "empty legacy");
+        assert_eq!(
+            opt_out_from(set(""), set("1")),
+            OptOut::Legacy,
+            "empty current falls through to a real legacy value"
+        );
+    }
+
+    /// The octos-core rev in Cargo.toml and the release tag we auto-provision
+    /// are two halves of ONE decision — which server protocol this client
+    /// speaks — living in two files, joined only by a doc comment saying "bump
+    /// this too". That drifted: the rev reached v2.0.3-rc.1 while
+    /// REQUIRED_OCTOS_RELEASE stayed at v2.0.2, so a fresh install provisioned
+    /// a server older than the protocol the client had been built against.
+    ///
+    /// Reading Cargo.toml at test time turns the comment into a check.
+    #[test]
+    fn octos_release_pin_matches_cargo_core_rev() {
+        let manifest = include_str!("../Cargo.toml");
+        let line = manifest
+            .lines()
+            .find(|l| l.trim_start().starts_with("octos-core"))
+            .expect("Cargo.toml declares an octos-core dependency");
+
+        let rev = line
+            .split("rev")
+            .nth(1)
+            .and_then(|rest| rest.split('"').nth(1))
+            .expect("the octos-core dependency pins an explicit rev");
+
+        assert_eq!(
+            rev, REQUIRED_OCTOS_CORE_REV,
+            "Cargo.toml pins octos-core at {rev}, but backend_ensure records \
+             {REQUIRED_OCTOS_CORE_REV} as the rev behind \
+             REQUIRED_OCTOS_RELEASE ({REQUIRED_OCTOS_RELEASE}).\n\
+             \n\
+             If you bumped the rev, also bump REQUIRED_OCTOS_RELEASE to the \
+             octos release tag containing it, and update \
+             REQUIRED_OCTOS_CORE_REV to match. Otherwise a fresh install \
+             auto-provisions a server whose protocol disagrees with this \
+             client."
+        );
+    }
+
+    /// A release tag, not a bare version — the auto-installer builds download
+    /// URLs from it (`releases/download/<tag>/…`).
+    #[test]
+    fn octos_release_pin_is_a_tag() {
+        assert!(
+            REQUIRED_OCTOS_RELEASE.starts_with('v'),
+            "REQUIRED_OCTOS_RELEASE must be a tag like `v2.0.3-rc.1`, got {REQUIRED_OCTOS_RELEASE}"
         );
     }
 }

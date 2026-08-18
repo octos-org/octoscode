@@ -1,4 +1,4 @@
-# octos-tui
+# octoscode
 
 <div align="center">
 <pre>
@@ -10,12 +10,12 @@
 ╚██████╔╝╚██████╗   ██║   ╚██████╔╝███████║
  ╚═════╝  ╚═════╝   ╚═╝    ╚═════╝ ╚══════╝
 </pre>
-<em>Welcome to Octos-TUI — Your Coding Buddy</em>
+<em>Welcome to Octoscode — Your Coding Buddy</em>
 </div>
 
-`octos-tui` is the terminal app for [Octos](https://github.com/octos-org/octos)
+`octoscode` is the terminal app for [Octos](https://github.com/octos-org/octos)
 — an AI coding assistant in your terminal, in the spirit of Claude Code and
-Codex. The Octos server runs the agent, the models, and the tools; `octos-tui`
+Codex. The Octos server runs the agent, the models, and the tools; `octoscode`
 is the fast, keyboard-driven way to talk to it: chat, diffs, tool approvals,
 background tasks — all without leaving the shell.
 
@@ -25,17 +25,17 @@ Install **just the TUI** — it auto-provisions the Octos **server** (the brain)
 on first launch, so there's nothing else to set up:
 
 ```bash
-npm install -g @octos-org/octos-tui
+npm install -g @octos-org/octoscode
 # or Homebrew (this repo is its own tap):
-#   brew tap octos-org/octos-tui https://github.com/octos-org/octos-tui
-#   brew install octos-org/octos-tui/octos-tui
+#   brew tap octos-org/octoscode https://github.com/octos-org/octoscode
+#   brew install octos-org/octoscode/octoscode
 # (or the shell / PowerShell installer — see Install below)
 ```
 
 Then just run it:
 
 ```bash
-octos-tui
+octoscode
 ```
 
 On first launch the TUI downloads the matching Octos server into `~/.octos/bin`
@@ -45,16 +45,16 @@ local profile (three fields — the email is local metadata only), pick an AI
 provider, paste its API key, and open your first coding chat. The
 [Quickstart](#quickstart-solo-onboarding) below walks every screen.
 
-> **Just looking?** `octos-tui --mode mock` opens a mock demo with canned
-> replies — no server, connected to nothing. Plain `octos-tui` is the real
+> **Just looking?** `octoscode --mode mock` opens a mock demo with canned
+> replies — no server, connected to nothing. Plain `octoscode` is the real
 > thing.
 
 ### If something looks wrong
 
 | Symptom | Fix |
 |---|---|
-| First launch can't fetch the server | Auto-install needs network. Offline / behind a proxy? Install octos yourself (`npm i -g @octos-org/octos`, or the [server guide](https://github.com/octos-org/octos#start-here)) — the TUI then finds it. Set `OCTOS_TUI_NO_AUTO_INSTALL=1` to disable auto-install. |
-| Replies are instant and feel canned | You launched with `--mode mock`. Run plain `octos-tui` for the real backend. |
+| First launch can't fetch the server | Auto-install needs network. Offline / behind a proxy? Install octos yourself (`npm i -g @octos-org/octos`, or the [server guide](https://github.com/octos-org/octos#start-here)) — the TUI then finds it. Set `OCTOSCODE_NO_AUTO_INSTALL=1` to disable auto-install. |
+| Replies are instant and feel canned | You launched with `--mode mock`. Run plain `octoscode` for the real backend. |
 | "Test provider" fails during onboarding | Re-check the API key and the provider choice; you can redo it anytime with `/onboard` or `/setup`. |
 
 More in the full [Troubleshooting](#troubleshooting) table below.
@@ -65,7 +65,7 @@ On a fresh first launch the main window shows the **OCTOS** block-letter
 wordmark with the tagline *"Welcome to Octos — Your Coding Buddy"* above a
 short onboarding menu — your starting point for the walkthrough below.
 
-`octos-tui` is intentionally separate from `octos-cli`: the `octos` repo owns
+`octoscode` is intentionally separate from `octos-cli`: the `octos` repo owns
 the server/runtime and the shared `octos-core` protocol types; this repo owns
 the terminal client. Architecture and ownership boundaries live in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
@@ -74,12 +74,12 @@ the terminal client. Architecture and ownership boundaries live in
 
 ## 📦 Install
 
-Every method installs a single self-contained `octos-tui` binary. Then run
-`octos-tui --help`.
+Every method installs a single self-contained `octoscode` binary. Then run
+`octoscode --help`.
 
 ### ⬇️ Prebuilt binary — no Rust toolchain needed (recommended)
 
-Same model as Claude Code and Codex: each [GitHub Release](https://github.com/octos-org/octos-tui/releases)
+Same model as Claude Code and Codex: each [GitHub Release](https://github.com/octos-org/octoscode/releases)
 ships prebuilt binaries for macOS (Apple Silicon), Linux (x86-64 +
 arm64), and Windows (x86-64). Pick one — each block has its own **copy button**
 (top-right corner, on hover) that copies just that command:
@@ -87,33 +87,33 @@ arm64), and Windows (x86-64). Pick one — each block has its own **copy button*
 **📦 npm**
 
 ```bash
-npm install -g @octos-org/octos-tui
+npm install -g @octos-org/octoscode
 ```
 
 **🍺 Homebrew** — this repo is its own tap
 
 ```bash
-brew tap octos-org/octos-tui https://github.com/octos-org/octos-tui
-brew install octos-org/octos-tui/octos-tui
+brew tap octos-org/octoscode https://github.com/octos-org/octoscode
+brew install octos-org/octoscode/octoscode
 ```
 
 **🐚 Shell installer** — macOS / Linux
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/octos-org/octos-tui/releases/latest/download/octos-tui-installer.sh | sh
+  https://github.com/octos-org/octoscode/releases/latest/download/octoscode-installer.sh | sh
 ```
 
 **🪟 PowerShell installer** — Windows
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/octos-org/octos-tui/releases/latest/download/octos-tui-installer.ps1 | iex"
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/octos-org/octoscode/releases/latest/download/octoscode-installer.ps1 | iex"
 ```
 
-Once installed, `octos-tui update` checks for a newer release — and for
+Once installed, `octoscode update` checks for a newer release — and for
 shell/PowerShell-installer installs it self-updates in place; npm/brew/cargo
 installs are owned by their package manager, so it prints the matching
-upgrade command instead. `octos-tui doctor` diagnoses the local environment
+upgrade command instead. `octoscode doctor` diagnoses the local environment
 and connection prerequisites.
 
 ### 🔧 From source with Cargo (needs Rust 1.85+)
@@ -121,13 +121,13 @@ and connection prerequisites.
 **From git** — no crates.io publish required
 
 ```bash
-cargo install --git https://github.com/octos-org/octos-tui octos-tui
+cargo install --git https://github.com/octos-org/octoscode octoscode
 ```
 
 **From crates.io** — once published
 
 ```bash
-cargo install octos-tui
+cargo install octoscode
 ```
 
 > `octos-core` (the shared protocol crate) is pulled automatically as a git
@@ -142,7 +142,7 @@ an LLM provider, and a live coding session — no dashboard, no email OTP.
 
 ### 1. Install the TUI
 
-Install `octos-tui` as shown in [Start here](#start-here) — that's all you need.
+Install `octoscode` as shown in [Start here](#start-here) — that's all you need.
 On first launch it downloads the matching Octos **server** into `~/.octos/bin`
 automatically (binary-only, no service), so there's no separate server install.
 (Already have `octos` on your `PATH`? The TUI uses it, as long as it's a
@@ -153,10 +153,10 @@ pulled automatically as a git dependency, so a plain clone builds with **no
 sibling checkout** required (needs Rust 1.85+):
 
 ```bash
-git clone https://github.com/octos-org/octos-tui.git
-cd octos-tui
+git clone https://github.com/octos-org/octoscode.git
+cd octoscode
 cargo build --release
-# produces ./target/release/octos-tui — substitute it for `octos-tui` below
+# produces ./target/release/octoscode — substitute it for `octoscode` below
 ```
 
 > **Developing against a local `octos`?** To build against an uncommitted
@@ -170,7 +170,7 @@ cargo build --release
 Just run it — the TUI provisions and launches the server for you:
 
 ```bash
-octos-tui
+octoscode
 ```
 
 You land on the **"Welcome to Octos"** screen (subtitle *"Set up a local solo
@@ -265,14 +265,14 @@ export OCTOS_AUTH_TOKEN=local-dev-token
 cargo run -p octos-cli --features api --bin octos -- serve \
   --host 127.0.0.1 --port 50080 \
   --cwd "$PWD" \
-  --data-dir /tmp/octos-tui-dev-data \
+  --data-dir /tmp/octoscode-dev-data \
   --auth-token "$OCTOS_AUTH_TOKEN"
 ```
 
 Then connect in another terminal:
 
 ```bash
-octos-tui \
+octoscode \
   --mode protocol \
   --endpoint ws://127.0.0.1:50080/api/ui-protocol/ws \
   --auth-token local-dev-token \
@@ -295,7 +295,7 @@ cargo run -- --mode mock --theme claude
 
 `--mode mock` is an explicit opt-in. A bare launch (no `--mode`/`--endpoint`/
 `--stdio-command`) defaults to **protocol** and auto-provisions a local server —
-so plain `octos-tui` is the real thing, not the mock.
+so plain `octoscode` is the real thing, not the mock.
 
 ---
 
@@ -318,6 +318,10 @@ so plain `octos-tui` is the real thing, not the mock.
 --lang en|zh             UI language; falls back to OCTOS_LANG / LANG. Default: en
 --scroll-mode <mode>     native (terminal scrollback, default) | pinned (composer pinned)
 --vim-mode               enable Vim modal editing in the composer (default off)
+--steer-mid-turn         inject a prompt typed mid-turn into the RUNNING turn
+                         (default off: mid-turn prompts queue FIFO and each runs
+                         as its own turn, in the order typed)
+--no-splash              skip the startup logo animation
 ```
 
 `--endpoint` and `--stdio-command` are mutually exclusive — pick one transport.
@@ -339,14 +343,15 @@ settings loaded by `octos serve`, and the TUI config rejects them.
   "theme": "codex",
   "lang": "en",
   "scroll-mode": "native",
-  "vim-mode": false
+  "vim-mode": false,
+  "steer-mid-turn": false
 }
 ```
 
-`/saveconfig` writes the active `theme` / `lang` / `scroll-mode` / `vim-mode`
+`/saveconfig` writes the active `theme` / `lang` / `scroll-mode` / `vim-mode` / `steer-mid-turn`
 back into this file (merging — it never clobbers transport keys like
 `stdio_command`); without `--config` it falls back to
-`~/.config/octos-tui/config.json`.
+`~/.config/octoscode/config.json`.
 
 ### Themes
 
@@ -360,6 +365,25 @@ allows it, using only restrained ANSI colors for borders, accents, and errors.
 Set the palette at launch with `--theme <name>`, or switch live with `/theme`
 (a `*`-marked menu; the change repaints immediately and survives reconnects).
 
+### Startup splash
+
+Every interactive launch opens with a short [ttfx](https://github.com/omacom-io/ttfx)-rendered
+OCTOS logo animation on the main screen, picked at random from a curated set:
+
+```text
+beams, sweep, wipe, rain, slide, scattered, middleout, highlight, matrix
+```
+
+Each effect runs to its natural end (~2–4s), settles on the full logo for a
+beat, then the TUI starts. Press any key to skip straight in. The animation
+never blocks startup: it is skipped automatically when stdout is not a TTY,
+when `CI` is set, or when the terminal is smaller than the logo, and any
+internal error silently falls through to a normal launch.
+
+- `--no-splash` or `OCTOSCODE_NO_SPLASH=1` turns it off.
+- `OCTOSCODE_SPLASH_EFFECT=matrix` pins a specific effect (any name from the
+  curated set; unknown names fall back to the random pick).
+
 ### In-session keys and slash commands
 
 ```text
@@ -370,7 +394,8 @@ Alt+A      re-show the pending approval prompt
 [ / ]      select previous / next inline diff hunk
 c          stage the selected hunk as next-turn context
 Ctrl+U     clear the composer
-Ctrl+C     interrupt the active turn
+Ctrl+C     interrupt the active turn; with nothing to interrupt, press twice to quit
+Ctrl+Q     quit immediately, from any surface (incl. wizard/menus)
 Esc        with no active turn: cancel the first running background task
 q          quit
 ```
@@ -389,7 +414,8 @@ q          quit
 /thinking   set reasoning effort for thinking models, per session (menu, or /thinking high)
 /scrollmode switch wheel-scroll behavior (toggle, or /scrollmode native|pinned)
 /vimmode    toggle Vim modal editing in the composer (Normal/Insert)
-/saveconfig persist the active theme / language / scroll-mode / vim-mode to the config file
+/saveconfig persist the active theme / language / scroll-mode / vim-mode / steer-mode to the config file
+/steer      switch what Enter means mid-turn: on injects into the running turn, off (default) queues FIFO
 /onboard    set onboarding fields inline (name, username, email, key, ...)
 /copy       copy the last assistant reply to the clipboard (works over SSH)
 /status     snapshot-backed session, runtime, and connection status
@@ -500,12 +526,22 @@ source/fallback locale, so any untranslated string falls back to English.
 | `OCTOS_LANG` / `LANG` | UI language fallback when `--lang` is unset. |
 | `RUST_LOG=off` | Keeps terminal output clean for live visual runs. |
 | `TERM=xterm-256color` | Avoids missing terminfo/color issues on remote hosts. |
-| `OCTOS_TUI_BIN` | Forces a specific built `octos-tui` binary for harnesses. |
-| `OCTOS_TUI_DIR` | Points Octos harness scripts at this standalone TUI repo. |
+| `OCTOSCODE_BIN` | Forces a specific built `octoscode` binary for harnesses. |
+| `OCTOSCODE_DIR` | Points Octos harness scripts at this standalone TUI repo. |
+| `OCTOSCODE_NO_AUTO_INSTALL` | Disables backend auto-install (a missing `octos` then errors). |
+| `OCTOSCODE_NO_SPLASH` | Disables the startup logo animation (same as `--no-splash`). |
+| `OCTOSCODE_SPLASH_EFFECT` | Pins the splash to one curated effect, e.g. `matrix`. |
+
+> **Renamed from `octos-tui`.** Every `OCTOS_TUI_*` variable is now
+> `OCTOSCODE_*`. The one exception that still works is
+> `OCTOS_TUI_NO_AUTO_INSTALL` — it is honoured with a one-time deprecation
+> notice so an existing CI job or shell profile does not silently get
+> auto-install switched back on. Rename it; the fallback goes away a release or
+> two after the rename settles.
 
 ### Workspace (cwd) behavior
 
-`octos-tui` requests a session cwd through `session/open`. By default that is the
+`octoscode` requests a session cwd through `session/open`. By default that is the
 terminal launch directory; `--cwd DIR` overrides it. `octos serve`
 canonicalizes the requested path and accepts it only if it is inside the
 server-approved roots — so start the server with a `--cwd` that contains the
@@ -841,7 +877,7 @@ one — so a profile can re-enable a skill the global defaults disabled:
 
 | Symptom | Fix |
 |---|---|
-| `octos-core` dependency not found | Keep `octos` and `octos-tui` as sibling directories. |
+| `octos-core` dependency not found | Keep `octos` and `octoscode` as sibling directories. |
 | Welcome screen never appears | Use a fresh empty `--data-dir` and omit `--profile-id`. |
 | Endpoint rejected | Use a `ws://` or `wss://` URL; HTTP URLs are rejected. |
 | Auth failure | Use the same token on `octos serve --auth-token` and the TUI (`--auth-token` or `OCTOS_AUTH_TOKEN`). |
@@ -849,7 +885,7 @@ one — so a profile can re-enable a skill the global defaults disabled:
 | Wrong workspace | Start `octos serve` with the desired `--cwd`. |
 | `can't find terminfo database` | Set `TERM=xterm-256color` or install terminfo on the host. |
 | Raw logs/timestamps in the UI | Start both server and TUI with `RUST_LOG=off`. |
-| `target` lock or permission error | Run with `CARGO_TARGET_DIR=/tmp/octos-tui-target`. |
+| `target` lock or permission error | Run with `CARGO_TARGET_DIR=/tmp/octoscode-target`. |
 
 ---
 
@@ -859,7 +895,7 @@ Run the unit/integration suite (mock-backed, no server needed):
 
 ```bash
 cargo test
-# CARGO_TARGET_DIR=/tmp/octos-tui-target cargo test   # on shared/locked hosts
+# CARGO_TARGET_DIR=/tmp/octoscode-target cargo test   # on shared/locked hosts
 ```
 
 Heavier live and visual harnesses live alongside the code:
@@ -869,7 +905,7 @@ Heavier live and visual harnesses live alongside the code:
   splash. See [`docs/ONBOARDING_TMUX_SOAK.md`](docs/ONBOARDING_TMUX_SOAK.md).
 - The tmux AppUi smoke and live Codex-parity harnesses live in the sibling
   `octos` repo (they start both the server and the TUI); point them at this repo
-  with `OCTOS_TUI_DIR="$PWD/../octos-tui"`.
+  with `OCTOSCODE_DIR="$PWD/../octoscode"`.
 
 For release packaging, pin `octos-core` to the matching Octos git tag or
 published crate version instead of the sibling path.
@@ -878,7 +914,7 @@ published crate version instead of the sibling path.
 
 ## Protocol contract
 
-`octos-tui` consumes Octos UI Protocol fields from `octos-core` and must not
+`octoscode` consumes Octos UI Protocol fields from `octos-core` and must not
 invent local wire extensions. Any protocol change must land through a formal UI
 Protocol change request with shared types, server tests, golden protocol tests,
 and TUI reducer/rendering tests.
