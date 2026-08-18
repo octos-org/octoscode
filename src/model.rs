@@ -9528,14 +9528,31 @@ impl AppState {
         /// line that began `Fix the error above or continue …`. Only a LIVE
         /// stream wants the tail, because there the newest text is the point.
         fn last_line_head(text: &str, cap: usize) -> Option<String> {
+            use unicode_segmentation::UnicodeSegmentation;
+            use unicode_width::UnicodeWidthStr;
             let line = text.lines().rev().find(|line| !line.trim().is_empty())?;
             let line = line.trim();
-            Some(if line.chars().count() > cap {
-                let head: String = line.chars().take(cap.saturating_sub(1)).collect();
-                format!("{head}…")
-            } else {
-                line.to_owned()
-            })
+            // `cap` is a COLUMN budget, exactly as in `last_line_tail` above.
+            // Counting `char`s let a CJK summary render at twice its allowance
+            // (119 columns for a cap of 60) and overflow the row. Walk
+            // graphemes from the START, keeping one column for the trailing
+            // ellipsis — graphemes, not chars, so a combining sequence is
+            // never cut in half.
+            if line.width() <= cap {
+                return Some(line.to_owned());
+            }
+            let budget = cap.saturating_sub(1);
+            let mut kept = String::new();
+            let mut used = 0usize;
+            for grapheme in line.graphemes(true) {
+                let w = grapheme.width();
+                if used + w > budget {
+                    break;
+                }
+                used += w;
+                kept.push_str(grapheme);
+            }
+            Some(format!("{kept}…"))
         }
         if let Some(reason) = self.session_blocked_reason(session_id) {
             return Some(t!("menu.sessions.item.blocked_reason", reason = reason).into_owned());
