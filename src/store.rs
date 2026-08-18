@@ -10604,9 +10604,16 @@ impl Store {
                         .filter(|word| !word.is_empty())
                     {
                         Some(word) => {
-                            self.state
-                                .session_status_word
-                                .insert(event.session_id.clone(), (turn_id, word.to_owned()));
+                            self.state.session_status_word.insert(
+                                event.session_id.clone(),
+                                (
+                                    turn_id,
+                                    word.to_owned(),
+                                    // Fresh word ⇒ the harness line replays
+                                    // the decrypt entrance from now.
+                                    std::time::Instant::now(),
+                                ),
+                            );
                         }
                         None => {
                             self.state.session_status_word.remove(&event.session_id);
@@ -35486,7 +35493,7 @@ now analyzing the bus module"
                 .state
                 .session_status_word
                 .get(&session_id)
-                .map(|(_, w)| w.as_str()),
+                .map(|(_, w, _)| w.as_str()),
             Some("整活中"),
             "the word must still reach its harness-line home"
         );
@@ -35561,7 +35568,7 @@ now analyzing the bus module"
                 .state
                 .session_status_word
                 .get(&session_id)
-                .map(|(t, w)| (t.clone(), w.as_str())),
+                .map(|(t, w, _)| (t.clone(), w.as_str())),
             Some((turn.clone(), "Conjuring")),
             "the persona word is stored keyed with its turn"
         );
@@ -35579,7 +35586,7 @@ now analyzing the bus module"
                 .state
                 .session_status_word
                 .get(&session_id)
-                .map(|(_, w)| w.as_str()),
+                .map(|(_, w, _)| w.as_str()),
             Some("Conjuring"),
             "a turn-less word does not overwrite the stored one"
         );
@@ -35598,7 +35605,7 @@ now analyzing the bus module"
                 .state
                 .session_status_word
                 .get(&session_id)
-                .map(|(_, w)| w.as_str()),
+                .map(|(_, w, _)| w.as_str()),
             Some("Conjuring"),
             "a non-current-turn word does not touch the stored one"
         );

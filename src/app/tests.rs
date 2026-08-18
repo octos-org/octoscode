@@ -10734,6 +10734,154 @@ mod tests {
         assert_eq!(harness_context_percent(&app), Some(999));
     }
 
+    /// The entrance swaps glyphs, never cell width: a CJK status word
+    /// (2-cell graphemes — the persona words are Chinese) must render the
+    /// same total width mid-decrypt as settled, or the spinner row jitters
+    /// for 800ms on every rotation.
+    #[test]
+    fn harness_status_word_entrance_preserves_cell_width_for_wide_graphemes() {
+        use unicode_width::UnicodeWidthStr;
+        let session_id = SessionKey("local:test".into());
+        let mut app = autonomy_app_state();
+        let turn_id = octos_core::ui_protocol::TurnId::new();
+        app.sessions[0].live_reply = Some(crate::model::LiveReply {
+            turn_id: turn_id.clone(),
+            text: String::new(),
+        });
+        app.orchestration.insert(
+            session_id.clone(),
+            octos_core::ui_protocol::SessionOrchestrationEvent {
+                session_id: session_id.clone(),
+                active: true,
+                running_agents: 0,
+                pending_continuations: 0,
+                phase: Some("working".into()),
+            },
+        );
+        let width_of = |app: &crate::model::AppState| -> usize {
+            harness_status_lines(app, Palette::for_theme(ThemeName::Codex), true)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref().width())
+                .sum()
+        };
+        // Settled reference width.
+        app.session_status_word.insert(
+            session_id.clone(),
+            (
+                turn_id.clone(),
+                "遥遥领先中".into(),
+                std::time::Instant::now()
+                    - std::time::Duration::from_millis(
+                        crate::app::STATUS_WORD_DECRYPT_MS as u64 + 100,
+                    ),
+            ),
+        );
+        let settled = width_of(&app);
+        // Fresh (mid-entrance) width must be identical.
+        app.session_status_word.insert(
+            session_id.clone(),
+            (
+                turn_id.clone(),
+                "遥遥领先中".into(),
+                std::time::Instant::now(),
+            ),
+        );
+        let fresh = width_of(&app);
+        assert_eq!(
+            fresh, settled,
+            "decrypt entrance must not change the row width for CJK words"
+        );
+    }
+
+    #[test]
+    fn harness_status_word_decrypts_on_entrance_then_settles() {
+        use octos_core::ui_protocol::SessionOrchestrationEvent;
+        let session_id = SessionKey("local:test".into());
+        let mut app = autonomy_app_state();
+        let turn_id = octos_core::ui_protocol::TurnId::new();
+        app.sessions[0].live_reply = Some(crate::model::LiveReply {
+            turn_id: turn_id.clone(),
+            text: String::new(),
+        });
+        app.orchestration.insert(
+            session_id.clone(),
+            SessionOrchestrationEvent {
+                session_id: session_id.clone(),
+                active: true,
+                running_agents: 0,
+                pending_continuations: 0,
+                phase: Some("working".into()),
+            },
+        );
+
+        // The ANIMATED entry point is the production path (`harness_status_lines`
+        // is what render.rs calls every ~25ms); the static one pins snapshots.
+        let render_animated = |app: &crate::model::AppState| -> String {
+            harness_status_lines(app, Palette::for_theme(ThemeName::Codex), true)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect()
+        };
+
+        // Fresh word: mid-entrance the label is ciphertext — the final word
+        // must NOT yet read through.
+        app.session_status_word.insert(
+            session_id.clone(),
+            (
+                turn_id.clone(),
+                "Conjuring".into(),
+                std::time::Instant::now(),
+            ),
+        );
+        let text = render_animated(&app);
+        assert!(
+            !text.contains("Conjuring"),
+            "a fresh word is still ciphertext: {text:?}"
+        );
+
+        // After the entrance window the wave gradient owns the label again
+        // and the word reads verbatim.
+        app.session_status_word.insert(
+            session_id.clone(),
+            (
+                turn_id.clone(),
+                "Conjuring".into(),
+                std::time::Instant::now()
+                    - std::time::Duration::from_millis(
+                        crate::app::STATUS_WORD_DECRYPT_MS as u64 + 100,
+                    ),
+            ),
+        );
+        let text = render_animated(&app);
+        assert!(
+            text.contains("Conjuring…"),
+            "the settled word reads through: {text:?}"
+        );
+
+        // And the STATIC entry point never animates at all — even for a
+        // just-landed word, snapshot renders read the settled label.
+        app.session_status_word.insert(
+            session_id.clone(),
+            (
+                turn_id.clone(),
+                "Conjuring".into(),
+                std::time::Instant::now(),
+            ),
+        );
+        let text: String =
+            harness_status_lines_static(&app, Palette::for_theme(ThemeName::Codex), true)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect();
+        assert!(
+            text.contains("Conjuring…"),
+            "static renders skip the entrance: {text:?}"
+        );
+    }
+
     #[test]
     fn harness_line_shows_the_persona_word_over_the_working_phase() {
         use octos_core::ui_protocol::SessionOrchestrationEvent;
@@ -10755,14 +10903,21 @@ mod tests {
                 phase: Some("working".into()),
             },
         );
-        app.session_status_word
-            .insert(session_id.clone(), (turn_id.clone(), "Conjuring".into()));
+        app.session_status_word.insert(
+            session_id.clone(),
+            (
+                turn_id.clone(),
+                "Conjuring".into(),
+                std::time::Instant::now(),
+            ),
+        );
 
-        let text: String = harness_status_lines(&app, Palette::for_theme(ThemeName::Codex), true)
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.as_ref())
-            .collect();
+        let text: String =
+            harness_status_lines_static(&app, Palette::for_theme(ThemeName::Codex), true)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect();
         assert!(
             text.contains("Conjuring…"),
             "persona word shows with ellipsis: {text:?}"
@@ -10784,11 +10939,12 @@ mod tests {
                 phase: Some("orchestrating".into()),
             },
         );
-        let text: String = harness_status_lines(&app, Palette::for_theme(ThemeName::Codex), true)
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.as_ref())
-            .collect();
+        let text: String =
+            harness_status_lines_static(&app, Palette::for_theme(ThemeName::Codex), true)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect();
         assert!(
             text.contains("Orchestrating"),
             "orchestrating phase kept: {text:?}"
@@ -10808,7 +10964,10 @@ mod tests {
         // Idle: no orchestration, no active turn → row reserves no rows and is
         // absent from the render (so it cannot collide with the composer).
         assert_eq!(harness_status_height(&app), 0);
-        assert!(harness_status_lines(&app, Palette::for_theme(ThemeName::Codex), true).is_empty());
+        assert!(
+            harness_status_lines_static(&app, Palette::for_theme(ThemeName::Codex), true)
+                .is_empty()
+        );
 
         // Orchestrating: active, 2 running agents, 1 pending continuation.
         app.orchestration.insert(
@@ -10842,11 +11001,12 @@ mod tests {
             1,
             "active row reserves one row"
         );
-        let text: String = harness_status_lines(&app, Palette::for_theme(ThemeName::Codex), true)
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.to_string())
-            .collect();
+        let text: String =
+            harness_status_lines_static(&app, Palette::for_theme(ThemeName::Codex), true)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.to_string())
+                .collect();
         assert!(text.contains("Orchestrating"), "{text:?}");
         assert!(text.contains("2 agents"), "{text:?}");
         assert!(text.contains("re-entering"), "{text:?}");
@@ -10919,11 +11079,12 @@ mod tests {
             last_compaction_id: None,
         });
 
-        let text: String = harness_status_lines(&app, Palette::for_theme(ThemeName::Codex), true)
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.to_string())
-            .collect();
+        let text: String =
+            harness_status_lines_static(&app, Palette::for_theme(ThemeName::Codex), true)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.to_string())
+                .collect();
         assert!(
             text.contains("ctx 32K/128K ~25%"),
             "ctx label must carry the used/max counts and the approximate marker: {text:?}"
@@ -10962,11 +11123,12 @@ mod tests {
             .insert(session_id.clone(), 1_000_000);
 
         // Narrow terminal (text fallback) carries the full readout.
-        let text: String = harness_status_lines(&app, Palette::for_theme(ThemeName::Codex), true)
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.to_string())
-            .collect();
+        let text: String =
+            harness_status_lines_static(&app, Palette::for_theme(ThemeName::Codex), true)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.to_string())
+                .collect();
         assert!(
             text.contains("ctx 128K/1M ~13%"),
             "harness row shows used/max token counts + estimate percent: {text:?}"
@@ -10999,11 +11161,12 @@ mod tests {
         retry.attempt = Some(3);
         app.session_retry.insert(session_id, retry);
 
-        let text: String = harness_status_lines(&app, Palette::for_theme(ThemeName::Codex), true)
-            .iter()
-            .flat_map(|line| line.spans.iter())
-            .map(|span| span.content.to_string())
-            .collect();
+        let text: String =
+            harness_status_lines_static(&app, Palette::for_theme(ThemeName::Codex), true)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.to_string())
+                .collect();
         assert!(
             text.to_lowercase().contains("retry") || text.to_lowercase().contains("retrying"),
             "retry state must render in the harness row: {text:?}"

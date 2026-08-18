@@ -4481,8 +4481,11 @@ pub struct AppState {
     /// "status_word"}` rotator, e.g. "Conjuring" / "正在炼丹"). Rendered in the
     /// harness gradient line above the composer only while it matches the
     /// active turn — so a stale word from a prior turn (or a server-started
-    /// continuation) is ignored rather than lingering.
-    pub session_status_word: std::collections::HashMap<SessionKey, (TurnId, String)>,
+    /// continuation) is ignored rather than lingering. The `Instant` is when
+    /// THIS word instance landed, keying the decrypt-style entrance animation
+    /// (fresh words decode from ciphertext before the wave gradient resumes).
+    pub session_status_word:
+        std::collections::HashMap<SessionKey, (TurnId, String, std::time::Instant)>,
     /// Per-session reasoning/thinking effort chosen via the `/thinking` command,
     /// keyed by `SessionKey` so each session keeps its own level. Attached to
     /// every `turn/start` for that session; absent = use the server

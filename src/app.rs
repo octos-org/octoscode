@@ -2708,6 +2708,99 @@ fn gradient_sample(stops: &[(u8, u8, u8)], t: f32) -> (u8, u8, u8) {
     }
 }
 
+/// Duration of the decrypt-style entrance a fresh status word plays before the
+/// steady water-wave gradient takes over (spec parity with ttfx's `decrypt`).
+pub(crate) const STATUS_WORD_DECRYPT_MS: u128 = 800;
+
+/// Deterministic cipher glyph for a not-yet-settled character: hash the
+/// (grapheme position, 33ms animation tick) pair with a splitmix64-style
+/// mixer, then map into a printable ASCII band. Deterministic per
+/// (position, tick) so the ~25ms redraw doesn't reshuffle mid-frame, and
+/// time-varying so unsettled cells scramble like ciphertext. Width-relevant:
+/// every cipher glyph is exactly one cell, and the entrance only swaps
+/// GLYPHS, never the grapheme count — so the fixed-width layout math the
+/// spinner label depends on is untouched.
+fn cipher_glyph(grapheme_index: usize, tick_33ms: u128) -> char {
+    let mut z = (grapheme_index as u64)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(tick_33ms as u64);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    // Printable ASCII minus space: '!'..='~' would include width-surprising
+    // glyphs none here — all are single-cell. Skew alnum-heavy for legibility.
+    const CIPHER: &[u8] = b"abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789#$%&*+=<>?@/\\|";
+    CIPHER[(z % CIPHER.len() as u64) as usize] as char
+}
+
+/// ttfx-`decrypt`-style entrance for a fresh persona status word: unsettled
+/// graphemes scramble as green ciphertext while a settle front sweeps
+/// left-to-right, locking each grapheme into its final glyph. Settled cells
+/// keep the wave gradient so the handoff to the steady state is seamless.
+///
+/// `word` is the full label already rendered for the steady state
+/// (`"{word}…"`); `shown_at` is when this word instance appeared. Returns
+/// `None` once the entrance has run its course, so callers fall through to
+/// the plain wave.
+fn decrypt_entrance_spans(
+    word: &str,
+    shown_at: std::time::Instant,
+    palette: Palette,
+) -> Option<Vec<Span<'static>>> {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+
+    let elapsed = shown_at.elapsed().as_millis();
+    if elapsed >= STATUS_WORD_DECRYPT_MS {
+        return None;
+    }
+    let graphemes: Vec<&str> = word.graphemes(true).collect();
+    let n = graphemes.len().max(1);
+    // Reserve the middle 60% of the window for the sweep; cells settle one by
+    // one across it, so short words still read as a decode rather than a pop.
+    let sweep_ms = STATUS_WORD_DECRYPT_MS as f32 * 0.6;
+    let start_ms = STATUS_WORD_DECRYPT_MS as f32 * 0.2;
+    let front = ((elapsed as f32 - start_ms) / sweep_ms * n as f32).clamp(0.0, n as f32) as usize;
+
+    // ttfx decrypt's ciphertext greens; settled cells take the theme's wave.
+    let cipher_lo = rgb_of(palette.muted); // dim green stand-in per theme
+    let cipher_hi = (0u8, 203u8, 0u8); // #00cb00 — ttfx default ciphertext mid
+    let tick = elapsed / 33; // ~30fps scramble cadence
+
+    let mut spans = Vec::with_capacity(n);
+    for (i, g) in graphemes.iter().enumerate() {
+        if i < front {
+            let (r, gg, b) = gradient_sample(&[cipher_lo, cipher_hi], 1.0);
+            spans.push(Span::styled(
+                g.to_string(),
+                Style::default()
+                    .fg(Color::Rgb(r, gg, b))
+                    .bg(palette.surface),
+            ));
+        } else {
+            let t = 0.5 + 0.5 * ((i as f32) * 0.7 + tick as f32 * 0.9).sin();
+            let (r, gg, b) = gradient_sample(&[cipher_lo, cipher_hi], t);
+            // Width invariant: one single-cell cipher glyph PER CELL of the
+            // original grapheme, so a 2-cell CJK persona word (拿捏中 …)
+            // renders the same row width mid-decrypt as settled — otherwise
+            // the spinner row jitters for the whole entrance on every
+            // rotation. Zero-width graphemes still get one glyph so the
+            // decode reads as text rather than a gap.
+            let cells = g.width().max(1);
+            let cipher: String = (0..cells)
+                .map(|cell| cipher_glyph(i * 3 + cell, tick))
+                .collect();
+            spans.push(Span::styled(
+                cipher,
+                Style::default()
+                    .fg(Color::Rgb(r, gg, b))
+                    .bg(palette.surface),
+            ));
+        }
+    }
+    Some(spans)
+}
+
 /// One `Span` per grapheme, each colored from a sine-driven sample point that
 /// slides with `phase`, so a bright crest travels along `text` like a ripple.
 /// Advances by DISPLAY columns (CJK/emoji are double-width) so the wave stays
@@ -5073,6 +5166,26 @@ fn harness_status_lines(
     palette: Palette,
     include_ctx_text: bool,
 ) -> Vec<Line<'static>> {
+    harness_status_lines_impl(app, palette, include_ctx_text, true)
+}
+
+/// Static, animation-free render for tests/snapshots: fresh status words
+/// render with the STEADY wave gradient, never mid-decrypt — the entrance is
+/// a pure visual layer and must not move any golden text.
+#[cfg(test)]
+fn harness_status_lines_static(
+    app: &AppState,
+    palette: Palette,
+    include_ctx_text: bool,
+) -> Vec<Line<'static>> {
+    harness_status_lines_impl(app, palette, include_ctx_text, false)
+}
+pub(crate) fn harness_status_lines_impl(
+    app: &AppState,
+    palette: Palette,
+    include_ctx_text: bool,
+    animate_entrance: bool,
+) -> Vec<Line<'static>> {
     if !harness_status_active(app) {
         return Vec::new();
     }
@@ -5097,10 +5210,17 @@ fn harness_status_lines(
     let persona_word = app
         .session_status_word
         .get(&session_id)
-        .filter(|(word_turn, _)| active_turn_id == Some(word_turn))
-        .map(|(_, word)| word.trim())
+        .filter(|(word_turn, _, _)| active_turn_id == Some(word_turn))
+        .map(|(_, word, _)| word.trim())
         .filter(|word| !word.is_empty())
         .map(|word| format!("{word}…"));
+    // When this word instance just landed, its decrypt entrance runs (fresh
+    // words only — the steady wave resumes after ~800ms).
+    let persona_word_shown_at = app
+        .session_status_word
+        .get(&session_id)
+        .filter(|(word_turn, _, _)| active_turn_id == Some(word_turn))
+        .map(|(_, _, shown_at)| *shown_at);
     let phase = match status.and_then(|s| s.phase.as_deref()) {
         Some("orchestrating") => t!("app.harness.orchestrating").to_string(),
         Some("re-entering") => t!("app.harness.re_entering").to_string(),
@@ -5125,12 +5245,28 @@ fn harness_status_lines(
         rgb_of(palette.accent),
         rgb_of(palette.highlight),
     ];
-    spans.extend(wave_gradient_spans(
-        &label,
-        anim_time_secs() * 3.0,
-        &stops,
-        palette.surface,
-    ));
+    // A persona word mid-entrance decodes from ciphertext instead of riding
+    // the wave; the whole label (spinner + space + word) goes through the
+    // entrance so the decode front sweeps the full row. Fall through to the
+    // wave when no entrance is in flight — or when the caller pinned a
+    // static render (tests/snapshots never see mid-animation glyphs).
+    let entrance = match (
+        animate_entrance,
+        persona_word.as_ref(),
+        persona_word_shown_at,
+    ) {
+        (true, Some(_), Some(shown_at)) => decrypt_entrance_spans(&label, shown_at, palette),
+        _ => None,
+    };
+    match entrance {
+        Some(entrance_spans) => spans.extend(entrance_spans),
+        None => spans.extend(wave_gradient_spans(
+            &label,
+            anim_time_secs() * 3.0,
+            &stops,
+            palette.surface,
+        )),
+    }
 
     // Live action count (spec task-activity-compact-fold): a silent agentic
     // turn (zero interleaved text) still shows a pulse here. Independent of
