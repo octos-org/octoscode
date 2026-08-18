@@ -649,8 +649,16 @@ pub(crate) const REQUIRED_OCTOS_RELEASE: &str = "v2.0.3-rc.2";
 ///
 /// Test-only: its whole job is to be compared against Cargo.toml, so it would
 /// be dead weight in a real build.
+///
+/// task-consume-turn-steer-dropped: this rev (octos `1ff2e3d8`, branch
+/// `fix/return-unconsumed-steer-inputs`) is AHEAD of [`REQUIRED_OCTOS_RELEASE`]
+/// on purpose — no octos release contains it yet. The protocol delta is
+/// additive only (the server-emitted `turn/steer_dropped` notification): a
+/// v2.0.3-rc.2 server simply never sends it and the client falls back to its
+/// terminal re-stage (task-steer-retained-until-echo). Bump
+/// `REQUIRED_OCTOS_RELEASE` to the first release tag containing this rev.
 #[cfg(test)]
-pub(crate) const REQUIRED_OCTOS_CORE_REV: &str = "57a60fd7eb56992b78c1d7929ff7eaaae0325363";
+pub(crate) const REQUIRED_OCTOS_CORE_REV: &str = "f6d5ef550f49189850646e7421cf21063b771895";
 /// Env var overriding the octos release tag to install (fork / pinned build).
 const OCTOS_RELEASE_ENV: &str = "OCTOSCODE_OCTOS_RELEASE";
 /// The octos server-bundle asset name for THIS build's target platform, or

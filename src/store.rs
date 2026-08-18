@@ -73,6 +73,13 @@ const PROVIDER_PENDING_TIMEOUT: std::time::Duration = std::time::Duration::from_
 /// enough that a stuck queue self-heals promptly.
 pub(crate) const STAGED_SUBMIT_GATE_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// task-stuck-run-state-watchdog: how long a session may sit in the phantom
+/// `InProgress` shape (run-state active, no live reply, no pre-token marker,
+/// no staged gate) before the tick watchdog ACTS — reset on server terminal
+/// evidence, or one `session/hydrate` probe when there is none. Elapsed time
+/// alone never resets the state (see the spec's Forbidden list).
+pub(crate) const PHANTOM_RUN_STATE_PROBE_SECS: u64 = 10;
+
 #[derive(Default)]
 struct TurnActivitySummary {
     action_count: usize,
@@ -1199,6 +1206,40 @@ impl Store {
     ) -> Option<AppUiCommand> {
         let pending = self.state.pending_turn_steers.pop_front();
         if event.result.steered {
+            // task-steer-retained-until-echo: accepted, not yet confirmed —
+            // keep the text until its UserMessage echo lands, or the turn's
+            // terminal re-stages it.
+            if let Some(pending) = pending {
+                let prior_matching_user_count = self
+                    .state
+                    .optimistic_user_messages
+                    .iter()
+                    .rev()
+                    .find(|optimistic| {
+                        optimistic.session_id == pending.session_id
+                            && optimistic.turn_id == pending.turn_id
+                            && optimistic.content == pending.prompt
+                    })
+                    .map(|optimistic| optimistic.prior_matching_user_count)
+                    .unwrap_or_else(|| {
+                        // No optimistic entry survived: count every matching
+                        // row present now, so only a NEW canonical row can
+                        // settle the steer (fail-safe: never under-count).
+                        self.find_session(&pending.session_id)
+                            .map(|session| {
+                                crate::model::matching_user_message_count(session, &pending.prompt)
+                            })
+                            .unwrap_or(0)
+                    });
+                self.state
+                    .retained_steers
+                    .push(crate::model::RetainedSteer {
+                        session_id: pending.session_id,
+                        turn_id: pending.turn_id,
+                        prompt: pending.prompt,
+                        prior_matching_user_count,
+                    });
+            }
             self.state.status = t!("status.steered_into_turn").into_owned();
             return None;
         }
@@ -6708,6 +6749,13 @@ impl Store {
             .active_turn()
             .map(|(session_id, turn_id)| (session_id.clone(), turn_id.clone()))
         else {
+            // task-esc-reconciles-phantom-turn: no live turn, but the chip
+            // says Working and inputs are queueing — give Esc an exit instead
+            // of a dead-end status line. Evidence-first, then one probe, then
+            // the user's repeated request counts as the decision.
+            if let Some(command) = self.reconcile_phantom_on_user_interrupt() {
+                return command;
+            }
             self.state.status = t!("status.no_active_turn_interrupt").into_owned();
             return None;
         };
@@ -8510,6 +8558,7 @@ impl Store {
                 // error fallback re-stages from it), so a replay landing in
                 // that window must carry it over or the text is lost.
                 let pending_turn_steers = self.state.pending_turn_steers.clone();
+                let retained_steers = self.state.retained_steers.clone();
 
                 let mut state = AppState::from_snapshot(snapshot);
                 if state.capabilities.is_none() {
@@ -8574,10 +8623,22 @@ impl Store {
                 state.pending_peer_kickoffs = pending_peer_kickoffs;
                 state.recently_closed_peers = recently_closed_peers;
                 state.pending_turn_steers = pending_turn_steers;
+                state.retained_steers = retained_steers;
                 // Settle gates the snapshot already reflects BEFORE the
                 // optimistic restore below re-inserts un-echoed rows (which
                 // would inflate the echo count and mis-settle live gates).
                 state.settle_staged_gates_reflected_by_snapshot();
+                // task-steer-retained-until-echo: same discipline for retained
+                // steers — canonical history that already carries the steer
+                // proves the server ran it; do not resubmit at the terminal.
+                let session_ids: Vec<SessionKey> = state
+                    .sessions
+                    .iter()
+                    .map(|session| session.id.clone())
+                    .collect();
+                for session_id in &session_ids {
+                    state.settle_retained_steers_reflected_by_history(session_id);
+                }
                 state.restore_optimistic_user_messages();
                 self.state = state;
                 None
@@ -9496,6 +9557,10 @@ impl Store {
         if let Some(messages) = projected_messages {
             let replaced_existing = if let Some(session) = self.find_session_mut(&session_id) {
                 session.messages = messages;
+                // task-steer-retained-until-echo: reconcile retained steers
+                // against the authoritative history (see the snapshot path).
+                self.state
+                    .settle_retained_steers_reflected_by_history(&session_id);
                 // codex P1: do NOT clear `live_reply` here. The hydrate result
                 // is COMMITTED history only; `live_reply` holds the turn that is
                 // still streaming. On a mid-turn reconnect, clearing it silently
@@ -9696,6 +9761,25 @@ impl Store {
             sections.join(", ")
         };
         self.state.status = t!("status.session_hydrated", summary = summary).into_owned();
+        // task-stuck-run-state-watchdog: an authoritative `turns` answer with
+        // NO Active/Interrupting entry is server evidence that nothing is
+        // live. If the local state is still the phantom InProgress shape (no
+        // live reply, no pre-token marker, no staged gate), reset it and drain
+        // the queue — the anti-wedge that `finalize_stale_hydrated_live_turn`
+        // provides for a latched live reply, extended to the run-state.
+        if let Some(turns) = result.turns.as_ref()
+            && !turns.iter().any(|turn| {
+                matches!(
+                    turn.state,
+                    TurnLifecycleState::Active | TurnLifecycleState::Interrupting
+                )
+            })
+            && self.phantom_in_progress(&session_id)
+        {
+            let status = t!("status.phantom_turn_reconciled").into_owned();
+            let command = self.reset_phantom_run_state(&session_id, status);
+            drain = drain.or(command);
+        }
         // A `SessionHydrateResult` carries a bare `UiCursor` (stream + seq) and
         // no health at all, and the only other probe on this path
         // (`probe_active_session_status_if_missing`) fires solely when NO status
@@ -10457,6 +10541,20 @@ impl Store {
         } else {
             self.state.session_retry.remove(&event.session_id);
         }
+        // Turn terminals are monotonic (mirror `ToolStarted`/`ToolProgress`):
+        // an aborted tool process can still emit `progress/updated` frames
+        // after `turn/error`, and by then the interrupt marker and live reply
+        // have been reconciled, so the generic in-progress guard cannot see
+        // the dead turn. Consult the turn-scoped terminal tombstone before
+        // recording an activity row or touching the run-state. Session-level
+        // bookkeeping above (usage, retry) is turn-agnostic and stays.
+        if event
+            .turn_id
+            .as_ref()
+            .is_some_and(|turn_id| self.state.is_turn_completed(&event.session_id, turn_id))
+        {
+            return None;
+        }
         let status = progress_status(&event);
         let record_activity = should_record_progress_activity(&event);
         let diff_preview_request = event.metadata.file_mutation.as_ref().and_then(|notice| {
@@ -10823,6 +10921,12 @@ impl Store {
                 None
             }
             UiNotification::TurnStarted(event) => {
+                // task-stuck-run-state-watchdog: remember the newest server-
+                // started turn; its tombstone is the turn-scoped evidence the
+                // phantom watchdog may act on.
+                self.state
+                    .last_started_turn
+                    .insert(event.session_id.clone(), event.turn_id.clone());
                 // The staged-drain submit (if any) has materialized into a
                 // real turn; from here live_reply gates further drains. Match
                 // on turn so a stale/continuation TurnStarted for a DIFFERENT
@@ -10918,6 +11022,18 @@ impl Store {
                 None
             }
             UiNotification::ToolStarted(event) => {
+                // Turn terminals are monotonic. An aborted tool process can
+                // emit lifecycle frames after `turn/error`; by then the
+                // interrupt marker and live reply have been reconciled, so the
+                // generic in-progress guard cannot identify the dead turn.
+                // Consult the turn-scoped terminal tombstone before creating a
+                // new running row or changing any global UI state.
+                if self
+                    .state
+                    .is_turn_completed(&event.session_id, &event.turn_id)
+                {
+                    return None;
+                }
                 self.state
                     .record_turn_prompt_anchor_from_latest_user(&event.session_id, &event.turn_id);
                 // A tool call starting means the current assistant CONTENT segment
@@ -10955,6 +11071,14 @@ impl Store {
                 None
             }
             UiNotification::ToolProgress(event) => {
+                // Mirror ToolStarted: progress from a terminal turn cannot
+                // update activity/status or resurrect the run-state.
+                if self
+                    .state
+                    .is_turn_completed(&event.session_id, &event.turn_id)
+                {
+                    return None;
+                }
                 let status = event
                     .progress_pct
                     .map(|pct| format!("{pct:.0}%"))
@@ -11641,6 +11765,9 @@ impl Store {
                     // Blocking bug 2 (belt-and-suspenders): the whole job is
                     // done — drop the indicator AND any stale retry so it cannot
                     // linger across the terminal orchestration boundary.
+                    // (task-stuck-run-state-watchdog: NOT recorded as terminal
+                    // evidence — this frame carries no turn identity and may be
+                    // a late frame from an older turn.)
                     self.state.orchestration.remove(&event.session_id);
                     self.state.session_retry.remove(&event.session_id);
                 }
@@ -11652,16 +11779,74 @@ impl Store {
             // octos-core is ahead of this crate and added `VoiceExit`; handling
             // it here keeps the match exhaustive so the workspace compiles.)
             UiNotification::VoiceExit(_) => None,
-            // Same octos-core drift as `VoiceExit` above: the path-overridden
-            // crate has since added a typed `PeerClosed` variant. This client
-            // does NOT route peer teardown through here — `handle_notification`
-            // (transport.rs) intercepts `peer/closed` BEFORE the vendored
-            // `UiNotification::from_method_and_params` and decodes it into
-            // `ClientEvent::PeerClosed`, which `apply_peer_closed_event` owns.
-            // So this arm is unreachable from the wire and must stay a no-op:
-            // handling it here would double-apply the teardown.
-            UiNotification::PeerClosed(_) => None,
+            // task-consume-turn-steer-dropped: the server hands back `turn/steer`
+            // inputs it accepted but never drained. Only a matching retained
+            // steer earns a re-stage — whoever consumes it first (this arm or
+            // the terminal fallback) owns the re-queue; the other is a no-op.
+            UiNotification::TurnSteerDropped(event) => self.apply_turn_steer_dropped(event),
+            // New in the octos-core rev pinned by task-consume-turn-steer-dropped
+            // (monitor runtime + background activity feed). This client renders
+            // no UI for them yet — ignore explicitly so the match stays
+            // exhaustive without changing any state.
+            UiNotification::MonitorUpdated(_)
+            | UiNotification::MonitorFired(_)
+            | UiNotification::MonitorExpired(_)
+            | UiNotification::BackgroundActivity(_) => None,
         }
+    }
+
+    /// task-consume-turn-steer-dropped: consume a server `turn/steer_dropped`.
+    /// For each returned text, in order, reap ONE retained steer of that
+    /// `(session, turn, text)` (count-exact, FIFO — never a set), withdraw its
+    /// optimistic transcript row and re-stage it at the front of ITS session's
+    /// queue. Texts with no retained match are ignored: the server never
+    /// injects text into the local queue without a local record. Idempotent
+    /// under replay (nothing left to reap). No submit happens here — the turn
+    /// terminal's drain (or the idle backstop) sends the re-staged prompt.
+    fn apply_turn_steer_dropped(
+        &mut self,
+        event: octos_core::ui_protocol::TurnSteerDroppedEvent,
+    ) -> Option<AppUiCommand> {
+        let session_id = event.session_id.clone();
+        let mut restaged: Vec<String> = Vec::new();
+        let mut unmatched = 0usize;
+        for text in event.inputs {
+            let position = self.state.retained_steers.iter().position(|steer| {
+                steer.session_id == session_id
+                    && steer.turn_id == event.turn_id
+                    && steer.prompt == text
+            });
+            match position {
+                Some(index) => {
+                    let steer = self.state.retained_steers.remove(index);
+                    self.state.withdraw_steered_user_prompt(
+                        &session_id,
+                        &event.turn_id,
+                        &steer.prompt,
+                    );
+                    restaged.push(steer.prompt);
+                }
+                None => unmatched += 1,
+            }
+        }
+        if !restaged.is_empty() {
+            let count = restaged.len();
+            // Back-to-front so the FIRST returned text ends up at the very
+            // front of the queue (they were typed before anything staged after).
+            for prompt in restaged.into_iter().rev() {
+                self.state.restage_staged_prompt_front(&session_id, prompt);
+            }
+            self.state.status = t!(
+                "status.steer_returned_by_server",
+                count = count,
+                reason = event.reason
+            )
+            .into_owned();
+        } else if unmatched > 0 {
+            self.state.status =
+                t!("status.steer_returned_unmatched", count = unmatched).into_owned();
+        }
+        None
     }
 
     /// Shared live-delta path for legacy `message/delta` and canonical v2
@@ -12145,6 +12330,12 @@ impl Store {
                 arguments_preview,
             } => {
                 let turn_id = self.resolve_v2_turn_id(&session_id, &wire_turn_id, false);
+                // Terminal tombstone (mirror `UiNotification::ToolStarted`): a
+                // late envelope frame for a terminated turn must not create a
+                // running row or resurrect the run-state.
+                if self.state.is_turn_completed(&session_id, &turn_id) {
+                    return None;
+                }
                 self.state
                     .record_turn_prompt_anchor_from_latest_user(&session_id, &turn_id);
                 self.finalize_live_reply_segment(&session_id, &turn_id);
@@ -12167,7 +12358,11 @@ impl Store {
                 tool_call_id,
                 message,
             } => {
-                let _ = self.resolve_v2_turn_id(&session_id, &wire_turn_id, false);
+                let turn_id = self.resolve_v2_turn_id(&session_id, &wire_turn_id, false);
+                // Terminal tombstone (mirror `UiNotification::ToolProgress`).
+                if self.state.is_turn_completed(&session_id, &turn_id) {
+                    return None;
+                }
                 self.state.update_tool_activity(
                     &tool_call_id,
                     "running",
@@ -12721,6 +12916,11 @@ impl Store {
         // turn). Match on turn so a late/duplicate terminal for an already-
         // finished earlier turn cannot drop a newer staged submit's gate.
         self.release_staged_gate_for_turn(&event.session_id, &event.turn_id);
+        // task-steer-retained-until-echo: steers the server accepted for THIS
+        // turn but never echoed did not enter the conversation — withdraw
+        // their optimistic rows and re-stage them (front, in dispatch order)
+        // so the tail drain below submits them as their own turns.
+        let steer_restaged = self.restage_unconfirmed_steers(&event.session_id, &event.turn_id);
         // Idempotence vs a turn-switch: if this turn was ALREADY finalized
         // (committed or dropped) by `commit_pending_live_reply_for_turn_switch`,
         // its late terminal is a no-op. Without this the late terminal would hit
@@ -12754,7 +12954,7 @@ impl Store {
             .state
             .is_turn_completed(&event.session_id, &event.turn_id)
         {
-            return self.submit_next_pending_if_idle();
+            return self.drain_after_terminal(steer_restaged);
         }
         // Mark this turn terminal so a late delta for it is dropped rather than
         // resurrecting it into `live_reply` (the wedge fix). Done before the
@@ -12929,7 +13129,7 @@ impl Store {
                 }
             }
         }
-        self.submit_next_pending_if_idle()
+        self.drain_after_terminal(steer_restaged)
     }
 
     fn fail_live_reply(&mut self, event: TurnErrorEvent) -> Option<AppUiCommand> {
@@ -12980,6 +13180,11 @@ impl Store {
         // stale/duplicate error for an earlier turn cannot drop a newer staged
         // submit's gate.
         self.release_staged_gate_for_turn(&event.session_id, &event.turn_id);
+        // task-steer-retained-until-echo: steers the server accepted for THIS
+        // turn but never echoed did not enter the conversation — withdraw
+        // their optimistic rows and re-stage them (front, in dispatch order)
+        // so the tail drain below submits them as their own turns.
+        let steer_restaged = self.restage_unconfirmed_steers(&event.session_id, &event.turn_id);
         // An errored turn gets no status report; just drop its per-turn clock.
         self.state
             .take_turn_elapsed_secs(&event.session_id, &event.turn_id);
@@ -13015,7 +13220,7 @@ impl Store {
             .state
             .is_turn_completed(&event.session_id, &event.turn_id)
         {
-            return self.submit_next_pending_if_idle();
+            return self.drain_after_terminal(steer_restaged);
         }
         let was_finalized_by_switch = self
             .state
@@ -13205,7 +13410,7 @@ impl Store {
                     .set_run_state_error(format!("{}: {}", event.code, event.message));
             }
         }
-        self.submit_next_pending_if_idle()
+        self.drain_after_terminal(steer_restaged)
     }
 
     /// After an explicit session switch the incoming session may be idle with
@@ -13240,6 +13445,69 @@ impl Store {
     /// review). Backoff-only gates (`in_flight == None`, awaiting a TTL
     /// re-stage) never match a live turn and are left for the TTL path.
     /// Returns true when a gate was released.
+    /// task-steer-retained-until-echo: on a turn's terminal, move every
+    /// retained (accepted-but-unconfirmed) steer of that turn back into the
+    /// queue FRONT in dispatch order, withdrawing the optimistic transcript
+    /// row so the re-submit renders once. Idempotent: entries are consumed.
+    fn restage_unconfirmed_steers(&mut self, session_id: &SessionKey, turn_id: &TurnId) -> bool {
+        // task-consume-turn-steer-dropped (v2): a server that advertises
+        // `event.turn_steer_dropped.v1` returns every accepted-but-undrained
+        // steer as `turn/steer_dropped` BEFORE this terminal (and
+        // `apply_turn_steer_dropped` already re-staged those). Whatever is
+        // still retained here was therefore CONSUMED — its echo may merely be
+        // late or lost — so re-staging it would resubmit text the server
+        // already ran. Settle it as consumed and leave the queue alone.
+        if self.server_settles_steers_before_terminal() {
+            self.state
+                .retained_steers
+                .retain(|steer| !(&steer.session_id == session_id && &steer.turn_id == turn_id));
+            return false;
+        }
+        let mut unconfirmed = Vec::new();
+        self.state.retained_steers.retain(|steer| {
+            if &steer.session_id == session_id && &steer.turn_id == turn_id {
+                unconfirmed.push(steer.prompt.clone());
+                false
+            } else {
+                true
+            }
+        });
+        if unconfirmed.is_empty() {
+            return false;
+        }
+        for prompt in &unconfirmed {
+            self.state
+                .withdraw_steered_user_prompt(session_id, turn_id, prompt);
+        }
+        // Re-stage back-to-front so the FIRST typed steer ends up at the very
+        // front of the queue.
+        for prompt in unconfirmed.into_iter().rev() {
+            self.state.restage_staged_prompt_front(session_id, prompt);
+        }
+        true
+    }
+
+    /// task-consume-turn-steer-dropped: whether the connected server settles
+    /// `turn/steer` input before the terminal (`event.turn_steer_dropped.v1`).
+    fn server_settles_steers_before_terminal(&self) -> bool {
+        self.state
+            .capabilities
+            .as_ref()
+            .is_some_and(|capabilities| {
+                capabilities.supports_feature(crate::model::APPUI_FEATURE_TURN_STEER_DROPPED_V1)
+            })
+    }
+
+    /// Terminal tail drain that lets a steer re-stage notice outrank the
+    /// drain's generic "submitted staged message" status line.
+    fn drain_after_terminal(&mut self, steer_restaged: bool) -> Option<AppUiCommand> {
+        let command = self.submit_next_pending_if_idle();
+        if steer_restaged {
+            self.state.status = t!("status.steer_restaged_after_turn_end").into_owned();
+        }
+        command
+    }
+
     fn release_staged_gate_for_turn(&mut self, session_id: &SessionKey, turn_id: &TurnId) -> bool {
         let matches = self
             .state
@@ -13430,6 +13698,171 @@ impl Store {
     /// retries on the gate-TTL cadence instead, and structurally closes any
     /// remaining wake-site gap (idle active session + staged prompt always
     /// flows within a tick). O(1) when there is nothing to do.
+    /// task-stuck-run-state-watchdog: the incident's "phantom InProgress"
+    /// shape — the run-state says a turn is active, but nothing local backs
+    /// it: no live reply, no pre-token marker for our own submit, no staged
+    /// gate. `Blocked` is excluded on purpose (an approval/question wait is a
+    /// live turn no matter how long it sits).
+    pub fn phantom_in_progress(&self, session_id: &SessionKey) -> bool {
+        if !matches!(
+            self.state.run_state,
+            crate::model::SessionRunState::InProgress
+        ) {
+            return false;
+        }
+        if !self
+            .state
+            .active_session()
+            .is_some_and(|session| &session.id == session_id)
+        {
+            return false;
+        }
+        if self.state.active_turn().is_some() {
+            return false;
+        }
+        if self
+            .state
+            .pre_token_turns
+            .get(session_id)
+            .is_some_and(|armed| armed.elapsed() < crate::model::PRE_TOKEN_TURN_TTL)
+        {
+            return false;
+        }
+        if self.state.staged_submit_in_flight.contains_key(session_id) {
+            return false;
+        }
+        true
+    }
+
+    /// The active session is in the phantom InProgress shape (event-loop
+    /// convenience over [`Self::phantom_in_progress`]).
+    pub fn active_session_phantom_in_progress(&self) -> bool {
+        self.state
+            .active_session()
+            .map(|session| session.id.clone())
+            .is_some_and(|session_id| self.phantom_in_progress(&session_id))
+    }
+
+    /// Turn-scoped server terminal evidence for a phantom session: the most
+    /// recent turn the server started (`last_started_turn`) has reached its
+    /// terminal (tombstoned in `completed_turns`) and nothing started since.
+    /// A session with no known started turn has no evidence.
+    fn phantom_terminal_evidence(&self, session_id: &SessionKey) -> bool {
+        self.state
+            .last_started_turn
+            .get(session_id)
+            .is_some_and(|turn_id| self.state.is_turn_completed(session_id, turn_id))
+    }
+
+    /// Reset a phantom InProgress session to Idle and drain its queue. Shared
+    /// by the tick watchdog (evidence path), the hydrate applier (all-terminal
+    /// turns) and the Esc exit (task-esc-reconciles-phantom-turn). Returns the
+    /// staged submit to send, if any. Never called without evidence or an
+    /// explicit user action — see the callers.
+    pub(crate) fn reset_phantom_run_state(
+        &mut self,
+        session_id: &SessionKey,
+        status: String,
+    ) -> Option<AppUiCommand> {
+        self.state.phantom_probe_sent.remove(session_id);
+        self.state.pre_token_turns.remove(session_id);
+        self.state.set_run_state_idle();
+        let command = self.submit_next_pending_if_idle();
+        // The reason for the reset outranks the drain's generic "submitted
+        // staged message" line — the user needs to know WHY the chip flipped.
+        self.state.status = status;
+        command
+    }
+
+    /// task-esc-reconciles-phantom-turn: Esc/Ctrl+C while the active session
+    /// is phantom InProgress. Returns `Some(command)` when the phantom path
+    /// handled the key (the inner `Option` is the command to send, if any);
+    /// `None` when the session is not phantom and the caller should fall back
+    /// to today's "no active turn" report.
+    ///
+    /// Order: server terminal evidence → reset + drain; no evidence and
+    /// `session/hydrate` advertised and not yet probed this episode → probe;
+    /// otherwise (probe already sent, or no hydrate) the user's explicit
+    /// request is the decision → reset + drain. The tick watchdog never takes
+    /// that last step on its own.
+    fn reconcile_phantom_on_user_interrupt(&mut self) -> Option<Option<AppUiCommand>> {
+        let session_id = self
+            .state
+            .active_session()
+            .map(|session| session.id.clone())?;
+        if !self.phantom_in_progress(&session_id) {
+            return None;
+        }
+        if self.phantom_terminal_evidence(&session_id) {
+            let status = t!("status.phantom_turn_reconciled").into_owned();
+            return Some(self.reset_phantom_run_state(&session_id, status));
+        }
+        if !self.state.phantom_probe_sent.contains(&session_id)
+            && let Some(command) = self.hydrate_session_state_command(&session_id)
+        {
+            self.state.phantom_probe_sent.insert(session_id);
+            self.state.status = t!("status.phantom_turn_probing").into_owned();
+            return Some(Some(command));
+        }
+        let status = t!("status.phantom_turn_reset_by_user").into_owned();
+        Some(self.reset_phantom_run_state(&session_id, status))
+    }
+
+    /// Tick-driven phantom-state watchdog (task-stuck-run-state-watchdog).
+    /// Acts only once the phantom shape has persisted for
+    /// [`PHANTOM_RUN_STATE_PROBE_SECS`]:
+    /// * server terminal evidence present → reset + drain (command goes to the
+    ///   follow-up queue, sent by the event loop this tick);
+    /// * no evidence, `session/hydrate` advertised → ONE probe per episode; the
+    ///   hydrate applier resets on an all-terminal `turns` answer;
+    /// * no evidence, no hydrate → status hint only. Elapsed time alone never
+    ///   flips the state.
+    ///
+    /// Returns true when it changed anything visible.
+    pub fn reconcile_phantom_run_state(&mut self, _now: std::time::Instant) -> bool {
+        let Some(session_id) = self
+            .state
+            .active_session()
+            .map(|session| session.id.clone())
+        else {
+            return false;
+        };
+        if !self.phantom_in_progress(&session_id) {
+            // Episode over (a turn is genuinely live, or we're idle): the next
+            // phantom episode earns its own probe.
+            self.state.phantom_probe_sent.remove(&session_id);
+            return false;
+        }
+        let elapsed = self.state.run_state_elapsed_secs().unwrap_or(0);
+        if elapsed < PHANTOM_RUN_STATE_PROBE_SECS {
+            return false;
+        }
+        if self.phantom_terminal_evidence(&session_id) {
+            let status = t!("status.phantom_turn_reconciled").into_owned();
+            if let Some(command) = self.reset_phantom_run_state(&session_id, status) {
+                self.state.enqueue_autonomy_hydration(command);
+            }
+            return true;
+        }
+        if self.state.phantom_probe_sent.contains(&session_id) {
+            return false;
+        }
+        if let Some(command) = self.hydrate_session_state_command(&session_id) {
+            self.state.phantom_probe_sent.insert(session_id.clone());
+            self.state.enqueue_autonomy_hydration(command);
+            self.state.status = t!("status.phantom_turn_probing").into_owned();
+            return true;
+        }
+        // No evidence and no way to ask: surface the contradiction so the
+        // user can Esc (task-esc-reconciles-phantom-turn), but do not guess.
+        let hint = t!("status.phantom_turn_hint").into_owned();
+        if self.state.status != hint {
+            self.state.status = hint;
+            return true;
+        }
+        false
+    }
+
     pub fn drain_staged_backstop(&mut self) -> bool {
         if let Some(command) = self.submit_next_pending_if_idle() {
             self.state.enqueue_autonomy_hydration(command);
@@ -17452,6 +17885,834 @@ mod tests {
             },
         )));
         assert_eq!(steered_rows(&store), 1, "replayed echo must stay deduped");
+    }
+
+    // ---- task-steer-retained-until-echo: acceptance is not confirmation ----
+
+    fn steer_into_live_turn(store: &mut Store, live_turn: &TurnId, text: &str) {
+        let command = store.queue_or_start_prompt_turn(text.into(), "queued".into());
+        assert!(
+            matches!(command, Some(AppUiCommand::TurnSteer(_))),
+            "{command:?}"
+        );
+        store.apply_client_event(ClientEvent::TurnSteered(
+            crate::client_event::TurnSteeredClientEvent {
+                message: "steered".into(),
+                result: crate::model::TurnSteerResult {
+                    turn_id: live_turn.clone(),
+                    steered: true,
+                },
+            },
+        ));
+    }
+
+    fn user_rows_with(store: &Store, text: &str) -> usize {
+        store.state.sessions[0]
+            .messages
+            .iter()
+            .filter(|message| message.role == MessageRole::User && message.content == text)
+            .count()
+    }
+
+    #[test]
+    fn steered_true_retains_prompt_until_echo() {
+        use octos_core::ui_protocol::PayloadV2;
+        let mut store = steer_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "also do X");
+
+        assert!(store.state.pending_turn_steers.is_empty());
+        assert_eq!(store.state.retained_steers.len(), 1);
+        assert_eq!(store.state.retained_steers[0].prompt, "also do X");
+        assert_eq!(store.state.retained_steers[0].turn_id, live_turn);
+
+        store.apply_event(AppUiEvent::Protocol(envelope_v2_notification(
+            session_id,
+            1,
+            &live_turn.0.to_string(),
+            PayloadV2::UserMessage {
+                text: "also do X".into(),
+                files: vec![],
+            },
+        )));
+
+        assert!(
+            store.state.retained_steers.is_empty(),
+            "echo confirms the steer"
+        );
+        assert!(store.state.pending_messages.is_empty());
+    }
+
+    #[test]
+    fn steered_false_is_not_retained() {
+        let mut store = steer_capable_store();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        let command = store.queue_or_start_prompt_turn("also do X".into(), "queued".into());
+        assert!(matches!(command, Some(AppUiCommand::TurnSteer(_))));
+        let _ = live_turn;
+
+        store.apply_client_event(ClientEvent::TurnSteered(
+            crate::client_event::TurnSteeredClientEvent {
+                message: "new turn".into(),
+                result: crate::model::TurnSteerResult {
+                    turn_id: TurnId::new(),
+                    steered: false,
+                },
+            },
+        ));
+
+        assert!(store.state.retained_steers.is_empty());
+        assert!(store.state.pending_turn_steers.is_empty());
+    }
+
+    #[test]
+    fn unechoed_steer_is_restaged_on_interrupt_terminal() {
+        let mut store = steer_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "also do X");
+        assert_eq!(
+            user_rows_with(&store, "also do X"),
+            1,
+            "optimistic row shown"
+        );
+
+        let command = store.apply_event(interrupted_terminal(&session_id, &live_turn));
+
+        assert_eq!(
+            command.as_ref().and_then(submit_prompt_text),
+            Some("also do X"),
+            "the unconfirmed steer is re-submitted as its own turn: {command:?}"
+        );
+        assert_eq!(
+            user_rows_with(&store, "also do X"),
+            1,
+            "withdrawn then re-recorded by the new submit — never twice"
+        );
+        assert_eq!(
+            store.state.status,
+            t!("status.steer_restaged_after_turn_end")
+        );
+        assert!(store.state.retained_steers.is_empty());
+        assert!(store.state.pending_messages.is_empty());
+    }
+
+    #[test]
+    fn unechoed_steer_is_restaged_on_completed_terminal() {
+        let mut store = steer_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "also do X");
+
+        let command = store.apply_event(completed_terminal(&session_id, &live_turn));
+
+        assert_eq!(
+            command.as_ref().and_then(submit_prompt_text),
+            Some("also do X"),
+            "{command:?}"
+        );
+        assert!(store.state.retained_steers.is_empty());
+    }
+
+    #[test]
+    fn echoed_steer_is_not_restaged_on_terminal() {
+        use octos_core::ui_protocol::PayloadV2;
+        let mut store = steer_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "also do X");
+        store.apply_event(AppUiEvent::Protocol(envelope_v2_notification(
+            session_id.clone(),
+            1,
+            &live_turn.0.to_string(),
+            PayloadV2::UserMessage {
+                text: "also do X".into(),
+                files: vec![],
+            },
+        )));
+
+        let command = store.apply_event(completed_terminal(&session_id, &live_turn));
+
+        assert!(
+            command.is_none(),
+            "confirmed steer must not resubmit: {command:?}"
+        );
+        assert!(store.state.pending_messages.is_empty());
+        assert_eq!(user_rows_with(&store, "also do X"), 1);
+    }
+
+    #[test]
+    fn restaged_steer_precedes_messages_staged_after_it() {
+        let mut store = steer_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "steered first");
+        // A later message that stages (steer disabled after the first, to
+        // force the queue path — e.g. the user toggled /steer off).
+        store.state.steer_mid_turn = false;
+        let staged = store.queue_or_start_prompt_turn("staged later".into(), "queued".into());
+        assert!(staged.is_none());
+        assert_eq!(
+            store.state.pending_messages,
+            vec!["staged later".to_string()]
+        );
+
+        let command = store.apply_event(interrupted_terminal(&session_id, &live_turn));
+
+        assert_eq!(
+            command.as_ref().and_then(submit_prompt_text),
+            Some("steered first"),
+            "the steer was typed first, so it goes first: {command:?}"
+        );
+        assert_eq!(
+            store.state.pending_messages,
+            vec!["staged later".to_string()]
+        );
+    }
+
+    #[test]
+    fn duplicate_terminal_does_not_restage_steer_twice() {
+        let mut store = steer_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "also do X");
+
+        let first = store.apply_event(interrupted_terminal(&session_id, &live_turn));
+        assert_eq!(
+            first.as_ref().and_then(submit_prompt_text),
+            Some("also do X")
+        );
+        let pending_after_first = store.state.pending_messages.clone();
+
+        let second = store.apply_event(interrupted_terminal(&session_id, &live_turn));
+
+        assert!(
+            second.is_none() || submit_prompt_text(second.as_ref().unwrap()) != Some("also do X")
+        );
+        assert_eq!(store.state.pending_messages, pending_after_first);
+        assert!(store.state.retained_steers.is_empty());
+    }
+
+    #[test]
+    fn same_content_steer_is_restaged_without_touching_original_row() {
+        let mut store = steer_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "same text");
+        assert_eq!(user_rows_with(&store, "same text"), 1);
+        steer_into_live_turn(&mut store, &live_turn, "same text");
+        assert_eq!(
+            user_rows_with(&store, "same text"),
+            2,
+            "original + steer rows"
+        );
+
+        let command = store.apply_event(interrupted_terminal(&session_id, &live_turn));
+
+        assert_eq!(
+            command.as_ref().and_then(submit_prompt_text),
+            Some("same text")
+        );
+        assert_eq!(
+            user_rows_with(&store, "same text"),
+            2,
+            "original row survives; the steer row is withdrawn and re-recorded once"
+        );
+    }
+
+    fn hydrated_user_row(seq: u64, content: &str, thread_id: &str) -> HydratedMessage {
+        HydratedMessage {
+            seq,
+            role: "user".into(),
+            content: content.into(),
+            turn_id: None,
+            thread_id: Some(thread_id.into()),
+            client_message_id: None,
+            persisted_at: chrono::Utc::now(),
+            message_id: None,
+            source: None,
+            media: Vec::new(),
+            reasoning_content: None,
+        }
+    }
+
+    fn snapshot_with_history(session_id: &SessionKey, history: Vec<Message>) -> AppUiEvent {
+        AppUiEvent::Snapshot(AppUiSnapshot {
+            sessions: vec![SessionView {
+                id: session_id.clone(),
+                title: "test".into(),
+                profile_id: Some("coding".into()),
+                messages: history,
+                tasks: vec![],
+                live_reply: None,
+            }],
+            selected_session: 0,
+            status: "replayed".into(),
+            target: None,
+            readonly: false,
+        })
+    }
+
+    #[test]
+    fn snapshot_with_persisted_steer_row_reaps_retained_steer() {
+        let mut store = steer_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "also do X");
+        assert_eq!(store.state.retained_steers.len(), 1);
+
+        // Reconnect: the server already persisted the steer (it was consumed
+        // before the echo reached us). Canonical history carries both rows.
+        store.apply_event(snapshot_with_history(
+            &session_id,
+            vec![
+                Message::user("first prompt").with_thread_id(ThreadId::new("t-1")),
+                Message::user("also do X").with_thread_id(ThreadId::new("t-2")),
+            ],
+        ));
+
+        assert!(
+            store.state.retained_steers.is_empty(),
+            "history proves the steer landed"
+        );
+        assert_eq!(user_rows_with(&store, "also do X"), 1);
+        // The live turn keeps going after reconnect; its terminal must not
+        // resubmit the text.
+        store.state.sessions[0].live_reply = Some(LiveReply {
+            turn_id: live_turn.clone(),
+            text: String::new(),
+        });
+        let command = store.apply_event(completed_terminal(&session_id, &live_turn));
+        assert!(command.is_none(), "{command:?}");
+        assert_eq!(user_rows_with(&store, "also do X"), 1);
+    }
+
+    #[test]
+    fn snapshot_without_steer_row_keeps_retained_steer() {
+        let mut store = steer_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "also do X");
+
+        store.apply_event(snapshot_with_history(
+            &session_id,
+            vec![Message::user("first prompt").with_thread_id(ThreadId::new("t-1"))],
+        ));
+
+        assert_eq!(
+            store.state.retained_steers.len(),
+            1,
+            "not yet proven — keep it"
+        );
+        store.state.sessions[0].live_reply = Some(LiveReply {
+            turn_id: live_turn.clone(),
+            text: String::new(),
+        });
+        let command = store.apply_event(interrupted_terminal(&session_id, &live_turn));
+        assert_eq!(
+            command.as_ref().and_then(submit_prompt_text),
+            Some("also do X")
+        );
+    }
+
+    #[test]
+    fn hydrate_with_persisted_steer_row_reaps_retained_steer() {
+        use crate::client_event::ClientEvent;
+        let mut store = steer_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "also do X");
+
+        let mut result = hydrate_result_with_turns(&session_id, vec![]);
+        result.turns = None;
+        result.messages = Some(vec![
+            hydrated_user_row(1, "first prompt", "t-1"),
+            hydrated_user_row(2, "also do X", "t-2"),
+        ]);
+        store.apply_client_event(ClientEvent::SessionHydrate(result));
+
+        assert!(store.state.retained_steers.is_empty());
+    }
+
+    // ---- task-consume-turn-steer-dropped: server-returned steers ----
+
+    fn steer_dropped(
+        session_id: &SessionKey,
+        turn_id: &TurnId,
+        inputs: &[&str],
+        reason: &str,
+    ) -> AppUiEvent {
+        AppUiEvent::Protocol(UiNotification::TurnSteerDropped(
+            octos_core::ui_protocol::TurnSteerDroppedEvent {
+                session_id: session_id.clone(),
+                topic: None,
+                turn_id: turn_id.clone(),
+                inputs: inputs.iter().map(|s| (*s).to_string()).collect(),
+                reason: reason.into(),
+            },
+        ))
+    }
+
+    #[test]
+    fn steer_dropped_before_terminal_restages_once_and_terminal_does_not_resubmit() {
+        let mut store = steer_dropped_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "also do X");
+
+        let dropped = store.apply_event(steer_dropped(
+            &session_id,
+            &live_turn,
+            &["also do X"],
+            "interrupted",
+        ));
+        assert!(dropped.is_none(), "turn still live: nothing to submit yet");
+        assert_eq!(store.state.pending_messages, vec!["also do X".to_string()]);
+        assert!(
+            store.state.retained_steers.is_empty(),
+            "the notification consumed the retained steer"
+        );
+        assert_eq!(
+            user_rows_with(&store, "also do X"),
+            0,
+            "optimistic row withdrawn until resubmit"
+        );
+        assert_eq!(
+            store.state.status,
+            t!(
+                "status.steer_returned_by_server",
+                count = 1,
+                reason = "interrupted"
+            )
+        );
+
+        let command = store.apply_event(interrupted_terminal(&session_id, &live_turn));
+        assert_eq!(
+            command.as_ref().and_then(submit_prompt_text),
+            Some("also do X")
+        );
+        assert!(store.state.pending_messages.is_empty());
+        assert_eq!(
+            user_rows_with(&store, "also do X"),
+            1,
+            "re-recorded exactly once"
+        );
+    }
+
+    #[test]
+    fn late_steer_dropped_after_terminal_is_a_noop() {
+        let mut store = steer_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "also do X");
+        // F5 fallback: the terminal already re-staged and submitted it.
+        let command = store.apply_event(interrupted_terminal(&session_id, &live_turn));
+        assert_eq!(
+            command.as_ref().and_then(submit_prompt_text),
+            Some("also do X")
+        );
+        let pending_before = store.state.pending_messages.clone();
+        let rows_before = user_rows_with(&store, "also do X");
+
+        let late = store.apply_event(steer_dropped(
+            &session_id,
+            &live_turn,
+            &["also do X"],
+            "interrupted",
+        ));
+
+        assert!(late.is_none());
+        assert_eq!(store.state.pending_messages, pending_before);
+        assert_eq!(user_rows_with(&store, "also do X"), rows_before);
+        assert_eq!(rows_before, 1);
+    }
+
+    #[test]
+    fn duplicate_steer_dropped_is_idempotent() {
+        let mut store = steer_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "also do X");
+        store.apply_event(steer_dropped(
+            &session_id,
+            &live_turn,
+            &["also do X"],
+            "interrupted",
+        ));
+        assert_eq!(store.state.pending_messages.len(), 1);
+
+        store.apply_event(steer_dropped(
+            &session_id,
+            &live_turn,
+            &["also do X"],
+            "interrupted",
+        ));
+
+        assert_eq!(store.state.pending_messages.len(), 1);
+        assert!(store.state.retained_steers.is_empty());
+    }
+
+    #[test]
+    fn same_text_steers_are_consumed_by_count_not_by_set() {
+        let mut store = steer_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        for _ in 0..3 {
+            steer_into_live_turn(&mut store, &live_turn, "same");
+        }
+        assert_eq!(store.state.retained_steers.len(), 3);
+
+        store.apply_event(steer_dropped(
+            &session_id,
+            &live_turn,
+            &["same", "same"],
+            "turn_ended",
+        ));
+
+        assert_eq!(
+            store.state.pending_messages,
+            vec!["same".to_string(), "same".to_string()]
+        );
+        assert_eq!(
+            store.state.retained_steers.len(),
+            1,
+            "one still awaits its echo"
+        );
+    }
+
+    #[test]
+    fn steer_dropped_preserves_input_order_in_queue() {
+        let mut store = steer_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "A");
+        steer_into_live_turn(&mut store, &live_turn, "B");
+
+        store.apply_event(steer_dropped(
+            &session_id,
+            &live_turn,
+            &["A", "B"],
+            "interrupted",
+        ));
+
+        assert_eq!(
+            store.state.pending_messages,
+            vec!["A".to_string(), "B".to_string()]
+        );
+    }
+
+    #[test]
+    fn steer_dropped_for_background_session_stays_in_its_own_queue() {
+        let mut store = steer_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "background steer");
+        // Switch the user to another session; the steer's session is now background.
+        store.state.sessions.push(open_session_on("other"));
+        store.state.selected_session = 1;
+        store.state.refresh_run_state_from_selection();
+        let other_id = store.state.sessions[1].id.clone();
+        assert_eq!(
+            store.state.active_session().map(|s| s.id.clone()),
+            Some(other_id)
+        );
+
+        store.apply_event(steer_dropped(
+            &session_id,
+            &live_turn,
+            &["background steer"],
+            "interrupted",
+        ));
+
+        assert!(
+            store.state.pending_messages.is_empty(),
+            "the visible session's queue is untouched"
+        );
+        assert_eq!(
+            store.state.pending_messages_by_session.get(&session_id),
+            Some(&vec!["background steer".to_string()])
+        );
+    }
+
+    #[test]
+    fn unmatched_steer_dropped_text_is_never_injected() {
+        let mut store = steer_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        assert!(store.state.retained_steers.is_empty());
+        let rows_before = store.state.sessions[0].messages.len();
+
+        let command = store.apply_event(steer_dropped(
+            &session_id,
+            &live_turn,
+            &["rm -rf / (never typed here)"],
+            "interrupted",
+        ));
+
+        assert!(command.is_none());
+        assert!(store.state.pending_messages.is_empty());
+        assert!(store.state.pending_messages_by_session.is_empty());
+        assert_eq!(store.state.sessions[0].messages.len(), rows_before);
+        assert_eq!(
+            store.state.status,
+            t!("status.steer_returned_unmatched", count = 1)
+        );
+    }
+
+    #[test]
+    fn steer_dropped_reason_is_surfaced_but_does_not_change_behavior() {
+        for reason in ["interrupted", "turn_ended"] {
+            let mut store = steer_capable_store();
+            let session_id = store.state.sessions[0].id.clone();
+            let live_turn = start_live_turn(&mut store, "first prompt");
+            steer_into_live_turn(&mut store, &live_turn, "also do X");
+
+            store.apply_event(steer_dropped(
+                &session_id,
+                &live_turn,
+                &["also do X"],
+                reason,
+            ));
+
+            assert_eq!(
+                store.state.pending_messages,
+                vec!["also do X".to_string()],
+                "{reason}"
+            );
+            assert!(
+                store.state.status.contains(reason),
+                "{reason} surfaces in {:?}",
+                store.state.status
+            );
+        }
+    }
+
+    #[test]
+    fn monitor_and_background_activity_notifications_are_ignored() {
+        let mut store = store_with_empty_session();
+        let sid = store.state.sessions[0].id.0.clone();
+        let before_status = store.state.status.clone();
+        let before_run_state = store.state.run_state.clone();
+        let monitor = serde_json::json!({
+            "monitor_id": "m1", "session_id": sid, "name": "logs", "argv": ["tail"],
+            "mode": "stream", "batch_ms": 100, "max_events_per_hour": 10, "persistent": false,
+            "status": "active", "fires_used": 0, "created_at_ms": 0, "updated_at_ms": 0
+        });
+        let frames = [
+            (
+                "monitor/updated",
+                serde_json::json!({"session_id": sid, "monitor": monitor}),
+            ),
+            (
+                "monitor/fired",
+                serde_json::json!({"session_id": sid, "monitor_id": "m1"}),
+            ),
+            (
+                "monitor/expired",
+                serde_json::json!({"session_id": sid, "monitor_id": "m1"}),
+            ),
+            (
+                "background/activity",
+                serde_json::json!({
+                    "session_id": sid, "origin_kind": "monitor", "origin_id": "m1",
+                    "text": "line", "emitted_at_ms": 0
+                }),
+            ),
+        ];
+        for (method, params) in frames {
+            let notification = UiNotification::from_method_and_params(method, params)
+                .unwrap_or_else(|err| panic!("{method} decodes: {err:?}"));
+            let command = store.apply_event(AppUiEvent::Protocol(notification));
+            assert!(command.is_none(), "{method} must be ignored");
+        }
+        assert_eq!(store.state.status, before_status);
+        assert_eq!(store.state.run_state, before_run_state);
+    }
+
+    /// A server that advertises `event.turn_steer_dropped.v1` (dropped-before-
+    /// terminal guarantee) — the real order for post-#2049 servers.
+    fn steer_dropped_capable_store() -> Store {
+        let mut store = steer_capable_store();
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods_and_features(
+            [crate::model::APPUI_METHOD_TURN_STEER],
+            [crate::model::APPUI_FEATURE_TURN_STEER_DROPPED_V1],
+        ));
+        store
+    }
+
+    #[test]
+    fn consumed_steer_with_lost_echo_is_not_resubmitted_when_server_settles_steers() {
+        // The server consumed the steer (it fed the loop) but the UserMessage
+        // echo never reached us; the turn then completes. A new server would
+        // have sent turn/steer_dropped BEFORE the terminal had the steer been
+        // unconsumed — it did not, so the terminal must NOT resubmit.
+        let mut store = steer_dropped_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "also do X");
+        assert_eq!(store.state.retained_steers.len(), 1);
+
+        let command = store.apply_event(completed_terminal(&session_id, &live_turn));
+
+        assert!(
+            command.is_none(),
+            "consumed steer must not be resubmitted: {command:?}"
+        );
+        assert!(
+            store.state.retained_steers.is_empty(),
+            "settled as consumed"
+        );
+        assert!(store.state.pending_messages.is_empty());
+        assert_eq!(
+            user_rows_with(&store, "also do X"),
+            1,
+            "the row the user saw stays"
+        );
+    }
+
+    #[test]
+    fn legacy_server_without_steer_dropped_feature_keeps_terminal_restage() {
+        let mut store = steer_capable_store(); // no event.turn_steer_dropped.v1
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "also do X");
+
+        let command = store.apply_event(interrupted_terminal(&session_id, &live_turn));
+
+        assert_eq!(
+            command.as_ref().and_then(submit_prompt_text),
+            Some("also do X")
+        );
+    }
+
+    #[test]
+    fn unconsumed_steer_is_recovered_exactly_once_in_real_server_order() {
+        use octos_core::ui_protocol::PayloadV2;
+        let mut store = steer_dropped_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "consumed one");
+        steer_into_live_turn(&mut store, &live_turn, "unconsumed one");
+        // The server drained "consumed one" and echoed it; "unconsumed one"
+        // was still buffered when the user interrupted.
+        store.apply_event(AppUiEvent::Protocol(envelope_v2_notification(
+            session_id.clone(),
+            1,
+            &live_turn.0.to_string(),
+            PayloadV2::UserMessage {
+                text: "consumed one".into(),
+                files: vec![],
+            },
+        )));
+        assert_eq!(store.state.retained_steers.len(), 1);
+
+        // Real server order: steer_dropped (only the unconsumed text) → terminal.
+        let dropped = store.apply_event(steer_dropped(
+            &session_id,
+            &live_turn,
+            &["unconsumed one"],
+            "interrupted",
+        ));
+        assert!(dropped.is_none());
+        assert_eq!(
+            store.state.pending_messages,
+            vec!["unconsumed one".to_string()]
+        );
+        let command = store.apply_event(interrupted_terminal(&session_id, &live_turn));
+
+        assert_eq!(
+            command.as_ref().and_then(submit_prompt_text),
+            Some("unconsumed one")
+        );
+        assert!(store.state.pending_messages.is_empty());
+        assert!(store.state.retained_steers.is_empty());
+        let rows: Vec<(String, bool)> = store.state.sessions[0]
+            .messages
+            .iter()
+            .filter(|m| m.role == MessageRole::User)
+            .map(|m| (m.content.clone(), m.thread_id.is_some()))
+            .collect();
+        assert_eq!(user_rows_with(&store, "consumed one"), 1, "{rows:?}");
+        assert_eq!(user_rows_with(&store, "unconsumed one"), 1, "{rows:?}");
+    }
+
+    /// task-consume-turn-steer-dropped (review round 3): the connection-close
+    /// terminal outlet. The socket died with a steer still buffered; on
+    /// reconnect the client replays the ledger, which (octos 1fb44005) reads
+    /// steer_dropped → turn/error(connection_closed). Exactly one recovery.
+    #[test]
+    fn replayed_connection_closed_terminal_after_dropped_recovers_exactly_once() {
+        let mut store = steer_dropped_capable_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let live_turn = start_live_turn(&mut store, "first prompt");
+        steer_into_live_turn(&mut store, &live_turn, "typed just before the socket died");
+
+        // Reconnect replay, in ledger order.
+        let dropped = store.apply_event(steer_dropped(
+            &session_id,
+            &live_turn,
+            &["typed just before the socket died"],
+            "interrupted",
+        ));
+        assert!(dropped.is_none());
+        let terminal = store.apply_event(AppUiEvent::Protocol(UiNotification::TurnError(
+            TurnErrorEvent {
+                session_id: session_id.clone(),
+                topic: None,
+                turn_id: live_turn.clone(),
+                code: "connection_closed".into(),
+                message: "connection closed before turn completed".into(),
+            },
+        )));
+
+        assert_eq!(
+            terminal.as_ref().and_then(submit_prompt_text),
+            Some("typed just before the socket died")
+        );
+        assert!(store.state.pending_messages.is_empty());
+        assert!(store.state.retained_steers.is_empty());
+        assert_eq!(
+            user_rows_with(&store, "typed just before the socket died"),
+            1
+        );
+
+        // A duplicate replay of the same two frames must not resubmit.
+        let again = store.apply_event(steer_dropped(
+            &session_id,
+            &live_turn,
+            &["typed just before the socket died"],
+            "interrupted",
+        ));
+        assert!(again.is_none());
+        assert!(store.state.pending_messages.is_empty());
+    }
+
+    #[test]
+    fn steer_dropped_status_keys_exist_in_both_locales() {
+        for key in [
+            "status.steer_returned_by_server",
+            "status.steer_returned_unmatched",
+        ] {
+            for locale in ["en", "zh"] {
+                let text = t!(key, locale = locale, count = 1, reason = "interrupted").into_owned();
+                assert!(
+                    text != key && text != format!("{locale}.{key}") && !text.is_empty(),
+                    "{key} must be defined in locales/{locale}.yml (got {text:?})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn steer_restage_status_key_exists_in_both_locales() {
+        let key = "status.steer_restaged_after_turn_end";
+        for locale in ["en", "zh"] {
+            let text = t!(key, locale = locale).into_owned();
+            assert!(
+                text != key && text != format!("{locale}.{key}") && !text.is_empty(),
+                "{key} must be defined in locales/{locale}.yml (got {text:?})"
+            );
+        }
     }
 
     /// The NORMAL submit path's own live user-row echo reconciles through the
@@ -32954,6 +34215,273 @@ now analyzing the bus module"
     }
 
     #[test]
+    fn tool_events_after_interrupt_terminal_do_not_resurrect_the_turn() {
+        let turn_id = TurnId::new();
+        let mut store = store_with_live_reply(turn_id.clone(), "partial");
+        let session_id = store.state.sessions[0].id.clone();
+        store.state.set_run_state_in_progress();
+
+        store.interrupt_command().expect("interrupts");
+        store.apply_event(AppUiEvent::Protocol(UiNotification::TurnError(
+            TurnErrorEvent {
+                session_id: session_id.clone(),
+                topic: None,
+                turn_id: turn_id.clone(),
+                code: "interrupted".into(),
+                message: "turn interrupted by client".into(),
+            },
+        )));
+        assert!(store.state.is_turn_completed(&session_id, &turn_id));
+        assert_eq!(store.state.run_state, SessionRunState::Idle);
+        let activity_count = store.state.activity.len();
+
+        // The aborted tool process can emit its final lifecycle frames after
+        // the turn's terminal. Those frames belong to a dead turn and must not
+        // recreate either its liveness or a stranded `running` activity row.
+        store.apply_event(AppUiEvent::Protocol(UiNotification::ToolStarted(
+            ToolStartedEvent {
+                session_id: session_id.clone(),
+                topic: None,
+                turn_id: turn_id.clone(),
+                tool_call_id: "late-call".into(),
+                tool_name: "shell".into(),
+                arguments: Some(serde_json::json!({"command": "cargo test"})),
+            },
+        )));
+        store.apply_event(AppUiEvent::Protocol(UiNotification::ToolProgress(
+            octos_core::ui_protocol::ToolProgressEvent {
+                session_id: session_id.clone(),
+                topic: None,
+                turn_id,
+                tool_call_id: "late-call".into(),
+                message: Some("aborting".into()),
+                progress_pct: None,
+            },
+        )));
+
+        assert_eq!(
+            store.state.run_state,
+            SessionRunState::Idle,
+            "post-terminal tool events must not resurrect the interrupted turn"
+        );
+        assert_eq!(
+            store.state.activity.len(),
+            activity_count,
+            "a post-terminal ToolStarted must not leave an orphan running row"
+        );
+
+        let command = store.queue_or_start_prompt_turn("next prompt".into(), "sent".into());
+        assert!(
+            matches!(command, Some(AppUiCommand::SubmitPrompt(_))),
+            "the next prompt must start immediately after the terminal"
+        );
+        assert!(store.state.pending_messages.is_empty());
+    }
+
+    /// Shared fixture for the terminal-monotonicity regressions: a live turn
+    /// that the user interrupted and whose `turn_error(interrupted)` terminal
+    /// has already reconciled (tombstone written, live reply released,
+    /// interrupt marker cleared, run-state Idle). Returns the store plus the
+    /// activity count at the terminal so callers can assert no orphan rows.
+    fn interrupted_terminal_store() -> (Store, SessionKey, TurnId, usize) {
+        let turn_id = TurnId::new();
+        let mut store = store_with_live_reply(turn_id.clone(), "partial");
+        let session_id = store.state.sessions[0].id.clone();
+        store.state.set_run_state_in_progress();
+        store.interrupt_command().expect("interrupts");
+        store.apply_event(AppUiEvent::Protocol(UiNotification::TurnError(
+            TurnErrorEvent {
+                session_id: session_id.clone(),
+                topic: None,
+                turn_id: turn_id.clone(),
+                code: "interrupted".into(),
+                message: "turn interrupted by client".into(),
+            },
+        )));
+        assert!(store.state.is_turn_completed(&session_id, &turn_id));
+        assert!(!store.state.turn_locally_interrupted(&session_id, &turn_id));
+        assert_eq!(store.state.run_state, SessionRunState::Idle);
+        let activity_count = store.state.activity.len();
+        (store, session_id, turn_id, activity_count)
+    }
+
+    /// Every wire shape a dead turn's tool process can still produce after the
+    /// terminal. Each must be inert: no run-state change, no orphan activity,
+    /// and the next prompt starts immediately.
+    fn assert_late_turn_events_are_inert(
+        store: &mut Store,
+        session_id: &SessionKey,
+        turn_id: &TurnId,
+        activity_count: usize,
+        label: &str,
+    ) {
+        assert_eq!(
+            store.state.run_state,
+            SessionRunState::Idle,
+            "{label}: post-terminal events must not resurrect the interrupted turn"
+        );
+        assert!(
+            store.state.active_turn().is_none(),
+            "{label}: no live reply may be rebound after the terminal"
+        );
+        assert_eq!(
+            store.state.activity.len(),
+            activity_count,
+            "{label}: post-terminal events must not leave an orphan running row"
+        );
+        assert!(
+            !store.state.turn_locally_interrupted(session_id, turn_id),
+            "{label}: interrupt marker must stay cleared"
+        );
+        let command = store.queue_or_start_prompt_turn("next prompt".into(), "sent".into());
+        assert!(
+            matches!(command, Some(AppUiCommand::SubmitPrompt(_))),
+            "{label}: the next prompt must start immediately after the terminal"
+        );
+        assert!(
+            store.state.pending_messages.is_empty(),
+            "{label}: nothing staged"
+        );
+    }
+
+    fn send_late_progress_frames(store: &mut Store, session_id: &SessionKey, turn_id: &TurnId) {
+        // A tool_progress-shaped frame (records an activity row when live) and
+        // a status_word frame (the rotator that was still ticking in the
+        // incident ledger right up to the terminal).
+        let mut tool_progress = UiProgressMetadata::new("tool_progress");
+        tool_progress.label = Some("bash".into());
+        tool_progress.message = Some("aborting".into());
+        store.apply_event(AppUiEvent::Progress(UiProgressEvent::new(
+            session_id.clone(),
+            Some(turn_id.clone()),
+            tool_progress,
+        )));
+        let mut status_word =
+            UiProgressMetadata::new(octos_core::ui_protocol::progress_kinds::STATUS_WORD);
+        status_word.label = Some("Synthesizing".into());
+        store.apply_event(AppUiEvent::Progress(UiProgressEvent::new(
+            session_id.clone(),
+            Some(turn_id.clone()),
+            status_word,
+        )));
+    }
+
+    fn send_late_envelope_tool_frames(
+        store: &mut Store,
+        session_id: &SessionKey,
+        turn_id: &TurnId,
+    ) {
+        use octos_core::ui_protocol::PayloadV2;
+        let wire = turn_id.0.to_string();
+        store.apply_event(AppUiEvent::Protocol(envelope_v2_notification(
+            session_id.clone(),
+            900,
+            &wire,
+            PayloadV2::ToolStart {
+                tool_call_id: "late-envelope-call".into(),
+                name: "bash".into(),
+                arguments_preview: Some("cmd: \"./tools/parity/run_suite.sh\"".into()),
+            },
+        )));
+        store.apply_event(AppUiEvent::Protocol(envelope_v2_notification(
+            session_id.clone(),
+            901,
+            &wire,
+            PayloadV2::ToolProgress {
+                tool_call_id: "late-envelope-call".into(),
+                message: "aborting".into(),
+            },
+        )));
+    }
+
+    #[test]
+    fn late_progress_frames_after_interrupt_terminal_do_not_resurrect_the_turn() {
+        let (mut store, session_id, turn_id, activity_count) = interrupted_terminal_store();
+        send_late_progress_frames(&mut store, &session_id, &turn_id);
+        assert_late_turn_events_are_inert(
+            &mut store,
+            &session_id,
+            &turn_id,
+            activity_count,
+            "progress/updated",
+        );
+    }
+
+    #[test]
+    fn late_envelope_tool_frames_after_interrupt_terminal_do_not_resurrect_the_turn() {
+        let (mut store, session_id, turn_id, activity_count) = interrupted_terminal_store();
+        send_late_envelope_tool_frames(&mut store, &session_id, &turn_id);
+        assert_late_turn_events_are_inert(
+            &mut store,
+            &session_id,
+            &turn_id,
+            activity_count,
+            "envelope tool_start/tool_progress",
+        );
+    }
+
+    #[test]
+    fn late_turn_events_stay_inert_across_a_session_switch() {
+        let (mut store, session_id, turn_id, activity_count) = interrupted_terminal_store();
+        // Switch away and back between the terminal and the late frames — the
+        // run-state derivation on switch must not resurrect the dead turn, and
+        // the tombstone must survive the round-trip.
+        store.state.sessions.push(open_session_on("other"));
+        store.state.selected_session = 1;
+        store.state.refresh_run_state_from_selection();
+        store.state.selected_session = 0;
+        store.state.refresh_run_state_from_selection();
+        assert_eq!(store.state.run_state, SessionRunState::Idle);
+
+        store.apply_event(AppUiEvent::Protocol(UiNotification::ToolStarted(
+            ToolStartedEvent {
+                session_id: session_id.clone(),
+                topic: None,
+                turn_id: turn_id.clone(),
+                tool_call_id: "late-call".into(),
+                tool_name: "shell".into(),
+                arguments: None,
+            },
+        )));
+        send_late_progress_frames(&mut store, &session_id, &turn_id);
+        send_late_envelope_tool_frames(&mut store, &session_id, &turn_id);
+        assert_late_turn_events_are_inert(
+            &mut store,
+            &session_id,
+            &turn_id,
+            activity_count,
+            "after session switch",
+        );
+    }
+
+    #[test]
+    fn late_tool_events_for_a_dead_turn_do_not_touch_a_successor_turn() {
+        let (mut store, session_id, dead_turn, _) = interrupted_terminal_store();
+        // A successor turn is live; the dead turn's straggler frames must not
+        // disturb it (its run-state stays InProgress because of the successor,
+        // not because of the straggler) and must not attach activity to it.
+        let successor = TurnId::new();
+        store.apply_event(AppUiEvent::Protocol(UiNotification::TurnStarted(
+            TurnStartedEvent {
+                session_id: session_id.clone(),
+                turn_id: successor.clone(),
+                timestamp: chrono::Utc::now(),
+                topic: None,
+            },
+        )));
+        assert_eq!(store.state.run_state, SessionRunState::InProgress);
+        let activity_count = store.state.activity.len();
+        send_late_progress_frames(&mut store, &session_id, &dead_turn);
+        send_late_envelope_tool_frames(&mut store, &session_id, &dead_turn);
+        assert_eq!(store.state.activity.len(), activity_count);
+        assert_eq!(
+            store.state.active_turn().map(|(_, turn)| turn.clone()),
+            Some(successor),
+            "the successor turn stays the live one"
+        );
+    }
+
+    #[test]
     fn terminal_clears_the_interrupt_marker_and_a_new_turn_streams() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "partial");
@@ -38844,6 +40372,489 @@ now analyzing the bus module"
                 crate::model::ACTIVITY_STATUS_INTERRUPTED,
                 "a {terminal:?} hydrated turn's stranded running item must be reconciled"
             );
+        }
+    }
+
+    // ---- task-stuck-run-state-watchdog: evidence-driven phantom-state watchdog ----
+
+    /// A session in the incident's "phantom InProgress" shape: run-state
+    /// InProgress, no live reply, no pre-token marker, no staged gate, and the
+    /// run-state clock already past the probe threshold.
+    fn phantom_in_progress_store() -> (Store, SessionKey) {
+        let mut store = store_with_empty_session();
+        let session_id = store.state.sessions[0].id.clone();
+        store.state.set_run_state_in_progress();
+        store.state.run_state_started_at = Some(
+            std::time::Instant::now()
+                - std::time::Duration::from_secs(PHANTOM_RUN_STATE_PROBE_SECS + 1),
+        );
+        assert!(store.phantom_in_progress(&session_id));
+        (store, session_id)
+    }
+
+    fn hydrate_capabilities() -> crate::menu::CapabilitySet {
+        crate::menu::CapabilitySet::from_methods_and_features(
+            [crate::model::APPUI_METHOD_SESSION_HYDRATE],
+            [crate::model::APPUI_FEATURE_SESSION_HYDRATE_V1],
+        )
+    }
+
+    fn orchestration_settled(store: &mut Store, session_id: &SessionKey) {
+        store.apply_event(AppUiEvent::Protocol(UiNotification::SessionOrchestration(
+            octos_core::ui_protocol::SessionOrchestrationEvent {
+                session_id: session_id.clone(),
+                active: false,
+                running_agents: 0,
+                pending_continuations: 0,
+                phase: None,
+            },
+        )));
+    }
+
+    fn turn_started(store: &mut Store, session_id: &SessionKey, turn_id: &TurnId) {
+        store.apply_event(AppUiEvent::Protocol(UiNotification::TurnStarted(
+            TurnStartedEvent {
+                session_id: session_id.clone(),
+                turn_id: turn_id.clone(),
+                timestamp: chrono::Utc::now(),
+                topic: None,
+            },
+        )));
+    }
+
+    /// Turn-scoped terminal evidence: the session's most recently started
+    /// turn reached its terminal (tombstoned), and nothing started since.
+    fn last_started_turn_terminal(store: &mut Store, session_id: &SessionKey) {
+        let turn_id = TurnId::new();
+        turn_started(store, session_id, &turn_id);
+        store.apply_event(interrupted_terminal(session_id, &turn_id));
+        // Back into the phantom shape: something re-armed InProgress after the
+        // terminal (the incident's late tool frame), with nothing local backing it.
+        store.state.sessions[0].live_reply = None;
+        store.state.pre_token_turns.remove(session_id);
+        store.state.run_state = SessionRunState::InProgress;
+        store.state.run_state_started_at = Some(
+            std::time::Instant::now()
+                - std::time::Duration::from_secs(PHANTOM_RUN_STATE_PROBE_SECS + 1),
+        );
+        assert!(store.phantom_in_progress(session_id));
+        assert_eq!(
+            store.state.last_started_turn.get(session_id),
+            Some(&turn_id)
+        );
+    }
+
+    /// The text of a `SubmitPrompt` command's first input item.
+    fn submit_prompt_text(command: &AppUiCommand) -> Option<&str> {
+        match command {
+            AppUiCommand::SubmitPrompt(params) => params.input.iter().find_map(|item| match item {
+                InputItem::Text { text } => Some(text.as_str()),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
+    fn interrupted_terminal(session_id: &SessionKey, turn_id: &TurnId) -> AppUiEvent {
+        AppUiEvent::Protocol(UiNotification::TurnError(TurnErrorEvent {
+            session_id: session_id.clone(),
+            topic: None,
+            turn_id: turn_id.clone(),
+            code: "interrupted".into(),
+            message: "turn interrupted by client".into(),
+        }))
+    }
+
+    fn completed_terminal(session_id: &SessionKey, turn_id: &TurnId) -> AppUiEvent {
+        AppUiEvent::Protocol(UiNotification::TurnCompleted(TurnCompletedEvent {
+            session_id: session_id.clone(),
+            topic: None,
+            turn_id: turn_id.clone(),
+            cursor: None,
+            tokens_in: None,
+            tokens_out: None,
+            session_result: None,
+        }))
+    }
+
+    fn drain_followups(store: &mut Store) -> Vec<AppUiCommand> {
+        let mut out = Vec::new();
+        while let Some(command) = store.state.dequeue_autonomy_hydration() {
+            out.push(command);
+        }
+        out
+    }
+
+    fn hydrate_result_with_turns(
+        session_id: &SessionKey,
+        turns: Vec<HydratedTurn>,
+    ) -> SessionHydrateResult {
+        SessionHydrateResult {
+            replayed_tool_envelopes: None,
+            session_id: session_id.clone(),
+            cursor: octos_core::ui_protocol::UiCursor {
+                stream: session_id.0.clone(),
+                seq: 1,
+            },
+            context: None,
+            context_state: None,
+            messages: None,
+            threads: None,
+            turns: Some(turns),
+            pending_approvals: None,
+            pending_questions: None,
+            replayed_envelopes: None,
+        }
+    }
+
+    fn hydrated_turn(state: TurnLifecycleState) -> HydratedTurn {
+        HydratedTurn {
+            turn_id: TurnId::new(),
+            state,
+            started_at: None,
+            completed_at: None,
+            thread_id: None,
+        }
+    }
+
+    #[test]
+    fn watchdog_resets_phantom_in_progress_when_last_started_turn_is_terminal() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        last_started_turn_terminal(&mut store, &session_id);
+        store
+            .state
+            .pending_messages
+            .push("queued behind phantom".into());
+
+        assert!(store.reconcile_phantom_run_state(std::time::Instant::now()));
+
+        // The phantom is gone: what is InProgress now is OUR real submit
+        // (pre-token marker armed), not the stale state.
+        assert!(!store.phantom_in_progress(&session_id));
+        assert!(store.state.pre_token_turns.contains_key(&session_id));
+        let followups = drain_followups(&mut store);
+        assert_eq!(
+            followups.iter().map(submit_prompt_text).collect::<Vec<_>>(),
+            vec![Some("queued behind phantom")],
+            "the queued prompt drains as a SubmitPrompt: {followups:?}"
+        );
+        assert!(store.state.pending_messages.is_empty());
+        assert_eq!(store.state.status, t!("status.phantom_turn_reconciled"));
+    }
+
+    #[test]
+    fn watchdog_prefers_evidence_over_probe() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+        last_started_turn_terminal(&mut store, &session_id);
+
+        store.reconcile_phantom_run_state(std::time::Instant::now());
+
+        assert_eq!(store.state.run_state, SessionRunState::Idle);
+        let followups = drain_followups(&mut store);
+        assert!(
+            !followups
+                .iter()
+                .any(|command| matches!(command, AppUiCommand::HydrateSession(_))),
+            "evidence wins: no probe when the server already settled the job"
+        );
+    }
+
+    #[test]
+    fn hydrate_all_terminal_turns_resets_phantom_in_progress() {
+        use crate::client_event::ClientEvent;
+        let (mut store, session_id) = phantom_in_progress_store();
+        store
+            .state
+            .pending_messages
+            .push("queued behind phantom".into());
+
+        let command =
+            store.apply_client_event(ClientEvent::SessionHydrate(hydrate_result_with_turns(
+                &session_id,
+                vec![
+                    hydrated_turn(TurnLifecycleState::Completed),
+                    hydrated_turn(TurnLifecycleState::Interrupted),
+                ],
+            )));
+
+        assert!(!store.phantom_in_progress(&session_id));
+        assert!(store.state.pre_token_turns.contains_key(&session_id));
+        assert_eq!(
+            command.as_ref().and_then(submit_prompt_text),
+            Some("queued behind phantom"),
+            "hydrate evidence drains the queue: {command:?}"
+        );
+        assert!(store.state.pending_messages.is_empty());
+    }
+
+    #[test]
+    fn watchdog_probes_hydrate_once_when_no_terminal_evidence() {
+        let (mut store, _session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+
+        store.reconcile_phantom_run_state(std::time::Instant::now());
+        store.reconcile_phantom_run_state(std::time::Instant::now());
+
+        let followups = drain_followups(&mut store);
+        assert_eq!(
+            followups
+                .iter()
+                .filter(|command| matches!(command, AppUiCommand::HydrateSession(_)))
+                .count(),
+            1,
+            "exactly one probe per phantom episode: {followups:?}"
+        );
+        assert_eq!(store.state.run_state, SessionRunState::InProgress);
+    }
+
+    #[test]
+    fn hydrate_with_active_turn_keeps_in_progress() {
+        use crate::client_event::ClientEvent;
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.pending_messages.push("still queued".into());
+
+        let command =
+            store.apply_client_event(ClientEvent::SessionHydrate(hydrate_result_with_turns(
+                &session_id,
+                vec![
+                    hydrated_turn(TurnLifecycleState::Completed),
+                    hydrated_turn(TurnLifecycleState::Active),
+                ],
+            )));
+
+        assert_eq!(store.state.run_state, SessionRunState::InProgress);
+        assert!(command.is_none());
+        assert_eq!(
+            store.state.pending_messages,
+            vec!["still queued".to_string()]
+        );
+    }
+
+    #[test]
+    fn watchdog_without_evidence_or_hydrate_only_hints() {
+        let (mut store, _session_id) = phantom_in_progress_store();
+        store.state.capabilities = None;
+
+        store.reconcile_phantom_run_state(std::time::Instant::now());
+
+        assert_eq!(store.state.run_state, SessionRunState::InProgress);
+        assert_eq!(store.state.status, t!("status.phantom_turn_hint"));
+        assert!(drain_followups(&mut store).is_empty());
+    }
+
+    #[test]
+    fn watchdog_leaves_pre_token_turn_alone() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        last_started_turn_terminal(&mut store, &session_id);
+        store
+            .state
+            .pre_token_turns
+            .insert(session_id.clone(), std::time::Instant::now());
+        assert!(!store.phantom_in_progress(&session_id));
+
+        assert!(!store.reconcile_phantom_run_state(std::time::Instant::now()));
+
+        assert_eq!(store.state.run_state, SessionRunState::InProgress);
+        assert!(drain_followups(&mut store).is_empty());
+    }
+
+    #[test]
+    fn watchdog_leaves_blocked_turn_alone() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        last_started_turn_terminal(&mut store, &session_id);
+        store.state.set_run_state_blocked("approval pending");
+        store.state.run_state_started_at = Some(
+            std::time::Instant::now()
+                - std::time::Duration::from_secs(PHANTOM_RUN_STATE_PROBE_SECS + 1),
+        );
+
+        assert!(!store.reconcile_phantom_run_state(std::time::Instant::now()));
+
+        assert!(matches!(
+            store.state.run_state,
+            SessionRunState::Blocked { .. }
+        ));
+    }
+
+    #[test]
+    fn late_orchestration_settlement_after_new_turn_start_is_not_evidence() {
+        // Reviewer's ordering: TurnStarted(B) → old turn A's LATE
+        // session_orchestration(active=false) → B's pre-token marker expires
+        // while B is still running (no delta yet). A session-level settlement
+        // carries no turn identity, so it must NOT count as evidence for B.
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+        let turn_b = TurnId::new();
+        turn_started(&mut store, &session_id, &turn_b);
+        // B is live but pre-token: no delta yet, so no live_reply. Simulate
+        // the pre-token marker having expired.
+        store.state.sessions[0].live_reply = None;
+        store.state.pre_token_turns.remove(&session_id);
+        orchestration_settled(&mut store, &session_id); // late frame from A
+        store.state.run_state = SessionRunState::InProgress;
+        store.state.run_state_started_at = Some(
+            std::time::Instant::now()
+                - std::time::Duration::from_secs(PHANTOM_RUN_STATE_PROBE_SECS + 1),
+        );
+        store.state.pending_messages.push("must not race B".into());
+
+        store.reconcile_phantom_run_state(std::time::Instant::now());
+        store.reconcile_phantom_run_state(std::time::Instant::now());
+
+        assert_eq!(store.state.run_state, SessionRunState::InProgress);
+        let followups = drain_followups(&mut store);
+        assert!(
+            !followups
+                .iter()
+                .any(|command| matches!(command, AppUiCommand::SubmitPrompt(_))),
+            "no queued prompt may be submitted while B is unconfirmed: {followups:?}"
+        );
+        assert_eq!(
+            followups
+                .iter()
+                .filter(|command| matches!(command, AppUiCommand::HydrateSession(_)))
+                .count(),
+            1,
+            "the only allowed action is a single hydrate probe"
+        );
+        assert_eq!(
+            store.state.pending_messages,
+            vec!["must not race B".to_string()]
+        );
+    }
+
+    #[test]
+    fn phantom_status_keys_exist_in_both_locales() {
+        for key in ["status.phantom_turn_reconciled", "status.phantom_turn_hint"] {
+            for locale in ["en", "zh"] {
+                let text = t!(key, locale = locale).into_owned();
+                assert!(
+                    text != key && text != format!("{locale}.{key}") && !text.is_empty(),
+                    "{key} must be defined in locales/{locale}.yml (got {text:?})"
+                );
+            }
+        }
+    }
+
+    // ---- task-esc-reconciles-phantom-turn: Esc as the explicit exit ----
+
+    #[test]
+    fn esc_in_phantom_state_with_evidence_resets_and_drains() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        last_started_turn_terminal(&mut store, &session_id);
+        store
+            .state
+            .pending_messages
+            .push("queued behind phantom".into());
+
+        let command = store.interrupt_command();
+
+        assert!(!store.phantom_in_progress(&session_id));
+        assert_eq!(
+            command.as_ref().and_then(submit_prompt_text),
+            Some("queued behind phantom"),
+            "Esc with evidence drains the queue: {command:?}"
+        );
+        assert_eq!(store.state.status, t!("status.phantom_turn_reconciled"));
+    }
+
+    #[test]
+    fn esc_in_phantom_state_probes_then_second_esc_forces_idle() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+
+        let first = store.interrupt_command();
+        assert!(
+            matches!(first, Some(AppUiCommand::HydrateSession(_))),
+            "first Esc probes the server: {first:?}"
+        );
+        assert_eq!(store.state.status, t!("status.phantom_turn_probing"));
+        assert_eq!(store.state.run_state, SessionRunState::InProgress);
+        assert!(store.phantom_in_progress(&session_id));
+
+        let second = store.interrupt_command();
+        assert!(
+            second.is_none(),
+            "empty queue: nothing to submit: {second:?}"
+        );
+        assert_eq!(store.state.run_state, SessionRunState::Idle);
+        assert_eq!(store.state.status, t!("status.phantom_turn_reset_by_user"));
+    }
+
+    #[test]
+    fn esc_in_phantom_state_without_hydrate_resets_on_user_action() {
+        let (mut store, _session_id) = phantom_in_progress_store();
+        store.state.capabilities = None;
+
+        let command = store.interrupt_command();
+
+        assert!(command.is_none());
+        assert_eq!(store.state.run_state, SessionRunState::Idle);
+        assert_eq!(store.state.status, t!("status.phantom_turn_reset_by_user"));
+    }
+
+    #[test]
+    fn watchdog_never_forces_reset_without_evidence_even_after_probe() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+
+        // The watchdog probes once, then keeps its hands off.
+        store.reconcile_phantom_run_state(std::time::Instant::now());
+        assert!(store.state.phantom_probe_sent.contains(&session_id));
+        store.reconcile_phantom_run_state(std::time::Instant::now());
+        store.reconcile_phantom_run_state(std::time::Instant::now());
+        assert_eq!(store.state.run_state, SessionRunState::InProgress);
+
+        // Only the user's explicit Esc turns "probe already sent" into a reset.
+        let command = store.interrupt_command();
+        assert!(command.is_none());
+        assert_eq!(store.state.run_state, SessionRunState::Idle);
+        assert_eq!(store.state.status, t!("status.phantom_turn_reset_by_user"));
+    }
+
+    #[test]
+    fn esc_in_blocked_state_does_not_phantom_reset() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        last_started_turn_terminal(&mut store, &session_id);
+        store.state.set_run_state_blocked("approval pending");
+
+        let command = store.interrupt_command();
+
+        assert!(command.is_none());
+        assert!(matches!(
+            store.state.run_state,
+            SessionRunState::Blocked { .. }
+        ));
+        assert_eq!(store.state.status, t!("status.no_active_turn_interrupt"));
+    }
+
+    #[test]
+    fn slash_exit_requests_exit_while_phantom_in_progress() {
+        let (mut store, _session_id) = phantom_in_progress_store();
+        store.state.composer = "/exit".into();
+
+        let _ = store.compose_command();
+
+        assert!(
+            store.state.exit_requested,
+            "/exit must not be gated on the run-state"
+        );
+    }
+
+    #[test]
+    fn phantom_esc_status_keys_exist_in_both_locales() {
+        for key in [
+            "status.phantom_turn_probing",
+            "status.phantom_turn_reset_by_user",
+        ] {
+            for locale in ["en", "zh"] {
+                let text = t!(key, locale = locale).into_owned();
+                assert!(
+                    text != key && text != format!("{locale}.{key}") && !text.is_empty(),
+                    "{key} must be defined in locales/{locale}.yml (got {text:?})"
+                );
+            }
         }
     }
 

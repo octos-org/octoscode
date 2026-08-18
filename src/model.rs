@@ -240,6 +240,13 @@ pub const APPUI_FEATURE_CODING_LOOP_RUNTIME_V1: &str = "coding.loop_runtime.v1";
 /// receive a notification it cannot render. Tui-local mirror: the vendored
 /// octos-core rev predates the constant.
 pub const APPUI_FEATURE_BACKGROUND_ACTIVITY_V1: &str = "event.background_activity.v1";
+/// task-consume-turn-steer-dropped: server guarantees that accepted-but-
+/// undrained `turn/steer` inputs are returned as `turn/steer_dropped` BEFORE
+/// the turn's terminal frame. When advertised, a terminal without a preceding
+/// `turn/steer_dropped` naming a retained steer means the server CONSUMED it —
+/// the client must not re-stage it (task-steer-retained-until-echo's terminal
+/// fallback is for servers without this feature only).
+pub const APPUI_FEATURE_TURN_STEER_DROPPED_V1: &str = "event.turn_steer_dropped.v1";
 
 /// Additive `profile/local/create` capability: the server honors an optional
 /// `requested_id` (the meaningful profile name the user types, e.g. `glm`) and
@@ -3738,6 +3745,29 @@ pub struct TurnSteerResult {
 /// the method-attributed error frames each consume exactly one entry from
 /// the front (every dead steer produces exactly one attributed error event,
 /// see the transport's send/cancel paths).
+/// task-steer-retained-until-echo: a steer the server ACCEPTED
+/// (`steered:true`) but has not yet CONFIRMED — confirmation is the drain-time
+/// persisted `UserMessage` echo landing (see [`AppState::apply_user_row_echo`]).
+/// Acceptance only means "in the pending-input buffer"; the loop can still
+/// abort before draining it (Esc mid-tool), and the server then drops the
+/// input with only a warning. Retained entries that are still here when the
+/// turn reaches its terminal are withdrawn from the transcript and re-staged
+/// at the FRONT of the queue (they were typed before anything staged after).
+/// Content is the only join key: steers carry no client_message_id and share
+/// their turn id with the live turn's original prompt.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RetainedSteer {
+    pub session_id: SessionKey,
+    pub turn_id: TurnId,
+    pub prompt: String,
+    /// User rows with this exact content that existed BEFORE the steer's
+    /// optimistic insert (the optimistic entry's baseline). After a
+    /// snapshot/hydrate rebuild, canonical history with MORE matching rows
+    /// than this proves the server persisted the steer — reap it, or the
+    /// terminal would resubmit text the server already ran.
+    pub prior_matching_user_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingTurnSteer {
     pub session_id: SessionKey,
@@ -4759,6 +4789,19 @@ pub struct AppState {
     /// warning. Cleared with the turn's terminal (and on backend relaunch,
     /// like `interrupted_turns`).
     pub interrupt_dropped_output: std::collections::HashSet<(SessionKey, TurnId)>,
+    /// task-stuck-run-state-watchdog: per session, the turn named by the most
+    /// recent server `TurnStarted`. Paired with `completed_turns` this gives
+    /// TURN-SCOPED terminal evidence: "the last turn the server told us about
+    /// has reached its terminal, and nothing started since". A session-level
+    /// `session_orchestration active=false` is deliberately NOT used as
+    /// evidence — it carries no turn identity, so a late frame from an old
+    /// turn A arriving after `TurnStarted(B)` would misfire on B.
+    pub last_started_turn: std::collections::HashMap<SessionKey, TurnId>,
+    /// task-stuck-run-state-watchdog: sessions for which the watchdog already
+    /// sent its one `session/hydrate` probe during the CURRENT phantom
+    /// episode. Cleared when the session leaves the phantom shape so the next
+    /// episode gets its own probe.
+    pub phantom_probe_sent: std::collections::HashSet<SessionKey>,
     /// #324 Phase C: per-session unread counters — turns that reached a
     /// terminal while the session was NOT focused. Incremented by the store's
     /// terminal appliers, cleared when the session gains focus.
@@ -4772,6 +4815,9 @@ pub struct AppState {
     /// the attributed error fallback (exactly one of which arrives per
     /// steer). Bounded by the transport's pending-request cap.
     pub pending_turn_steers: std::collections::VecDeque<PendingTurnSteer>,
+    /// task-steer-retained-until-echo: accepted-but-unconfirmed steers, in
+    /// dispatch order. See [`RetainedSteer`].
+    pub retained_steers: Vec<RetainedSteer>,
     /// #395: the in-flight `/peer` dispatch. `peer/prepare`'s result does not
     /// echo the brief (and `go` never crosses the wire), so the dispatcher
     /// stashes them here; the `PeerPrepared` apply consumes the stash to build
@@ -6770,8 +6816,11 @@ impl AppState {
             interrupted_turns: std::collections::HashMap::new(),
             unhealthy_cursors: std::collections::HashSet::new(),
             interrupt_dropped_output: std::collections::HashSet::new(),
+            last_started_turn: std::collections::HashMap::new(),
+            phantom_probe_sent: std::collections::HashSet::new(),
             unread_turns: std::collections::HashMap::new(),
             pending_turn_steers: std::collections::VecDeque::new(),
+            retained_steers: Vec::new(),
             pending_peer_prepare: None,
             pending_peer_kickoffs: std::collections::HashMap::new(),
             peer_session_meta: std::collections::HashMap::new(),
@@ -7602,10 +7651,19 @@ impl AppState {
             let excess = self.optimistic_user_messages.len() - MAX_OPTIMISTIC_USER_MESSAGES;
             self.optimistic_user_messages.drain(0..excess);
         }
-        self.restore_optimistic_user_messages();
+        self.restore_optimistic_user_messages_inner(false);
     }
 
     pub fn restore_optimistic_user_messages(&mut self) {
+        self.restore_optimistic_user_messages_inner(true);
+    }
+
+    /// `drop_confirmed`: when an optimistic row is already present, drop its
+    /// tracking entry (snapshot/hydrate replaced the list with canonical
+    /// rows — the echo already happened) or keep it (a sibling submit merely
+    /// re-ran the restore; the row is still OUR optimistic insert awaiting
+    /// its own echo, which must still be able to promote it).
+    fn restore_optimistic_user_messages_inner(&mut self, drop_confirmed: bool) {
         let mut retained = Vec::new();
         for optimistic in self.optimistic_user_messages.clone() {
             let Some(session) = self
@@ -7619,6 +7677,13 @@ impl AppState {
             if matching_user_message_count(session, &optimistic.content)
                 > optimistic.prior_matching_user_count
             {
+                if !drop_confirmed {
+                    // task-consume-turn-steer-dropped: with two steers in one
+                    // turn, the second steer's record used to run this restore
+                    // and DROP the first steer's entry — its echo then had no
+                    // entry to promote and appended a duplicate row.
+                    retained.push(optimistic);
+                }
                 continue;
             }
 
@@ -7682,6 +7747,60 @@ impl AppState {
     /// MUST run BEFORE [`Self::restore_optimistic_user_messages`]: the
     /// restore re-inserts un-echoed optimistic rows, which would inflate the
     /// match count and settle (lose) a gate whose submit never landed.
+    /// task-steer-retained-until-echo: after canonical history was rebuilt
+    /// (snapshot / hydrate), drop retained steers the history already proves
+    /// landed — more user rows with that content than the steer's baseline.
+    /// Call BEFORE `restore_optimistic_user_messages` so the count reflects
+    /// canonical rows only. Returns how many were reaped.
+    pub fn settle_retained_steers_reflected_by_history(
+        &mut self,
+        session_id: &SessionKey,
+    ) -> usize {
+        let Some(session) = self
+            .sessions
+            .iter()
+            .find(|session| &session.id == session_id)
+        else {
+            return 0;
+        };
+        let before = self.retained_steers.len();
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for message in &session.messages {
+            if message.role == octos_core::MessageRole::User {
+                *counts.entry(message.content.as_str()).or_insert(0) += 1;
+            }
+        }
+        // Consume evidence in dispatch order: each proven row settles ONE
+        // retained steer of that content, oldest first.
+        let mut proven: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for steer in &self.retained_steers {
+            if &steer.session_id != session_id {
+                continue;
+            }
+            let have = counts.get(steer.prompt.as_str()).copied().unwrap_or(0);
+            let used = proven.get(&steer.prompt).copied().unwrap_or(0);
+            if have > steer.prior_matching_user_count + used {
+                *proven.entry(steer.prompt.clone()).or_insert(0) += 1;
+            }
+        }
+        let mut consumed: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        self.retained_steers.retain(|steer| {
+            if &steer.session_id != session_id {
+                return true;
+            }
+            let allowed = proven.get(&steer.prompt).copied().unwrap_or(0);
+            let used = consumed.get(&steer.prompt).copied().unwrap_or(0);
+            if used < allowed {
+                *consumed.entry(steer.prompt.clone()).or_insert(0) += 1;
+                false
+            } else {
+                true
+            }
+        });
+        before - self.retained_steers.len()
+    }
+
     pub fn settle_staged_gates_reflected_by_snapshot(&mut self) {
         let mut settled: Vec<SessionKey> = Vec::new();
         for (session_id, gate) in &self.staged_submit_in_flight {
@@ -7916,6 +8035,16 @@ impl AppState {
         });
         if already_present {
             return;
+        }
+        // task-steer-retained-until-echo: this echo is the server's proof the
+        // text entered the conversation — release the OLDEST retained steer
+        // with this content (steers land in dispatch order).
+        if let Some(confirmed) = self
+            .retained_steers
+            .iter()
+            .position(|steer| &steer.session_id == session_id && steer.prompt == text)
+        {
+            self.retained_steers.remove(confirmed);
         }
         if let Some(tracked) = self
             .optimistic_user_messages
@@ -10452,7 +10581,7 @@ fn is_plan_heading(line: &str) -> bool {
 /// How long a [`AppState::pre_token_turns`] marker stays authoritative. A
 /// submit whose turn/started never arrives within this window is treated as
 /// dead (mirrors the staged-gate TTL in `store.rs`).
-const PRE_TOKEN_TURN_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const PRE_TOKEN_TURN_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// How long a [`AppState::pending_peer_kickoffs`] entry stays live (#395). A
 /// prepared peer whose `session/opened` never arrives within this window is a
@@ -10486,7 +10615,7 @@ fn initial_run_state(sessions: &[SessionView], selected_session: usize) -> Sessi
     }
 }
 
-fn matching_user_message_count(session: &SessionView, content: &str) -> usize {
+pub(crate) fn matching_user_message_count(session: &SessionView, content: &str) -> usize {
     session
         .messages
         .iter()

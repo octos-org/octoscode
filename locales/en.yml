@@ -540,6 +540,11 @@ status:
   readonly_turn_disabled: "Read-only mode: turn/start disabled"
   # /stop when no active turn
   no_active_turn: "No active turn to interrupt"
+  # task-stuck-run-state-watchdog / task-esc-reconciles-phantom-turn
+  phantom_turn_reconciled: "No live turn on the server — cleared the stale Working state; queued messages are sending."
+  phantom_turn_probing: "Working with no live turn — checking with the server…"
+  phantom_turn_hint: "Working with no live turn and no server evidence — press Esc to reconcile."
+  phantom_turn_reset_by_user: "Cleared the stale Working state on your request; queued messages are sending."
   # /theme feedback
   theme_set: "Theme: %{theme}"
   theme_unknown: "Unknown theme: %{theme}"
@@ -559,6 +564,9 @@ status:
   no_session_send_prompt: "No coding session open. Run /onboard open-session before sending a prompt."
   message_staged: "Message staged; it will submit after the active turn. Press Esc to interrupt/send."
   steered_into_turn: "Steered into the running turn."
+  steer_restaged_after_turn_end: "The turn ended before your steered message was taken up — it was re-queued and is sending as a new turn."
+  steer_returned_by_server: "Server returned %{count} steered message(s) it never took up (%{reason}) — re-queued."
+  steer_returned_unmatched: "Server reported %{count} dropped steer(s) with no local record — ignored."
   btw_usage: "Usage: /btw <question> — ask a quick aside while the turn keeps working"
   btw_answering: "btw: answering…"
   btw_answered: "btw: answered"
