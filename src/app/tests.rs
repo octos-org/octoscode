@@ -12007,14 +12007,14 @@ mod tests {
             .insert(running.clone(), std::time::Instant::now());
 
         app.peer_dock_collapsed = false;
-        let expanded = lines_text(&peer_strip_lines(&app, Palette::for_theme(app.theme), 4));
+        let expanded = lines_text(&peer_strip_lines(&app, Palette::for_theme(app.theme), 4, 118));
         assert!(
             expanded.contains("3/4 landed"),
             "the expanded dock title row shows fleet progress; got: {expanded}"
         );
 
         app.peer_dock_collapsed = true;
-        let pill = lines_text(&peer_strip_lines(&app, Palette::for_theme(app.theme), 4));
+        let pill = lines_text(&peer_strip_lines(&app, Palette::for_theme(app.theme), 4, 118));
         assert!(
             pill.contains("3/4 landed"),
             "the collapsed pill shows fleet progress; got: {pill}"
