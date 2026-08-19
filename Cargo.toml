@@ -23,7 +23,7 @@ path = "src/main.rs"
 # per-project `session/list` scoping below. This rev is a clean 1-commit
 # superset of the previous main pin `82b1abf11148`. RE-PIN to the merged main
 # rev once #1662 lands on octos `main`.
-octos-core = { git = "https://github.com/octos-org/octos", rev = "f6d5ef550f49189850646e7421cf21063b771895" }
+octos-core = { git = "https://github.com/octos-org/octos", rev = "e87f1c0615e76e18483d9d7ae8f5296477fee743" }
 # Startup splash animation engine (specs/task-startup-splash.spec). Git dep +
 # optional local patch, same pattern as octos-core above. ttfx itself only
 # depends on clap + terminal_size.
