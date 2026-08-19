@@ -45,6 +45,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use crate::cli::{Cli, Mode};
 use eyre::{Result, WrapErr, eyre};
@@ -744,6 +745,7 @@ fn install_octos_bundle() -> Result<()> {
 fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
     Ok(http_client()?
         .get(url)
+        .timeout(HTTP_BUNDLE_DOWNLOAD_TIMEOUT)
         .send()?
         .error_for_status()?
         .bytes()?
@@ -755,9 +757,16 @@ fn http_get_string(url: &str) -> Result<String> {
     Ok(http_client()?.get(url).send()?.error_for_status()?.text()?)
 }
 
+/// Octos release bundles are large enough that an active download can
+/// legitimately exceed reqwest's 30-second default timeout. Keep the transfer
+/// bounded, but allow enough time for the bundle to arrive over a slow link.
+const HTTP_BUNDLE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn http_client() -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .user_agent(concat!("octoscode/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
         .build()
         .map_err(Into::into)
 }
@@ -946,6 +955,18 @@ mod tests {
             assert!(a.starts_with("octos-bundle-"));
             assert!(a.ends_with(".zip") || a.ends_with(".tar.gz"));
         }
+    }
+
+    #[test]
+    fn bundle_download_timeout_allows_large_archives_but_remains_bounded() {
+        assert!(
+            HTTP_BUNDLE_DOWNLOAD_TIMEOUT > Duration::from_secs(30),
+            "the bundle timeout must exceed reqwest's too-short 30-second default"
+        );
+        assert!(
+            !HTTP_BUNDLE_DOWNLOAD_TIMEOUT.is_zero() && !HTTP_CONNECT_TIMEOUT.is_zero(),
+            "connection establishment and the overall transfer must remain bounded"
+        );
     }
 
     #[test]
