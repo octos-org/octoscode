@@ -594,8 +594,36 @@ pub struct LoopListResult {
     /// clear stale mirrors without touching other profiles.
     #[serde(default)]
     pub profile_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_loop_records")]
     pub loops: Vec<octos_core::ui_protocol::UiLoopRecord>,
+}
+
+/// Decode `loops` one record at a time, dropping the ones that do not fit
+/// `UiLoopRecord` instead of failing the whole response.
+///
+/// A plain `Vec<UiLoopRecord>` is all-or-nothing: one record missing `loop_id`,
+/// or carrying a negative `interval_seconds` where the field is `u64`, makes
+/// serde reject the WHOLE result. The client then reports a decode error and
+/// the loops surface stays empty — the user loses every well-formed loop
+/// alongside the bad one, and `/loop pause|resume|delete` become unusable
+/// because there are no ids to name. Same failure the `session_id` field hit
+/// (spec task-loop-list-global-decode); same fix, applied per record.
+///
+/// Dropped records are not surfaced individually: the store already reports the
+/// RETAINED count ("Loop list refreshed: N loop(s)"), so a record the client
+/// cannot model is simply not one of the N. Losing one unusable row beats
+/// losing the list.
+fn deserialize_loop_records<'de, D>(
+    deserializer: D,
+) -> Result<Vec<octos_core::ui_protocol::UiLoopRecord>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Vec::<Value>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|record| serde_json::from_value(record).ok())
+        .collect())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -10753,6 +10781,66 @@ mod tests {
         UiArtifactPaneItem, UiArtifactPaneSnapshot, UiGitHistoryItem, UiGitPaneSnapshot,
         UiGitStatusItem, UiWorkspacePaneEntry, UiWorkspacePaneSnapshot,
     };
+
+    /// A `loop/list` carrying one unmodellable record must still yield the
+    /// others. Both payloads come from the mock_octos scenario fuzzer
+    /// (`loops-no-loop-id`, `loops-interval-negative`), which drove the real
+    /// TUI into "failed to decode UI protocol result for loop/list: missing
+    /// field `loop_id`" with an empty loops surface — every well-formed loop
+    /// lost with the bad one, and no ids left to pause or delete by.
+    #[test]
+    fn loop_list_keeps_the_records_it_can_decode() {
+        let good = serde_json::json!({
+            "loop_id": "loop_01",
+            "session_id": "alan:local:tui#coding",
+            "profile_id": "alan",
+            "prompt": "run tests",
+            "mode": "fixed_interval",
+            "interval_seconds": 300,
+            "status": "active",
+            "expires_at_ms": 1784880148509_i64,
+            "created_at_ms": 1784275348509_i64,
+            "updated_at_ms": 1784275348509_i64,
+        });
+
+        for bad in [
+            // loops-no-loop-id: the id serde needs is simply absent.
+            serde_json::json!({
+                "session_id": "alan:local:tui#coding",
+                "prompt": "2 5 seconds",
+                "mode": "self_paced",
+                "status": "paused",
+                "expires_at_ms": 1784880148509_i64,
+                "created_at_ms": 1784275348509_i64,
+                "updated_at_ms": 1784275348509_i64,
+            }),
+            // loops-interval-negative: -60 into `Option<u64>`.
+            serde_json::json!({
+                "loop_id": "loop_02",
+                "session_id": "alan:local:tui#coding",
+                "prompt": "2",
+                "mode": "fixed_interval",
+                "interval_seconds": -60,
+                "status": "paused",
+                "expires_at_ms": 1784880148509_i64,
+                "created_at_ms": 1784275348509_i64,
+                "updated_at_ms": 1784275348509_i64,
+            }),
+        ] {
+            let result: LoopListResult = serde_json::from_value(serde_json::json!({
+                "session_id": "alan:local:tui#coding",
+                "profile_id": "alan",
+                "loops": [good.clone(), bad],
+            }))
+            .expect("one bad record must not take the whole list down");
+            assert_eq!(
+                result.loops.len(),
+                1,
+                "the decodable record survives, the other is dropped"
+            );
+            assert_eq!(result.loops[0].loop_id, "loop_01");
+        }
+    }
 
     /// The client's LOCAL launch/resolve types (octoscode pins an older
     /// octos-core, so `LaunchResolveResult`/`LaunchDecisionKind` are hand
