@@ -135,17 +135,18 @@ pub fn run(cli: Cli) -> Result<()> {
             .as_ref()
             .map(|path| path.to_string_lossy().to_string()),
     );
-    // Phase 3 startup picker: remember the pinned `--profile-id` (honored
-    // unchanged, never triggers the picker) and, for a locally-spawned solo
-    // backend, discover the profiles already on disk. Skipped when a profile is
-    // pinned (nothing to pick) or for remote/WebSocket launches (no local
-    // profiles dir to read). Best-effort — an empty list just runs onboarding.
+    // Phase 3 startup picker: remember the pinned `--profile-id` and, for a
+    // locally-spawned solo backend, discover the profiles already on disk. The
+    // registry is needed even when a profile is pinned: it distinguishes
+    // "select this existing profile" from "create this missing profile" and
+    // prevents `session/open` from failing with `profile_unresolved`.
+    // Remote/WebSocket launches still skip discovery because their profile
+    // registry is not locally visible. Best-effort — an empty list runs
+    // onboarding.
     store.state.onboarding.launch_profile_id = cli.profile_id.clone();
-    if cli.profile_id.is_none() {
-        if let Some(stdio_command) = cli.stdio_command.as_deref() {
-            store.state.onboarding.available_profiles =
-                crate::profiles::discover_local_profile_ids(Some(stdio_command));
-        }
+    if let Some(stdio_command) = cli.stdio_command.as_deref() {
+        store.state.onboarding.available_profiles =
+            crate::profiles::discover_local_profile_ids(Some(stdio_command));
     }
     // In-TUI profiles surface (`/profiles`): resolve the on-disk data dir once so
     // set-default / delete can operate on it, and seed the current default so the

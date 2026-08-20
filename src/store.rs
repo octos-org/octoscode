@@ -2928,6 +2928,33 @@ impl Store {
         };
     }
 
+    /// Enter the local-profile creation step for a profile id that launch
+    /// resolution selected but the on-disk registry does not contain. This is
+    /// the recovery path for stale project-local `active-profile` pointers and
+    /// new names passed through `--profile-id`.
+    fn begin_missing_local_profile_creation(&mut self, requested_id: String) {
+        self.reset_onboarding_for_new_profile();
+        self.state.onboarding.requested_id = requested_id;
+        self.close_all_menus();
+        self.open_menu(MenuId::from(crate::menu::registry::MENU_ONBOARD));
+    }
+
+    /// `Some(true)` means the locally-visible profile registry definitively
+    /// lacks `profile_id`; `None` means this is a remote launch, where the
+    /// client must not infer server-side profile existence from an empty local
+    /// list.
+    fn local_profile_is_missing(&self, profile_id: &str) -> Option<bool> {
+        self.state.onboarding.profiles_data_dir.as_ref()?;
+        Some(
+            !self
+                .state
+                .onboarding
+                .available_profiles
+                .iter()
+                .any(|candidate| candidate.trim() == profile_id.trim()),
+        )
+    }
+
     /// Re-read the on-disk profile ids + `default-profile` pointer into state so
     /// the profiles surface renders current truth (on open, and after a
     /// set-default / delete). No-op for a remote launch (no local data dir).
@@ -2951,6 +2978,10 @@ impl Store {
     fn dispatch_switch_to_profile(&mut self, id: &str) -> Option<AppUiCommand> {
         self.close_all_menus();
         self.state.onboarding.selected_profile = None;
+        // Keep the target available if `session/open` reports that this known
+        // profile still needs a model; the error event carries only the error
+        // kind/message, not the request's profile id.
+        self.state.onboarding.profile_id = Some(id.to_owned());
         let cwd = self.current_switch_cwd();
         let session_id = octos_core::SessionKey::with_profile_topic(id, "local", "tui", "coding");
         self.state.status = t!("status.switching_profile", profile = id.to_string()).into_owned();
@@ -6039,6 +6070,14 @@ impl Store {
                         params.session_id = self.active_session().map(|session| session.id.clone());
                     }
                 }
+                // Launch-prompt rows send `session/open` directly from the
+                // menu. Remember their target so a `profile_unconfigured`
+                // response can route into model setup for the right profile.
+                if let AppUiCommand::OpenSession(params) = command.as_ref()
+                    && let Some(profile_id) = params.profile_id.as_deref()
+                {
+                    self.state.onboarding.profile_id = Some(profile_id.to_owned());
+                }
                 Some(*command)
             }
             MenuAction::SubmitPrompt(prompt) => {
@@ -8731,6 +8770,31 @@ impl Store {
                     .into_owned();
                     return None;
                 }
+                // A configured local profile may still lack its required LLM
+                // selection (for example immediately after profile creation).
+                // `session/open` reports that as the structured
+                // `profile_unconfigured` kind. Treat it as a setup transition,
+                // not a terminal session error: open the provider step for the
+                // remembered target profile and leave the UI idle/usable.
+                let is_unconfigured_session_open = error.code == "profile_unconfigured"
+                    && error.message.starts_with("session/open ");
+                if is_unconfigured_session_open
+                    && let Some(profile_id) = self.current_profile_for_onboarding()
+                {
+                    self.state.onboarding.profile_id = Some(profile_id.clone());
+                    self.state.onboarding.creating_new_profile = false;
+                    self.close_all_menus();
+                    self.open_menu(MenuId::from(crate::menu::registry::MENU_ONBOARD));
+                    self.state.status =
+                        t!("status.profile_model_setup_required", profile = profile_id)
+                            .into_owned();
+                    self.state.push_activity(
+                        ActivityItem::new(ActivityKind::Warning, error.code, error.message)
+                            .with_detail("opened model setup"),
+                    );
+                    self.state.set_run_state_idle();
+                    return None;
+                }
                 // A staged-drain SubmitPrompt can die at the TRANSPORT layer —
                 // no turn/started or terminal will ever arrive for it, so the
                 // FIFO in-flight gate would wedge the session's remaining
@@ -9175,10 +9239,14 @@ impl Store {
             // the send_code/verify rows, leaving no way to authenticate — so a
             // legacy `--profile-id` launch falls through to the OTP path below.
             crate::model::StartupProfileDecision::Pinned(profile_id) if supports_local_solo => {
-                if self.state.onboarding.effective_profile_id(None).is_none() {
-                    self.state.onboarding.profile_id = Some(profile_id);
+                if self.local_profile_is_missing(&profile_id) == Some(true) {
+                    self.begin_missing_local_profile_creation(profile_id);
+                } else {
+                    if self.state.onboarding.effective_profile_id(None).is_none() {
+                        self.state.onboarding.profile_id = Some(profile_id);
+                    }
+                    self.open_menu(MenuId::from(crate::menu::registry::MENU_ONBOARD));
                 }
-                self.open_menu(MenuId::from(crate::menu::registry::MENU_ONBOARD));
             }
             // A first-ever run with no profiles, a legacy-auth server (incl. a
             // legacy `--profile-id` launch), or a non-solo Pick/Attach:
@@ -9201,6 +9269,17 @@ impl Store {
         result: crate::model::LaunchResolveResult,
     ) -> Option<AppUiCommand> {
         use crate::model::{LaunchDecisionKind, LaunchPromptState};
+        // The project-local sticky pointer and `--profile-id` are launch hints,
+        // not proof that a local profile exists. Route a missing id into the
+        // create step before showing an activation prompt or issuing the doomed
+        // `session/open` that produced `profile_unresolved`.
+        if let Some(profile_id) = result.resolved_profile.as_deref()
+            && self.local_profile_create_supported()
+            && self.local_profile_is_missing(profile_id) == Some(true)
+        {
+            self.begin_missing_local_profile_creation(profile_id.to_owned());
+            return None;
+        }
         match result.decision {
             LaunchDecisionKind::Resume => match result.resolved_profile {
                 Some(profile_id) => self.open_resolved_launch_session(profile_id),
@@ -9239,6 +9318,10 @@ impl Store {
     fn open_resolved_launch_session(&mut self, profile_id: String) -> Option<AppUiCommand> {
         let session_id =
             octos_core::SessionKey::with_profile_topic(&profile_id, "local", "tui", "coding");
+        // Preserve the target across a rejected `session/open`; AppUiError does
+        // not carry request params, and profile-unconfigured recovery needs the
+        // id to open model setup for the correct profile.
+        self.state.onboarding.profile_id = Some(profile_id.clone());
         self.state.status = t!(
             "status.opening_coding_session",
             profile = profile_id.clone()
@@ -24416,6 +24499,8 @@ now analyzing the bus module"
     fn launch_resolve_resume_opens_folder_session() {
         let mut store = protocol_store_without_sessions();
         store.state.workspace.root = "/tmp/launch-project".into();
+        store.state.onboarding.available_profiles = vec!["dev".into()];
+        store.state.onboarding.profiles_data_dir = Some("/tmp/local-octos".into());
 
         let follow_up = store.apply_client_event(ClientEvent::LaunchResolve(
             crate::model::LaunchResolveResult {
@@ -24430,6 +24515,85 @@ now analyzing the bus module"
         };
         assert_eq!(params.profile_id.as_deref(), Some("dev"));
         assert_eq!(params.cwd.as_deref(), Some("/tmp/launch-project"));
+    }
+
+    #[test]
+    fn launch_resolve_missing_local_profile_opens_creation_instead_of_session() {
+        let mut store = protocol_store_without_sessions();
+        store.state.workspace.root = "/tmp/launch-project".into();
+        store.state.onboarding.available_profiles = vec!["other".into()];
+        store.state.onboarding.profiles_data_dir = Some("/tmp/local-octos".into());
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods([
+            crate::model::APPUI_METHOD_PROFILE_LOCAL_CREATE,
+        ]));
+
+        let follow_up = store.apply_client_event(ClientEvent::LaunchResolve(
+            crate::model::LaunchResolveResult {
+                decision: crate::model::LaunchDecisionKind::Resume,
+                resolved_profile: Some("dev".into()),
+                existing_profiles: Vec::new(),
+            },
+        ));
+
+        assert!(follow_up.is_none(), "missing profile must not be opened");
+        assert!(store.active_menu_id_is(crate::menu::registry::MENU_ONBOARD));
+        assert!(store.state.onboarding.creating_new_profile);
+        assert_eq!(store.state.onboarding.requested_id, "dev");
+        assert!(store.state.onboarding.profile_id.is_none());
+    }
+
+    #[test]
+    fn profile_unconfigured_session_open_routes_to_model_onboarding() {
+        use octos_core::app_ui::AppUiError;
+
+        let mut store = protocol_store_without_sessions();
+        store.state.workspace.root = "/tmp/launch-project".into();
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods([
+            crate::model::APPUI_METHOD_PROFILE_LOCAL_CREATE,
+        ]));
+        let open = store
+            .open_resolved_launch_session("dev".into())
+            .expect("launch emits session/open");
+        assert!(matches!(open, AppUiCommand::OpenSession(_)));
+        store.state.set_run_state_error("session open failed");
+
+        let follow_up = store.apply_event(AppUiEvent::Error(AppUiError {
+            code: "profile_unconfigured".into(),
+            message: "session/open request tui-3 failed: session/open requires the routed profile to have an LLM selection".into(),
+        }));
+
+        assert!(follow_up.is_none());
+        assert!(store.active_menu_id_is(crate::menu::registry::MENU_ONBOARD));
+        assert!(!store.state.onboarding.creating_new_profile);
+        assert_eq!(store.state.onboarding.profile_id.as_deref(), Some("dev"));
+        assert_active_menu_has_row(&store, "onboard.provider.add_model");
+        assert!(matches!(
+            store.state.run_state,
+            crate::model::SessionRunState::Idle
+        ));
+        assert_eq!(
+            store.state.status,
+            t!("status.profile_model_setup_required", profile = "dev").into_owned()
+        );
+    }
+
+    #[test]
+    fn profile_unconfigured_non_session_error_stays_an_error() {
+        use octos_core::app_ui::AppUiError;
+
+        let mut store = protocol_store_without_sessions();
+        store.state.onboarding.profile_id = Some("dev".into());
+
+        store.apply_event(AppUiEvent::Error(AppUiError {
+            code: "profile_unconfigured".into(),
+            message: "profile/llm/test request tui-4 failed: profile is not configured".into(),
+        }));
+
+        assert!(!store.active_menu_id_is(crate::menu::registry::MENU_ONBOARD));
+        assert!(matches!(
+            store.state.run_state,
+            crate::model::SessionRunState::Error { .. }
+        ));
     }
 
     /// An `Activate` decision (this folder has no conversation yet) stages the
@@ -24703,7 +24867,9 @@ now analyzing the bus module"
     fn first_launch_pin_attaches_pinned_profile_and_skips_picker() {
         let mut store = protocol_store_without_sessions();
         store.state.onboarding.launch_profile_id = Some("coding".into());
-        store.state.onboarding.available_profiles = vec!["glm".into(), "deepseek".into()];
+        store.state.onboarding.available_profiles =
+            vec!["glm".into(), "deepseek".into(), "coding".into()];
+        store.state.onboarding.profiles_data_dir = Some("/tmp/local-octos".into());
 
         store.apply_client_event(local_solo_capabilities_event());
 
@@ -24712,6 +24878,21 @@ now analyzing the bus module"
         // setup) instead of routing to profile/local/create for a new profile.
         assert!(store.active_menu_id_is(crate::menu::registry::MENU_ONBOARD));
         assert_eq!(store.state.onboarding.profile_id.as_deref(), Some("coding"));
+    }
+
+    #[test]
+    fn first_launch_missing_local_pin_opens_profile_creation() {
+        let mut store = protocol_store_without_sessions();
+        store.state.onboarding.launch_profile_id = Some("ymote".into());
+        store.state.onboarding.available_profiles = vec!["dev".into()];
+        store.state.onboarding.profiles_data_dir = Some("/tmp/local-octos".into());
+
+        store.apply_client_event(local_solo_capabilities_event());
+
+        assert!(store.active_menu_id_is(crate::menu::registry::MENU_ONBOARD));
+        assert!(store.state.onboarding.creating_new_profile);
+        assert_eq!(store.state.onboarding.requested_id, "ymote");
+        assert!(store.state.onboarding.profile_id.is_none());
     }
 
     #[test]

@@ -710,6 +710,7 @@ status:
   testing_provider: "Testing provider"
   testing_provider_connection: "Testing provider connection"
   cannot_open_profile_unresolved: "Cannot open session: profile unresolved. Use /onboard profile <profile_id>."
+  profile_model_setup_required: "Profile %{profile} needs an AI model. Choose one to continue."
   cannot_open_workspace_invalid: "Cannot open session: workspace invalid — %{reason}."
   workspace_validation_in_progress: "Workspace validation in progress; try /onboard finish again in a moment."
   cannot_open_workspace_not_validated: "Cannot open session: workspace not validated. Use /onboard workspace <path> then /onboard workspace-validate."

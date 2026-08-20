@@ -1469,6 +1469,7 @@ status:
   testing_provider: "正在测试供应商"
   testing_provider_connection: "正在测试供应商连接"
   cannot_open_profile_unresolved: "无法打开会话：档案未解析。请使用 /onboard profile <profile_id>。"
+  profile_model_setup_required: "档案 %{profile} 需要配置 AI 模型。请选择一个模型以继续。"
   cannot_open_workspace_invalid: "无法打开会话：工作区无效 — %{reason}。"
   workspace_validation_in_progress: "工作区验证进行中；请稍后再次 /onboard finish。"
   cannot_open_workspace_not_validated: "无法打开会话：工作区未验证。请使用 /onboard workspace <path> 然后 /onboard workspace-validate。"
