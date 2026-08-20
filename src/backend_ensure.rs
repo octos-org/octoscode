@@ -739,10 +739,25 @@ fn install_octos_bundle() -> Result<()> {
     Ok(())
 }
 
+/// Ceiling for the multi-MB bundle download. reqwest's blocking client
+/// defaults to a 30s TOTAL request timeout, which a slow link can't fit the
+/// bundle inside — but this whole module runs synchronously BEFORE the TUI
+/// takes the terminal, so the ceiling is also the longest a wedged socket can
+/// silently stall startup (reqwest 0.12's blocking builder exposes no
+/// per-read stall timeout, only this total one). 10 minutes covers a
+/// ~50 MB bundle at dial-up-adjacent speeds without letting a dead peer hang
+/// the launch forever.
+const BUNDLE_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Ceiling for the tiny `.sha256` checksum GET — a few dozen bytes, so the
+/// pre-download 30s default remains right-sized; it must NOT inherit the
+/// bundle's 10-minute ceiling.
+const CHECKSUM_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Blocking GET returning the response body bytes, erroring on non-2xx. Follows
 /// GitHub's release-asset redirect (reqwest follows up to 10 by default).
 fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
-    Ok(http_client()?
+    Ok(http_client(BUNDLE_DOWNLOAD_TIMEOUT)?
         .get(url)
         .send()?
         .error_for_status()?
@@ -752,12 +767,20 @@ fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
 
 /// Blocking GET returning the response body as text, erroring on non-2xx.
 fn http_get_string(url: &str) -> Result<String> {
-    Ok(http_client()?.get(url).send()?.error_for_status()?.text()?)
+    Ok(http_client(CHECKSUM_FETCH_TIMEOUT)?
+        .get(url)
+        .send()?
+        .error_for_status()?
+        .text()?)
 }
 
-fn http_client() -> Result<reqwest::blocking::Client> {
+fn http_client(timeout: std::time::Duration) -> Result<reqwest::blocking::Client> {
+    // Tight connect timeout so an unreachable host fails fast regardless of
+    // how generous the per-request total ceiling is.
     reqwest::blocking::Client::builder()
         .user_agent(concat!("octoscode/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(timeout)
         .build()
         .map_err(Into::into)
 }
