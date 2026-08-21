@@ -940,11 +940,11 @@ fn is_plain_text_key(key: &KeyEvent) -> bool {
 /// True while a modal overlay (not a menu) owns the keyboard — the same set,
 /// in the same order, that `handle_plain_key` routes to before the menu/global
 /// arms: the activity navigator, the approval modal, the AskUserQuestion
-/// picker, and the task-output / artifact / thread-graph / turn-state detail
-/// viewers. While any of these is up, global composer edits (Ctrl+U, modified
-/// cursor/word keys) and pastes must not mutate the composer hidden underneath
-/// — `show_pending_approval` force-focuses the composer, so a focus check
-/// alone cannot catch this.
+/// picker, the task-output / artifact / thread-graph / turn-state detail
+/// viewers, and the expanded diff-preview overlay. While any of these is up,
+/// global composer edits (Ctrl+U, modified cursor/word keys) and pastes must
+/// not mutate the composer hidden underneath — `show_pending_approval`
+/// force-focuses the composer, so a focus check alone cannot catch this.
 fn modal_owns_keyboard(store: &Store) -> bool {
     store.state.activity_navigator.active
         || store
@@ -961,6 +961,7 @@ fn modal_owns_keyboard(store: &Store) -> bool {
         || store.state.artifact_detail.active
         || store.state.thread_graph_detail.active
         || store.state.turn_state_detail.active
+        || store.state.diff_preview.overlay_active()
 }
 
 pub(crate) fn handle_key(store: &mut Store, key: KeyEvent) -> KeyAction {
@@ -1032,7 +1033,27 @@ pub(crate) fn handle_key(store: &mut Store, key: KeyEvent) -> KeyAction {
     }
 
     if is_control_char(&key, 'o') {
-        store.state.toggle_tool_output_expansion();
+        // With a renderable diff preview open, Ctrl+O toggles the diff's OWN
+        // full-screen overlay instead of the global tool-output expansion —
+        // the dedicated bit keeps a user's transcript-wide expansion
+        // preference out of the modal's lifecycle (auto-opened previews must
+        // never fling a surprise full-screen modal, and collapsing the
+        // overlay must not collapse every other tool output). Expansion is
+        // gated on no OTHER modal owning the keyboard, so Ctrl+O can't stack
+        // an overlay over a dialog that would keep routing the keys.
+        // Collapse checks the raw `expanded` bit (not `overlay_active`) so a
+        // preview that lost its renderable diff while expanded still resets
+        // instead of popping the overlay back later.
+        if store.state.diff_preview.active && store.state.diff_preview.expanded {
+            store.state.collapse_diff_preview_overlay();
+        } else if !modal_owns_keyboard(store)
+            && store.state.diff_preview.active
+            && store.state.diff_preview.has_renderable_diff()
+        {
+            store.state.expand_diff_preview_overlay();
+        } else {
+            store.state.toggle_tool_output_expansion();
+        }
         return KeyAction::Continue;
     }
 
@@ -1154,7 +1175,14 @@ pub(crate) fn handle_key(store: &mut Store, key: KeyEvent) -> KeyAction {
 
     // Ctrl+X, not Ctrl+C — Ctrl+C is the interrupt and is claimed at the top.
     if (is_alt_char(&key, 'c') || is_ctrl_char(&key, 'x')) && store.state.diff_preview.active {
+        // Same contract as the overlay's plain `c` (spec R6): staging lands
+        // the hunk prompt in the composer, so a still-expanded overlay would
+        // hide what just happened and keep swallowing plain keys over it.
+        let had_context = store.state.diff_preview.selected_hunk_context().is_some();
         store.stage_selected_diff_context();
+        if had_context {
+            store.state.diff_preview.expanded = false;
+        }
         return KeyAction::Continue;
     }
 
@@ -1588,6 +1616,15 @@ fn handle_plain_key(store: &mut Store, key: KeyEvent) -> KeyAction {
 
     if store.state.turn_state_detail.active {
         return handle_turn_state_detail_key(store, key);
+    }
+
+    // Expanded (Ctrl+O) diff preview is a full-screen overlay; give it the
+    // same modal scrolling keys as the other detail panes before any
+    // composer/focus routing sees the key. LAST among the modals — every
+    // other modal takes keys ahead of it, matching the render order where the
+    // overlay draws beneath them.
+    if store.state.diff_preview.overlay_active() {
+        return handle_diff_preview_key(store, key);
     }
 
     if store.state.menu_stack.is_active() {
@@ -2728,6 +2765,80 @@ fn handle_user_question_key(store: &mut Store, key: KeyEvent) -> KeyAction {
     KeyAction::Continue
 }
 
+/// Cap the diff overlay's from-bottom scroll at the top of its content, so
+/// holding k/PageUp at the top can't bank an offset the user then has to
+/// scroll back through before the view moves again ("dead zone").
+fn clamp_diff_overlay_scroll(store: &mut Store) {
+    let palette = Palette::for_theme(store.state.theme);
+    let max_scroll = app::diff_preview_overlay_max_scroll(&store.state, palette);
+    let scroll = &mut store.state.diff_preview.scroll;
+    *scroll = (*scroll).min(max_scroll);
+}
+
+/// Key handling for the expanded (Ctrl+O) diff preview overlay. Keeps the
+/// diff-specific keys (hunk nav / stage / view toggle) and adds the same
+/// scroll keys the other full-screen detail panes have, so a long diff is
+/// actually readable end-to-end.
+fn handle_diff_preview_key(store: &mut Store, key: KeyEvent) -> KeyAction {
+    match key.code {
+        KeyCode::Esc => {
+            // Collapse back to the inline preview (keep the preview open);
+            // Ctrl+O toggles the same way. A second Esc closes it entirely —
+            // handled by the inline Esc arm once we're no longer expanded.
+            store.state.collapse_diff_preview_overlay();
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            store.state.diff_preview.scroll_down(1);
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            store.state.diff_preview.scroll_up(1);
+            clamp_diff_overlay_scroll(store);
+        }
+        KeyCode::PageDown => {
+            store.state.diff_preview.scroll_down(8);
+        }
+        KeyCode::PageUp => {
+            store.state.diff_preview.scroll_up(8);
+            clamp_diff_overlay_scroll(store);
+        }
+        KeyCode::Home => {
+            store.state.diff_preview.scroll_up(usize::MAX);
+            clamp_diff_overlay_scroll(store);
+        }
+        KeyCode::End => {
+            store.state.diff_preview.scroll = 0;
+        }
+        KeyCode::Char(']') => {
+            store.select_next_diff_hunk();
+        }
+        KeyCode::Char('[') => {
+            store.select_prev_diff_hunk();
+        }
+        KeyCode::Char('c') => {
+            // Staging lands the hunk prompt in the composer (or the pending
+            // queue) — collapse so the user can SEE what just happened; a
+            // still-open overlay would keep swallowing their typing over an
+            // invisible composer. Stays open when there was nothing to stage.
+            let had_context = store.state.diff_preview.selected_hunk_context().is_some();
+            store.stage_selected_diff_context();
+            if had_context {
+                store.state.diff_preview.expanded = false;
+            }
+        }
+        KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'v') => {
+            store.toggle_diff_view_mode();
+        }
+        KeyCode::Char('d') => {
+            if let Some(command) = store.read_diff_preview_command() {
+                return KeyAction::send(command);
+            }
+        }
+        _ => {}
+    }
+
+    KeyAction::Continue
+}
+
 fn handle_task_output_key(store: &mut Store, key: KeyEvent) -> KeyAction {
     match key.code {
         KeyCode::Esc => {
@@ -2916,6 +3027,11 @@ fn scroll_current_surface_down(store: &mut Store, lines: usize) {
         store.state.turn_state_detail.scroll_down(lines);
         return;
     }
+    // Expanded (Ctrl+O) diff preview is a full-screen scrollable surface too.
+    if store.state.diff_preview.overlay_active() {
+        store.state.diff_preview.scroll_down(lines);
+        return;
+    }
     // Mirrors `scroll_current_surface_up`: /btw sits under the detail modals but
     // over the focused pane.
     if btw_aside_open(&store.state) {
@@ -2966,6 +3082,12 @@ fn scroll_current_surface_up(store: &mut Store, lines: usize) {
     }
     if store.state.turn_state_detail.active {
         store.state.turn_state_detail.scroll_up(lines);
+        return;
+    }
+    // Expanded (Ctrl+O) diff preview is a full-screen scrollable surface too.
+    if store.state.diff_preview.overlay_active() {
+        store.state.diff_preview.scroll_up(lines);
+        clamp_diff_overlay_scroll(store);
         return;
     }
     // The /btw aside sits under any detail modal (which renders on top of it) but
@@ -5987,6 +6109,213 @@ mod tests {
             KeyAction::Continue
         ));
         assert_eq!(store.state.composer, "g");
+    }
+
+    /// A renderable preview tall enough that the overlay has real scroll room
+    /// at the 100x30 terminal the overlay tests pin.
+    fn diff_result_with_long_hunk(session_id: SessionKey) -> crate::model::DiffPreviewGetResult {
+        crate::model::DiffPreviewGetResult {
+            status: "ready".into(),
+            source: "pending_store".into(),
+            preview: crate::model::DiffPreview {
+                session_id,
+                preview_id: PreviewId::new(),
+                title: Some("Patch".into()),
+                files: vec![crate::model::DiffPreviewFile {
+                    path: "src/lib.rs".into(),
+                    old_path: None,
+                    status: "modified".into(),
+                    hunks: vec![crate::model::DiffPreviewHunk {
+                        header: "@@ -1,60 +1,60 @@".into(),
+                        lines: (1..=60)
+                            .map(|n| crate::model::DiffPreviewLine {
+                                kind: "added".into(),
+                                content: format!("line {n}"),
+                                old_line: None,
+                                new_line: Some(n),
+                            })
+                            .collect(),
+                    }],
+                }],
+            },
+        }
+    }
+
+    fn store_with_expanded_diff_overlay() -> Store {
+        let mut store = store_with_sessions(1);
+        store.state.last_terminal_width = 100;
+        store.state.last_terminal_height = 30;
+        let session_id = store.state.sessions[0].id.clone();
+        store
+            .state
+            .diff_preview
+            .apply_result(diff_result_with_long_hunk(session_id));
+        handle_key(
+            &mut store,
+            modified_key(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        );
+        assert!(
+            store.state.diff_preview.overlay_active(),
+            "Ctrl+O on a renderable preview expands the overlay"
+        );
+        store
+    }
+
+    #[test]
+    fn diff_preview_overlay_scrolls_and_collapses() {
+        // specs/task-diff-preview-overlay-scroll.spec R1/R2: Ctrl+O opens the
+        // expanded diff as a full-screen scrollable overlay on its OWN state
+        // bit; j/k/PgUp/PgDn and the wheel move `diff_preview.scroll`, clamped
+        // at the top; Esc collapses back to the inline preview WITHOUT closing
+        // it and WITHOUT touching the global tool-output expansion.
+        let mut store = store_with_expanded_diff_overlay();
+        assert!(
+            !store.state.expanded_tool_outputs,
+            "the overlay must not hijack the global tool-output flag"
+        );
+
+        // j / Down scroll down (from-bottom: decreases), k / Up scroll up.
+        handle_key(&mut store, key(KeyCode::Char('j')));
+        assert_eq!(store.state.diff_preview.scroll, 0, "j at bottom stays 0");
+        handle_key(&mut store, key(KeyCode::Char('k')));
+        assert_eq!(store.state.diff_preview.scroll, 1, "k scrolls up");
+        handle_key(&mut store, key(KeyCode::PageUp));
+        assert_eq!(store.state.diff_preview.scroll, 9, "PgUp jumps 8");
+        handle_key(&mut store, key(KeyCode::PageDown));
+        assert_eq!(store.state.diff_preview.scroll, 1, "PgDown jumps back");
+        handle_key(&mut store, key(KeyCode::End));
+        assert_eq!(store.state.diff_preview.scroll, 0, "End returns to bottom");
+
+        // Over-scrolling past the top clamps instead of banking a dead zone:
+        // the very next PgDown must move the view.
+        let max_scroll = app::diff_preview_overlay_max_scroll(
+            &store.state,
+            Palette::for_theme(store.state.theme),
+        );
+        assert!(max_scroll > 8, "fixture must give the overlay scroll room");
+        for _ in 0..40 {
+            handle_key(&mut store, key(KeyCode::PageUp));
+        }
+        assert_eq!(
+            store.state.diff_preview.scroll, max_scroll,
+            "scroll clamps at the top of the content"
+        );
+        handle_key(&mut store, key(KeyCode::PageDown));
+        assert_eq!(
+            store.state.diff_preview.scroll,
+            max_scroll - 8,
+            "no dead zone after over-scrolling"
+        );
+
+        // Wheel routes to the expanded diff surface.
+        handle_key(&mut store, key(KeyCode::End));
+        scroll_current_surface_up(&mut store, 3);
+        assert_eq!(store.state.diff_preview.scroll, 3, "wheel up scrolls up");
+        scroll_current_surface_down(&mut store, 3);
+        assert_eq!(
+            store.state.diff_preview.scroll, 0,
+            "wheel down scrolls down"
+        );
+
+        // Esc collapses to inline — the preview itself stays open.
+        handle_key(&mut store, key(KeyCode::Esc));
+        assert!(
+            !store.state.diff_preview.expanded,
+            "Esc collapses the overlay"
+        );
+        assert!(
+            store.state.diff_preview.active,
+            "Esc must not close the preview"
+        );
+    }
+
+    #[test]
+    fn diff_overlay_owns_keyboard_and_ctrl_o_falls_back_without_renderable_diff() {
+        // specs/task-diff-preview-overlay-scroll.spec R3/R4: while the overlay is up
+        // it OWNS the keyboard — Ctrl+U must not clear the hidden composer —
+        // and Ctrl+O without a renderable diff keeps its global tool-output
+        // meaning instead of opening a near-empty modal.
+        let mut store = store_with_expanded_diff_overlay();
+        store.state.composer = "draft".into();
+        handle_key(
+            &mut store,
+            modified_key(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(
+            store.state.composer, "draft",
+            "Ctrl+U is swallowed while the overlay owns the keyboard"
+        );
+
+        // Ctrl+O inside the overlay collapses it (round trip)...
+        handle_key(
+            &mut store,
+            modified_key(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        );
+        assert!(!store.state.diff_preview.expanded);
+        assert!(
+            !store.state.expanded_tool_outputs,
+            "collapsing the overlay must not flip the global flag"
+        );
+
+        // ...and with no renderable diff (active but empty), Ctrl+O falls
+        // back to the global tool-output toggle instead of expanding.
+        let mut store = store_with_sessions(1);
+        store.state.diff_preview.active = true;
+        handle_key(
+            &mut store,
+            modified_key(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        );
+        assert!(
+            !store.state.diff_preview.expanded,
+            "an empty preview never expands to a full-screen modal"
+        );
+        assert!(store.state.expanded_tool_outputs);
+    }
+
+    #[test]
+    fn diff_overlay_stage_key_collapses_so_the_composer_is_visible() {
+        // specs/task-diff-preview-overlay-scroll.spec R6: `c` stages the selected hunk
+        // into the composer and collapses the overlay — otherwise the staged
+        // prompt sits under a modal that keeps swallowing every keystroke.
+        let mut store = store_with_expanded_diff_overlay();
+        handle_key(&mut store, key(KeyCode::Char('c')));
+        assert!(
+            !store.state.diff_preview.expanded,
+            "staging collapses the overlay"
+        );
+        assert!(store.state.composer.contains("file: src/lib.rs"));
+        assert_eq!(store.state.focus, FocusPane::Composer);
+    }
+
+    #[test]
+    fn showing_a_pending_decision_collapses_the_diff_overlay() {
+        // specs/task-diff-preview-overlay-scroll.spec R5: the approval/question dialogs
+        // take key priority over the overlay but render beneath it — becoming
+        // visible must collapse the overlay so the user never blind-types at a
+        // covered dialog.
+        let mut store = store_with_expanded_diff_overlay();
+        store.state.approval = Some(crate::model::ApprovalModalState {
+            session_id: store.state.sessions[0].id.clone(),
+            approval_id: octos_core::ui_protocol::ApprovalId::new(),
+            turn_id: octos_core::ui_protocol::TurnId::new(),
+            tool_name: "shell".into(),
+            title: "Run command".into(),
+            body: "approve?".into(),
+            approval_kind: None,
+            risk: None,
+            typed_details: None,
+            render_hints: None,
+            visible: false,
+        });
+        assert!(store.show_pending_approval());
+        assert!(
+            !store.state.diff_preview.expanded,
+            "a shown approval collapses the overlay"
+        );
+        assert!(
+            store.state.diff_preview.active,
+            "the inline preview survives the collapse"
+        );
     }
 
     #[test]

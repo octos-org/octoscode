@@ -104,6 +104,12 @@ pub fn wants_fullscreen_overlay(app: &AppState) -> bool {
         || app.artifact_detail.active
         || app.thread_graph_detail.active
         || app.turn_state_detail.active
+        // Ctrl+O on a diff preview expands to a full-screen scrollable detail:
+        // the inline live-tail viewport is bounded (it must leave scrollback
+        // rows above), so a fully-expanded diff has nowhere to render and no
+        // scroll surface of its own — the overlay is what makes "see every
+        // change" actually reachable.
+        || app.diff_preview.overlay_active()
 }
 
 /// The detail overlays that render full-screen (alt-screen, no native scrollback
@@ -116,6 +122,7 @@ fn scrollable_detail_modal_active(app: &AppState) -> bool {
         || app.artifact_detail.active
         || app.thread_graph_detail.active
         || app.turn_state_detail.active
+        || app.diff_preview.overlay_active()
 }
 
 /// Mouse capture policy. In the default `native` scroll-mode, capture is on

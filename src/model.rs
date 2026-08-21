@@ -5666,9 +5666,7 @@ impl UserQuestionEntry {
             }
         } else {
             let already = self.option_selected.get(row).copied().unwrap_or(false);
-            for slot in &mut self.option_selected {
-                *slot = false;
-            }
+            self.option_selected.fill(false);
             if let Some(slot) = self.option_selected.get_mut(row) {
                 *slot = !already;
             }
@@ -6221,6 +6219,15 @@ pub struct DiffPreviewPaneState {
     /// preference, not per-preview data: it survives `apply_result` and a
     /// reload (`open_loading_for_turn`); only `close()` resets it.
     pub side_by_side: bool,
+    /// Ctrl+O while the preview is open: the diff takes over the screen as a
+    /// full-screen scrollable overlay. Deliberately its OWN bit, not the global
+    /// `expanded_tool_outputs` flag: previews auto-open on turn events, and a
+    /// user whose transcript-wide expansion preference is on must not be thrown
+    /// into (or collapsed out of) a modal they never asked for. Reset by
+    /// `open_loading_for_turn` (a NEW preview never opens pre-expanded) and by
+    /// `close()`; survives `apply_result` so a refresh doesn't collapse the
+    /// view mid-read.
+    pub expanded: bool,
 }
 
 impl DiffPreviewPaneState {
@@ -6242,6 +6249,7 @@ impl DiffPreviewPaneState {
             selected_file: 0,
             selected_hunk: 0,
             side_by_side: self.side_by_side,
+            expanded: false,
         };
     }
 
@@ -6284,15 +6292,25 @@ impl DiffPreviewPaneState {
             .is_some_and(|preview| preview.files.iter().any(|file| !file.hunks.is_empty()))
     }
 
+    /// Whether the full-screen diff overlay owns the screen right now. The ONE
+    /// gate shared by render, key routing, wheel routing and
+    /// `modal_owns_keyboard` — any drift between those four is a modal that
+    /// renders without keys or takes keys while invisible. Includes the same
+    /// renderability check as the inline box (C6): an expanded-but-empty
+    /// preview falls back to inline handling instead of a near-blank modal
+    /// that swallows every plain key.
+    pub fn overlay_active(&self) -> bool {
+        self.active && self.expanded && self.has_renderable_diff()
+    }
+
     pub fn close(&mut self) {
         *self = Self::default();
     }
 
-    // NOTE: currently dead code — nothing calls these and the diff renderer
-    // does not read `scroll` (hunk selection drives the viewport instead).
-    // They already use the from-bottom convention (up = add, down = sub)
-    // shared by the transcript and the detail modals, so a future caller
-    // inherits the right direction.
+    // From-bottom scroll semantics (up = add, down = sub), shared with the
+    // transcript and the detail modals. Read by the full-screen diff overlay;
+    // the event loop clamps after every scroll-up so the offset can't build a
+    // dead zone past the top (`clamp_diff_overlay_scroll`).
     pub fn scroll_up(&mut self, lines: usize) {
         self.scroll = self.scroll.saturating_add(lines);
     }
@@ -8698,6 +8716,9 @@ impl AppState {
             // discipline keeps the card on screen).
             if let Some(mut approval) = self.pending_session_approvals.remove(&session_id) {
                 approval.visible = true;
+                // The promoted dialog takes key priority over the expanded
+                // diff overlay but renders beneath it — collapse the overlay.
+                self.diff_preview.expanded = false;
                 let title = approval.title.clone();
                 self.approval = Some(approval);
                 self.focus = FocusPane::Composer;
@@ -8705,6 +8726,7 @@ impl AppState {
             }
             if let Some(mut picker) = self.pending_session_questions.remove(&session_id) {
                 picker.visible = true;
+                self.diff_preview.expanded = false;
                 self.user_question_auto_open = true;
                 let title = picker.title.clone();
                 self.user_question = Some(picker);
@@ -9684,6 +9706,22 @@ impl AppState {
         } else {
             "Collapsed tool output + diff".into()
         };
+    }
+
+    /// Ctrl+O with a renderable diff preview open: the preview takes over the
+    /// screen as the full-screen overlay. Distinct status text from the global
+    /// tool-output toggle (which Ctrl+O still drives when no preview is open)
+    /// so the user can tell which surface the key just acted on.
+    pub fn expand_diff_preview_overlay(&mut self) {
+        self.diff_preview.expanded = true;
+        self.status = t!("status.diff_overlay_expanded").into_owned();
+    }
+
+    /// Esc / Ctrl+O inside the overlay: back to the inline preview (the
+    /// preview itself stays open — a second Esc closes it).
+    pub fn collapse_diff_preview_overlay(&mut self) {
+        self.diff_preview.expanded = false;
+        self.status = t!("status.diff_overlay_collapsed").into_owned();
     }
 
     pub fn persist_composer_draft_for_selected_session(&mut self) {

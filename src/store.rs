@@ -7273,6 +7273,11 @@ impl Store {
             approval.title.clone()
         };
 
+        // The approval prompt renders in the transcript, UNDER the detail
+        // overlays, yet takes key priority over all of them — an expanded
+        // diff overlay left up would cover the very dialog now receiving
+        // approve/deny keys. Collapse it (keep the preview open inline).
+        self.state.diff_preview.expanded = false;
         self.state.approval_auto_open = true;
         self.state.focus = FocusPane::Composer;
         self.state.status = t!("status.approval_shown", title = title).into_owned();
@@ -7459,6 +7464,10 @@ impl Store {
             picker.title.clone()
         };
 
+        // Same as `show_pending_approval`: the picker takes key priority over
+        // the expanded diff overlay but renders beneath it — collapse the
+        // overlay so the user answers a dialog they can actually see.
+        self.state.diff_preview.expanded = false;
         self.state.user_question_auto_open = true;
         self.state.focus = FocusPane::Composer;
         self.state.status = t!("status.question_shown", title = title).into_owned();
@@ -10149,6 +10158,12 @@ impl Store {
         );
         let mut approval = ApprovalModalState::from_event(event);
         approval.visible = self.state.approval_auto_open;
+        if approval.visible {
+            // A visible approval takes key priority over the expanded diff
+            // overlay but renders beneath it — collapse the overlay so the
+            // dialog receiving approve/deny keys is on screen.
+            self.state.diff_preview.expanded = false;
+        }
         self.state.approval = Some(approval);
         self.state.focus = FocusPane::Composer;
         self.state.set_run_state_blocked(title);
@@ -11332,6 +11347,12 @@ impl Store {
                 }
                 let mut approval = ApprovalModalState::from_event(event);
                 approval.visible = self.state.approval_auto_open;
+                if approval.visible {
+                    // A visible approval takes key priority over the expanded
+                    // diff overlay but renders beneath it — collapse the
+                    // overlay so approve/deny keys act on a visible dialog.
+                    self.state.diff_preview.expanded = false;
+                }
                 let diff_preview_id = approval.diff_preview_id();
                 let diff_preview_turn_id = approval.turn_id.clone();
                 self.state.approval = Some(approval);
@@ -12857,6 +12878,10 @@ impl Store {
         // and their answers never reached the model. Force it visible and mark
         // auto-open so the peek yields to it.
         picker.visible = true;
+        // The picker takes key priority over the expanded diff overlay but
+        // renders beneath it — collapse the overlay so the question is
+        // answered on a visible dialog.
+        self.state.diff_preview.expanded = false;
         self.state.user_question_auto_open = true;
         self.state.user_question = Some(picker);
         // Salience (spec task-approval-ux-salience): a live decision arrival

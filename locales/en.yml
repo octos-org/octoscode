@@ -210,6 +210,7 @@ app:
     ctrl_o_expand: "Ctrl+O expand"
     task_output_modal: "o read more | PgUp/PgDn | Esc close"
     scroll_modal: "PgUp/PgDn | Esc close"
+    diff_preview_modal: "j/k scroll | PgUp/PgDn | [/] hunk | v view | c stage | Esc collapse"
   plan:
     live: "live"
   workspace:
@@ -815,6 +816,8 @@ status:
   diff_view_side_by_side: "Side-by-side diff view"
   diff_view_unified: "Unified diff view"
   diff_view_too_narrow: "Terminal too narrow for side-by-side diff (needs %{min}+ cols)"
+  diff_overlay_expanded: "Expanded diff preview to full screen (Esc collapses)"
+  diff_overlay_collapsed: "Collapsed diff preview to inline"
   staged_diff_context: "Staged selected diff hunk context for next turn: %{path}"
   added_diff_context: "Added selected diff hunk context to composer: %{path}"
   accepted: "accepted"

@@ -22,6 +22,13 @@ pub fn render(frame: &mut impl FrameLike, app: &AppState, palette: Palette) {
         render_chat_layout(frame, app, palette);
     }
 
+    // The expanded diff preview is the LOWEST detail layer: `handle_plain_key`
+    // routes keys to every other modal ahead of it, so it must also render
+    // BENEATH them — a surface drawn on top while another modal owns the
+    // keyboard is a dialog the user blind-types at.
+    if app.diff_preview.overlay_active() {
+        render_diff_preview_modal(frame, app, palette);
+    }
     if app.task_output.active {
         render_task_output_modal(frame, &app.task_output, palette);
     }
@@ -2144,6 +2151,168 @@ pub(super) fn render_task_output_modal(
         )
         .scroll((scroll_top, 0))
         .wrap(Wrap { trim: false });
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(pane, area);
+}
+
+/// The expanded diff overlay's floating footprint, shared by the render path
+/// and the event loop's scroll clamp so both agree on the visible height.
+pub fn diff_overlay_area(terminal: Rect) -> Rect {
+    centered_rect(92, 88, terminal)
+}
+
+/// Content lines for the expanded (Ctrl+O) diff overlay at `inner_width`
+/// columns. Renders EVERY hunk body (the inline view caps non-selected hunks
+/// to headers), marks the selected hunk with the same `›` the inline view
+/// uses (it is what `c` stages), and honors the unified/side-by-side toggle
+/// with the inline view's narrow-fallback rule. Every line is hard-clipped to
+/// `inner_width` — the overlay never wraps, so the logical line count IS the
+/// display row count and the scroll math stays exact.
+fn diff_preview_modal_lines(
+    app: &crate::model::AppState,
+    palette: Palette,
+    inner_width: usize,
+) -> Vec<Line<'static>> {
+    let diff = &app.diff_preview;
+    let side_by_side =
+        diff.side_by_side && inner_width >= crate::model::DIFF_SIDE_BY_SIDE_MIN_WIDTH;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    if let Some(preview) = &diff.preview {
+        for (file_idx, file) in preview.files.iter().enumerate() {
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            let path = match &file.old_path {
+                Some(old_path) if old_path != &file.path => {
+                    format!("{old_path} -> {}", file.path)
+                }
+                _ => file.path.clone(),
+            };
+            let (added, removed) = super::diff_file_line_counts(file);
+            lines.push(Line::from(vec![
+                Span::styled("  ", palette.muted()),
+                Span::styled(file.status.clone(), palette.text()),
+                Span::styled("  ", palette.muted()),
+                Span::styled(
+                    format!("+{added} "),
+                    ratatui::style::Style::default().fg(palette.success),
+                ),
+                Span::styled(
+                    format!("-{removed} "),
+                    ratatui::style::Style::default().fg(palette.danger),
+                ),
+                Span::styled(
+                    path,
+                    palette.text().add_modifier(ratatui::style::Modifier::BOLD),
+                ),
+            ]));
+            if file.hunks.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("    ", palette.muted()),
+                    Span::styled(
+                        t!("app.diff.line_unavailable").into_owned(),
+                        palette.muted(),
+                    ),
+                ]));
+            }
+            for (hunk_idx, hunk) in file.hunks.iter().enumerate() {
+                let selected = file_idx == diff.selected_file && hunk_idx == diff.selected_hunk;
+                let marker = if selected { "  › " } else { "  ├ " };
+                lines.push(Line::from(vec![
+                    Span::styled(marker, palette.selected()),
+                    Span::styled(hunk.header.clone(), diff_hunk_style(palette)),
+                ]));
+                crate::app::transcript_build::push_diff_hunk_body(
+                    &mut lines,
+                    palette,
+                    &hunk.lines,
+                    side_by_side,
+                    inner_width,
+                    None,
+                );
+            }
+        }
+        if preview.files.is_empty() {
+            lines.push(Line::from(Span::styled(
+                t!("app.empty.no_file_changes").to_string(),
+                palette.muted(),
+            )));
+        }
+    } else if diff.loading {
+        lines.push(Line::from(Span::styled(
+            t!("app.diff.loading").to_string(),
+            palette.selected(),
+        )));
+    } else if let Some(error) = &diff.error {
+        lines.push(Line::from(Span::styled(
+            error.clone(),
+            ratatui::style::Style::default().fg(palette.danger),
+        )));
+    }
+
+    lines
+        .into_iter()
+        .map(|line| Line::from(clip_line_spans(line.spans, inner_width)))
+        .collect()
+}
+
+/// From-bottom scroll ceiling for the expanded diff overlay at the current
+/// terminal size. The event loop clamps `diff_preview.scroll` with this after
+/// every scroll-up, so over-scrolling past the top can't bank a dead zone the
+/// user has to scroll back through. Exact, not an estimate: overlay lines are
+/// hard-clipped, never wrapped (see `diff_preview_modal_lines`).
+pub fn diff_preview_overlay_max_scroll(app: &crate::model::AppState, palette: Palette) -> usize {
+    let area = diff_overlay_area(Rect::new(
+        0,
+        0,
+        app.last_terminal_width,
+        app.last_terminal_height,
+    ));
+    let inner_width = usize::from(area.width.saturating_sub(2));
+    let visible_height = usize::from(area.height.saturating_sub(2)).max(1);
+    diff_preview_modal_lines(app, palette, inner_width)
+        .len()
+        .saturating_sub(visible_height)
+}
+
+/// Full-screen modal for the expanded (Ctrl+O) diff preview. Honors
+/// `diff_preview.scroll` (lines from the bottom, same convention as the other
+/// detail panes) so a long diff is scrollable end-to-end — the inline
+/// live-tail viewport is bounded and has no scroll surface of its own, which
+/// is why Ctrl+O used to look "stuck".
+pub(super) fn render_diff_preview_modal(
+    frame: &mut impl FrameLike,
+    app: &crate::model::AppState,
+    palette: Palette,
+) {
+    let diff = &app.diff_preview;
+    let area = diff_overlay_area(frame.area());
+    let inner_width = usize::from(area.width.saturating_sub(2));
+    let lines = diff_preview_modal_lines(app, palette, inner_width);
+
+    let visible_height = usize::from(area.height.saturating_sub(2)).max(1);
+    let max_scroll = lines.len().saturating_sub(visible_height);
+    let scroll_from_bottom = diff.scroll.min(max_scroll);
+    let scroll_top =
+        u16::try_from(max_scroll.saturating_sub(scroll_from_bottom)).unwrap_or(u16::MAX);
+
+    // No `.wrap()`: lines are pre-clipped to the pane width, so the scroll
+    // offset maps 1:1 onto display rows and the bottom line is always
+    // reachable (wrapped rows would silently inflate the content height past
+    // `max_scroll`).
+    let pane = Paragraph::new(Text::from(lines))
+        .block(
+            titled_block(
+                t!("app.diff.title").to_string(),
+                palette,
+                true,
+                Some(t!("app.hint.diff_preview_modal").into_owned()),
+            )
+            .border_style(palette.selected()),
+        )
+        .scroll((scroll_top, 0));
 
     frame.render_widget(Clear, area);
     frame.render_widget(pane, area);

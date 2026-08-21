@@ -62,7 +62,6 @@ fn inline_diff_marker_style_for_test(kind: &str, palette: Palette) -> Style {
     diff_line_marker_style(kind, palette)
 }
 mod tests {
-    use super::super::*;
     use super::*;
     use crate::{
         cli::ThemeName,
@@ -2627,10 +2626,13 @@ mod tests {
                 .with_success(true),
         );
 
-        app.expanded_tool_outputs = true;
+        // Collapsed inline preview: the diff stays in the transcript above the
+        // composer. (Expanded state now opens the full-screen overlay instead —
+        // see specs/task-diff-preview-overlay-scroll.spec R1.)
+        app.expanded_tool_outputs = false;
         let buffer = rendered_buffer(&app, Palette::for_theme(ThemeName::Codex));
         let rows = rendered_rows(&buffer);
-        let activity = row_index_containing(&rows, "Read");
+        let activity = row_index_containing(&rows, "Agent task completed");
         let diff = row_index_containing(&rows, "Diff Preview");
         let composer = row_index_containing(&rows, "Composer");
 
@@ -2645,6 +2647,121 @@ mod tests {
         assert!(!rows.join("\n").contains("Work  sticky"));
         assert!(!rows.join("\n").contains("Activity"));
         assert!(!rows.join("\n").contains("**Hero**"));
+    }
+
+    #[test]
+    fn diff_overlay_modal_marks_selection_renders_all_hunks_and_never_wraps() {
+        // specs/task-diff-preview-overlay-scroll.spec R7: the full-screen overlay
+        // renders EVERY hunk body, carries the inline view's `›` selected-hunk
+        // marker (it is what `c` stages), and hard-clips long lines instead of
+        // wrapping them (wrapped rows would break the 1:1 scroll math).
+        let long_line = format!("{}ENDMARK", "x".repeat(300));
+        let mut app = app_with_diff(DiffPreviewGetResult {
+            status: "ready".into(),
+            source: "pending_store".into(),
+            preview: DiffPreview {
+                session_id: SessionKey("local:test".into()),
+                preview_id: PreviewId::new(),
+                title: Some("Patch".into()),
+                files: vec![DiffPreviewFile {
+                    path: "src/lib.rs".into(),
+                    old_path: None,
+                    status: "modified".into(),
+                    hunks: vec![
+                        DiffPreviewHunk {
+                            header: "@@ -1 +1 @@".into(),
+                            lines: vec![mixed_hunk_line("added", "first-hunk-body", None, Some(1))],
+                        },
+                        DiffPreviewHunk {
+                            header: "@@ -9 +9 @@".into(),
+                            lines: vec![mixed_hunk_line("added", &long_line, None, Some(9))],
+                        },
+                    ],
+                }],
+            },
+        });
+        app.diff_preview.expanded = true;
+        app.diff_preview.selected_hunk = 1;
+
+        let buffer = rendered_buffer(&app, Palette::for_theme(ThemeName::Codex));
+        let rows = rendered_rows(&buffer);
+        let joined = rows.join("\n");
+
+        assert!(
+            joined.contains("› @@ -9 +9 @@"),
+            "selected hunk carries the › marker"
+        );
+        assert!(
+            joined.contains("├ @@ -1 +1 @@"),
+            "non-selected hunk keeps the ├ marker"
+        );
+        assert!(
+            joined.contains("first-hunk-body"),
+            "the overlay renders non-selected hunk bodies too (inline caps them)"
+        );
+        // Clip assertions are scoped to the modal's own footprint — the 8%
+        // margins around it still show the inline transcript underneath,
+        // which wraps the same long line.
+        let modal = diff_overlay_area(Rect::new(0, 0, 120, 42));
+        let modal_rows: Vec<String> = rows
+            [usize::from(modal.y)..usize::from(modal.y + modal.height)]
+            .iter()
+            .map(|row| {
+                row.chars()
+                    .skip(usize::from(modal.x))
+                    .take(usize::from(modal.width))
+                    .collect()
+            })
+            .collect();
+        assert!(
+            !modal_rows.join("\n").contains("ENDMARK"),
+            "an over-wide diff line is clipped at the pane edge"
+        );
+        assert_eq!(
+            modal_rows.iter().filter(|row| row.contains("xxxx")).count(),
+            1,
+            "an over-wide diff line occupies exactly one row (clip, not wrap)"
+        );
+    }
+
+    #[test]
+    fn diff_overlay_modal_honors_side_by_side_view_mode() {
+        // specs/task-diff-preview-overlay-scroll.spec R8: `v` must visibly change the
+        // overlay — side-by-side renders the paired `old │ new` columns.
+        let mut app = app_with_diff(DiffPreviewGetResult {
+            status: "ready".into(),
+            source: "pending_store".into(),
+            preview: DiffPreview {
+                session_id: SessionKey("local:test".into()),
+                preview_id: PreviewId::new(),
+                title: Some("Patch".into()),
+                files: vec![DiffPreviewFile {
+                    path: "src/lib.rs".into(),
+                    old_path: None,
+                    status: "modified".into(),
+                    hunks: vec![DiffPreviewHunk {
+                        header: "@@ -1 +1 @@".into(),
+                        lines: vec![
+                            mixed_hunk_line("removed", "old-side", Some(1), None),
+                            mixed_hunk_line("added", "new-side", None, Some(1)),
+                        ],
+                    }],
+                }],
+            },
+        });
+        app.diff_preview.expanded = true;
+        app.diff_preview.side_by_side = true;
+
+        let buffer = rendered_buffer(&app, Palette::for_theme(ThemeName::Codex));
+        let rows = rendered_rows(&buffer);
+        let paired = rows
+            .iter()
+            .find(|row| row.contains("old-side") && row.contains("new-side"))
+            .expect("side-by-side pairs old and new on one row");
+        assert!(
+            paired.contains(" │ "),
+            "side-by-side row carries the column separator"
+        );
     }
 
     fn mixed_hunk_line(
@@ -14724,7 +14841,6 @@ mod tests {
     }
 }
 mod running_row_regression {
-    use super::super::*;
     use super::*;
     use crate::model::*;
     use crate::store::Store;

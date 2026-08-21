@@ -194,6 +194,7 @@ app:
     ctrl_o_expand: "Ctrl+O 展开"
     task_output_modal: "o 查看更多 | PgUp/PgDn | Esc 关闭"
     scroll_modal: "PgUp/PgDn | Esc 关闭"
+    diff_preview_modal: "j/k 滚动 | PgUp/PgDn | [/] 代码块 | v 视图 | c 暂存 | Esc 收起"
   plan:
     live: "实时"
   workspace:
@@ -1574,6 +1575,8 @@ status:
   diff_view_side_by_side: "并排差异视图"
   diff_view_unified: "统一差异视图"
   diff_view_too_narrow: "终端宽度不足，无法并排显示差异（需要至少 %{min} 列）"
+  diff_overlay_expanded: "差异预览已全屏展开（Esc 收起）"
+  diff_overlay_collapsed: "差异预览已收起为内联显示"
   staged_diff_context: "已为下一回合暂存所选差异代码块上下文：%{path}"
   added_diff_context: "已将所选差异代码块上下文添加到输入框：%{path}"
   accepted: "已接受"
