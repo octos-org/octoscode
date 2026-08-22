@@ -48,6 +48,18 @@ octoscode 启动时（`backend_ensure` 之后、`event_loop::run` 接管终端�
   视觉终态一致；banner 留在 scrollback，与 inline scrollback 模型不冲突。
 - **失败静默**：`splash::play` 返回 `()`，内部 `run` 的任何 `Err`（引擎错误、IO 错误、
   终端探测失败）都被吞掉，启动继续。
+- **块居中（ANSI 免疫）**：`block_pad` 在 `SplashSession::new()` 里按**最终文本**宽度
+  （`text_dimensions(text)`）一次算定并存字段；`paint()` 只用 `self.block_pad`、绝不
+  按 frame 测宽——ttfx 帧携带 SGR 颜色序列，其可打印字符会把 `UnicodeWidthStr::width`
+  撑到数百列、使 pad 坍缩为 0。块内窄行保持左对齐，对齐主 banner 的 figlet 居中
+  （`{art:<fig_w$}` + `centered()`）。
+- **平滑斜接（inline viewport 坐标系）**：不使用 `MoveTo(0,0)`——TUI 是 inline
+  viewport，从**当前光标行**开始，不是屏幕第 0 行。`run()` 结束后光标**上移回画布
+  顶行**（`\x1b[{rows-1}A\r`）而非 park 在画布下方，使 launch banner 的第一帧原地
+  覆盖 splash 终态帧。
+- **LOGO 与 banner 一致**：`LOGO` 常量与 `app::ONBOARDING_LOGO_ART` 运行时逐字节相等
+  （`\` 行延续吃掉下一行全部前导空白的行为两边一致）；`splash_text()` 的版本行无硬编码
+  缩进（居中由 `paint()` 统一处理，硬编码缩进会重复计算偏移）。
 
 ## 边界
 
@@ -137,6 +149,26 @@ octoscode 启动时（`backend_ensure` 之后、`event_loop::run` 接管终端�
   假设 以空输入文本构造 splash 使引擎构建失败
   当 调用内部 run 路径
   那么 返回错误被吞掉且函数正常返回、不 panic
+
+场景: 画布按终端宽度块居中
+  测试: paint_centers_block_to_terminal
+  假设 10 列终端与一段 2 列宽、2 行高的文本
+  当 调用 paint 绘制该文本
+  那么 每一行在清行序列后带 4 个空格的左填充
+  并且 窄于块宽的行在块内保持左对齐
+
+场景: 居中偏移对 ANSI 色码免疫
+  测试: paint_block_pad_is_ansi_immune
+  假设 帧内容被 SGR 颜色序列包裹（模拟 ttfx 真实输出）
+  当 调用 paint 绘制该帧
+  那么 左填充仍为按最终文本宽度算出的 4 列而非 0
+
+场景: run 结束时光标回到画布顶行
+  测试: run_leaves_cursor_on_canvas_top_row
+  假设 一个 2 行文本的 splash 会话跑到自然结束
+  当 run 返回
+  那么 输出尾部是上移一行加回车（\x1b[1A\r）而非换行 park
+  并且 后续 inline viewport 的首帧可原地覆盖 splash 终态
 
 <!-- lint-ack: decision-coverage — ttfx git 依赖由 cargo build 本身机械验证，无需场景 -->
 <!-- lint-ack: precedence-fallback-coverage — 门控为无序 OR 组合而非优先级链，五个单条件场景已穷举 -->
