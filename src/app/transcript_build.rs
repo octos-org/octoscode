@@ -959,6 +959,10 @@ pub(super) fn transcript_render_model(
     let visible_height = transcript_visible_height(area);
     let total_rows = transcript_visual_rows(&lines, wrap_width);
     let max_scroll = total_rows.saturating_sub(visible_height);
+    // Feed the true maximum back so `scroll_transcript_up/down` clamp to it
+    // (see `transcript_scroll_max`; same discipline as the peek overlay's
+    // `record_agent_view_scroll_max`).
+    app.record_transcript_scroll_max(max_scroll);
     let scroll_from_bottom = app.transcript_scroll.min(max_scroll);
     let metrics = TranscriptScrollMetrics {
         visible_rows: visible_height,

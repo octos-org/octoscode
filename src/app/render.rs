@@ -177,6 +177,10 @@ pub(super) fn render_live_tail_with_finalization(
     let visible_height = transcript_visible_height(area);
     let total_rows = transcript_visual_rows(&lines, wrap_width);
     let max_scroll = total_rows.saturating_sub(visible_height);
+    // Feed the true maximum back so `scroll_transcript_up/down` clamp to it
+    // (see `transcript_scroll_max`; same discipline as the peek overlay's
+    // `record_agent_view_scroll_max`).
+    app.record_transcript_scroll_max(max_scroll);
     let scroll_from_bottom = app.transcript_scroll.min(max_scroll);
     let scroll_top =
         u16::try_from(max_scroll.saturating_sub(scroll_from_bottom)).unwrap_or(u16::MAX);
@@ -343,6 +347,7 @@ pub(super) fn render_chat_layout(frame: &mut impl FrameLike, app: &AppState, pal
         frame.render_widget(transcript.paragraph, areas.transcript);
         if app.transcript_pager_active {
             render_pager_scrollbar(frame, metrics, areas.transcript, palette);
+            render_scroll_to_bottom_button(frame, app, metrics, areas.transcript, palette);
         }
         // `/btw` aside floats over the top of the transcript as a distinct pane.
         render_btw_overlay(frame, app, palette, areas.transcript);
@@ -1253,6 +1258,53 @@ pub(super) fn render_pager_scrollbar(
             cell.set_style(palette.muted());
         }
     }
+}
+
+/// Floating "jump to latest" button for the pager: a small ` ▼ ` chip in the
+/// transcript's bottom-right corner, just left of the scrollbar lane, shown
+/// only while the view is scrolled away from the bottom. Mouse capture is
+/// always on inside the pager (`wants_mouse_capture`), so the click is
+/// deliverable; the hit rect is written back onto `AppState` because only the
+/// renderer knows the laid-out transcript area (one-frame-stale `Cell`, same
+/// as `agent_view_scroll_max`). REVERSED turns the accent foreground into a
+/// solid accent chip in every theme, including the `terminal` theme where the
+/// surface colors are `Reset`.
+pub(super) fn render_scroll_to_bottom_button(
+    frame: &mut impl FrameLike,
+    app: &AppState,
+    metrics: TranscriptScrollMetrics,
+    area: Rect,
+    palette: Palette,
+) {
+    let label = " ▼ ";
+    let width = UnicodeWidthStr::width(label) as u16;
+    // 1 column scrollbar lane + 1 gap so the button never covers the thumb.
+    if metrics.scroll_from_bottom == 0 || area.height == 0 || area.width < width + 2 {
+        app.record_scroll_to_bottom_button(None);
+        return;
+    }
+    let button = Rect::new(
+        area.x + area.width - width - 2,
+        area.y + area.height - 1,
+        width,
+        1,
+    );
+    frame.render_widget(Clear, button);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            label,
+            palette
+                .title()
+                .add_modifier(Modifier::REVERSED | Modifier::BOLD),
+        ))),
+        button,
+    );
+    app.record_scroll_to_bottom_button(Some(ScrollToBottomHit {
+        x: button.x,
+        y: button.y,
+        width: button.width,
+        height: button.height,
+    }));
 }
 
 pub(super) fn render_btw_overlay(
