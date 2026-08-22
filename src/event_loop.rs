@@ -10,7 +10,8 @@ use crossterm::{
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableBracketedPaste, EnableFocusChange, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+        MouseEventKind,
     },
     execute,
     terminal::{
@@ -600,9 +601,21 @@ fn drain_backend_events(backend: &mut dyn AppUiBackend, store: &mut Store) -> Re
 }
 
 /// Give the initial protocol capabilities probe a bounded chance to land before
-/// the first frame. First-launch onboarding is capability-gated, so drawing
-/// before this handshake can flash or stick on an empty inline composer.
+/// the first frame — but ONLY on first launch. First-launch onboarding is
+/// capability-gated, so drawing before this handshake can flash or stick on an
+/// empty inline composer. A routine launch (local profiles already on disk, or
+/// a profile pinned via `--profile-id`) skips the wait entirely and draws the
+/// first frame immediately: the composer/status UI needs no capabilities to
+/// render, and the handshake lands asynchronously in the main loop. The
+/// capabilities probe is only ever issued at startup — onboarding opens from
+/// its arrival — so an already-open menu or an already-connected session is
+/// also settled state and skips the wait regardless of profile discovery
+/// (e.g. remote launches, where the registry is not locally visible and
+/// `available_profiles` is always empty).
 fn drain_initial_startup_events(backend: &mut dyn AppUiBackend, store: &mut Store) -> Result<bool> {
+    if !is_first_launch(store) {
+        return Ok(false);
+    }
     let deadline = Instant::now() + INITIAL_CAPABILITIES_HANDSHAKE_TIMEOUT;
     let mut applied = false;
     while should_wait_for_initial_capabilities(store) {
@@ -613,6 +626,17 @@ fn drain_initial_startup_events(backend: &mut dyn AppUiBackend, store: &mut Stor
         std::thread::sleep(INITIAL_CAPABILITIES_HANDSHAKE_POLL);
     }
     Ok(applied)
+}
+
+/// First launch = the launch-time profile probe found no locally-spawned
+/// profile to resume (no discovered profiles, no `--profile-id` pin), no
+/// session is connected yet, and onboarding has not already opened. Only this
+/// case blocks the first frame on the capabilities handshake.
+fn is_first_launch(store: &Store) -> bool {
+    store.state.sessions.is_empty()
+        && store.state.onboarding.available_profiles.is_empty()
+        && store.state.onboarding.launch_profile_id.is_none()
+        && !store.state.menu_stack.is_active()
 }
 
 fn should_wait_for_initial_capabilities(store: &Store) -> bool {
@@ -972,6 +996,21 @@ fn handle_mouse(store: &mut Store, mouse: MouseEvent) -> KeyAction {
     match mouse.kind {
         MouseEventKind::ScrollUp => scroll_current_surface_up(store, lines),
         MouseEventKind::ScrollDown => scroll_current_surface_down(store, lines),
+        // A left click on the pager's floating ▼ button jumps back to the
+        // latest output — the mouse counterpart of the End binding. Capture is
+        // guaranteed on while the pager is up (`wants_mouse_capture`), and the
+        // pager gate keeps a stale hit rect from eating clicks after it closes
+        // (pinned mode keeps capture on in the inline flow).
+        MouseEventKind::Down(MouseButton::Left)
+            if store.state.transcript_pager_active
+                && store
+                    .state
+                    .scroll_to_bottom_button
+                    .get()
+                    .is_some_and(|hit| hit.contains(mouse.column, mouse.row)) =>
+        {
+            store.state.scroll_transcript_to_latest();
+        }
         _ => {}
     }
     KeyAction::Continue
@@ -4910,6 +4949,77 @@ mod tests {
         assert!(
             written.contains("Welcome to Octos"),
             "onboarding should render before the first frame; wrote {written:?}"
+        );
+    }
+
+    /// Routine launch (local profiles already on disk): the capabilities
+    /// handshake must NOT block the first frame. The startup drain returns
+    /// immediately with nothing applied, and the probe event stays queued for
+    /// the main loop to apply asynchronously after the first draw. Guards the
+    /// startup fast path: previously this blocked up to
+    /// `INITIAL_CAPABILITIES_HANDSHAKE_TIMEOUT` (1.5 s) — 80%+ of launch time.
+    #[test]
+    fn startup_drain_skips_handshake_wait_when_profiles_exist() {
+        let mut backend = FakeBackend::new(vec![onboarding_capabilities_event()]);
+        let mut store = Store {
+            state: AppState::new(
+                vec![],
+                0,
+                "starting".into(),
+                Some("stdio:octos serve --stdio --solo".into()),
+                false,
+            ),
+        };
+        store.state.onboarding.available_profiles = vec!["glm".into()];
+
+        let started = Instant::now();
+        let applied =
+            drain_initial_startup_events(&mut backend, &mut store).expect("startup drain");
+
+        assert!(
+            !applied,
+            "routine launch applies nothing before the first frame"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "routine launch must not wait on the handshake: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            !app::wants_fullscreen_overlay(&store.state),
+            "onboarding must not open before the first frame on a routine launch"
+        );
+        assert_eq!(
+            backend.events.len(),
+            1,
+            "the handshake lands asynchronously in the main loop"
+        );
+    }
+
+    /// First launch (no locally-spawned profiles discovered): the startup
+    /// drain KEEPS the bounded handshake wait so the capability-gated
+    /// onboarding wizard renders before the first frame, instead of flashing
+    /// or sticking on an empty inline composer.
+    #[test]
+    fn startup_drain_waits_for_handshake_on_first_launch() {
+        let mut backend = FakeBackend::new(vec![onboarding_capabilities_event()]);
+        let mut store = Store {
+            state: AppState::new(
+                vec![],
+                0,
+                "starting".into(),
+                Some("stdio:octos serve --stdio --solo".into()),
+                false,
+            ),
+        };
+
+        let applied =
+            drain_initial_startup_events(&mut backend, &mut store).expect("startup drain");
+
+        assert!(applied);
+        assert!(
+            app::wants_fullscreen_overlay(&store.state),
+            "first-launch onboarding must be open before the first frame"
         );
     }
 
