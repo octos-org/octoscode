@@ -60,11 +60,16 @@ axoupdater = { version = "0.10", default-features = false, features = ["github_r
 zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
 sha2 = "0.11.0"
 tempfile = "3.27.0"
-rustix = "1.1.4"
+# `process` + `termios` are needed by the suspend/resume path (SIGTSTP/SIGCONT
+# handling, terminal mode restore); declared explicitly rather than relying on
+# feature unification from other crates in the tree.
+rustix = { version = "1.1.4", features = ["process", "termios"] }
 # Keep the parent alive while an attached `!` child receives terminal-generated
 # Ctrl+C/Ctrl+\\. The child resets caught handlers on exec and retains normal
-# shell cancellation semantics.
-signal-hook = "0.3"
+# shell cancellation semantics. Also used for suspend/resume resilience:
+# SIGCONT via the async-signal-safe flag pattern (0.3.18 is already in the
+# tree transitively via crossterm/signal-hook-mio).
+signal-hook = "0.3.18"
 
 [features]
 default = ["update"]
