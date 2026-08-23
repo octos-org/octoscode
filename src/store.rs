@@ -8569,6 +8569,13 @@ impl Store {
                 octos_core::ui_protocol::hydrate_sections::THREADS.into(),
                 octos_core::ui_protocol::hydrate_sections::TURNS.into(),
                 octos_core::ui_protocol::hydrate_sections::PENDING_APPROVALS.into(),
+                // OUTER_LOOP_REVIEW #12 re-review: the dedupe makes the FIRST
+                // dispatch win, and the open path usually wins — so it must
+                // also carry pending_questions, or a parked question (e.g. a
+                // peer's question escalation) silently loses its modal after
+                // a restart. No hydrate_sections constant exists upstream;
+                // the literal matches the resume path's include.
+                "pending_questions".into(),
             ],
         }))
     }
@@ -37937,6 +37944,11 @@ now analyzing the bus module"
                         octos_core::ui_protocol::hydrate_sections::THREADS.to_string(),
                         octos_core::ui_protocol::hydrate_sections::TURNS.to_string(),
                         octos_core::ui_protocol::hydrate_sections::PENDING_APPROVALS.to_string(),
+                        // OUTER_LOOP_REVIEW #12 re-review: the dedupe makes the
+                        // first dispatch win, so the open path must also carry
+                        // pending_questions or a parked question's modal is
+                        // silently lost after a restart.
+                        "pending_questions".to_string(),
                     ]
                 );
             }
@@ -41586,6 +41598,66 @@ now analyzing the bus module"
         assert!(
             store.state.hydrate_in_flight.is_empty(),
             "relaunch drops dead in-flight markers"
+        );
+    }
+
+    /// OUTER_LOOP_REVIEW #12 re-review: the dedupe makes the FIRST dispatch
+    /// win, and the open path usually wins — so the open path's include must
+    /// carry `pending_questions`, or a parked question (e.g. a peer's question
+    /// escalation) silently loses its modal after a restart.
+    #[test]
+    fn open_path_hydrate_includes_pending_questions() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+
+        let Some(AppUiCommand::HydrateSession(params)) =
+            store.hydrate_session_state_command(&session_id)
+        else {
+            panic!("expected a hydrate dispatch");
+        };
+        assert!(
+            params.include.iter().any(|s| s == "pending_questions"),
+            "the open-path include must carry pending_questions: {:?}",
+            params.include
+        );
+    }
+
+    /// The end-to-end half of the re-review contract: a hydrate answer whose
+    /// `pending_questions` carries a parked question surfaces it as a visible
+    /// modal after a restart.
+    #[test]
+    fn hydrated_parked_question_surfaces_as_modal() {
+        use crate::client_event::ClientEvent;
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+        let turn_id = store
+            .state
+            .active_session()
+            .and_then(|s| s.live_reply.as_ref().map(|l| l.turn_id.clone()))
+            .unwrap_or_else(octos_core::ui_protocol::TurnId::new);
+
+        let question = octos_core::ui_protocol::UserQuestionRequestedEvent::new(
+            session_id.clone(),
+            octos_core::ui_protocol::QuestionId::new(),
+            turn_id,
+            "Parked question",
+            "Answer me after restart",
+            Vec::<octos_core::ui_protocol::UserQuestion>::new(),
+        );
+        let hydrate = hydrate_result_with_turns(&session_id, vec![]);
+        let hydrate = octos_core::ui_protocol::SessionHydrateResult {
+            pending_questions: Some(vec![question]),
+            ..hydrate
+        };
+        store.apply_client_event(ClientEvent::SessionHydrate(hydrate));
+
+        assert!(
+            store
+                .state
+                .user_question
+                .as_ref()
+                .is_some_and(|picker| picker.visible),
+            "the parked question must surface as a visible modal after hydrate"
         );
     }
 
