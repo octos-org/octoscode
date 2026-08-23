@@ -63,6 +63,18 @@
    仅在显式 solo opt-in 下可设——漏掉它的症状是
    "requested permission profile is not allowed outside local solo mode"。
 
+0b. **权限档 = 文件系统沙箱开关,不是审批开关**(2026-08-24 实战定论):
+   /permissions 菜单 1-4 档(Default/Read Only/Workspace Write/Never Ask)
+   都运行在 bwrap 沙箱里——只挂载工作区与系统目录,`~/.cargo`/`~/.rustup`
+   **不可见**,任何构建命令都是 "command not found",历史上 peer 反复声明
+   "本机无工具链" 的真相即此。要跑构建必须第 5 档 **Full Access**(免沙箱),
+   或 serve 带 **`--danger-full-access`**(默认所有未显式选择的 session 为
+   Full Access;solo 门控;`OCTOS_DANGER_FULL_ACCESS=1` 等价)。注意:
+   给 agent 授免沙箱权限属 operator 亲手动作——外环自己的 harness 也会
+   拦截代按,不要尝试绕过。标准启动命令:
+   `octoscode --stdio-command 'octos serve --stdio --solo --danger-full-access'`。
+   重启 checklist:①上述命令启动(operator)②`/loop resume`(外环可代)。
+
 1. 数据根:`~/.octos/instances/<cwd-hash>/profiles/<profile>/data`
    (cwd-hash = 项目目录的 DefaultHasher 十六进制;L1 将提供查询命令代替自算)。
 2. 挂事件监听:tail serve 日志,过滤 `peer-goal:|escalation|transitioned goal|ERROR`。
@@ -135,6 +147,54 @@ L2 的 steer API 将消除"需要 operator 说一句话"这最后一步。
 正确。具体行为只能由 main 上的代码、绑定 commit 的测试和独立复验确认。
 主要摩擦点(观测靠 tail 日志、寻址靠自算 hash、steer 靠 TUI 注入)仍是
 L1/L2 路线的动机,对应 REQ-OLP-{OBS,CTRL,HEADLESS}。
+
+## 实战沉淀·第二辑(2026-08-24 性能战役,10.5s→0.21s 全程)
+
+一次跨两仓库的真实性能战役(octoscode #578 + octos #2114),外环三次
+带证据改判、内环两次带证据抗命、一次外环拦截倒退修复。教训按角色归档:
+
+### 外环派发纪律
+
+- **迭代预算是任务切分的硬约束**:内环单 turn 有迭代上限(实测 50),
+  超限即静默收工(改动留工作区、无 commit 无 ACK,外观像"卡住")。
+  任务书必须按 turn 预算切片(如 commit A/B 分步),重活拆成连续小条目。
+- **指导粒度决定成败**:给"设计要求"内环会拿模糊方向瞎撞(丢唤醒假说、
+  writer 重写两次弯路);给"行号级定位 + 证据链 + 照图施工"一次到位。
+  定位性工程(读代码、置探针、断因果)是外环的活,不要外包给苦力模型。
+- **外环诊断用独立 git worktree**:与内环共享工作区做探针实验必然纠缠
+  (实测:探针与修复混编译断、diff-preview 竞态 SIGBUS)。R4 的外环版:
+  诊断改动永不落在内环正在写的 worktree。
+
+### 验收纪律(R2 增补)
+
+- **测试全绿 ≠ 真机正确,外环真机验收是终审**。两个实证反例:快照机制
+  单测全过但对存量大账本零收益(cadence 永远不触发);writer 超时重驱动
+  内存 duplex 测试全过但真管道字节流损坏(write_all 被 drop 丢进度偏移)。
+  凡涉 IO/并发,test double 必须用真 OS 原语(真管道、真文件),内存
+  替身只配当冒烟。
+- **恒定时长 = 固定成本或超时**的启发式两次立功:耗时不随数据量变 →
+  别在数据路径找,去找 timeout/池 keep_alive/固定循环。
+- **探针三重校验**:源文件 grep → 二进制 strings → 运行时输出,三关都过
+  才算探针在场;缺一关就会像"writer 无输出"那样误导整轮推理。
+- 观测两坑:tracing subscriber 可能是线程作用域——裸 OS 线程(如专职
+  writer 线程)的 tracing 输出会静默丢失,改直写文件;serve 子进程的
+  stderr 被 octoscode 收进 ring buffer,eprintln 探针不可见。
+
+### git 运维
+
+- **"同内容异历史"的收编**:cherry-pick 拆 PR 上游合并后,本地 main 与
+  origin/main 是同样改动、不同哈希——此时 pull/rebase = 每文件冲突地狱。
+  正解:存档分支(`archive/<date>`)→ `reset --hard origin/main` → 唯一
+  上游没有的内容(黑板叙事)单 commit 补回。
+- **octos 构建永远带 `--features api`**:漏掉则 serve 子命令消失,
+  octoscode 启动失败,症状与代码 bug 无法区分(累计踩坑三次)。
+
+### 外环 harness 自身边界
+
+外环(Claude Code)的权限分类器会拦截:给 agent 授免沙箱权限、批量搬移
+serve 数据目录等动作。这类动作按 operator-tier 处理:摆好现场(菜单开到
+目标项、命令写好)交 operator 一键完成,不要尝试绕过——R3 由"外环不应
+代按"升级为"外环技术上也无法代按",这是特性不是缺陷。
 
 ## 已知局限(v0)
 
