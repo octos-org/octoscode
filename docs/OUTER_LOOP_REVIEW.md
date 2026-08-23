@@ -374,7 +374,7 @@ ACK:
 - 36 个孤儿 spec + 6 个 parse error 清理(可拆多 peer)。
 - 黑板已闭条目的定期归档(防黑板无限膨胀)。
 
-ACK:
+ACK: P0 收尾完成(2026-08-24 凌晨,cargo 窗口恢复后补跑):`cargo build --release` 通过(36.8s 编译,Finished release),`cargo test --lib` **1938 passed / 0 failed / 1 ignored**(3.27s)——main 同步到 origin/main(876fd4a,含上游 #569-577)+ 黑板 11-15 条恢复(b0e0e72)后的树全绿。运维单六项全部闭合(存档分支 archive/local-main-20260824、reset、黑板恢复 commit、build、test、状态报告)。
 
 ### 17. 夜间自治窗口(2026-08-24 夜,operator 授权,晨起审查)
 
