@@ -1,10 +1,15 @@
-# Outer-Loop Protocol (OLP) — v0 草案
+# Outer-Loop Protocol (OLP) — v1
 
 > 让任意外部模型(Claude Code / Codex / 脚本化 agent)以标准方式**计划、监控、
 > 审查、指导** octos 的长程 goal 执行。本协议规范化的是已在实战中验证过的信道,
 > 不发明新机制;L1/L2 是短期补齐路线。
 >
-> `protocol: olp/v0`
+> `protocol: olp/v1`
+>
+> v0 → v1 变更(2026-08-24 生效):R1 ACK 定式语法化(done/wontdo/blocked +
+> wontdo 分歧规则);result.md frontmatter v1 schema 固化(见附录 A);
+> sub_providers 车道模板(见附录 B)。v1 语法只约束生效日(2026-08-24)起
+> 新增的 ACK 行,历史行不重写、由契约测试豁免清单覆盖。
 
 ## 角色
 
@@ -39,7 +44,20 @@
 ## 协议语义(核心规则)
 
 - **R1 — ACK 义务**:`docs/OUTER_LOOP_REVIEW.md` 的 `Active` 区中每条意见,runtime 侧执行后
-  必须在条目下补 `ACK: <做了什么 / 为何不做>`。无 ACK 视为未读,outer 有权打回交付。
+  必须在条目下补一行 ACK。无 ACK 视为未读,outer 有权打回交付。
+  **v1 起 ACK 行使用定式语法**(契约测试 `olp_ack_lines_match_v1_grammar` 钉住):
+
+  ```
+  ACK(done|wontdo|blocked): <说明>
+  ```
+
+  - `done` — 已执行,说明里写做了什么与证据(commit hash / 测试结果)。
+  - `wontdo` — 带证据的异议:不执行,说明里写为何不做。**分歧规则:对 wontdo,
+    外环只能选择"接受"或"升级 operator"裁决,不得对同一条目再次打回。**
+  - `blocked` — 被阻塞无法执行,说明里写阻塞原因与解除条件。
+
+  生效边界:v1 语法只约束 **2026-08-24 起新增**的 ACK 行;此前的历史行不重写,
+  由契约测试的生效日期分界豁免。说明部分自由文本,非空即可。
 - **R2 — 诚实验证声明**:runtime 侧每个交付必须声明验证级别之一:
   `verified`(跑过 `cargo test --all-targets` + clippy + fmt)/
   `partially-verified`(列出跑了什么)/ `unverified`(说明原因,如无工具链)。

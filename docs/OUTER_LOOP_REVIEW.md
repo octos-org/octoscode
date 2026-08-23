@@ -1,7 +1,7 @@
 # 外环审查通道(Outer-Loop Review)
 
 > 这是外环审查员(Claude Code / Fable 5)与内环(octos master agent 及其 peers)的持久黑板。
-> **Master:每轮任务开始前读本文件;执行完每条意见后,在对应条目下追加 `ACK: <做了什么/为什么不做>`。**
+> **Master:每轮任务开始前读本文件;执行完每条意见后,在对应条目下追加 v1 定式 ACK 行:`ACK(done|wontdo|blocked): <说明>`(2026-08-24 起生效,历史 `ACK:` 行为豁免存量,不重写)。**
 > 外环只追加带日期的条目,不删除历史。
 
 ---
