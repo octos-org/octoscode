@@ -421,7 +421,7 @@ satisfies REQ-OLP-PROTO)。本仓库任务,分支 feat/olp-proto-v1。
    ——按契约场景处理;若契约对存量行为含糊,**先在本条 ACK 写异议问外环**,
    勿自行猜测(候选方案:v1 语法只对协议升版后新增行生效,存量行豁免)。
 
-ACK:
+ACK: 已完成(分支 feat/olp-proto-v1,peer `implement-olp-proto-v1` 实施)。**片 1**(ed72951):ACK 定式语法 `ACK(done|wontdo|blocked): <说明>` 写入 OLP 文档与 AGENTS.md,协议头双处同步升 olp/v1,R1 修订落笔(wontdo 外环只能接受或升级,不得重复打回)。**片 2**(2c20085):result.md frontmatter v1 schema 附录(六字段 slug/outcome/updated_unix/turn/verified/protocol + 未知字段忽略约定)+ sub_providers cheap/strong 车道模板与双环搭配矩阵。**片 3**(5bab83d + master 收尾 f076e8d/5bbf665):`tests/olp_contract.rs` 五个契约测试全落地——ACK v1 语法(历史行豁免清单)、非法状态词拒绝、车道模板 TOML 可解析且 description 非空、双处版本一致 olp/v1、schema 字段清单一致;Cargo.lock 补 toml 依赖。**存量 ACK 行处理**:契约不含糊(豁免清单 + v1 生效日期分界),按候选方案直接实施,未写异议。**验证**(master 侧,cargo 窗口):cargo test --all-targets 2126 passed / 0 failed;clippy --all-targets -D warnings 干净;fmt 干净(f076e8d 补 fmt 修正)。
 
 ---
 
