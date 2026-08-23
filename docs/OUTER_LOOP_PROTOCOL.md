@@ -189,6 +189,19 @@ L1/L2 路线的动机,对应 REQ-OLP-{OBS,CTRL,HEADLESS}。
 - **octos 构建永远带 `--features api`**:漏掉则 serve 子命令消失,
   octoscode 启动失败,症状与代码 bug 无法区分(累计踩坑三次)。
 
+### 驱动机制选型:直驱 master vs /goal + peer(实战定型)
+
+两种驱动共用黑板 + ACK 契约层,按「外环在不在线」选:
+
+- **外环在线盯着(交互式攻坚、SDD 逐片验收)→ 直驱 master**:herdr
+  注入 user-message,master 本人执行。切片化后每片一个 turn,比
+  handoff→peer→gather 少两跳;外环本身就是 keeper,goal keeper 冗余。
+- **外环离线/长程(过夜无人值守、多任务并行)→ /goal 承载**:keeper
+  跨 turn 自动推进、peer 并行、escalation 走 goal 账本 durable 兜底,
+  外环回线后按账本收账。
+- 历史注:验证期 peer 沙箱无工具链曾是"master 直做"的附加理由,
+  Full Access 默认化后该差异消失,选型只看在线性。
+
 ### 派发与改判的制度化(审计补漏)
 
 - **任务书两种体裁,不要混用**:(a) **SDD 契约引用型**——黑板条目只放
