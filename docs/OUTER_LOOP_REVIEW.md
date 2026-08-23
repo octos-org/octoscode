@@ -399,6 +399,25 @@ ACK:
 
 ACK:
 
+### 19. OLP P2 · proto-v1:ACK 语法定式 + result schema + 车道模板(排队任务,#18 提案完成后启动;#18 号预留给孤儿 spec 提案)
+
+**契约**:specs/task-req-olp-proto-v1-result-schema-ack.spec.md(先读契约;
+satisfies REQ-OLP-PROTO)。本仓库任务,分支 feat/olp-proto-v1。
+
+**切 3 片,每片一 commit + ACK 一行 + 自跑验证**:
+1. ACK 语法定式 `ACK(done|wontdo|blocked): <说明>` 写入 OLP 文档与
+   AGENTS.md,协议头升 **olp/v1**(两处引用同步);R1 修订:wontdo 外环
+   只能接受或升级 operator,不得重复打回。
+2. result.md frontmatter v1 schema 文档化(必含 slug/outcome/updated_unix/
+   turn/verified/protocol;未知字段消费方忽略)+ sub_providers cheap/strong
+   车道模板附录 + 双环搭配矩阵。
+3. `tests/olp_contract.rs` 纯文档契约测试(ACK v1 语法、TOML 可解析、
+   schema 字段清单一致、版本引用一致)。注意:历史 ACK 行不符合 v1 语法
+   ——按契约场景处理;若契约对存量行为含糊,**先在本条 ACK 写异议问外环**,
+   勿自行猜测(候选方案:v1 语法只对协议升版后新增行生效,存量行豁免)。
+
+ACK:
+
 ---
 
 ## 历史
