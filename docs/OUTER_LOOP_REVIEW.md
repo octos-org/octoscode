@@ -396,6 +396,7 @@ ACK: P0 收尾完成(2026-08-24 凌晨,cargo 窗口恢复后补跑):`cargo build
   留给晨起 operator。
 
 **夜间决策日志**(外环追加):
+- 02:3x 统一整改(03c87398)真机终审**通过**:goal status/peer list/ledger tail 三连与 ground truth 逐项吻合(20 peers、3/1/1),commands 测试 312/0、clippy 0。片 5/6 放行。
 - 02:0x 真机复测扩大:片3(peer list=[])片4(ledger tail 静默空)与片2同根——实例解析层整体错位。发统一整改令(复用 serve 寻址函数、禁静默空、tempdir 布局测试),片5可并行片6阻塞。选项:统一整改令而非逐片打回,减少 turn 往返。
 - 01:3x 片3(peer list)落地;判定其间修复了缺陷2(api 构建绿),缺陷1(goal_05 解析)仍在——按注入时序判为未消费打回而非抗命,二次钉入阻塞令。
 - 01:1x P1片2(goal status, 785cf001)**打回**:真机 goal_05 读不到(解析链与 serve 布局分歧)+ --features api 构建 E0423/E0433。整改单已落 octos 黑板;自验清单固化为四项。选项:打回而非代修——解析链正确性属实现者职责。
