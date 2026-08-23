@@ -344,6 +344,38 @@ ACK:
 
 ACK:
 
+### 16. 双环协作正式开工:工作总纲(2026-08-24,外环制定,operator 批准后生效)
+
+验证期结束(v0 全条款实证 + 10.5s→0.21s 战役收官),转入常态运行。
+队列按优先级,内环凡完成一项在此 ACK 一行;外环负责验收与重排:
+
+**P0 · 在途收尾**
+- octoscode #578 与 octos #2114 等 operator 手测转 ready(外环跟踪)。
+- 运维单遗留:main 同步后的 build+test 验证(cargo 已恢复可用,补跑并 ACK)。
+
+**P1 · OLP L1 落地(解放外环的 tail 监控)——第二内环(octos 仓库)**
+- 按 specs/task-req-olp-obs-cli.spec.md 施工:goal status/peer list/
+  ledger tail 三个 --json 命令 + events.jsonl + inbox path。
+- 完成后按 specs/task-req-olp-evt-subscribe.spec.md 施工 WS 订阅端点。
+- 纪律照旧:分支制、切片提交、R2 由外环接、真机终审。
+
+**P2 · 控制通道正式化——排在 P1 后**
+- ctrl-steer(specs/task-req-olp-ctrl-steer.spec.md):session/steer API;
+  过渡期继续用 herdr send-keys 事实标准。
+- proto-v1 result schema(octoscode 侧,第一内环)。
+
+**P3 · F1 毕业考:过夜无人值守试跑**
+- 前置全齐:--danger-full-access 默认、loop 心跳、审批链、监控。
+- 设计:入夜前外环把任务批次写黑板(候选:36 孤儿 spec 清理、octos 2b
+  writer 去杂交、#14 edit_file 原子写),心跳自转,清晨外环收账出报告。
+- 时间由 operator 定。
+
+**P4 · 卫生债(loop 心跳的日常口粮)**
+- 36 个孤儿 spec + 6 个 parse error 清理(可拆多 peer)。
+- 黑板已闭条目的定期归档(防黑板无限膨胀)。
+
+ACK:
+
 ---
 
 ## 历史
