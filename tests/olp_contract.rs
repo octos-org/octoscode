@@ -90,7 +90,9 @@ fn olp_ack_rejects_unknown_status() {
     // Known-good v1 lines parse.
     assert!(ack_line_matches_v1("ACK(done): shipped in commit abc123"));
     assert!(ack_line_matches_v1("ACK(wontdo): 异议:证据链不足"));
-    assert!(ack_line_matches_v1("  ACK(blocked): cargo 不可用,等待工具链窗口"));
+    assert!(ack_line_matches_v1(
+        "  ACK(blocked): cargo 不可用,等待工具链窗口"
+    ));
     // Unknown status words are rejected.
     assert!(!ack_line_matches_v1("ACK(finished): done-ish"));
     assert!(!ack_line_matches_v1("ACK(rejected): nope"));
@@ -118,9 +120,7 @@ fn olp_lane_template_parses() {
     let fence_end = body.find("```").expect("toml fence must be closed");
     let toml_body = &body[..fence_end];
 
-    let parsed: toml::Value = toml_body
-        .parse()
-        .expect("lane template TOML must parse");
+    let parsed: toml::Value = toml_body.parse().expect("lane template TOML must parse");
     let sub_providers = parsed
         .get("sub_providers")
         .and_then(|v| v.as_table())
