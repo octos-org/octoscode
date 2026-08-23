@@ -422,7 +422,39 @@ ACK:
 
 ---
 
-## 历史
+### 18. P4 预备:孤儿 spec 与 parse error 三分类提案(2026-08-24 凌晨,内环夜班)
+
+按 #16 P4 授权盘点 specs/(49 个文件)。口径:孤儿 = spec 内 `测试:` 引用的测试名
+在 src//tests/ 中全部缺失(0% 命中);漂移 = 部分缺失;健康 = 100% 命中。
+**本条目只提案,不删除任何文件;删除/归档权留晨起 operator。**
+
+**盘点总览**:49 个 spec — 孤儿 10 个、漂移 4 个(75-83% 命中)、健康 35 个;
+parse error 6 个(与孤儿有重叠,见下)。
+
+**三分类提案**:
+
+**(A) 修复(有活代码,引用漂移或语法破损——修 spec 而非删)**:
+- `task-d…(doctor live capability probe)`(8/10 命中):2 个测试名漂移,补测试或修 spec 名
+- `task-geometry-helper.spec`(3/4):1 个漂移
+- `task-o…(5/6)`、`task-scrollmode-command.spec`(5/6):各 1 个漂移
+- parse error 4 个(`task-a…`、`task-a…`、`task-i…`、`task-o…`、`task-t…` 中的 5 处——注:`task-a…` 有两个同名文件,一处 parse error 一处正常):顶层节标题用了 `最小实现计划`/`Completion Conditions`/`注：…` 等非法节名,改为合法节(Intent/Decisions/Boundaries/Acceptance Criteria)即可修
+
+**(B) 归档(历史任务已完成,spec 只剩叙事价值——移入 specs/archive/ 保留)**:
+- `task-a…(Activity navigator recent changes)`:0 引用,功能已在 8/8 命中的姊妹 spec 覆盖
+- `task-i…(Inline diff preview Livediff polish)`:0 引用,livediff 线已并入 diff-preview overlay spec
+- `task-t…(Transcript diff code block semantic highlight)`:0 引用,已被 c…(代码块高亮 fg-only)取代
+- `ch02-events.spec.md`:book-chapter 型(缺 spec: 字段,parse error),非任务契约,归档
+
+**(C) 保留但转交(未实施的在途工作,孤儿是因为代码还没写——不是死 spec)**:
+- `task-req-olp-obs-cli.spec.md`、`task-req-olp-ctrl-steer.spec.md`、`task-req-olp-exec-peer.spec.md`:OLP P1/P2 在途(#16 总纲点名),spec 先行代码未动——保留,归 OLP workstream
+- `task-r…(herdr 驾驶舱)`(0/7)、`task-r…(headless client)`(0/5):OLP 运行时阶段 1/2,在途——保留
+- `task-r…(OLP v1 ACK 语法)`(0/5):octoscode 侧 OLP v1,在途——保留
+
+**与黑板"36 孤儿"口径的差异**:本盘点 0% 命中 10 个;若把口径放宽到"场景级未绑定"(matrix 的 ungrouped/uncovered 维度)数字会更大(audit 报 305 场景中 235 ungrouped)——36 可能来自该口径。两口径的清单都已在上表,晨起可按任一口径裁定。
+
+**建议执行顺序**(晨起后):先 (A) 修复(改动最小、收益最直接——parse error 修复后 agent-spec guard 才能全绿),再 (B) 归档(移目录,git 历史保留),(C) 不动。
+
+ACK:
 
 - 2026-08-22 02:15 曾经由 inbox goal-progress notes 递送过第 1/3 条的早期版本;
   该通道是 read-and-clear 的一次性注入,不适合需要 ACK 的指导,自本文件起
