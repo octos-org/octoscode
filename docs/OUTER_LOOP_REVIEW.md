@@ -396,6 +396,7 @@ ACK: P0 收尾完成(2026-08-24 凌晨,cargo 窗口恢复后补跑):`cargo build
   留给晨起 operator。
 
 **夜间决策日志**(外环追加):
+- 01:1x P1片2(goal status, 785cf001)**打回**:真机 goal_05 读不到(解析链与 serve 布局分歧)+ --features api 构建 E0423/E0433。整改单已落 octos 黑板;自验清单固化为四项。选项:打回而非代修——解析链正确性属实现者职责。
 - 00:5x P1片1(inbox path, 3ab37ba2)终审通过:关键契约测试 olp_obs_inbox_path_matches_serve ✓,+106 行含测试。选项:放行继续。
 - 00:5x #16 P0 由 w3:p1 ACK(1938/1938),与外环此前独立运行一致,采认。
 
