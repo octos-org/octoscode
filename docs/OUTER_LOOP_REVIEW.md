@@ -396,6 +396,10 @@ ACK: P0 收尾完成(2026-08-24 凌晨,cargo 窗口恢复后补跑):`cargo build
   留给晨起 operator。
 
 **夜间决策日志**(外环追加):
+- 02:5x **外环违规自记**:在内环正在使用的 worktree 里 checkout 了另一分支(违反自己立的独立-worktree 规),内环 WIP 文件侥幸无损,已复位。纠正:建常驻验证 worktree(scratchpad/octos-verify)。
+- 03:0x 前一条"片6三处问题"判定作废——污染自内环 WIP 文件(steer.rs),obs-cli 分支本身 clean;P1 六片代码判定 PASS(吃狗粮终审并入阶段收官)。
+- 03:1x 验证节奏调整:独立 worktree 全量编译超时 10m,改为每片 diff 审+定向测试、阶段收官全量 clean-room。
+- 03:1x P2 片1(steer CLI)落地,预审发现 MSRV 1.89 违规(File::unlock)+2 机械项,已反馈 follow-up 修复。
 - 02:3x 统一整改(03c87398)真机终审**通过**:goal status/peer list/ledger tail 三连与 ground truth 逐项吻合(20 peers、3/1/1),commands 测试 312/0、clippy 0。片 5/6 放行。
 - 02:0x 真机复测扩大:片3(peer list=[])片4(ledger tail 静默空)与片2同根——实例解析层整体错位。发统一整改令(复用 serve 寻址函数、禁静默空、tempdir 布局测试),片5可并行片6阻塞。选项:统一整改令而非逐片打回,减少 turn 往返。
 - 01:3x 片3(peer list)落地;判定其间修复了缺陷2(api 构建绿),缺陷1(goal_05 解析)仍在——按注入时序判为未消费打回而非抗命,二次钉入阻塞令。
