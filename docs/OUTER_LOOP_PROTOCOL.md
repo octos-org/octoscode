@@ -36,7 +36,7 @@
 | 信道 | 载体 | 特性 |
 |---|---|---|
 | 事件流 | serve 日志 `peer-goal:*` / escalation / `transitioned goal` 行 | outer 侧 tail+filter,事件驱动零轮询 |
-| 交付物 | `peers/<slug>/result.md`(frontmatter: `slug/outcome/updated_unix/turn`) | 每轮交付 |
+| 交付物 | `peers/<slug>/result.md`(frontmatter schema 见附录 A) | 每轮交付 |
 | 权威账本 | `goal-ledgers/<goal_id>` | durable,重启幸存 |
 | 求助 | escalation(park 于 approval/question) | 分级升级,见 R3 |
 | 代码 | git log / diff | 审查对象 |
@@ -253,3 +253,56 @@ serve 数据目录等动作。这类动作按 operator-tier 处理:摆好现场(
 - 日志文件按进程启动日期滚动而非自然日;tail -F 需同时跟前后两天的文件。
 - session-hash 使用 Rust DefaultHasher,跨 Rust 版本不保证稳定(上游注释已声明);
   outer 不得将其用于持久寻址。
+- session-hash 使用 Rust DefaultHasher,跨 Rust 版本不保证稳定(上游注释已声明);
+  outer 不得将其用于持久寻址。
+
+## 附录 A:result.md frontmatter v1 schema
+
+`peers/<slug>/result.md` 是 runtime → outer 的每轮交付物(见上行信道矩阵)。
+v1 起其 YAML frontmatter **必须包含**以下字段集合,恰为 6 个
+(契约测试 `olp_result_schema_fields_documented` 钉住本清单):
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `slug` | string | peer 的唯一标识(目录名,如 `implement-terminal-resilience-v2`) |
+| `outcome` | string | 交付结论,取值 `complete` / `partial` / `blocked` / `failed` |
+| `updated_unix` | integer | 最近更新的 Unix 时间戳(秒) |
+| `turn` | integer | 该 peer 已运行的 turn 数 |
+| `verified` | string | R2 验证级别:`verified` / `partially-verified` / `unverified` |
+| `protocol` | string | 写入时遵循的协议版本,如 `olp/v1` |
+
+**消费侧约定**:未知字段必须忽略(forward compatibility)——消费方按上述
+6 字段清单取数,对 frontmatter 中出现的任何其他字段不做解释、不得报错。
+`verified` 与 `protocol` 两字段由 octos 侧写入
+(specs/task-req-olp-exec-peer),本仓库只固化 schema 文档与消费约定,
+不做运行时消费。
+
+## 附录 B:sub_providers 车道模板
+
+octos 的 `sub_providers` 配置把不同档位的模型分成"车道"(lane),runtime
+按任务性质选道,避免所有流量挤在主力档。v1 附开箱模板
+(契约测试 `olp_lane_template_parses` 钉住:TOML 可解析且每条 lane 有
+非空 description):
+
+```toml
+# octos 配置片段(示例键名以 octos 实际配置 schema 为准)
+[sub_providers.cheap]
+model = "kimi/kimi-k2-turbo"
+description = "低成本高吞吐车道:机械性、低风险、强可回滚的任务——文档/测试编译诊断、日志分类、黑板 ACK 检索、格式化与搬运类修改。选道标准:做错了代价是一次重跑,不需要强推理。"
+
+[sub_providers.strong]
+model = "anthropic/claude-opus"
+description = "强档车道:需要长链推理或跨文件架构判断的任务——代码审查定级、分歧裁决(wontdo 复核)、多步调试定位。选道标准:做错会污染主线判断,值得付溢价。"
+```
+
+### 双环搭配矩阵
+
+| 工作性质 | 车道 |
+|---|---|
+| 分析(读代码、写摘要、分类盘点) | cheap |
+| 验证(跑测试、复验 R2 声明、机械断言) | cheap |
+| 实施(写生产代码、契约测试、schema 改动) | primary(主档,不走路由) |
+| keeper(goal 推进、ledger 记账、状态判断) | primary |
+
+矩阵理由:分析/验证的产出被外层审查兜底,错了可重跑;实施与 keeper
+的产出直接进主线与账本,错误成本高,留在主档由 R2 与外层审查控制质量。
