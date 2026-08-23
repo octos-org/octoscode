@@ -3209,6 +3209,11 @@ impl Store {
         // active) — drain them now that it is active again.
         self.enqueue_staged_drain_after_switch();
         self.state.status = format!("Resuming {}…", session_id.0);
+        // OUTER_LOOP_REVIEW #12: an in-flight hydrate (e.g. the `session/opened`
+        // dispatch) already fetches this same transcript — skip the duplicate.
+        if !self.state.hydrate_in_flight.insert(session_id.clone()) {
+            return None;
+        }
         Some(AppUiCommand::HydrateSession(SessionHydrateParams {
             session_id,
             after: None,
@@ -8540,11 +8545,20 @@ impl Store {
         commands
     }
 
-    pub fn hydrate_session_state_command(&self, session_id: &SessionKey) -> Option<AppUiCommand> {
+    pub fn hydrate_session_state_command(
+        &mut self,
+        session_id: &SessionKey,
+    ) -> Option<AppUiCommand> {
         let capabilities = self.state.capabilities.as_ref()?;
         if !capabilities.supports_feature(crate::model::APPUI_FEATURE_SESSION_HYDRATE_V1)
             || !capabilities.supports_method(crate::model::APPUI_METHOD_SESSION_HYDRATE)
         {
+            return None;
+        }
+        // OUTER_LOOP_REVIEW #12: never dispatch a second hydrate while one is
+        // already in flight for this session — the duplicate doubles serve
+        // busy time and re-inserts the whole history into native scrollback.
+        if !self.state.hydrate_in_flight.insert(session_id.clone()) {
             return None;
         }
         Some(AppUiCommand::HydrateSession(SessionHydrateParams {
@@ -8791,6 +8805,16 @@ impl Store {
                 None
             }
             AppUiEvent::Error(error) => {
+                // OUTER_LOOP_REVIEW #12: an attributed `session/hydrate`
+                // failure/cancellation answers the in-flight request — clear
+                // every session's marker so a later resume/reconnect can
+                // re-dispatch. Errors carry no session attribution (same
+                // discipline as the `/btw` arm below); concurrent in-flight
+                // hydrates across sessions fail together, which is the safe
+                // direction (a spurious clear only re-permits a cheap probe).
+                if error.message.starts_with("session/hydrate ") {
+                    self.state.hydrate_in_flight.clear();
+                }
                 // `/btw` failure/cancellation. Match ONLY the two shapes the
                 // transport actually produces for an aside — the response
                 // error/cancel ("{method} request {id} …" formats the method
@@ -9701,6 +9725,9 @@ impl Store {
         result: SessionHydrateResult,
     ) -> Option<AppUiCommand> {
         let session_id = result.session_id.clone();
+        // OUTER_LOOP_REVIEW #12: the in-flight hydrate is answered — the next
+        // producer (resume, reconnect, phantom probe) may dispatch again.
+        self.state.hydrate_in_flight.remove(&session_id);
         // Staged-queue drain released when a stale live turn is finalized below.
         let mut drain: Option<AppUiCommand> = None;
         let projected_messages = hydrated_projection_messages(&result);
@@ -14197,6 +14224,10 @@ impl Store {
         // orchestration tick re-asserts any session that is genuinely active.
         self.state.orchestration.clear();
         self.state.session_retry.clear();
+        // OUTER_LOOP_REVIEW #12: in-flight `session/hydrate` requests died with
+        // the old child (its transport is gone), so their markers must not
+        // suppress the re-hydration the new child's `session/opened` triggers.
+        self.state.hydrate_in_flight.clear();
         // Optimistic-idle interrupt bookkeeping dies with the old child for the
         // same reason: the NEW child never knew these turns and will never emit
         // their terminals, so a marker for a turn that never latched a
@@ -41377,6 +41408,185 @@ now analyzing the bus module"
             std::iter::from_fn(|| store.state.dequeue_autonomy_hydration()).collect();
         assert_eq!(drained.len(), 1);
         assert!(matches!(drained[0], AppUiCommand::HydrateSession(_)));
+    }
+
+    // ---- OUTER_LOOP_REVIEW #12: startup double-hydrate dedupe ----
+
+    /// Both hydrate producers hit during startup (session/open → open-path
+    /// hydrate enqueued; active-session restore → `/resume` hydrate returned):
+    /// the session key is already in flight, so the second producer must NOT
+    /// emit a duplicate — and the transcript must be applied exactly once when
+    /// the single answer lands (the pre-fix bug wrote history into native
+    /// scrollback twice).
+    #[test]
+    fn startup_double_hydrate_dedupes_to_one_request_and_one_apply() {
+        use crate::client_event::ClientEvent;
+        use octos_core::ui_protocol::SessionOpened;
+
+        let mut store = protocol_store_with_autonomy();
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods_and_features(
+            [crate::model::APPUI_METHOD_SESSION_HYDRATE],
+            [crate::model::APPUI_FEATURE_SESSION_HYDRATE_V1],
+        ));
+        store.state.sessions.clear();
+        let session_id = SessionKey("local:test".into());
+        // Dispatch point 1: session list / session-opened path.
+        let opened: SessionOpened = serde_json::from_value(serde_json::json!({
+            "session_id": session_id,
+            "active_profile_id": "coding",
+            "workspace_root": null,
+            "cursor": null,
+            "panes": null,
+        }))
+        .expect("session_opened payload");
+        store.apply_event(AppUiEvent::Protocol(UiNotification::SessionOpened(opened)));
+        assert!(
+            store.state.hydrate_in_flight.contains(&session_id),
+            "the open-path hydrate marks the session in flight"
+        );
+        // Dispatch point 2: active-session restore via the /resume path, 1ms
+        // later — must be swallowed by the in-flight marker.
+        let second = store.resume_session_command(session_id.0.clone());
+        assert!(
+            second.is_none(),
+            "the duplicate hydrate is deduped: {second:?}"
+        );
+        let drained: Vec<_> =
+            std::iter::from_fn(|| store.state.dequeue_autonomy_hydration()).collect();
+        assert_eq!(
+            drained
+                .iter()
+                .filter(|command| matches!(command, AppUiCommand::HydrateSession(_)))
+                .count(),
+            1,
+            "exactly one hydrate request left the store: {drained:?}"
+        );
+        // The single answer applies the transcript ONCE (each apply installs
+        // a full transcript snapshot; a second apply was the double scrollback
+        // insert the operator saw).
+        let hydrate = SessionHydrateResult {
+            replayed_tool_envelopes: None,
+            session_id: session_id.clone(),
+            cursor: octos_core::ui_protocol::UiCursor {
+                stream: session_id.0.clone(),
+                seq: 1,
+            },
+            context: None,
+            context_state: None,
+            messages: Some(vec![HydratedMessage {
+                seq: 1,
+                role: "user".into(),
+                content: "earlier committed prompt".into(),
+                turn_id: None,
+                thread_id: None,
+                client_message_id: None,
+                persisted_at: chrono::Utc::now(),
+                message_id: None,
+                source: None,
+                media: Vec::new(),
+                reasoning_content: None,
+            }]),
+            threads: None,
+            turns: None,
+            pending_approvals: None,
+            pending_questions: None,
+            replayed_envelopes: None,
+        };
+        store.apply_client_event(ClientEvent::SessionHydrate(hydrate));
+        let session = store
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .expect("session view");
+        assert_eq!(
+            session.messages.len(),
+            1,
+            "the history was installed exactly once"
+        );
+        assert!(
+            !store.state.hydrate_in_flight.contains(&session_id),
+            "the answer clears the in-flight marker"
+        );
+    }
+
+    /// The reverse startup order (resume first, then the open-path hydrate)
+    /// dedupes the same way — the marker is producer-agnostic.
+    #[test]
+    fn hydrate_in_flight_dedupes_open_path_after_resume() {
+        let mut store = store_with_empty_session();
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods_and_features(
+            [crate::model::APPUI_METHOD_SESSION_HYDRATE],
+            [crate::model::APPUI_FEATURE_SESSION_HYDRATE_V1],
+        ));
+        let session_id = store.state.sessions[0].id.clone();
+
+        let first = store.resume_session_command(session_id.0.clone());
+        assert!(matches!(first, Some(AppUiCommand::HydrateSession(_))));
+        assert!(
+            store.hydrate_session_state_command(&session_id).is_none(),
+            "the open-path hydrate is deduped while the resume hydrate is in flight"
+        );
+    }
+
+    /// A hydrate answer re-arms the producers: after the in-flight request is
+    /// answered, a later resume dispatches a fresh hydrate.
+    #[test]
+    fn hydrate_answer_re_arms_dispatch() {
+        use crate::client_event::ClientEvent;
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+        assert!(store.hydrate_session_state_command(&session_id).is_some());
+        store.apply_client_event(ClientEvent::SessionHydrate(hydrate_result_with_turns(
+            &session_id,
+            vec![],
+        )));
+        assert!(
+            store.hydrate_session_state_command(&session_id).is_some(),
+            "the next producer may dispatch again once the answer landed"
+        );
+    }
+
+    /// An attributed `session/hydrate` error frame clears the in-flight
+    /// marker so a later resume/reconnect can retry — a failed hydrate must
+    /// not wedge the session out of hydration forever.
+    #[test]
+    fn hydrate_error_clears_in_flight_marker() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+        assert!(store.hydrate_session_state_command(&session_id).is_some());
+        assert!(store.state.hydrate_in_flight.contains(&session_id));
+
+        store.apply_event(AppUiEvent::error(
+            "internal",
+            "session/hydrate request tui-5 failed: boom".to_string(),
+        ));
+
+        assert!(
+            !store.state.hydrate_in_flight.contains(&session_id),
+            "the attributed error releases the marker"
+        );
+        assert!(
+            store.hydrate_session_state_command(&session_id).is_some(),
+            "a retry may dispatch after the failure"
+        );
+    }
+
+    /// A backend relaunch kills the old child's in-flight requests; their
+    /// markers must not suppress the new child's re-hydration.
+    #[test]
+    fn backend_relaunch_clears_in_flight_hydrates() {
+        use crate::client_event::ClientEvent;
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+        assert!(store.hydrate_session_state_command(&session_id).is_some());
+
+        store.apply_client_event(ClientEvent::BackendRelaunched);
+
+        assert!(
+            store.state.hydrate_in_flight.is_empty(),
+            "relaunch drops dead in-flight markers"
+        );
     }
 
     #[test]

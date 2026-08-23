@@ -4964,6 +4964,20 @@ pub struct AppState {
     /// episode. Cleared when the session leaves the phantom shape so the next
     /// episode gets its own probe.
     pub phantom_probe_sent: std::collections::HashSet<SessionKey>,
+    /// OUTER_LOOP_REVIEW #12: sessions with a `session/hydrate` request already
+    /// dispatched (or queued for dispatch) and not yet answered. Both hydrate
+    /// producers (`hydrate_session_state_command` on `session/opened` /
+    /// phantom probe, and `resume_session_command` on `/resume`) record here
+    /// and refuse to emit a SECOND hydrate while one is in flight — the two
+    /// startup producers used to fire identical hydrates 1ms apart, doubling
+    /// serve busy time and writing the history into native scrollback twice.
+    /// Cleared when the hydrate result lands, when an attributed
+    /// `session/hydrate` error frame arrives, and on backend relaunch (the old
+    /// child's in-flight requests die with it). The wire include sets of both
+    /// producers are equivalent (`resume` adds `pending_questions`, which the
+    /// open-path include silently omits), so the first dispatch wins — no
+    /// merge needed.
+    pub hydrate_in_flight: std::collections::HashSet<SessionKey>,
     /// #324 Phase C: per-session unread counters — turns that reached a
     /// terminal while the session was NOT focused. Incremented by the store's
     /// terminal appliers, cleared when the session gains focus.
@@ -6999,6 +7013,7 @@ impl AppState {
             interrupt_dropped_output: std::collections::HashSet::new(),
             last_started_turn: std::collections::HashMap::new(),
             phantom_probe_sent: std::collections::HashSet::new(),
+            hydrate_in_flight: std::collections::HashSet::new(),
             unread_turns: std::collections::HashMap::new(),
             pending_turn_steers: std::collections::VecDeque::new(),
             retained_steers: Vec::new(),
