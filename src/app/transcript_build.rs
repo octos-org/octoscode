@@ -1744,13 +1744,43 @@ pub(super) fn push_code_block_lines(
         complete,
         palette.code_theme,
     );
+    // Same reason as the diff paths: an over-wide source line handed whole to
+    // the transcript paragraph gets its tail restarted at column 0, outside
+    // the `│` rule. `wrap_line` breaks it here instead, carrying each
+    // fragment's syntax-highlight style onto the continuation rows.
+    let budget = code_block_content_budget(indent, width);
     for row in rendered.iter() {
-        let mut spans = vec![
-            Span::styled(indent, style_bg(palette.border(), bg)),
-            Span::styled("│ ", style_bg(palette.border(), bg)),
-        ];
-        spans.extend(row.iter().cloned());
-        lines.push(chat_line(spans, bg));
+        let source = Line::from(row.iter().map(sanitized_span).collect::<Vec<_>>());
+        for wrapped in crate::insert_history::wrap_line(&source, budget) {
+            let mut spans = vec![
+                Span::styled(indent, style_bg(palette.border(), bg)),
+                Span::styled("│ ", style_bg(palette.border(), bg)),
+            ];
+            spans.extend(wrapped.spans);
+            lines.push(chat_line(spans, bg));
+        }
+    }
+}
+
+/// Columns left for a code block's content after its indent and `│ ` rule.
+/// Floored so a very narrow transcript shreds the block instead of panicking
+/// or emitting one column per row.
+fn code_block_content_budget(indent: &str, width: usize) -> usize {
+    width.saturating_sub(indent.width() + 2).max(8)
+}
+
+/// Expand tabs and drop other control characters so the wrap budget is
+/// measured in the columns the terminal will actually print — the
+/// `fit_diff_cell` ordering. Untouched (and unallocated) when the span is
+/// already clean, which is the common case.
+fn sanitized_span(span: &Span<'static>) -> Span<'static> {
+    if span.content.chars().any(char::is_control) {
+        Span::styled(
+            crate::insert_history::sanitize_span_content(span.content.as_ref()),
+            span.style,
+        )
+    } else {
+        span.clone()
     }
 }
 

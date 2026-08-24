@@ -4412,6 +4412,44 @@ mod tests {
         assert_eq!(added_style.bg, Some(palette.success_bg));
     }
 
+    /// A plain highlighted fence has the same left-overshoot as the diff
+    /// fence: an over-wide source line reached the transcript paragraph
+    /// unwrapped and its tail restarted at column 0, breaking out of the
+    /// block's `│` rule.
+    #[test]
+    fn render_code_fence_wraps_long_lines_inside_the_block_rule() {
+        let app = AppState::new(
+            vec![SessionView {
+                id: SessionKey("local:test".into()),
+                title: "test".into(),
+                profile_id: Some("coding".into()),
+                messages: vec![Message::assistant(
+                    "```rust\nHEADTOKEN = aaaa + bbbb + cccc + dddd + eeee + ffff + gggg + hhhh + iiii + jjjj + TAILTOKEN;\n```",
+                )],
+                tasks: vec![],
+                live_reply: None,
+            }],
+            0,
+            "ready".into(),
+            None,
+            false,
+        );
+        let buffer = rendered_buffer_with_size(&app, Palette::for_theme(ThemeName::Codex), 80, 42);
+        let rows = rendered_rows(&buffer);
+
+        let head = rows
+            .iter()
+            .position(|row| row.contains("HEADTOKEN"))
+            .expect("the long source line renders");
+        let tail = rows
+            .iter()
+            .position(|row| row.contains("TAILTOKEN"))
+            .expect("the tail of the long source line renders");
+        assert!(tail > head, "the line is too wide for 80 columns");
+
+        assert_wrapped_rows_hang_under(&rows[head..=tail]);
+    }
+
     /// The same left-overshoot as the diff pane, on the fenced-diff path a
     /// model reply actually uses: a `+` line wider than the terminal reached
     /// the transcript paragraph unwrapped, so ratatui restarted it at column
