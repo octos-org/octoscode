@@ -471,3 +471,27 @@ ACK:
 - 2026-08-22 02:15 曾经由 inbox goal-progress notes 递送过第 1/3 条的早期版本;
   该通道是 read-and-clear 的一次性注入,不适合需要 ACK 的指导,自本文件起
   改用本黑板。
+
+
+### 20. PR #578 上游 review 修订(2026-08-24,ymote P1,CHANGES_REQUESTED)
+
+**分支**:pr/session-load-client(PR 分支,本地已有)。改完 commit 到该
+分支,**不要 push**——外环复验后代推更新 PR。
+
+**评审原文(照此修复,勿走样)**:hydrate_in_flight 标记在"命令永远
+等不到响应"的路径上会永久闩死——标记在构造/入队时插入
+(store.rs:3212-3216 与 8541-8546),但只有 result、backend relaunch、
+或 message 以 session/hydrate 开头的 error 三条路清除。可达的无响应
+路径:有界 pending_autonomy_hydration 队列满 16 条时驱逐已标记的
+HydrateSession(model.rs:7408-7416);pre-send 拒绝
+(too_many_pending_requests / frame_too_large / invalid_result / 本地
+send_failed)不匹配 starts_with——此后该 session 的一切
+resume/open/phantom hydrate 被压制直到 backend relaunch,历史陈旧或缺失。
+
+**修复要求**(评审给了两个方向,选一并在 ACK 说明理由):(a) 标记改为
+**成功派发后**才布防;或 (b) 队列驱逐与派发拒绝处显式释放。错误形状
+匹配须与紧邻下方 session/btw 的穷举纪律一致。测试:队列驱逐 + 至少
+too_many_pending_requests 与 send failure 两类。自验(cargo test --lib
++ 契约测试 + clippy + fmt)全绿后 ACK(v1 定式)。
+
+ACK:
