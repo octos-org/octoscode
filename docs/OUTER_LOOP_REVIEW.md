@@ -396,6 +396,7 @@ ACK: P0 收尾完成(2026-08-24 凌晨,cargo 窗口恢复后补跑):`cargo build
   留给晨起 operator。
 
 **夜间决策日志**(外环追加):
+- 07:5x P2 首航三回合:落盘✓(回合1修校验)→ 跨进程唤醒✓(回合2修 drain 清扫)→ 注入执行判决中(消费 turn 与心跳撞车,42 迭代长跑中;嫌疑:段落注入≠用户消息层级,待 turn 收尾定谳)。清理内环自测误射到 a9c471 inbox 的杂散 steer。
 - 02:5x **外环违规自记**:在内环正在使用的 worktree 里 checkout 了另一分支(违反自己立的独立-worktree 规),内环 WIP 文件侥幸无损,已复位。纠正:建常驻验证 worktree(scratchpad/octos-verify)。
 - 03:0x 前一条"片6三处问题"判定作废——污染自内环 WIP 文件(steer.rs),obs-cli 分支本身 clean;P1 六片代码判定 PASS(吃狗粮终审并入阶段收官)。
 - 03:1x 验证节奏调整:独立 worktree 全量编译超时 10m,改为每片 diff 审+定向测试、阶段收官全量 clean-room。
