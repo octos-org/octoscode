@@ -2283,6 +2283,9 @@ fn diff_preview_modal_lines(
                     side_by_side,
                     inner_width,
                     None,
+                    // The overlay hard-clips below and its scroll geometry is
+                    // exact only while one diff line stays one row.
+                    crate::app::transcript_build::DiffRowFit::Clip,
                 );
             }
         }

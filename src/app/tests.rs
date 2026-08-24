@@ -2895,6 +2895,7 @@ mod tests {
             true,
             wrap_width,
             None,
+            DiffRowFit::Wrap,
         );
         assert_eq!(lines.len(), 3, "context + paired change + surplus removed");
         let widths: Vec<usize> = lines
@@ -2961,6 +2962,7 @@ mod tests {
             true,
             wrap_width,
             None,
+            DiffRowFit::Wrap,
         );
         assert_eq!(lines.len(), 2, "context + paired change");
         let rendered: Vec<String> = lines
@@ -3157,6 +3159,83 @@ mod tests {
                 .any(|row| row.contains("Alt+V/Ctrl+V side-by-side")),
             "footer hint advertises the side-by-side toggle and its portable Ctrl twin"
         );
+    }
+
+    /// One added line far wider than any sane terminal — the case unified
+    /// mode used to hand to the transcript paragraph verbatim.
+    fn overlong_added_line_diff_result() -> DiffPreviewGetResult {
+        DiffPreviewGetResult {
+            status: "ready".into(),
+            source: "pending_store".into(),
+            preview: DiffPreview {
+                session_id: SessionKey("local:test".into()),
+                preview_id: PreviewId::new(),
+                title: Some("Wide patch".into()),
+                files: vec![DiffPreviewFile {
+                    path: "src/wide.rs".into(),
+                    old_path: None,
+                    status: "modified".into(),
+                    hunks: vec![DiffPreviewHunk {
+                        header: "@@ -1,1 +1,1 @@".into(),
+                        lines: vec![mixed_hunk_line(
+                            "added",
+                            "HEADTOKEN aaaa bbbb cccc dddd eeee ffff gggg hhhh \
+                             iiii jjjj kkkk llll mmmm nnnn oooo pppp TAILTOKEN",
+                            None,
+                            Some(1),
+                        )],
+                    }],
+                }],
+            },
+        }
+    }
+
+    /// A long added line used to reach the transcript paragraph unwrapped, so
+    /// ratatui wrapped it at column 0 — the continuation ran out to the LEFT
+    /// of the `+` sign and the line-number gutter, past the pane's own left
+    /// edge (user screenshot). Continuations must hang under the content
+    /// column instead.
+    #[test]
+    fn unified_diff_wraps_long_lines_under_the_sign_gutter() {
+        let app = app_with_diff(overlong_added_line_diff_result());
+        let buffer = rendered_buffer_with_size(&app, Palette::for_theme(ThemeName::Codex), 80, 42);
+        let rows = rendered_rows(&buffer);
+
+        let head = rows
+            .iter()
+            .position(|row| row.contains("HEADTOKEN"))
+            .expect("the long added line renders");
+        let tail = rows
+            .iter()
+            .position(|row| row.contains("TAILTOKEN"))
+            .expect("the tail of the long added line renders");
+        assert!(
+            tail > head,
+            "the line is too wide for 80 columns, so it must wrap onto later rows"
+        );
+
+        assert_wrapped_rows_hang_under(&rows[head..=tail]);
+    }
+
+    /// Every row after the first must keep its content at or right of the
+    /// first row's content column: only padding and the code block's `│` rule
+    /// may sit left of it.
+    fn assert_wrapped_rows_hang_under(rows: &[String]) {
+        let head_byte = rows[0].find("HEADTOKEN").expect("first row content column");
+        // Column, not byte offset: the code block's `│` rule is 3 bytes wide.
+        let content_col = rows[0][..head_byte].chars().count();
+        for row in &rows[1..] {
+            let before: String = row.chars().take(content_col).collect();
+            assert!(
+                before.chars().all(|ch| ch == ' ' || ch == '│'),
+                "wrapped rows hang under the content column, never left of the sign: {row:?}"
+            );
+            let after: String = row.chars().skip(content_col).collect();
+            assert!(
+                !after.starts_with(' '),
+                "wrapped content starts exactly at the content column: {row:?}"
+            );
+        }
     }
 
     #[test]
@@ -4331,6 +4410,45 @@ mod tests {
         let added_style = style_for_text(&buffer, "native").expect("added diff style");
         assert_eq!(added_style.fg, Some(palette.success));
         assert_eq!(added_style.bg, Some(palette.success_bg));
+    }
+
+    /// The same left-overshoot as the diff pane, on the fenced-diff path a
+    /// model reply actually uses: a `+` line wider than the terminal reached
+    /// the transcript paragraph unwrapped, so ratatui restarted it at column
+    /// 0 — the continuation printed left of both the `+` sign and the code
+    /// block's `│` rule (user screenshot).
+    #[test]
+    fn render_diff_fence_wraps_long_added_lines_under_the_sign() {
+        let app = AppState::new(
+            vec![SessionView {
+                id: SessionKey("local:test".into()),
+                title: "test".into(),
+                profile_id: Some("coding".into()),
+                messages: vec![Message::assistant(
+                    "```diff\n@@ -1 +1 @@\n+HEADTOKEN aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm nnnn oooo pppp TAILTOKEN\n```",
+                )],
+                tasks: vec![],
+                live_reply: None,
+            }],
+            0,
+            "ready".into(),
+            None,
+            false,
+        );
+        let buffer = rendered_buffer_with_size(&app, Palette::for_theme(ThemeName::Codex), 80, 42);
+        let rows = rendered_rows(&buffer);
+
+        let head = rows
+            .iter()
+            .position(|row| row.contains("HEADTOKEN"))
+            .expect("the long added line renders");
+        let tail = rows
+            .iter()
+            .position(|row| row.contains("TAILTOKEN"))
+            .expect("the tail of the long added line renders");
+        assert!(tail > head, "the line is too wide for 80 columns");
+
+        assert_wrapped_rows_hang_under(&rows[head..=tail]);
     }
 
     #[test]
