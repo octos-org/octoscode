@@ -207,6 +207,25 @@ L1/L2 路线的动机,对应 REQ-OLP-{OBS,CTRL,HEADLESS}。
 - **octos 构建永远带 `--features api`**:漏掉则 serve 子命令消失,
   octoscode 启动失败,症状与代码 bug 无法区分(累计踩坑三次)。
 
+### 裁决审计:master 自决是独立审查面(operator 定调)
+
+goal 模式下 peer 的问题先上报 master,master 能解决就地解决——**它不会
+为"自认为解决了"的事再来问外环**。因此外环的监督不能只盯交付物
+(commit/ACK),必须主动审计 master 的中途裁决:
+
+- **审什么**:escalation → decision 的每一对(peer 问了什么、master 怎么
+  裁的);master 对 peer 交付的验收结论;master 对失败的归因解释。
+  历史样本:goal_03 测量方法错误(#6)——master 与 peer 均无自觉,零
+  上报,外环审文档才抓住。
+- **用什么审**:`octos ledger tail <goal_id> --json` 的 decisions/
+  escalations 表(REQ-OLP-OBS 交付)= master 裁决的完整留痕;events.jsonl
+  的 escalation 事件是审计触发器。
+- **必审裁决类**:依赖引入、契约偏离、测量/验证方法、wontdo、以及一切
+  "master 代 operator 回答了 peer"的场景(R3 边界内移的风险点)。
+- **节奏**:goal 进行中每次 escalation 事件后审;goal 收官时全量对账一遍
+  decisions 表。发现错裁 → steer/黑板批注纠正,并检查错裁已污染的下游
+  工作。
+
 ### 驱动机制选型:直驱 master vs /goal + peer(实战定型)
 
 两种驱动共用黑板 + ACK 契约层,按「外环在不在线」选:
