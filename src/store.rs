@@ -8819,7 +8819,30 @@ impl Store {
                 // discipline as the `/btw` arm below); concurrent in-flight
                 // hydrates across sessions fail together, which is the safe
                 // direction (a spurious clear only re-permits a cheap probe).
-                if error.message.starts_with("session/hydrate ") {
+                //
+                // #20 (ymote P1): the marker latches forever when the command
+                // never gets an answer — match the FULL set of shapes the
+                // transport produces for this method, mirroring the `/btw` and
+                // `turn/steer` exhaustiveness discipline immediately below:
+                //   - response error/cancel formats the method FIRST
+                //     ("session/hydrate …"),
+                //   - pre-send rejections name the method in fixed trailers
+                //     (pending-cap refusal) or prefixes (oversized frame,
+                //     send failure, result decode).
+                let is_hydrate_error = error.message.starts_with("session/hydrate ")
+                    || (error.code == "too_many_pending_requests"
+                        && error.message.ends_with("enqueue session/hydrate request"))
+                    || (error.code == "frame_too_large"
+                        && error.message.starts_with("encoded session/hydrate request"))
+                    || (error.code == "transport_send"
+                        && error
+                            .message
+                            .starts_with("failed to send session/hydrate request"))
+                    || (error.code == "invalid_result"
+                        && error.message.starts_with(
+                            "failed to decode UI protocol result for session/hydrate",
+                        ));
+                if is_hydrate_error {
                     self.state.hydrate_in_flight.clear();
                 }
                 // `/btw` failure/cancellation. Match ONLY the two shapes the
@@ -41598,6 +41621,102 @@ now analyzing the bus module"
         assert!(
             store.state.hydrate_in_flight.is_empty(),
             "relaunch drops dead in-flight markers"
+        );
+    }
+
+    // ---- OUTER_LOOP_REVIEW #20 (ymote P1): latch-free in-flight markers ----
+
+    /// Queue eviction must release the evicted hydrate's marker: the bounded
+    /// pending_autonomy_hydration queue drops the oldest command at 16 — if
+    /// that drop keeps the marker, the session is latched out of hydration
+    /// until relaunch.
+    #[test]
+    fn queue_eviction_releases_evicted_hydrate_marker() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+        // Mark the session in flight via the open path, then enqueue the
+        // command exactly as the dispatch sites do.
+        let command = store
+            .hydrate_session_state_command(&session_id)
+            .expect("hydrate dispatch");
+        assert!(store.state.hydrate_in_flight.contains(&session_id));
+        store.state.enqueue_autonomy_hydration(command);
+
+        // Fill the queue to the cap with non-hydrate commands, then one more —
+        // the hydrate (oldest) is evicted and its marker must be released.
+        let filler = || {
+            AppUiCommand::ReadSessionStatus(crate::model::SessionStatusReadParams {
+                session_id: session_id.clone(),
+            })
+        };
+        for _ in 0..16 {
+            store.state.enqueue_autonomy_hydration(filler());
+        }
+        assert!(
+            !store.state.hydrate_in_flight.contains(&session_id),
+            "evicting the queued hydrate releases its marker"
+        );
+        assert!(
+            store.hydrate_session_state_command(&session_id).is_some(),
+            "the session can re-dispatch after the eviction"
+        );
+    }
+
+    /// Pre-send rejections that never reach the wire must release the marker —
+    /// pinned for the pending-cap refusal and the transport send failure (the
+    /// two shapes ymote's review called out), plus oversized-frame and
+    /// result-decode for parity with the /btw and turn/steer arms.
+    #[test]
+    fn pre_send_rejections_release_hydrate_marker() {
+        for (code, message) in [
+            (
+                "too_many_pending_requests",
+                "UI protocol has 16 pending request(s); refusing to enqueue session/hydrate request".to_string(),
+            ),
+            (
+                "transport_send",
+                "failed to send session/hydrate request tui-5: broken pipe".to_string(),
+            ),
+            (
+                "frame_too_large",
+                "encoded session/hydrate request tui-5 is 999999 bytes; max is 262144".to_string(),
+            ),
+            (
+                "invalid_result",
+                "failed to decode UI protocol result for session/hydrate: missing field".to_string(),
+            ),
+        ] {
+            let (mut store, session_id) = phantom_in_progress_store();
+            store.state.capabilities = Some(hydrate_capabilities());
+            assert!(store.hydrate_session_state_command(&session_id).is_some());
+            assert!(store.state.hydrate_in_flight.contains(&session_id));
+
+            store.apply_event(AppUiEvent::error(code, message.clone()));
+
+            assert!(
+                !store.state.hydrate_in_flight.contains(&session_id),
+                "pre-send rejection must release the marker: code={code} message={message}"
+            );
+        }
+    }
+
+    /// An unrelated error that merely CONTAINS the method name must not clear
+    /// the marker (same discipline as /btw: never a bare substring).
+    #[test]
+    fn hydrate_unrelated_error_keeps_marker() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+        assert!(store.hydrate_session_state_command(&session_id).is_some());
+        assert!(store.state.hydrate_in_flight.contains(&session_id));
+
+        store.apply_event(AppUiEvent::error(
+            "internal",
+            "session/open failed while session/hydrate was mentioned in a payload".to_string(),
+        ));
+
+        assert!(
+            store.state.hydrate_in_flight.contains(&session_id),
+            "an unrelated error echoing the method name must not clear the marker"
         );
     }
 

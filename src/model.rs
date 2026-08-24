@@ -7470,10 +7470,20 @@ impl AppState {
     /// Enqueue a pending reconnect hydration command. Bounded — extra
     /// commands beyond a small cap are dropped to keep the queue O(1) —
     /// fresh hydration on the next reconnect is cheap.
+    ///
+    /// OUTER_LOOP_REVIEW #20 (ymote P1): evicting a queued
+    /// `HydrateSession` without clearing its `hydrate_in_flight` marker
+    /// latches the session out of hydration until a backend relaunch — the
+    /// marker was set at construction time but only answered/error/relaunch
+    /// paths cleared it. Release the evicted command's marker here.
     pub fn enqueue_autonomy_hydration(&mut self, command: AppUiCommand) {
         const MAX_PENDING_HYDRATION: usize = 16;
         if self.pending_autonomy_hydration.len() >= MAX_PENDING_HYDRATION {
-            self.pending_autonomy_hydration.pop_front();
+            if let Some(AppUiCommand::HydrateSession(params)) =
+                self.pending_autonomy_hydration.pop_front()
+            {
+                self.hydrate_in_flight.remove(&params.session_id);
+            }
         }
         self.pending_autonomy_hydration.push_back(command);
     }
