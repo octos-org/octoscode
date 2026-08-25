@@ -19,7 +19,7 @@
   是冻结快照,**严禁写入**(tracked、随分支变化,写了会被 checkout 冲掉)。
 - **写入必须走原子追加助手**(flock 互斥 + 自写登记):
   ```bash
-  ~/.octos/outer/board_append.sh <板路径>   # 正文从 stdin 喂
+  scripts/olp-board-append.sh <板路径>       # 正文从 stdin 喂(仓库发行版;本机自建版亦可)
   ```
 - 编号:先 `grep -oE '^### [0-9]+' <板> | tail -1` 取当前最大号,+1 使用。
 - 条目自包含:背景、精确文件/行号、修法方向、验收标准、分支名(基于
