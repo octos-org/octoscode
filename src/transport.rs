@@ -83,6 +83,95 @@ use crate::{
 const PROTOCOL_TRANSPORT_QUEUE_CAPACITY: usize = 4096;
 const MAX_PENDING_REQUESTS: usize = 256;
 
+// ---------------------------------------------------------------------------
+// Pre-send error message contract (blackboard #28a)
+//
+// The transport SYNTHESIZES a small set of error messages for failures that
+// happen before a request reaches the wire (pending-cap refusal, oversized
+// frame, send failure, response-result decode failure). The store MATCHES
+// those exact shapes to attribute the error back to the command that was
+// lost (OUTER_LOOP_REVIEW #12/#20, #22b-r1). Historically both sides wrote
+// the wording as independent string literals, so a wording drift on one side
+// silently broke the other (same pathogen as the original #578 bug).
+//
+// This block is the SINGLE definition point: every producer below calls the
+// `*_message` constructors, and every matcher in store.rs calls the
+// `message_is_*` discriminators. The shared fragment constants below are the
+// only place the literal wording exists.
+const PRE_SEND_PENDING_CAP_PREFIX: &str = "UI protocol has ";
+const PRE_SEND_PENDING_CAP_INFIX: &str = " pending request(s); refusing to enqueue ";
+const PRE_SEND_PENDING_CAP_SUFFIX: &str = " request";
+const FRAME_TOO_LARGE_PREFIX: &str = "encoded ";
+const FRAME_TOO_LARGE_INFIX: &str = " request ";
+const FRAME_TOO_LARGE_INFIX_BYTES: &str = " is ";
+const FRAME_TOO_LARGE_SUFFIX_BYTES: &str = " bytes; max is ";
+const TRANSPORT_SEND_PREFIX: &str = "failed to send ";
+const TRANSPORT_SEND_INFIX: &str = " request ";
+const INVALID_RESULT_PREFIX: &str = "failed to decode UI protocol result for ";
+const INVALID_RESULT_INFIX: &str = ": ";
+
+/// Pending-cap pre-send refusal (`too_many_pending_requests`): the message
+/// names the rejected method in a fixed trailer so the store can attribute
+/// the refusal back to the command that lost its queue slot.
+pub(crate) fn pre_send_pending_cap_message(method: &str, pending_count: usize) -> String {
+    format!(
+        "{PRE_SEND_PENDING_CAP_PREFIX}{pending_count}{PRE_SEND_PENDING_CAP_INFIX}{method}{PRE_SEND_PENDING_CAP_SUFFIX}"
+    )
+}
+
+/// Oversized-frame pre-send rejection (`frame_too_large`).
+pub(crate) fn frame_too_large_message(method: &str, request_id: &str, bytes: usize) -> String {
+    format!(
+        "{FRAME_TOO_LARGE_PREFIX}{method}{FRAME_TOO_LARGE_INFIX}{request_id}{FRAME_TOO_LARGE_INFIX_BYTES}{bytes}{FRAME_TOO_LARGE_SUFFIX_BYTES}{MAX_TEXT_FRAME_BYTES}"
+    )
+}
+
+/// Transport send failure (`transport_send`).
+pub(crate) fn transport_send_message(method: &str, request_id: &str, err: &eyre::Report) -> String {
+    format!(
+        "{TRANSPORT_SEND_PREFIX}{method}{TRANSPORT_SEND_INFIX}{request_id}{INVALID_RESULT_INFIX}{err:#}"
+    )
+}
+
+/// Response-result decode failure (`invalid_result`).
+pub(crate) fn invalid_result_message(method: &str, err: &serde_json::Error) -> String {
+    format!("{INVALID_RESULT_PREFIX}{method}{INVALID_RESULT_INFIX}{err}")
+}
+
+/// Discriminator for [`pre_send_pending_cap_message`]: the pending count is
+/// dynamic, so match the fixed trailer that names the method (a bare
+/// `ends_with` on the trailer alone would also match a same-trailer message
+/// without the cap prefix, so gate on the prefix too).
+pub(crate) fn message_is_pending_cap_for_method(message: &str, method: &str) -> bool {
+    message.starts_with(PRE_SEND_PENDING_CAP_PREFIX)
+        && message.ends_with(&format!("{method}{PRE_SEND_PENDING_CAP_SUFFIX}"))
+        && message.contains(PRE_SEND_PENDING_CAP_INFIX)
+}
+
+/// Discriminator for [`frame_too_large_message`]: request id and byte count
+/// are dynamic, so match the fixed prefix that names the method.
+pub(crate) fn message_is_frame_too_large_for_method(message: &str, method: &str) -> bool {
+    message.starts_with(&format!(
+        "{FRAME_TOO_LARGE_PREFIX}{method}{FRAME_TOO_LARGE_INFIX}"
+    ))
+}
+
+/// Discriminator for [`transport_send_message`]: request id and error are
+/// dynamic, so match the fixed prefix that names the method.
+pub(crate) fn message_is_transport_send_for_method(message: &str, method: &str) -> bool {
+    message.starts_with(&format!(
+        "{TRANSPORT_SEND_PREFIX}{method}{TRANSPORT_SEND_INFIX}"
+    ))
+}
+
+/// Discriminator for [`invalid_result_message`]: the decode error is
+/// dynamic, so match the fixed prefix that names the method.
+pub(crate) fn message_is_invalid_result_for_method(message: &str, method: &str) -> bool {
+    message.starts_with(&format!(
+        "{INVALID_RESULT_PREFIX}{method}{INVALID_RESULT_INFIX}"
+    ))
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct AppUiLaunch {
     pub endpoint: Option<AppUiEndpoint>,
@@ -2193,22 +2282,20 @@ impl AppUiBackend for ProtocolAppUiBackend {
             // #22b-r1: a hydrate refusal is attributable LOCALLY from the
             // in-hand command — emit the attributed event so the store
             // releases only that session's marker.
+            // #28a: the wording lives in the shared contract above — the
+            // store's matcher discriminates the SAME constants.
+            let message =
+                pre_send_pending_cap_message(method, self.protocol.pending_requests.len());
             let event: ClientEvent = if let AppUiCommand::HydrateSession(params) = &command {
                 ClientEvent::HydrateError(crate::client_event::HydrateErrorClientEvent {
                     session_id: params.session_id.clone(),
                     code: "too_many_pending_requests".into(),
-                    message: format!(
-                        "UI protocol has {} pending request(s); refusing to enqueue {method} request",
-                        self.protocol.pending_requests.len()
-                    ),
+                    message,
                 })
             } else {
                 AppUiEvent::Error(AppUiError {
                     code: "too_many_pending_requests".into(),
-                    message: format!(
-                        "UI protocol has {} pending request(s); refusing to enqueue {method} request",
-                        self.protocol.pending_requests.len()
-                    ),
+                    message,
                 })
                 .into()
             };
@@ -2233,10 +2320,7 @@ impl AppUiBackend for ProtocolAppUiBackend {
                 .pending_requests
                 .remove(&request_id)
                 .and_then(|pending| pending.hydrate_session);
-            let message = format!(
-                "encoded {method} request {request_id} is {} bytes; max is {MAX_TEXT_FRAME_BYTES}",
-                text.len()
-            );
+            let message = frame_too_large_message(method.as_str(), &request_id, text.len());
             let event: ClientEvent = match hydrate_session {
                 Some(session_id) => {
                     ClientEvent::HydrateError(crate::client_event::HydrateErrorClientEvent {
@@ -2268,7 +2352,7 @@ impl AppUiBackend for ProtocolAppUiBackend {
             self.mark_disconnected(format!(
                 "UI protocol disconnected; reconnect will retry on next send/read: {err:#}"
             ));
-            let message = format!("failed to send {method} request {request_id}: {err:#}");
+            let message = transport_send_message(method.as_str(), &request_id, &err);
             let event: ClientEvent = match hydrate_session {
                 Some(session_id) => {
                     ClientEvent::HydrateError(crate::client_event::HydrateErrorClientEvent {
@@ -2990,10 +3074,7 @@ fn success_response_to_app_event(
                 Err(err) => Ok(Some(
                     app_error(
                         "invalid_result",
-                        format!(
-                            "failed to decode UI protocol result for {}: {err}",
-                            octos_core::ui_protocol::methods::SESSION_BTW
-                        ),
+                        invalid_result_message(octos_core::ui_protocol::methods::SESSION_BTW, &err),
                     )
                     .into(),
                 )),
@@ -3208,10 +3289,7 @@ fn success_response_to_app_event(
                 Err(err) => Ok(Some(
                     app_error(
                         "invalid_result",
-                        format!(
-                            "failed to decode UI protocol result for {}: {err}",
-                            crate::model::APPUI_METHOD_TURN_STEER
-                        ),
+                        invalid_result_message(crate::model::APPUI_METHOD_TURN_STEER, &err),
                     )
                     .into(),
                 )),
@@ -3343,10 +3421,7 @@ fn success_response_to_app_event(
             Err(err) => {
                 // #22b-r1: decode failure is attributable LOCALLY via the
                 // pending entry — release only that session's marker.
-                let message = format!(
-                    "failed to decode UI protocol result for {}: {err}",
-                    methods::SESSION_HYDRATE
-                );
+                let message = invalid_result_message(methods::SESSION_HYDRATE, &err);
                 Ok(Some(match pending_request.hydrate_session.clone() {
                     Some(session_id) => {
                         ClientEvent::HydrateError(crate::client_event::HydrateErrorClientEvent {

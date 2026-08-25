@@ -47,6 +47,10 @@ use crate::{
         ToolConfigUpsertParams, UserQuestionPickerState, V2AssistantSegment,
         complete_plan_steps_in_text, task_state_label, terminal_task_state_from_agent_status,
     },
+    transport::{
+        message_is_frame_too_large_for_method, message_is_invalid_result_for_method,
+        message_is_pending_cap_for_method, message_is_transport_send_for_method,
+    },
 };
 
 const TASK_OUTPUT_TAIL_BYTES: usize = 600;
@@ -7810,13 +7814,20 @@ impl Store {
                 // main turn.
                 let is_btw_error = error.message.starts_with("session/btw ")
                     || (error.code == "too_many_pending_requests"
-                        && error.message.ends_with("enqueue session/btw request"))
+                        && message_is_pending_cap_for_method(
+                            &error.message,
+                            octos_core::ui_protocol::methods::SESSION_BTW,
+                        ))
                     || (error.code == "invalid_result"
-                        && error
-                            .message
-                            .starts_with("failed to decode UI protocol result for session/btw"))
+                        && message_is_invalid_result_for_method(
+                            &error.message,
+                            octos_core::ui_protocol::methods::SESSION_BTW,
+                        ))
                     || (error.code == "frame_too_large"
-                        && error.message.starts_with("encoded session/btw request"));
+                        && message_is_frame_too_large_for_method(
+                            &error.message,
+                            octos_core::ui_protocol::methods::SESSION_BTW,
+                        ));
                 if is_btw_error && self.state.fail_btw_answering(&error.message) > 0 {
                     self.state.status = t!("status.btw_failed").into_owned();
                     return None;
@@ -7837,17 +7848,25 @@ impl Store {
                 // server's own echo keep the transcript truthful).
                 let is_steer_error = error.message.starts_with("turn/steer ")
                     || (error.code == "too_many_pending_requests"
-                        && error.message.ends_with("enqueue turn/steer request"))
+                        && message_is_pending_cap_for_method(
+                            &error.message,
+                            crate::model::APPUI_METHOD_TURN_STEER,
+                        ))
                     || (error.code == "frame_too_large"
-                        && error.message.starts_with("encoded turn/steer request"))
+                        && message_is_frame_too_large_for_method(
+                            &error.message,
+                            crate::model::APPUI_METHOD_TURN_STEER,
+                        ))
                     || (error.code == "transport_send"
-                        && error
-                            .message
-                            .starts_with("failed to send turn/steer request"))
+                        && message_is_transport_send_for_method(
+                            &error.message,
+                            crate::model::APPUI_METHOD_TURN_STEER,
+                        ))
                     || (error.code == "invalid_result"
-                        && error
-                            .message
-                            .starts_with("failed to decode UI protocol result for turn/steer"));
+                        && message_is_invalid_result_for_method(
+                            &error.message,
+                            crate::model::APPUI_METHOD_TURN_STEER,
+                        ));
                 if is_steer_error {
                     if let Some(pending) = self.state.pending_turn_steers.pop_front() {
                         if error.code != "invalid_result" {
@@ -9271,18 +9290,29 @@ impl Store {
                 // path outside the five transport synthesis points — none is
                 // known today): a spurious clear merely re-permits a cheap
                 // probe, the safe direction.
+                // #28a: the wording contract lives in transport.rs — match
+                // via the shared discriminators so a wording drift on the
+                // producer side cannot silently desync this arm.
                 let is_hydrate_error = error.message.starts_with("session/hydrate ")
                     || (error.code == "too_many_pending_requests"
-                        && error.message.ends_with("enqueue session/hydrate request"))
+                        && message_is_pending_cap_for_method(
+                            &error.message,
+                            crate::model::APPUI_METHOD_SESSION_HYDRATE,
+                        ))
                     || (error.code == "frame_too_large"
-                        && error.message.starts_with("encoded session/hydrate request"))
+                        && message_is_frame_too_large_for_method(
+                            &error.message,
+                            crate::model::APPUI_METHOD_SESSION_HYDRATE,
+                        ))
                     || (error.code == "transport_send"
-                        && error
-                            .message
-                            .starts_with("failed to send session/hydrate request"))
+                        && message_is_transport_send_for_method(
+                            &error.message,
+                            crate::model::APPUI_METHOD_SESSION_HYDRATE,
+                        ))
                     || (error.code == "invalid_result"
-                        && error.message.starts_with(
-                            "failed to decode UI protocol result for session/hydrate",
+                        && message_is_invalid_result_for_method(
+                            &error.message,
+                            crate::model::APPUI_METHOD_SESSION_HYDRATE,
                         ));
                 if is_hydrate_error {
                     self.state.hydrate_in_flight.clear();
@@ -9306,13 +9336,20 @@ impl Store {
                 // main turn.
                 let is_btw_error = error.message.starts_with("session/btw ")
                     || (error.code == "too_many_pending_requests"
-                        && error.message.ends_with("enqueue session/btw request"))
+                        && message_is_pending_cap_for_method(
+                            &error.message,
+                            octos_core::ui_protocol::methods::SESSION_BTW,
+                        ))
                     || (error.code == "invalid_result"
-                        && error
-                            .message
-                            .starts_with("failed to decode UI protocol result for session/btw"))
+                        && message_is_invalid_result_for_method(
+                            &error.message,
+                            octos_core::ui_protocol::methods::SESSION_BTW,
+                        ))
                     || (error.code == "frame_too_large"
-                        && error.message.starts_with("encoded session/btw request"));
+                        && message_is_frame_too_large_for_method(
+                            &error.message,
+                            octos_core::ui_protocol::methods::SESSION_BTW,
+                        ));
                 if is_btw_error && self.state.fail_btw_answering(&error.message) > 0 {
                     self.state.status = t!("status.btw_failed").into_owned();
                     return None;
@@ -9333,17 +9370,25 @@ impl Store {
                 // server's own echo keep the transcript truthful).
                 let is_steer_error = error.message.starts_with("turn/steer ")
                     || (error.code == "too_many_pending_requests"
-                        && error.message.ends_with("enqueue turn/steer request"))
+                        && message_is_pending_cap_for_method(
+                            &error.message,
+                            crate::model::APPUI_METHOD_TURN_STEER,
+                        ))
                     || (error.code == "frame_too_large"
-                        && error.message.starts_with("encoded turn/steer request"))
+                        && message_is_frame_too_large_for_method(
+                            &error.message,
+                            crate::model::APPUI_METHOD_TURN_STEER,
+                        ))
                     || (error.code == "transport_send"
-                        && error
-                            .message
-                            .starts_with("failed to send turn/steer request"))
+                        && message_is_transport_send_for_method(
+                            &error.message,
+                            crate::model::APPUI_METHOD_TURN_STEER,
+                        ))
                     || (error.code == "invalid_result"
-                        && error
-                            .message
-                            .starts_with("failed to decode UI protocol result for turn/steer"));
+                        && message_is_invalid_result_for_method(
+                            &error.message,
+                            crate::model::APPUI_METHOD_TURN_STEER,
+                        ));
                 if is_steer_error {
                     if let Some(pending) = self.state.pending_turn_steers.pop_front() {
                         if error.code != "invalid_result" {
@@ -42113,22 +42158,41 @@ now analyzing the bus module"
     /// result-decode for parity with the /btw and turn/steer arms.
     #[test]
     fn pre_send_rejections_release_hydrate_marker() {
+        // #28a: fixtures come from the SAME constructors the transport
+        // produces with — a wording drift moves both sides together and this
+        // test stays truthful instead of pinning a stale literal.
+        let decode_err = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        let send_err = eyre::eyre!("broken pipe");
         for (code, message) in [
             (
                 "too_many_pending_requests",
-                "UI protocol has 16 pending request(s); refusing to enqueue session/hydrate request".to_string(),
+                crate::transport::pre_send_pending_cap_message(
+                    crate::model::APPUI_METHOD_SESSION_HYDRATE,
+                    16,
+                ),
             ),
             (
                 "transport_send",
-                "failed to send session/hydrate request tui-5: broken pipe".to_string(),
+                crate::transport::transport_send_message(
+                    crate::model::APPUI_METHOD_SESSION_HYDRATE,
+                    "tui-5",
+                    &send_err,
+                ),
             ),
             (
                 "frame_too_large",
-                "encoded session/hydrate request tui-5 is 999999 bytes; max is 262144".to_string(),
+                crate::transport::frame_too_large_message(
+                    crate::model::APPUI_METHOD_SESSION_HYDRATE,
+                    "tui-5",
+                    999999,
+                ),
             ),
             (
                 "invalid_result",
-                "failed to decode UI protocol result for session/hydrate: missing field".to_string(),
+                crate::transport::invalid_result_message(
+                    crate::model::APPUI_METHOD_SESSION_HYDRATE,
+                    &decode_err,
+                ),
             ),
         ] {
             let (mut store, session_id) = phantom_in_progress_store();
