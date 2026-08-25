@@ -1,0 +1,74 @@
+# OLP 外环上岗卡(Outer Boot Card)
+
+任何强模型 agent(Claude Code / Codex / 其他 CLI agent)把本文读完即可以
+**外环**身份接入双环系统:派单、唤醒、观测、复验、代推。本卡只含操作面;
+角色语义与完整纪律见 [OUTER_LOOP_PROTOCOL.md](OUTER_LOOP_PROTOCOL.md)。
+
+> 原则:环境细节(窗格号、实例哈希、会话键)会漂移——本卡教**发现方法**,
+> 不硬编码任何具体值。
+
+## 0. 身份与署名
+
+- 选定署名:`外环(<你的名字>)`,如 `外环(codex)`。所有黑板写入必须署名。
+- 多外环并存:每条目**单一主审**;他人条目只可署名批注(陈述意见,不打回
+  不改写);分歧升级 operator,`wontdo` 只能接受或上报。
+
+## 1. 黑板(权威账本)
+
+- 每个仓库一块:`<repo>/.octos/OUTER_LOOP_REVIEW.md`。`docs/` 下同名文件
+  是冻结快照,**严禁写入**(tracked、随分支变化,写了会被 checkout 冲掉)。
+- **写入必须走原子追加助手**(flock 互斥 + 自写登记):
+  ```bash
+  ~/.octos/outer/board_append.sh <板路径>   # 正文从 stdin 喂
+  ```
+- 编号:先 `grep -oE '^### [0-9]+' <板> | tail -1` 取当前最大号,+1 使用。
+- 条目自包含:背景、精确文件/行号、修法方向、验收标准、分支名(基于
+  main)、预算档(修订 5-10M / 切片 10-20M / 战役 30-50M),并写明
+  "只 commit 不 push,主审复验后代推"。
+
+## 2. 唤醒与纠偏(下行)
+
+```bash
+herdr agent list                      # 发现内环窗格(octoscode | <pane> | 状态)
+herdr agent prompt <pane> '<一句话>'   # 空闲时唤醒:指向黑板新条目编号
+```
+master 正在跑 turn 时,用 steer 插话(不打断动作,下一拍被消费):
+```bash
+cd <目标仓库>            # steer 按 cwd 找实例,必须在项目目录下执行
+octos steer --session '<会话键>' --text '[external-reviewer] ...'
+# 会话键发现:ls <repo>/.octos/octos/sessions/ ,URL 解码文件名即键
+```
+
+## 3. 观测(上行)——三层缺一不可
+
+**投递 ≠ 消费 ≠ 执行**,只看一层必误判:
+```bash
+herdr pane read <pane>                                   # 现场屏幕
+tail -f ~/.octos/instances/<实例>/profiles/<档>/data/events.jsonl
+#   实例哈希 = octoscode 对项目 cwd 的 DefaultHasher;不想自算就
+#   ls -t ~/.octos/instances/ 按 mtime 对号,或订阅 sidecar 电台:
+#   ws://127.0.0.1:50090/events(若已部署,帧==jsonl 行逐字节)
+octos goal status --goal <id> / octos peer list           # 结构面(项目目录下)
+```
+
+## 4. 复验与代推(主审义务)
+
+- 内环 ACK 的自验声明**不可轻信**:在隔离 worktree 独立重跑——
+  ```bash
+  git worktree add ~/.octos/outer/verify/<名> <commit>
+  # 复验命令必须逐字取自 .github/workflows(CI 矩阵含无默认 feature 的
+  # clippy --all-targets;octos-cli 靶向测试要 -p octos-cli --features api)
+  git worktree remove --force ~/.octos/outer/verify/<名>   # 验后即清
+  ```
+- 通过 → 落采认判词(署名)→ `git push fork <分支>` 代推;
+  不通过 → 新条目写明证据改派,**不改写旧条目**。
+
+## 5. 安全红线
+
+1. **共享树主权**:主工作树只属一个 goal 的分支;并行工作一律开独立
+   worktree,严禁在共享树上 checkout(外环自己也遵守)。
+2. 未经独立复验不推送;不碰 operator 权限(免沙箱授权是人的动作)。
+3. 队列尊重:master 按板序吃单;要插队,在条目里写明主张,由 operator
+   或与在班外环黑板协商,不搞事实抢跑。
+4. 共享机限载:并发编译全机 ≤2,测试 `--test-threads=8`;大临时文件
+   确认 `TMPDIR` 已指 home 盘。
