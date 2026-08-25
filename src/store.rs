@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use octos_core::app_ui::{AppUiEvent, AppUiSnapshot};
+use octos_core::app_ui::{AppUiError, AppUiEvent, AppUiSnapshot};
 use octos_core::ui_protocol::{
     ApprovalAutoResolvedEvent, ApprovalCancelledEvent, ApprovalDecidedEvent, ApprovalId,
     ApprovalRespondParams, AttachmentOwnerV2, DiffPreviewGetParams, Envelope, EnvelopeNotification,
@@ -7767,9 +7767,438 @@ impl Store {
         self.state.scroll_transcript_to_latest();
     }
 
+    /// Error handling with the hydrate arm removed — used by the
+    /// `ClientEvent::HydrateError` path (#22b-r1), where attribution was
+    /// already resolved by the transport and the per-session marker released;
+    /// re-running the hydrate matcher would take the unattributed clear-all
+    /// fallback on the re-emitted message.
+    fn apply_non_hydrate_error(&mut self, code: String, message: String) -> Option<AppUiCommand> {
+        let error = AppUiError { code, message };
+        match AppUiEvent::Error(error) {
+            AppUiEvent::Error(error) => {
+                // OUTER_LOOP_REVIEW #12: an attributed `session/hydrate`
+                // failure/cancellation answers the in-flight request — clear
+                // every session's marker so a later resume/reconnect can
+                // re-dispatch. Errors carry no session attribution (same
+                // discipline as the `/btw` arm below); concurrent in-flight
+                // hydrates across sessions fail together, which is the safe
+                // direction (a spurious clear only re-permits a cheap probe).
+                //
+                // #20 (ymote P1): the marker latches forever when the command
+                // never gets an answer — match the FULL set of shapes the
+                // transport produces for this method, mirroring the `/btw` and
+                // `turn/steer` exhaustiveness discipline immediately below:
+                //   - response error/cancel formats the method FIRST
+                //     ("session/hydrate …"),
+                //   - pre-send rejections name the method in fixed trailers
+                //     (pending-cap refusal) or prefixes (oversized frame,
+                //     send failure, result decode).
+                //
+                // `/btw` failure/cancellation. Match ONLY the two shapes the
+                // transport actually produces for an aside — the response
+                // error/cancel ("{method} request {id} …" formats the method
+                // FIRST) and the pre-send pending-cap rejection (its fixed
+                // trailer names the method) — never a bare substring: an
+                // unrelated error merely echoing "session/btw" (e.g. inside a
+                // session key) must fall through to the normal error handling
+                // below, not be swallowed by this early return. Errors carry
+                // no session attribution; with concurrent asides across
+                // sessions all answering cards fail together (rare; each card
+                // invites a retry). CRUCIALLY: an aside failure is NOT a
+                // turn/transport failure — return before the generic path
+                // below flips the run state to error for a perfectly healthy
+                // main turn.
+                let is_btw_error = error.message.starts_with("session/btw ")
+                    || (error.code == "too_many_pending_requests"
+                        && error.message.ends_with("enqueue session/btw request"))
+                    || (error.code == "invalid_result"
+                        && error
+                            .message
+                            .starts_with("failed to decode UI protocol result for session/btw"))
+                    || (error.code == "frame_too_large"
+                        && error.message.starts_with("encoded session/btw request"));
+                if is_btw_error && self.state.fail_btw_answering(&error.message) > 0 {
+                    self.state.status = t!("status.btw_failed").into_owned();
+                    return None;
+                }
+                // octos#1807: a dead `turn/steer` falls back to STAGING its
+                // prompt so the typed text is never lost. Same
+                // attribution discipline as `/btw` above — match ONLY the
+                // shapes the transport actually produces for this method
+                // (response error/cancel formats the method FIRST; the
+                // pre-send rejections carry fixed method-naming trailers) —
+                // and, crucially, EARLY-RETURN: a steer failing says nothing
+                // about the MAIN turn, which is still streaming; falling
+                // through would flip the run state to Error under a healthy
+                // turn. `invalid_result` means the response ARRIVED (the
+                // server acted — steered or started a turn) but did not
+                // decode: re-staging would submit the text twice, so only
+                // the stash entry is consumed (the optimistic row + the
+                // server's own echo keep the transcript truthful).
+                let is_steer_error = error.message.starts_with("turn/steer ")
+                    || (error.code == "too_many_pending_requests"
+                        && error.message.ends_with("enqueue turn/steer request"))
+                    || (error.code == "frame_too_large"
+                        && error.message.starts_with("encoded turn/steer request"))
+                    || (error.code == "transport_send"
+                        && error
+                            .message
+                            .starts_with("failed to send turn/steer request"))
+                    || (error.code == "invalid_result"
+                        && error
+                            .message
+                            .starts_with("failed to decode UI protocol result for turn/steer"));
+                if is_steer_error {
+                    if let Some(pending) = self.state.pending_turn_steers.pop_front() {
+                        if error.code != "invalid_result" {
+                            self.state.withdraw_steered_user_prompt(
+                                &pending.session_id,
+                                &pending.turn_id,
+                                &pending.prompt,
+                            );
+                            self.state
+                                .stage_prompt_back(&pending.session_id, pending.prompt);
+                            self.state.status = t!("status.message_staged").into_owned();
+                            return None;
+                        }
+                    }
+                    self.state.status = t!(
+                        "status.error_code_message",
+                        code = error.code,
+                        message = error.message
+                    )
+                    .into_owned();
+                    return None;
+                }
+                // A configured local profile may still lack its required LLM
+                // selection (for example immediately after profile creation).
+                // `session/open` reports that as the structured
+                // `profile_unconfigured` kind. Treat it as a setup transition,
+                // not a terminal session error: open the provider step for the
+                // remembered target profile and leave the UI idle/usable.
+                let is_unconfigured_session_open = error.code == "profile_unconfigured"
+                    && error.message.starts_with("session/open ");
+                if is_unconfigured_session_open
+                    && let Some(profile_id) = self.current_profile_for_onboarding()
+                {
+                    self.state.onboarding.profile_id = Some(profile_id.clone());
+                    self.state.onboarding.creating_new_profile = false;
+                    self.close_all_menus();
+                    self.open_menu(MenuId::from(crate::menu::registry::MENU_ONBOARD));
+                    self.state.status =
+                        t!("status.profile_model_setup_required", profile = profile_id)
+                            .into_owned();
+                    self.state.push_activity(
+                        ActivityItem::new(ActivityKind::Warning, error.code, error.message)
+                            .with_detail("opened model setup"),
+                    );
+                    self.state.set_run_state_idle();
+                    return None;
+                }
+                // A staged-drain SubmitPrompt can die at the TRANSPORT layer —
+                // no turn/started or terminal will ever arrive for it, so the
+                // FIFO in-flight gate would wedge the session's remaining
+                // staged queue (codex P2 on the gate). Release PRECISELY
+                // (codex round-3: an over-broad clear drops gates whose
+                // turn/start is still alive → concurrent submits), and
+                // RE-STAGE the dead submit's prompt from the gate (P2 tri-repo
+                // #246: the drain already pulled it off the queue, so a bare
+                // release LOST it — "queue 3 prompts, hit a reconnect burst →
+                // the drained one vanishes"):
+                //
+                // * `request_cancelled` carries "{method} request {id}
+                //   cancelled: {reason}" — only a dead `turn/start` affects
+                //   the gate, and cancellation is cancel-ALL (disconnect /
+                //   skipped frame), so every in-flight turn/start died with
+                //   it: re-stage every gate's prompt into its own session.
+                // * send-layer refusals (`send_failed`,
+                //   `too_many_pending_requests`, `transport_send`) carry no
+                //   method attribution; the staged submit rides the ACTIVE
+                //   session's follow-up queue, so release that gate only.
+                // * recoverable parser noise (`malformed_frame`, skipped
+                //   frames themselves) cancels nothing — their pending
+                //   requests emit their own `request_cancelled` events.
+                //
+                // Each re-stage leaves a BACKOFF-only gate and deliberately
+                // does NOT wake the drain: the transport just failed, so an
+                // immediate resubmit would spin submit→fail→re-stage at
+                // event-loop speed (and a repeat wire error before the retry
+                // must not re-stage the same prompt twice). The per-tick
+                // `drain_staged_backstop` retries on the gate-TTL cadence.
+                let restaged = match error.code.as_str() {
+                    "request_cancelled"
+                        if error
+                            .message
+                            .starts_with(octos_core::ui_protocol::methods::TURN_START) =>
+                    {
+                        let gates: Vec<(SessionKey, StagedSubmitGate)> =
+                            self.state.staged_submit_in_flight.drain().collect();
+                        let mut restaged = false;
+                        for (session_id, gate) in gates {
+                            restaged |= self.restage_dead_staged_submit(&session_id, gate);
+                            // EVERY drained gate comes back as a FRESH backoff
+                            // — including backoff-only ones (codex fold: a
+                            // repeat error must extend the backoff, not strip
+                            // it and let the tick backstop retry immediately).
+                            self.state
+                                .staged_submit_in_flight
+                                .insert(session_id, StagedSubmitGate::backoff());
+                        }
+                        restaged
+                    }
+                    "send_failed" | "too_many_pending_requests" | "transport_send" => {
+                        let active = self
+                            .state
+                            .active_session()
+                            .map(|session| session.id.clone());
+                        if let Some(session_id) = active
+                            && let Some(gate) =
+                                self.state.staged_submit_in_flight.remove(&session_id)
+                        {
+                            let restaged = self.restage_dead_staged_submit(&session_id, gate);
+                            // Fresh backoff for BOTH gate kinds (see above).
+                            self.state
+                                .staged_submit_in_flight
+                                .insert(session_id, StagedSubmitGate::backoff());
+                            restaged
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                };
+                // M22-B: route `profile/local/create` failures back
+                // into the onboarding step so the user lands on a
+                // typed recovery instead of a generic status line.
+                //
+                // Order matters here:
+                //
+                // 1. Transport-level codes (`transport_read`,
+                //    `transport_send`, `malformed_frame`) take
+                //    PRECEDENCE: even if the message text mentions
+                //    `profile/local/create`, the failure is a wire-
+                //    level event, not a profile rejection. Clear the
+                //    pending flag so the user can retry without
+                //    pretending the username was at fault.
+                // 2. Otherwise attribution requires a POSITIVE
+                //    signal — a known local-create error code or an
+                //    explicit method-prefixed error message
+                //    (`profile/local/create request tui-N failed: …`,
+                //    see `error_response_to_app_event`). The bare
+                //    `local_profile_create_pending` boolean is NOT
+                //    enough on its own because an unrelated RPC
+                //    failing during the pending window would
+                //    otherwise be misclassified.
+                // Codes the client raises that are NOT profile-
+                // level rejections. The substring check below MUST
+                // NOT route these through profile recovery even
+                // when the message names `profile/local/create` —
+                // the wire/policy/cancellation failure is not a
+                // field problem.
+                let is_client_synth_error = matches!(
+                    error.code.as_str(),
+                    "transport_read"
+                        | "transport_send"
+                        | "malformed_frame"
+                        | "malformed_json"
+                        | "frame_too_large"
+                        | "readonly"
+                        | "too_many_pending_requests"
+                        | "request_cancelled"
+                );
+                let attribute_to_local_create = !is_client_synth_error
+                    && (is_local_create_error_code(&error.code)
+                        || error.message.contains("profile/local/create"));
+
+                // Of those, only the codes that DEFINITIVELY end the
+                // in-flight local-create request should clear the
+                // pending snapshot. Generic `too_many_pending_requests`,
+                // `frame_too_large`, and `malformed_json` can fire
+                // on OTHER commands while the local-create response
+                // is still on its way; clearing the snapshot in
+                // that case would let a second create dispatch
+                // (the overlapping-create finding) and could
+                // misattribute the eventual response to a stale
+                // pending tracker.
+                //
+                // The conservative set is:
+                //   - `transport_read`/`transport_send`: wire-level
+                //     break → no response will arrive for ANY in-
+                //     flight request including the local-create.
+                //   - Other client-synth codes (`request_cancelled`,
+                //     `readonly`, `frame_too_large`,
+                //     `too_many_pending_requests`) when the message
+                //     names `profile/local/create`: the rejection
+                //     is attributed to the local-create RPC itself
+                //     (cancellation, pre-send policy/encoding/queue
+                //     gate) so the request is GONE.
+                //
+                // `malformed_frame` and `malformed_json` are
+                // recoverable parser errors — the transport stays
+                // connected and `pending_requests` is not drained,
+                // so the original `profile/local/create` response
+                // can still arrive. Clearing the pending flag for
+                // those would allow a duplicate create and
+                // misattribute the eventual response.
+                let names_local_create = error.message.contains("profile/local/create");
+                let cancels_in_flight_create =
+                    matches!(error.code.as_str(), "transport_read" | "transport_send")
+                        || (matches!(
+                            error.code.as_str(),
+                            "request_cancelled"
+                                | "readonly"
+                                | "frame_too_large"
+                                | "too_many_pending_requests"
+                        ) && names_local_create);
+                let is_transport_error = matches!(
+                    error.code.as_str(),
+                    "transport_read" | "transport_send" | "malformed_frame"
+                );
+                // Same attribution scheme for the staged provider RPCs
+                // (Test / Save / Fetch models): the error format is
+                // "{method} request tui-N failed: …", so a message naming
+                // the method positively identifies the dead request; a
+                // wire-level break kills every in-flight request including
+                // this one. Clearing `provider_pending` here is what
+                // un-wedges the staged model-config surface — the flag gates
+                // re-dispatch AND every staged edit, so a failed test used
+                // to freeze the whole menu on "Testing connection…" forever
+                // (mini4: profile/llm/test rejected with auth_scope_violation
+                // → stuck spinner + "provider test already in progress").
+                let names_provider_rpc = [
+                    crate::model::APPUI_METHOD_PROFILE_LLM_TEST,
+                    crate::model::APPUI_METHOD_PROFILE_LLM_UPSERT,
+                    crate::model::APPUI_METHOD_PROFILE_LLM_FETCH_MODELS,
+                    // A research-lane save is a staged-wizard RPC too (PR384
+                    // review P2-c): without this, a rejected lane upsert (e.g.
+                    // the #1775 api_key-without-env rule on manual providers)
+                    // freezes the wizard for the full 30s sweep and then shows
+                    // a misleading "timeout" instead of the server's reason.
+                    crate::model::APPUI_METHOD_PROFILE_SUB_PROVIDERS_UPSERT,
+                ]
+                .iter()
+                .any(|method| error.message.contains(method));
+                let cancels_in_flight_provider = self.state.onboarding.provider_pending.is_some()
+                    && (names_provider_rpc
+                        || matches!(error.code.as_str(), "transport_read" | "transport_send"));
+                if cancels_in_flight_provider {
+                    self.state.onboarding.provider_pending = None;
+                    self.state.onboarding.provider_pending_since = None;
+                    self.state.onboarding.pending_research_lane_key = None;
+                    self.state.onboarding.last_message = Some(
+                        t!("status.provider_request_failed", message = error.message).into_owned(),
+                    );
+                    self.refresh_active_menu_if_open();
+                }
+                if cancels_in_flight_create && self.state.onboarding.local_profile_create_pending {
+                    self.state.onboarding.local_profile_create_pending = false;
+                    self.state.onboarding.local_profile_create_pending_username = None;
+                    self.state.status = if is_transport_error {
+                        t!(
+                            "status.local_create_cancelled_transport",
+                            code = error.code,
+                            message = error.message
+                        )
+                        .into_owned()
+                    } else {
+                        t!(
+                            "status.local_create_cancelled",
+                            code = error.code,
+                            message = error.message
+                        )
+                        .into_owned()
+                    };
+                } else if error.code == "frame_too_large" {
+                    // Recoverable pre-send rejection: the frame (e.g. a large
+                    // inline turn input or paste) exceeded the 1 MB UI-protocol
+                    // cap. The connection + session are fine — surface an
+                    // actionable message rather than a raw "Error [...]" and do
+                    // NOT wedge the session in Error (mini5: a 1.1 MB inline send
+                    // left the session stuck in Error, unrecoverable). The
+                    // local-create attribution above runs first so the wizard's
+                    // pending-clear is preserved.
+                    self.state.status =
+                        t!("status.message_too_large", message = error.message).into_owned();
+                } else if is_client_synth_error {
+                    // Surfaced for the user but does NOT touch the
+                    // local-create pending state.
+                    self.state.status = t!(
+                        "status.error_code_message",
+                        code = error.code,
+                        message = error.message
+                    )
+                    .into_owned();
+                } else if attribute_to_local_create {
+                    self.state
+                        .onboarding
+                        .apply_local_profile_error(&error.code, &error.message);
+                    let recovery_message_and_focus = self
+                        .state
+                        .onboarding
+                        .local_profile_recovery
+                        .as_ref()
+                        .map(|recovery| (recovery.message.clone(), recovery.focus_field));
+                    if let Some((message, focus_field)) = recovery_message_and_focus {
+                        self.state.status =
+                            t!("status.local_profile_setup_blocked", message = message)
+                                .into_owned();
+                        self.refresh_active_menu_if_open();
+                        self.focus_local_profile_field(focus_field);
+                    } else {
+                        self.state.status = t!(
+                            "status.error_code_message",
+                            code = error.code,
+                            message = error.message
+                        )
+                        .into_owned();
+                    }
+                } else {
+                    self.state.status = t!(
+                        "status.error_code_message",
+                        code = error.code,
+                        message = error.message
+                    )
+                    .into_owned();
+                }
+                self.state.push_activity(
+                    ActivityItem::new(
+                        ActivityKind::Error,
+                        error.code.clone(),
+                        error.message.clone(),
+                    )
+                    .with_detail("app-ui error"),
+                );
+                // Written LAST so the re-queue outcome is what the user reads
+                // (the raw error stays visible on the activity feed and the
+                // run-state chip below).
+                if restaged {
+                    self.state.status = t!("status.staged_submit_requeued").into_owned();
+                }
+                if error.code == "frame_too_large" {
+                    // Recoverable — keep the session usable (idle) instead of
+                    // wedging it in Error on an oversized inline send.
+                    self.state.set_run_state_idle();
+                } else {
+                    self.state.set_run_state_error(error.message);
+                }
+                None
+            }
+            _ => unreachable!("constructed as Error above"),
+        }
+    }
+
     pub fn apply_client_event(&mut self, event: ClientEvent) -> Option<AppUiCommand> {
         match event {
             ClientEvent::App(event) => self.apply_event(*event),
+            // #22b-r1: transport-attributed hydrate failure — release ONLY
+            // this session's marker, then surface the original error shape.
+            // The message re-emit bypasses `apply_event`'s hydrate arm (its
+            // five-shape matcher would take the unattributed clear-all
+            // fallback), because attribution was already resolved here.
+            ClientEvent::HydrateError(event) => {
+                self.state.hydrate_in_flight.remove(&event.session_id);
+                self.apply_non_hydrate_error(event.code, event.message)
+            }
             ClientEvent::BackendRelaunched => self.reconcile_after_backend_relaunch(),
             ClientEvent::Capabilities(event) => {
                 let follow_up = self.apply_capabilities_event(event);
@@ -8830,26 +9259,18 @@ impl Store {
                 //     (pending-cap refusal) or prefixes (oversized frame,
                 //     send failure, result decode).
                 //
-                // #22b (codex, verified by 外环(claude)): the `.clear()` below
-                // is the CONSERVATIVE branch of "remove the attributable
-                // session only, clear-all only when unattributable" — and ALL
-                // FIVE shapes above are unattributable at this layer:
-                //   - response errors/cancels carry only the JSON-RPC request
-                //     id; the id→session map lives in the transport's
-                //     `pending_requests` table, which the store cannot see;
-                //   - pre-send rejections carry even less — the pending-cap
-                //     refusal fires BEFORE the command is assigned a request
-                //     id, and the frame_too_large/transport_send messages
-                //     embed the id but the store has no id→session lookup;
-                //   - `invalid_result` likewise embeds only the method name.
-                // Attributing would require a wire-visible session field on
-                // the error event (an AppUiError schema change) — out of
-                // scope for this revision. Until then a cross-session
-                // spurious clear only re-permits a cheap re-probe (the
-                // in-flight hydrate for the other session IS still answered
-                // by its own result, which re-applies idempotently); the
-                // reverse (latching) was the P1. Pinned by
-                // `pre_send_rejection_in_one_session_clears_all_in_flight`.
+                // #22b-r1 (codex round-2, 外环(claude) 让步): hydrate errors
+                // now arrive ATTRIBUTED via `ClientEvent::HydrateError`
+                // (transport resolves the session from `PendingRequest.
+                // hydrate_session` or the in-hand command — same mechanism as
+                // `select_session`; wire schema unchanged) and release only
+                // that session's marker at the `apply_client_event` arm
+                // above. This `.clear()` remains ONLY as a defensive fallback
+                // for a hydrate error that somehow still arrives WITHOUT
+                // attribution (a legacy-shaped `AppUiEvent::Error` from a
+                // path outside the five transport synthesis points — none is
+                // known today): a spurious clear merely re-permits a cheap
+                // probe, the safe direction.
                 let is_hydrate_error = error.message.starts_with("session/hydrate ")
                     || (error.code == "too_many_pending_requests"
                         && error.message.ends_with("enqueue session/hydrate request"))
@@ -8865,6 +9286,9 @@ impl Store {
                         ));
                 if is_hydrate_error {
                     self.state.hydrate_in_flight.clear();
+                    // #22b-r1: the marker is released; the remaining error
+                    // handling (status surface, btw/turn arms) still applies.
+                    return self.apply_non_hydrate_error(error.code, error.message);
                 }
                 // `/btw` failure/cancellation. Match ONLY the two shapes the
                 // transport actually produces for an aside — the response
@@ -41721,14 +42145,12 @@ now analyzing the bus module"
         }
     }
 
-    /// #22b: a pre-send hydrate rejection in session A currently clears ALL
-    /// in-flight markers — including session B's genuinely-answered hydrate.
-    /// This test pins that behavior as DELIBERATE (none of the five hydrate
-    /// error shapes carries session attribution at the store layer; see the
-    /// error-arm comment), so the day attribution becomes available this test
-    /// FAILS and forces the arm to switch to per-session `remove`.
+    /// #22b-r1: an ATTRIBUTED hydrate failure in session A releases ONLY A's
+    /// marker — session B's genuinely in-flight hydrate marker must SURVIVE
+    /// (the codex P1: a blanket clear would re-permit a duplicate hydrate for
+    /// B → doubled serve busy time and duplicate scrollback).
     #[test]
-    fn pre_send_rejection_in_one_session_clears_all_in_flight() {
+    fn attributed_hydrate_error_releases_only_that_session() {
         let (mut store, session_a) = phantom_in_progress_store();
         // Add session B alongside the phantom session A.
         store.state.sessions.push(SessionView {
@@ -41746,28 +42168,49 @@ now analyzing the bus module"
         assert!(store.state.hydrate_in_flight.contains(&session_a));
         assert!(store.state.hydrate_in_flight.contains(&session_b));
 
-        // A's pre-send rejection arrives (no session attribution on the wire).
+        // A's pre-send rejection arrives WITH transport-resolved attribution.
+        store.apply_client_event(ClientEvent::HydrateError(
+            crate::client_event::HydrateErrorClientEvent {
+                session_id: session_a.clone(),
+                code: "too_many_pending_requests".into(),
+                message: "UI protocol has 16 pending request(s); refusing to enqueue session/hydrate request".to_string(),
+            },
+        ));
+
+        assert!(
+            !store.state.hydrate_in_flight.contains(&session_a),
+            "the failed session's marker must be released"
+        );
+        assert!(
+            store.state.hydrate_in_flight.contains(&session_b),
+            "session B's in-flight marker must SURVIVE session A's failure (#22b-r1)"
+        );
+        // A can re-dispatch; B is still deduped while its hydrate is in flight.
+        assert!(store.hydrate_session_state_command(&session_a).is_some());
+        assert!(store.hydrate_session_state_command(&session_b).is_none());
+    }
+
+    /// #22b-r1 fallback: a hydrate error that arrives WITHOUT attribution
+    /// (legacy-shaped `AppUiEvent::Error` from outside the transport's five
+    /// synthesis points) still conservatively clears all markers — a spurious
+    /// clear only re-permits a cheap probe; the latch was the P1.
+    #[test]
+    fn unattributed_hydrate_error_falls_back_to_clear_all() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+        assert!(store.hydrate_session_state_command(&session_id).is_some());
+        assert!(store.state.hydrate_in_flight.contains(&session_id));
+
         store.apply_event(AppUiEvent::error(
             "too_many_pending_requests",
             "UI protocol has 16 pending request(s); refusing to enqueue session/hydrate request"
                 .to_string(),
         ));
 
-        // Deliberate conservative behavior today: BOTH markers are released —
-        // B's spurious release only re-permits a cheap re-probe, while keeping
-        // A latched was the P1. When wire-level attribution lands, flip this
-        // to `contains(&session_b)` and switch the arm to per-session remove.
         assert!(
-            !store.state.hydrate_in_flight.contains(&session_a),
-            "the rejected session's marker must be released"
+            !store.state.hydrate_in_flight.contains(&session_id),
+            "unattributed fallback still releases the marker (no latch)"
         );
-        assert!(
-            !store.state.hydrate_in_flight.contains(&session_b),
-            "unattributable errors conservatively clear all markers (#22b)"
-        );
-        // Both sessions can re-dispatch afterwards — no latch.
-        assert!(store.hydrate_session_state_command(&session_a).is_some());
-        assert!(store.hydrate_session_state_command(&session_b).is_some());
     }
 
     /// An unrelated error that merely CONTAINS the method name must not clear

@@ -359,6 +359,13 @@ struct PendingRequest {
     /// the response updates exactly that session's caches — correlation by
     /// JSON-RPC request id, immune to reply reordering and queue drift.
     select_session: Option<SessionKey>,
+    /// OUTER_LOOP_REVIEW #22b-r1: for `session/hydrate`, the session the
+    /// request hydrates — so an error/cancel/invalid-result for THIS request
+    /// releases only this session's in-flight marker (never a blanket clear
+    /// that drops another session's genuinely in-flight hydrate). Same
+    /// local-attribution mechanism as `select_session`; the wire schema is
+    /// unchanged.
+    hydrate_session: Option<SessionKey>,
 }
 
 #[derive(Debug, Default)]
@@ -376,11 +383,27 @@ struct ProtocolExchange {
 struct CancelledRequest {
     method: String,
     event: AppUiEvent,
+    /// #22b-r1: hydrate session attribution carried from the pending entry —
+    /// the store releases only this session's marker on cancel.
+    hydrate_session: Option<SessionKey>,
 }
 
 impl CancelledRequest {
     fn is_capabilities_probe(&self) -> bool {
         self.method == crate::model::APPUI_METHOD_CONFIG_CAPABILITIES_LIST
+    }
+
+    fn into_client_event(self) -> ClientEvent {
+        if let Some(session_id) = self.hydrate_session
+            && let AppUiEvent::Error(error) = self.event
+        {
+            return ClientEvent::HydrateError(crate::client_event::HydrateErrorClientEvent {
+                session_id,
+                code: error.code,
+                message: error.message,
+            });
+        }
+        self.event.into()
     }
 }
 
@@ -458,6 +481,10 @@ impl ProtocolExchange {
             AppUiCommand::ProfileLlmSelect(params) => params.session_id.clone(),
             _ => None,
         };
+        let hydrate_session = match &command {
+            AppUiCommand::HydrateSession(params) => Some(params.session_id.clone()),
+            _ => None,
+        };
         let request_id = self.next_request_id();
         let request = rpc_request_from_command(request_id.clone(), command)?;
 
@@ -466,6 +493,7 @@ impl ProtocolExchange {
             PendingRequest {
                 method,
                 select_session,
+                hydrate_session,
             },
         );
 
@@ -533,7 +561,11 @@ impl ProtocolExchange {
                     "request_cancelled",
                     format!("{method} request {id} cancelled: {reason}"),
                 );
-                CancelledRequest { method, event }
+                CancelledRequest {
+                    method,
+                    event,
+                    hydrate_session: request.hydrate_session,
+                }
             })
             .collect()
     }
@@ -1633,7 +1665,7 @@ impl ProtocolAppUiBackend {
         }
         self.queue
             .extend(cancelled_requests.into_iter().filter_map(|cancelled| {
-                (!cancelled.is_capabilities_probe()).then_some(cancelled.event.into())
+                (!cancelled.is_capabilities_probe()).then_some(cancelled.into_client_event())
             }));
     }
 
@@ -1929,7 +1961,8 @@ impl ProtocolAppUiBackend {
                     let cancelled = self.protocol.cancel_pending_requests(reason);
                     self.queue
                         .extend(cancelled.into_iter().filter_map(|cancelled| {
-                            (!cancelled.is_capabilities_probe()).then_some(cancelled.event.into())
+                            (!cancelled.is_capabilities_probe())
+                                .then_some(cancelled.into_client_event())
                         }));
                 }
                 self.queue
@@ -2157,7 +2190,19 @@ impl AppUiBackend for ProtocolAppUiBackend {
             // that was just blocked. Without this the store cannot
             // tell which command lost its slot in the queue.
             let method = command.method();
-            self.queue.push_back(
+            // #22b-r1: a hydrate refusal is attributable LOCALLY from the
+            // in-hand command — emit the attributed event so the store
+            // releases only that session's marker.
+            let event: ClientEvent = if let AppUiCommand::HydrateSession(params) = &command {
+                ClientEvent::HydrateError(crate::client_event::HydrateErrorClientEvent {
+                    session_id: params.session_id.clone(),
+                    code: "too_many_pending_requests".into(),
+                    message: format!(
+                        "UI protocol has {} pending request(s); refusing to enqueue {method} request",
+                        self.protocol.pending_requests.len()
+                    ),
+                })
+            } else {
                 AppUiEvent::Error(AppUiError {
                     code: "too_many_pending_requests".into(),
                     message: format!(
@@ -2165,8 +2210,9 @@ impl AppUiBackend for ProtocolAppUiBackend {
                         self.protocol.pending_requests.len()
                     ),
                 })
-                .into(),
-            );
+                .into()
+            };
+            self.queue.push_back(event);
             return Ok(());
         }
 
@@ -2180,17 +2226,32 @@ impl AppUiBackend for ProtocolAppUiBackend {
         let method = request.method.clone();
         let text = serde_json::to_string(&request).wrap_err("failed to encode JSON-RPC request")?;
         if text.len() > MAX_TEXT_FRAME_BYTES {
-            self.protocol.pending_requests.remove(&request_id);
-            self.queue.push_back(
-                AppUiEvent::Error(AppUiError {
+            // #22b-r1: recover the hydrate session attribution before dropping
+            // the pending entry.
+            let hydrate_session = self
+                .protocol
+                .pending_requests
+                .remove(&request_id)
+                .and_then(|pending| pending.hydrate_session);
+            let message = format!(
+                "encoded {method} request {request_id} is {} bytes; max is {MAX_TEXT_FRAME_BYTES}",
+                text.len()
+            );
+            let event: ClientEvent = match hydrate_session {
+                Some(session_id) => {
+                    ClientEvent::HydrateError(crate::client_event::HydrateErrorClientEvent {
+                        session_id,
+                        code: "frame_too_large".into(),
+                        message,
+                    })
+                }
+                None => AppUiEvent::Error(AppUiError {
                     code: "frame_too_large".into(),
-                    message: format!(
-                        "encoded {method} request {request_id} is {} bytes; max is {MAX_TEXT_FRAME_BYTES}",
-                        text.len()
-                    ),
+                    message,
                 })
                 .into(),
-            );
+            };
+            self.queue.push_back(event);
             return Ok(());
         }
 
@@ -2198,17 +2259,31 @@ impl AppUiBackend for ProtocolAppUiBackend {
             // Remove the pending entry before mark_disconnected so that
             // cancel_pending_requests does not emit a duplicate "cancelled"
             // event for this request on top of the transport_send error below.
-            self.protocol.pending_requests.remove(&request_id);
+            // #22b-r1: recover the hydrate session attribution (see above).
+            let hydrate_session = self
+                .protocol
+                .pending_requests
+                .remove(&request_id)
+                .and_then(|pending| pending.hydrate_session);
             self.mark_disconnected(format!(
                 "UI protocol disconnected; reconnect will retry on next send/read: {err:#}"
             ));
-            self.queue.push_back(
-                AppUiEvent::Error(AppUiError {
+            let message = format!("failed to send {method} request {request_id}: {err:#}");
+            let event: ClientEvent = match hydrate_session {
+                Some(session_id) => {
+                    ClientEvent::HydrateError(crate::client_event::HydrateErrorClientEvent {
+                        session_id,
+                        code: "transport_send".into(),
+                        message,
+                    })
+                }
+                None => AppUiEvent::Error(AppUiError {
                     code: "transport_send".into(),
-                    message: format!("failed to send {method} request {request_id}: {err:#}"),
+                    message,
                 })
                 .into(),
-            );
+            };
+            self.queue.push_back(event);
         }
 
         Ok(())
@@ -2795,9 +2870,7 @@ fn rpc_value_to_app_event(
         }
 
         return if has_error {
-            Ok(Some(
-                error_response_to_app_event(frame, pending_requests).into(),
-            ))
+            Ok(Some(error_response_to_app_event(frame, pending_requests)))
         } else {
             success_response_to_app_event(frame, pending_requests)
         };
@@ -3267,7 +3340,24 @@ fn success_response_to_app_event(
         }
         methods::SESSION_HYDRATE => match serde_json::from_value::<SessionHydrateResult>(result) {
             Ok(result) => Ok(Some(ClientEvent::SessionHydrate(result))),
-            Err(err) => Ok(Some(autonomy_decode_error(methods::SESSION_HYDRATE, err))),
+            Err(err) => {
+                // #22b-r1: decode failure is attributable LOCALLY via the
+                // pending entry — release only that session's marker.
+                let message = format!(
+                    "failed to decode UI protocol result for {}: {err}",
+                    methods::SESSION_HYDRATE
+                );
+                Ok(Some(match pending_request.hydrate_session.clone() {
+                    Some(session_id) => {
+                        ClientEvent::HydrateError(crate::client_event::HydrateErrorClientEvent {
+                            session_id,
+                            code: "invalid_result".into(),
+                            message,
+                        })
+                    }
+                    None => app_error("invalid_result", message).into(),
+                }))
+            }
         },
         methods::SESSION_LIST => match serde_json::from_value::<SessionListResult>(result) {
             Ok(result) => Ok(Some(ClientEvent::SessionList(result))),
@@ -4101,22 +4191,24 @@ fn interrupt_ack_status(result: &Value) -> String {
 fn error_response_to_app_event(
     frame: &serde_json::Map<String, Value>,
     pending_requests: &mut HashMap<String, PendingRequest>,
-) -> AppUiEvent {
+) -> ClientEvent {
     let request_id = match response_id(frame) {
         Ok(request_id) => request_id,
-        Err(event) => return *event,
+        Err(event) => return (*event).into(),
     };
     let Some(error) = frame.get("error") else {
         return app_error(
             "malformed_frame",
             "UI protocol response is missing error field",
-        );
+        )
+        .into();
     };
     if !error.is_object() {
         return app_error(
             "malformed_frame",
             "UI protocol error response error field must be an object",
-        );
+        )
+        .into();
     }
 
     let pending_request = request_id
@@ -4124,6 +4216,12 @@ fn error_response_to_app_event(
         .and_then(|id| pending_requests.remove(id));
     let code = rpc_error_code(error);
     let message = rpc_error_message(error);
+    // #22b-r1: a hydrate failure is attributable LOCALLY via the pending
+    // entry — emit the attributed event so the store releases only that
+    // session's in-flight marker.
+    let hydrate_session = pending_request
+        .as_ref()
+        .and_then(|request| request.hydrate_session.clone());
     let message = match (pending_request, request_id) {
         (Some(request), Some(id)) => {
             format!("{} request {id} failed: {message}", request.method)
@@ -4132,7 +4230,16 @@ fn error_response_to_app_event(
         (_, None) => message,
     };
 
-    app_error(code, message)
+    match hydrate_session {
+        Some(session_id) => {
+            ClientEvent::HydrateError(crate::client_event::HydrateErrorClientEvent {
+                session_id,
+                code,
+                message,
+            })
+        }
+        None => app_error(code, message).into(),
+    }
 }
 
 fn response_id(
@@ -7209,6 +7316,7 @@ mod tests {
             PendingRequest {
                 select_session: None,
                 method: crate::model::APPUI_METHOD_PROFILE_SKILLS_LIST.into(),
+                hydrate_session: None,
             },
         );
         let frame = json!({
@@ -7277,6 +7385,7 @@ mod tests {
             PendingRequest {
                 method: crate::model::APPUI_METHOD_PEER_PREPARE.into(),
                 select_session: None,
+                hydrate_session: None,
             },
         );
         let frame = json!({
@@ -7343,6 +7452,7 @@ mod tests {
             PendingRequest {
                 method: crate::model::APPUI_METHOD_PEER_PREPARE.into(),
                 select_session: None,
+                hydrate_session: None,
             },
         );
         let frame = json!({
@@ -7435,6 +7545,7 @@ mod tests {
             PendingRequest {
                 method: crate::model::APPUI_METHOD_TURN_STEER.into(),
                 select_session: None,
+                hydrate_session: None,
             },
         );
         let frame = json!({
@@ -7460,6 +7571,7 @@ mod tests {
             PendingRequest {
                 method: crate::model::APPUI_METHOD_TURN_STEER.into(),
                 select_session: None,
+                hydrate_session: None,
             },
         );
         let frame = json!({
@@ -7750,6 +7862,7 @@ mod tests {
             PendingRequest {
                 method: crate::model::APPUI_METHOD_PEER_GATHER.into(),
                 select_session: None,
+                hydrate_session: None,
             },
         );
         let frame = json!({
@@ -7856,6 +7969,7 @@ mod tests {
             PendingRequest {
                 method: crate::model::APPUI_METHOD_SESSION_STATUS_READ.into(),
                 select_session: None,
+                hydrate_session: None,
             },
         );
         let frame = json!({
@@ -9270,6 +9384,7 @@ mod tests {
             Some(&PendingRequest {
                 select_session: None,
                 method: methods::APPROVAL_SCOPES_LIST.into(),
+                hydrate_session: None,
             })
         );
 
@@ -9623,6 +9738,7 @@ mod tests {
                 PendingRequest {
                     select_session: None,
                     method: methods::APPROVAL_SCOPES_LIST.into(),
+                    hydrate_session: None,
                 },
             );
         }
@@ -9703,6 +9819,7 @@ mod tests {
             Some(&PendingRequest {
                 select_session: None,
                 method: methods::TURN_START.into(),
+                hydrate_session: None,
             })
         );
 

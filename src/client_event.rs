@@ -45,6 +45,16 @@ pub enum ClientEvent {
     /// were dropped from the session and `thread` carries the trimmed
     /// transcript to re-render (same shape as `session/hydrate`).
     SessionRollback(SessionRollbackResult),
+    /// OUTER_LOOP_REVIEW #22b-r1: a `session/hydrate` failure (response error,
+    /// request cancel, or pre-send rejection) with LOCAL session attribution
+    /// resolved by the transport (`PendingRequest` for on-wire failures, the
+    /// in-hand command for pre-send rejections) — the wire `AppUiError` schema
+    /// is unchanged. The store releases ONLY this session's in-flight marker,
+    /// never a blanket clear that would drop another session's genuinely
+    /// in-flight hydrate. The event still surfaces to the user as an error
+    /// (the store converts it into the same `AppUiEvent::Error` shape after
+    /// releasing the marker).
+    HydrateError(HydrateErrorClientEvent),
     ReviewStart(ReviewStartResult),
     AuthStatus(AuthStatusClientEvent),
     AuthSendCode(AuthSendCodeClientEvent),
@@ -123,6 +133,16 @@ impl From<AppUiEvent> for ClientEvent {
     fn from(event: AppUiEvent) -> Self {
         Self::App(Box::new(event))
     }
+}
+
+/// See [`ClientEvent::HydrateError`]. The `session_id` is resolved locally by
+/// the transport; `code`/`message` keep the wire error's original shape so
+/// the store can re-emit the identical user-facing `AppUiEvent::Error`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HydrateErrorClientEvent {
+    pub session_id: SessionKey,
+    pub code: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
