@@ -8829,6 +8829,27 @@ impl Store {
                 //   - pre-send rejections name the method in fixed trailers
                 //     (pending-cap refusal) or prefixes (oversized frame,
                 //     send failure, result decode).
+                //
+                // #22b (codex, verified by 外环(claude)): the `.clear()` below
+                // is the CONSERVATIVE branch of "remove the attributable
+                // session only, clear-all only when unattributable" — and ALL
+                // FIVE shapes above are unattributable at this layer:
+                //   - response errors/cancels carry only the JSON-RPC request
+                //     id; the id→session map lives in the transport's
+                //     `pending_requests` table, which the store cannot see;
+                //   - pre-send rejections carry even less — the pending-cap
+                //     refusal fires BEFORE the command is assigned a request
+                //     id, and the frame_too_large/transport_send messages
+                //     embed the id but the store has no id→session lookup;
+                //   - `invalid_result` likewise embeds only the method name.
+                // Attributing would require a wire-visible session field on
+                // the error event (an AppUiError schema change) — out of
+                // scope for this revision. Until then a cross-session
+                // spurious clear only re-permits a cheap re-probe (the
+                // in-flight hydrate for the other session IS still answered
+                // by its own result, which re-applies idempotently); the
+                // reverse (latching) was the P1. Pinned by
+                // `pre_send_rejection_in_one_session_clears_all_in_flight`.
                 let is_hydrate_error = error.message.starts_with("session/hydrate ")
                     || (error.code == "too_many_pending_requests"
                         && error.message.ends_with("enqueue session/hydrate request"))
@@ -41698,6 +41719,55 @@ now analyzing the bus module"
                 "pre-send rejection must release the marker: code={code} message={message}"
             );
         }
+    }
+
+    /// #22b: a pre-send hydrate rejection in session A currently clears ALL
+    /// in-flight markers — including session B's genuinely-answered hydrate.
+    /// This test pins that behavior as DELIBERATE (none of the five hydrate
+    /// error shapes carries session attribution at the store layer; see the
+    /// error-arm comment), so the day attribution becomes available this test
+    /// FAILS and forces the arm to switch to per-session `remove`.
+    #[test]
+    fn pre_send_rejection_in_one_session_clears_all_in_flight() {
+        let (mut store, session_a) = phantom_in_progress_store();
+        // Add session B alongside the phantom session A.
+        store.state.sessions.push(SessionView {
+            id: SessionKey("local:test-b".into()),
+            title: "test-b".into(),
+            profile_id: Some("coding".into()),
+            messages: vec![],
+            tasks: vec![],
+            live_reply: None,
+        });
+        let session_b = store.state.sessions[1].id.clone();
+        store.state.capabilities = Some(hydrate_capabilities());
+        assert!(store.hydrate_session_state_command(&session_a).is_some());
+        assert!(store.hydrate_session_state_command(&session_b).is_some());
+        assert!(store.state.hydrate_in_flight.contains(&session_a));
+        assert!(store.state.hydrate_in_flight.contains(&session_b));
+
+        // A's pre-send rejection arrives (no session attribution on the wire).
+        store.apply_event(AppUiEvent::error(
+            "too_many_pending_requests",
+            "UI protocol has 16 pending request(s); refusing to enqueue session/hydrate request"
+                .to_string(),
+        ));
+
+        // Deliberate conservative behavior today: BOTH markers are released —
+        // B's spurious release only re-permits a cheap re-probe, while keeping
+        // A latched was the P1. When wire-level attribution lands, flip this
+        // to `contains(&session_b)` and switch the arm to per-session remove.
+        assert!(
+            !store.state.hydrate_in_flight.contains(&session_a),
+            "the rejected session's marker must be released"
+        );
+        assert!(
+            !store.state.hydrate_in_flight.contains(&session_b),
+            "unattributable errors conservatively clear all markers (#22b)"
+        );
+        // Both sessions can re-dispatch afterwards — no latch.
+        assert!(store.hydrate_session_state_command(&session_a).is_some());
+        assert!(store.hydrate_session_state_command(&session_b).is_some());
     }
 
     /// An unrelated error that merely CONTAINS the method name must not clear
