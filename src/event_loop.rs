@@ -826,8 +826,16 @@ fn drain_pending_autonomy_hydration(backend: &mut dyn AppUiBackend, store: &mut 
 }
 
 fn send_command(backend: &mut dyn AppUiBackend, store: &mut Store, command: AppUiCommand) {
+    let method = command.method();
     if let Err(err) = backend.send(command) {
-        store.apply_event(AppUiEvent::error("send_failed", format!("{err:#}")));
+        // OUTER_LOOP_REVIEW #27: never swallow a failed send silently — the
+        // user (composer input above all) must see that THIS command did not
+        // reach the backend, named by method, instead of the TUI sitting
+        // quiet after a "reconnected" status while input goes nowhere.
+        store.apply_event(AppUiEvent::error(
+            "send_failed",
+            format!("命令未送达 backend({method} 发送失败): {err:#}"),
+        ));
     }
 }
 

@@ -234,6 +234,17 @@ pub struct ProtocolAppUiBackend {
     /// the current session at all). Falls back to the launch session when
     /// nothing has been opened yet.
     reopen_session: Option<SessionOpenParams>,
+    /// OUTER_LOOP_REVIEW #27: endpoint mode (WS to a remote `octos serve`)
+    /// reconnects the TRANSPORT but never replays the session bootstrap the
+    /// store issued on the now-dead connection — `launch/resolve` above all:
+    /// its result drives onboarding/routing, and the store only dispatches it
+    /// once per capabilities advertisement, so a lost one leaves the TUI
+    /// staring at "reconnected" with no bootstrap at all (the P3 "假重连":
+    /// composer input silently goes nowhere). Cached when the command goes
+    /// out; replayed BEFORE the session reopen on a real reconnect (a
+    /// disconnect means its result died with the old connection); cleared
+    /// when the result lands.
+    pending_launch_resolve: Option<crate::model::LaunchResolveParams>,
     refresh_capabilities_on_reconnect: bool,
     queue: VecDeque<ClientEvent>,
     protocol: ProtocolExchange,
@@ -1493,6 +1504,7 @@ impl ProtocolAppUiBackend {
             disconnected_status_reported: false,
             fatal_error: None,
             reopen_session: None,
+            pending_launch_resolve: None,
             refresh_capabilities_on_reconnect: false,
             queue: VecDeque::new(),
             protocol: ProtocolExchange::default(),
@@ -1571,6 +1583,20 @@ impl ProtocolAppUiBackend {
         let endpoint = driver.label().to_string();
         self.mark_connected(&endpoint);
         self.refresh_capabilities_after_reconnect()?;
+        // #27: replay the session bootstrap BEFORE the session reopen — the
+        // store's launch/resolve went out on the now-dead connection, its
+        // result died with it, and the store only dispatches it once per
+        // capabilities advertisement, so without the replay the TUI shows
+        // "reconnected" while onboarding/routing never re-runs (the P3
+        // "假重连": composer input silently went nowhere).
+        // `reopen_command.is_some()` marks a REAL reconnect (it is computed
+        // only when a disconnect was reported) — replay the cached bootstrap
+        // only then, never on the first connect of `bootstrap` itself.
+        if reopen_command.is_some()
+            && let Some(params) = self.pending_launch_resolve.clone()
+        {
+            self.send(AppUiCommand::LaunchResolve(params))?;
+        }
         if let Some(command) = reopen_command {
             self.send(command)?;
         }
@@ -2220,6 +2246,12 @@ impl AppUiBackend for ProtocolAppUiBackend {
         // gates (so a genuinely-rejected command never becomes the reopen
         // target) and before `build_tracked_request` consumes `command`.
         self.record_reopen_target(&command);
+        // #27: cache the session bootstrap dispatch for replay after a
+        // reconnect — see the field doc. Same gate placement: a genuinely
+        // rejected command (readonly / pending-cap) never enters the cache.
+        if let AppUiCommand::LaunchResolve(params) = &command {
+            self.pending_launch_resolve = Some(params.clone());
+        }
 
         let request = self.build_tracked_request(command)?;
         let request_id = request.id.clone();
@@ -2290,22 +2322,28 @@ impl AppUiBackend for ProtocolAppUiBackend {
     }
 
     fn next_event(&mut self) -> Result<Option<ClientEvent>> {
-        if let Some(event) = self.queue.pop_front() {
-            return Ok(Some(event));
-        }
+        let event = if let Some(event) = self.queue.pop_front() {
+            Some(event)
+        } else {
+            loop {
+                let Some(event) = self.read_next_transport_event()? else {
+                    break self.queue.pop_front();
+                };
 
-        loop {
-            let Some(event) = self.read_next_transport_event()? else {
-                if let Some(event) = self.queue.pop_front() {
-                    return Ok(Some(event));
+                if let Some(event) = self.handle_transport_event(event)? {
+                    break Some(event);
                 }
-                return Ok(None);
-            };
-
-            if let Some(event) = self.handle_transport_event(event)? {
-                return Ok(Some(event));
             }
+        };
+        // #27: a delivered launch/resolve result answers the cached bootstrap
+        // dispatch — drop the replay copy so a LATER reconnect does not
+        // re-issue an already-answered resolve. (Error/cancel paths leave the
+        // cache armed: the store treats those as terminal for this connection,
+        // but a subsequent reconnect still needs the resolve re-issued.)
+        if matches!(event, Some(ClientEvent::LaunchResolve(_))) {
+            self.pending_launch_resolve = None;
         }
+        Ok(event)
     }
 }
 
@@ -5917,6 +5955,116 @@ mod tests {
         fn join(self) {
             self.thread.join().expect("protocol server exits cleanly");
         }
+    }
+
+    /// OUTER_LOOP_REVIEW #27 server: connection 1 serves capabilities +
+    /// launch/resolve then DIES (writer closed mid-session); connection 2
+    /// (the reconnect) captures every request so the test can assert the
+    /// session bootstrap (launch/resolve) is REPLAYED before the session
+    /// reopen — the "假重连" fix.
+    fn spawn_bootstrap_replay_reconnect_server() -> io::Result<ProtocolCaptureServer> {
+        let listener = StdTcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let addr = listener.local_addr()?;
+        let (frame_tx, frame_rx) = mpsc::channel();
+        let thread = thread::spawn(move || {
+            let runtime = Runtime::new().expect("test protocol server runtime");
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener)
+                    .expect("wrap protocol test server listener");
+
+                // Connection 1: answer capabilities + launch/resolve, then
+                // drop the socket (simulate the remote serve dying).
+                let (stream, _) = listener.accept().await.expect("accept first connection");
+                let mut ws = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("accept first websocket");
+                // Answer whatever the bootstrap + store dispatch send
+                // (capabilities, launch/resolve, session/open), then drop
+                // the socket (simulate the remote serve dying).
+                let mut answered = 0usize;
+                while answered < 3 {
+                    let message = ws
+                        .next()
+                        .await
+                        .expect("first-connection request arrives")
+                        .expect("read first-connection request");
+                    let text = match message {
+                        WsMessage::Text(text) => text.to_string(),
+                        other => panic!("unexpected websocket message: {other:?}"),
+                    };
+                    let frame: Value = serde_json::from_str(&text).expect("request is JSON");
+                    let method = frame["method"].as_str().expect("method");
+                    let result = match method {
+                        "config/capabilities/list" => json!({ "capabilities": tui_capabilities() }),
+                        // LaunchResolveResult: decision is the bare snake_case
+                        // enum variant (`resume`), rest serde-defaulted.
+                        "launch/resolve" => json!({ "decision": "resume" }),
+                        "session/open" => json!({
+                            "opened": {
+                                "session_id": frame["params"]["session_id"].clone(),
+                                "active_profile_id": "coding",
+                                "workspace_root": "/repo",
+                            }
+                        }),
+                        other => panic!("unexpected first-connection method: {other}"),
+                    };
+                    ws.send(WsMessage::Text(
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": frame["id"].clone(),
+                            "result": result,
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .expect("send first-connection response");
+                    answered += 1;
+                }
+                drop(ws); // the "remote serve died" moment
+
+                // Connection 2 (reconnect): capture capabilities retry +
+                // the REPLAYED launch/resolve + the session reopen.
+                let (stream, _) = listener.accept().await.expect("accept reconnect");
+                let mut ws = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("accept reconnect websocket");
+                for _ in 0..3 {
+                    let message = ws
+                        .next()
+                        .await
+                        .expect("reconnect request arrives")
+                        .expect("read reconnect request");
+                    let text = match message {
+                        WsMessage::Text(text) => text.to_string(),
+                        other => panic!("unexpected reconnect message: {other:?}"),
+                    };
+                    let frame: Value = serde_json::from_str(&text).expect("request is JSON");
+                    frame_tx
+                        .send(frame.clone())
+                        .expect("capture reconnect request");
+                    if frame["method"].as_str() == Some("config/capabilities/list") {
+                        ws.send(WsMessage::Text(
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": frame["id"].clone(),
+                                "result": { "capabilities": tui_capabilities() },
+                            })
+                            .to_string()
+                            .into(),
+                        ))
+                        .await
+                        .expect("send reconnect capabilities");
+                    }
+                }
+            });
+        });
+        Ok(ProtocolCaptureServer {
+            endpoint: format!("ws://{addr}/ui-protocol"),
+            received: frame_rx,
+            thread,
+        })
     }
 
     fn spawn_protocol_capture_server(
@@ -9719,6 +9867,86 @@ mod tests {
         assert_eq!(
             retry["method"],
             crate::model::APPUI_METHOD_CONFIG_CAPABILITIES_LIST
+        );
+        server.join();
+    }
+
+    /// OUTER_LOOP_REVIEW #27 (P3 真机 "假重连"): after a remote-serve death,
+    /// the reconnect must REPLAY the session bootstrap (launch/resolve)
+    /// before the session reopen — the store dispatches launch/resolve once
+    /// per capabilities advertisement, so losing it to the dead connection
+    /// used to leave the TUI "reconnected" with no bootstrap at all.
+    #[test]
+    fn endpoint_reconnect_replays_launch_resolve_before_reopen() {
+        let server = match spawn_bootstrap_replay_reconnect_server() {
+            Ok(server) => server,
+            Err(err) if err.kind() == io::ErrorKind::PermissionDenied => return,
+            Err(err) => panic!("protocol test server starts: {err}"),
+        };
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch {
+            endpoint: Some(AppUiEndpoint::websocket(server.endpoint.clone(), None)),
+            session_id: Some(SessionKey("local:test".into())),
+            ..AppUiLaunch::default()
+        });
+
+        backend.bootstrap().expect("bootstrap connects");
+
+        // Simulate the store's once-per-capabilities launch/resolve dispatch
+        // (the server asserts it arrives right after capabilities).
+        backend
+            .send(AppUiCommand::LaunchResolve(
+                crate::model::LaunchResolveParams {
+                    cwd: "/repo".into(),
+                    profile_id: None,
+                },
+            ))
+            .expect("launch/resolve sends on the first connection");
+
+        // Drain until the reconnect happens: the dead writer makes the next
+        // send/poll fail, the disconnect is reported, and the backend
+        // reconnects (server accepts connection 2 and captures 3 requests).
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut saw_disconnect = false;
+        while Instant::now() < deadline {
+            match backend.next_event() {
+                Ok(Some(ClientEvent::App(event))) => {
+                    if let AppUiEvent::Status(status) = *event {
+                        saw_disconnect |= status.message.contains("disconnected")
+                            || status.message.contains("closed");
+                    }
+                }
+                Ok(Some(_)) | Ok(None) => {}
+                Err(_) => {}
+            }
+            // Trigger the reconnect path (ensure_connected runs on send).
+            let _ = backend.send(AppUiCommand::ReadSessionStatus(
+                crate::model::SessionStatusReadParams {
+                    session_id: SessionKey("local:test".into()),
+                },
+            ));
+            if let Ok(frame) = server.received.recv_timeout(Duration::from_millis(50)) {
+                // First reconnect request must be the capabilities refresh.
+                assert_eq!(
+                    frame["method"],
+                    crate::model::APPUI_METHOD_CONFIG_CAPABILITIES_LIST
+                );
+                break;
+            }
+        }
+        assert!(saw_disconnect, "the dead connection was reported");
+
+        // The REPLAYED launch/resolve lands BEFORE the session reopen.
+        let replayed = server.recv_json();
+        assert_eq!(
+            replayed["method"],
+            crate::model::APPUI_METHOD_LAUNCH_RESOLVE,
+            "reconnect replays the lost session bootstrap (#27)"
+        );
+        let reopen = server.recv_json();
+        assert_eq!(
+            reopen["method"],
+            methods::SESSION_OPEN,
+            "session reopen follows the bootstrap replay"
         );
         server.join();
     }
