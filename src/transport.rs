@@ -92,6 +92,11 @@ pub struct AppUiLaunch {
     pub cwd: Option<String>,
     pub auth_token: Option<String>,
     pub readonly: bool,
+    /// OUTER_LOOP_REVIEW #30: startup prompt (`--prompt`). The store
+    /// auto-submits it as ONE turn/start after the session bootstrap +
+    /// hydrate completes; the exactly-once marker lives in the store state
+    /// (separate from the #27 bootstrap replay).
+    pub prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +170,7 @@ fn launch_from_cli(cli: &Cli) -> AppUiLaunch {
         cwd: launch_cwd_from_cli(cli),
         auth_token,
         readonly: cli.readonly,
+        prompt: cli.prompt.clone(),
     }
 }
 
@@ -5919,6 +5925,179 @@ mod tests {
         }
     }
 
+    // ---- OUTER_LOOP_REVIEW #30: startup prompt exactly-once across
+    // reconnects (fake WS server, same play as the #27 replay test) ----
+
+    /// Fake server scripting the bootstrap (capabilities + launch/resolve +
+    /// session/open + session/hydrate) then counting every turn/start it
+    /// receives across BOTH connections (pre- and post-reconnect).
+    fn spawn_startup_prompt_server(
+        kill_after_bootstrap: bool,
+    ) -> io::Result<(
+        ProtocolCaptureServer,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    )> {
+        let listener = StdTcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let addr = listener.local_addr()?;
+        let (frame_tx, frame_rx) = mpsc::channel();
+        let turn_starts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = turn_starts.clone();
+        let thread =
+            thread::spawn(move || {
+                let runtime = Runtime::new().expect("test server runtime");
+                runtime.block_on(async move {
+                    let listener = tokio::net::TcpListener::from_std(listener).expect("wrap");
+                    for connection in 0..2 {
+                        let Ok((stream, _)) = listener.accept().await else {
+                            break;
+                        };
+                        let mut ws = tokio_tungstenite::accept_async(stream)
+                            .await
+                            .expect("accept websocket");
+                        let mut served = 0usize;
+                        loop {
+                            let Some(Ok(message)) = ws.next().await else {
+                                break;
+                            };
+                            let WsMessage::Text(text) = message else {
+                                continue;
+                            };
+                            let frame: Value = serde_json::from_str(&text).expect("json");
+                            let method = frame["method"].as_str().unwrap_or("");
+                            if method == "turn/start" {
+                                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                frame_tx.send(frame.clone()).expect("capture turn/start");
+                                ws.send(WsMessage::Text(
+                                    json!({
+                                        "jsonrpc": "2.0", "id": frame["id"].clone(),
+                                        "result": {"turn_id": frame["params"]["turn_id"].clone()},
+                                    })
+                                    .to_string()
+                                    .into(),
+                                ))
+                                .await
+                                .expect("ack turn");
+                                continue;
+                            }
+                            let result = match method {
+                                "config/capabilities/list" => {
+                                    json!({"capabilities": tui_capabilities()})
+                                }
+                                "launch/resolve" => json!({"decision": "resume"}),
+                                "session/open" => json!({"opened": {
+                                "session_id": frame["params"]["session_id"].clone(),
+                                "active_profile_id": "coding", "workspace_root": "/repo"}}),
+                                "session/hydrate" => json!({
+                                "session_id": frame["params"]["session_id"].clone(),
+                                "cursor": {"stream": "session", "seq": 1}}),
+                                "session/status/read" => json!({
+                                "session_id": frame["params"]["session_id"].clone()}),
+                                _ => break,
+                            };
+                            ws.send(WsMessage::Text(
+                            json!({"jsonrpc": "2.0", "id": frame["id"].clone(), "result": result})
+                                .to_string().into(),
+                        )).await.expect("respond");
+                            served += 1;
+                            if kill_after_bootstrap && connection == 0 && served >= 4 {
+                                break; // connection dies after the bootstrap
+                            }
+                        }
+                        // keep the socket briefly on the second connection
+                        if connection == 1 {
+                            let _ = ws.next().await;
+                        }
+                    }
+                });
+            });
+        Ok((
+            ProtocolCaptureServer {
+                endpoint: format!("ws://{addr}/ui-protocol"),
+                received: frame_rx,
+                thread,
+            },
+            turn_starts,
+        ))
+    }
+
+    /// 场景 1: the startup prompt dispatches exactly ONE turn/start after
+    /// the bootstrap + hydrate completes — and the transport never
+    /// originates one on its own (the store once-machine is the trigger).
+    #[test]
+    fn startup_prompt_dispatches_exactly_one_turn_start() {
+        let (server, turn_starts) = match spawn_startup_prompt_server(false) {
+            Ok(pair) => pair,
+            Err(err) if err.kind() == io::ErrorKind::PermissionDenied => return,
+            Err(err) => panic!("server: {err}"),
+        };
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch {
+            endpoint: Some(AppUiEndpoint::websocket(server.endpoint.clone(), None)),
+            session_id: Some(SessionKey("local:test".into())),
+            prompt: Some("hello startup".into()),
+            ..AppUiLaunch::default()
+        });
+        backend.bootstrap().expect("bootstrap");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            match backend.next_event() {
+                Ok(Some(ClientEvent::SessionHydrate(_))) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            turn_starts.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "transport alone never originates a turn/start (store arm is the trigger)"
+        );
+        drop(backend);
+        let _ = server;
+    }
+
+    /// 场景 2/3 交界: reconnect — the #27 bootstrap replay sequence
+    /// (launch/resolve → session/open → hydrate) contains NO turn/start;
+    /// the startup-prompt re-dispatch is the store once-machine re-armed by
+    /// the replayed hydrate (pinned by the store-level tests).
+    #[test]
+    fn reconnect_bootstrap_replay_never_carries_turn_start() {
+        let (server, turn_starts) = match spawn_startup_prompt_server(true) {
+            Ok(pair) => pair,
+            Err(err) if err.kind() == io::ErrorKind::PermissionDenied => return,
+            Err(err) => panic!("server: {err}"),
+        };
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch {
+            endpoint: Some(AppUiEndpoint::websocket(server.endpoint.clone(), None)),
+            session_id: Some(SessionKey("local:test".into())),
+            prompt: Some("hello startup".into()),
+            ..AppUiLaunch::default()
+        });
+        backend.bootstrap().expect("bootstrap");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut hydrates = 0usize;
+        while Instant::now() < deadline && hydrates < 2 {
+            let _ = backend.send(AppUiCommand::ReadSessionStatus(
+                crate::model::SessionStatusReadParams {
+                    session_id: SessionKey("local:test".into()),
+                },
+            ));
+            match backend.next_event() {
+                Ok(Some(ClientEvent::SessionHydrate(_))) => hydrates += 1,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            turn_starts.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the #27 bootstrap replay never carries a turn/start"
+        );
+        drop(backend);
+        let _ = server;
+    }
+
     fn spawn_protocol_capture_server(
         expected_requests: usize,
         respond_to_session_open: bool,
@@ -9124,6 +9303,7 @@ mod tests {
             vim_mode: false,
             steer_mid_turn: false,
             no_splash: false,
+            prompt: None,
         };
 
         let launch = launch_from_cli(&cli);
@@ -10529,6 +10709,7 @@ mod tests {
             vim_mode: false,
             steer_mid_turn: false,
             no_splash: false,
+            prompt: None,
         };
 
         let launch = launch_from_cli(&cli);
