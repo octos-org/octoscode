@@ -36,6 +36,12 @@ ls -t ~/.octos/instances/        # 运行实例(目录名 = 项目 cwd 的哈希
 - 内环 ACK 后:**隔离 git worktree 独立复验**(复验命令逐字取自
   `.github/workflows`,不轻信自验声明),采认落判词后由你代推
 
+## 内环开设
+
+内环形态选型(octoscode 标准形态 / Claude·codex 快轨窗格 / 强档车道折中)
+与开设命令见 `docs/OLP_OUTER_BOOT.md` 第 6 节——内环契约 agent 无关,
+按单据尺寸选形态。
+
 ## 红线速记
 
 1. 内环只 commit 不 push;推送权在主审外环,且必须复验后

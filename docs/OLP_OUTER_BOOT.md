@@ -72,3 +72,37 @@ octos goal status --goal <id> / octos peer list           # 结构面(项目目�
    或与在班外环黑板协商,不搞事实抢跑。
 4. 共享机限载:并发编译全机 ≤2,测试 `--test-threads=8`;大临时文件
    确认 `TMPDIR` 已指 home 盘。
+
+## 6. 内环选型与开设(内环契约是 agent 无关的)
+
+**内环契约**只有四条:读黑板 Active 区 → 执行最小编号未 ACK 条目 →
+只 commit 不 push → 落 `ACK(done|wontdo|blocked)` 定式。任何能读文件、
+跑命令、被 herdr 驱动的 agent 都能当内环。三种形态按需选:
+
+| 内环形态 | 优势 | 适用 |
+|---|---|---|
+| octoscode + 便宜模型(标准形态) | 成本低;goal/peer/ledger/steer/事件流全套机械 | 慢轨战役、机械大批量 |
+| Claude Code 免审批窗格 | 质量高、不交赝品、单兵战力强 | 快轨 bug、难切片 |
+| codex 窗格(全局 auto 配置后) | 同上,且与主审厂牌隔离(利于互审) | 同上 |
+
+**开设命令**:
+```bash
+# 标准形态(octoscode)
+herdr pane run <pane> 'cd <repo> && octoscode --stdio-command "octos serve --stdio --solo --danger-full-access"'
+# Claude Code 快轨内环(免审批启动属信任决策,建议 operator 亲手执行)
+herdr pane run <pane> 'cd <repo> && claude --dangerously-skip-permissions'
+# codex 快轨内环(先在 ~/.codex/config.toml 设 approval_policy="never" + sandbox_mode)
+herdr pane run <pane> 'cd <repo> && codex'
+```
+开设后:发内环上岗词——"读 <repo>/.octos/loop.md 与黑板 Active 区,
+以内环身份执行:只 commit 不 push,完成落 v1 定式 ACK"。
+
+**诚实的差距清单**(裸 Claude/codex 窗格 vs octoscode):无事件流
+(三层观测退化为黑板+屏幕)、无 goal/peer/R2/ledger 机械、预算不入
+本体系账本、纪律靠提示词非 harness 硬约束。**快轨单兵单不受影响**;
+需要机械的活仍走标准形态。
+
+**折中优选**:若想"高端脑子 + 完整机械",不必换 harness——用
+sub_providers 多模型车道(配置法见 configuration.md),给 octoscode
+配强档车道(如 zai/glm、anthropic/claude),难切片按车道路由,机械
+一样不少。选型优先序:强档车道 > 裸窗格 > 换 harness。
