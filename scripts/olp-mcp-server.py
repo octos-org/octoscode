@@ -65,9 +65,11 @@ def outer_root() -> Path:
 def mailbox_dirs(root: Path) -> tuple:
     questions = root / "mcp" / "questions"
     answers = root / "mcp" / "answers"
+    consumed = root / "mcp" / "consumed"
     questions.mkdir(parents=True, exist_ok=True)
     answers.mkdir(parents=True, exist_ok=True)
-    return questions, answers
+    consumed.mkdir(parents=True, exist_ok=True)
+    return questions, answers, consumed
 
 
 def board_append(root: Path, text: str) -> bool:
@@ -139,7 +141,7 @@ class OlcpMcpServer:
     def __init__(self, root: Path, timeout_secs: float = ASK_TIMEOUT_SECS,
                  poll_interval: float = ASK_POLL_INTERVAL_SECS):
         self.root = root
-        self.questions_dir, self.answers_dir = mailbox_dirs(root)
+        self.questions_dir, self.answers_dir, self.consumed_dir = mailbox_dirs(root)
         self.timeout_secs = timeout_secs
         self.poll_interval = poll_interval
         self.ask_count = 0
@@ -187,6 +189,15 @@ class OlcpMcpServer:
                     text = answer.get("answer", "")
                     audit_entry(self.root, "answer",
                                 f"id={ask_id} answered ({len(text)} chars)")
+                    # S3: archive the consumed pair so questions/ holds only
+                    # unanswered asks (the outer side's queue view) and the
+                    # audit trail keeps the full history.
+                    archive = self.consumed_dir / f"{ts}-{ask_id}.json"
+                    archive.write_text(json.dumps(
+                        {"question": payload, "answer": answer},
+                        ensure_ascii=False, indent=2), encoding="utf-8")
+                    question_path.unlink(missing_ok=True)
+                    answer_path.unlink(missing_ok=True)
                     return text
                 except (json.JSONDecodeError, OSError) as err:
                     log.warning("answer unreadable: %s", err)
@@ -359,10 +370,13 @@ def self_test() -> int:
             "tried": "读过 model.rs 7408 与 store.rs 错误臂"}})
         writer.join(timeout=2)
         text = resp["result"]["content"][0]["text"] if resp else ""
+        # S3: the consumed pair is archived and questions/ is drained.
         questions = list(server.questions_dir.glob("*-*.json"))
+        consumed = list(server.consumed_dir.glob("*-*.json"))
         board_text = board_log.read_text(encoding="utf-8") if board_log.exists() else ""
-        ok = (text == "外环答:走候选 b" and len(questions) == 1
-              and json.loads(questions[0].read_text(encoding="utf-8"))["tried"]
+        ok = (text == "外环答:走候选 b" and len(consumed) == 1 and len(questions) == 0
+              and json.loads(consumed[0].read_text(encoding="utf-8"))["question"]["tried"]
+              and json.loads(consumed[0].read_text(encoding="utf-8"))["answer"]["answer"] == "外环答:走候选 b"
               and SIGNATURE in board_text and "ask" in board_text)
         check("self_test_ask_outer_roundtrip", bool(ok), f"answer={text!r}")
 
