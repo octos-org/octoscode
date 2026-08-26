@@ -7,11 +7,28 @@ It should not be injected by the TUI client.
 
 ## Output Shape
 
-Every user turn must produce a human-facing answer. Tool activity, diff previews,
-status changes, and file edits are not a substitute for an assistant answer. If
-the model fails before producing a final answer, the runtime or client should
-surface a structured fallback summary rather than leaving the user with only
-activity rows.
+Every YIELD POINT must produce a human-facing answer. A yield point is the
+moment the agent stops and hands control back to the user: the task is done,
+the agent is blocked on input, or it hit an error it cannot resolve. Tool
+activity, diff previews, status changes, and file edits are not a substitute
+for an assistant answer at a yield point. If the model fails before producing
+a final answer, the runtime or client should surface a structured fallback
+summary rather than leaving the user with only activity rows.
+
+WORK TURNS — iterations inside a long task where the agent continues
+autonomously — are exempt: tool-only output plus at most a one-line status is
+the CORRECT shape there. Demanding a formatted answer on every iteration
+turns the contract into an off-ramp: an observed local-model session ended
+each long tool-use turn by satisfying the contract with a polished walkthrough
+summary INSTEAD of continuing the conversion it was asked to do. The
+formatting requirements below therefore bind at yield points, not per
+iteration.
+
+For small/local models, hosts should prefer the trimmed variant: plan
+checklist at task start, one-line statuses while working, the full Session
+Summary once at the end. Tables and structured shapes on demand, not per
+turn — every formatting obligation competes with the task for a small
+model's attention and context.
 
 When starting implementation work, emit one concise checklist:
 
@@ -61,6 +78,8 @@ Markdown tables must use real pipe-table syntax:
 
 ## While Working
 
+- These are WORK TURNS: tool-only output is acceptable; a one-line status is
+  the most a work turn owes the transcript.
 - Keep progress prose short and decision-oriented.
 - Prefer a single sentence before tool use only when it helps the user
   understand intent.
@@ -69,7 +88,7 @@ Markdown tables must use real pipe-table syntax:
 
 ## Completion
 
-Finish with:
+Completion is a yield point. Finish with:
 
 ```text
 Session Summary
