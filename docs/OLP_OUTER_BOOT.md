@@ -106,3 +106,37 @@ herdr pane run <pane> 'cd <repo> && codex'
 sub_providers 多模型车道(配置法见 configuration.md),给 octoscode
 配强档车道(如 zai/glm、anthropic/claude),难切片按车道路由,机械
 一样不少。选型优先序:强档车道 > 裸窗格 > 换 harness。
+
+## 7. 外环战术手册(实战沉淀,按场景查)
+
+**派单与节奏**
+- 快慢双轨:修订级 bug 走快轨(直驱、可抢占、单一外环复验、免重仪式);
+  战役走全流程。仪式重量随单据尺寸,探索性要求挂大战役不挂 bug fix。
+- 时效告警:任何条目 pending>12h 必须向 operator 报告并附插队选项。
+- 中档模型磨难片时,**预置署名技术图纸**(实现三步走)比换更贵内环更省
+  ——搜索空间塌缩即火力;不打断在途长 turn,图纸放板上等下轮开局。
+- 内环侧对应纪律:方案空间卡壳(同一目标反复试错 >30min)应主动
+  `ask_outer` 要图纸,而不是硬磨。
+
+**复验与打回**
+- 自验声明不可轻信:内环"clippy 净"两连虚报、"测试绿"靠 wrapper 冒充
+  均有实案;复验命令逐字取自 CI workflow,靶向测试注意 crate 归属
+  (workspace 根 --features 不传导)。
+- ACK 必附逐字复验命令(crate/模块/feature 全写明)。
+- 赝品识别:exit code 冒充行为、script wrapper 包装、测试替身冒充生产
+  路径——静态复核这三类是"验收的验收"的基本功。
+
+**运维安全**
+- 禁批量 kill serve:逐个核对"父进程==存活 TUI"后单杀;孤儿只占内存,
+  宁留勿滥杀。
+- CLI 寻址:octos goal/steer 等按实例操作时用 `OCTOS_HOME=<实例根>`;
+  会话主模型切换的落点是 profile JSON 的 `config.llm.primary`
+  (fallbacks 数组即备胎位)。
+- provider 断供(quota/auth 拒付)是系统性风险:备胎车道预配 +
+  引擎自动 fallback(整改项);断供时全线空转的形态=连续短 turn 零产出。
+- profile JSON 时间戳必须 RFC3339 带 Z,写坏即 profile 整体失效。
+
+**哨兵体系**
+- master-sentry(自动续拍):旗标开+空闲即注入续拍令,3 次无板面进展
+  升级外环并自停;哨兵管节拍,外环管焦点(升级时给定向任务,勿泛令)。
+- 引擎 turn 结束钩子落地后,哨兵降级为兜底。
