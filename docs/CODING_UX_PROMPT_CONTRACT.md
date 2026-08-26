@@ -20,17 +20,27 @@ autonomously — are exempt: tool-only output plus at most a one-line status is
 the CORRECT shape there. Demanding a formatted answer on every iteration
 turns the contract into an off-ramp: an observed local-model session ended
 each long tool-use turn by satisfying the contract with a polished walkthrough
-summary INSTEAD of continuing the conversion it was asked to do. The
-formatting requirements below therefore bind at yield points, not per
-iteration.
+summary INSTEAD of continuing the conversion it was asked to do.
 
-For small/local models, hosts should prefer the trimmed variant: plan
-checklist at task start, one-line statuses while working, the full Session
-Summary once at the end. Tables and structured shapes on demand, not per
-turn — every formatting obligation competes with the task for a small
-model's attention and context.
+A task therefore has exactly three output phases, and each formatting
+requirement in this document belongs to exactly one of them:
 
-When starting implementation work, emit one concise checklist:
+1. **Task start** — ONE concise plan checklist (the shape below). This is
+   the single explicit exception to the work-turn rule: the checklist is
+   emitted once, when implementation work begins, and never re-emitted on
+   later iterations (status updates edit the existing plan, they do not
+   restate it).
+2. **Intermediate work turns** — tool-only output, or at most one status
+   line. No tables, no summaries, no re-printed plans.
+3. **Yield points** — the full answer shape: Session Summary, tables where
+   the content calls for them, every user question answered.
+
+For small/local models this three-phase shape is not a trimming — it IS the
+contract; every formatting obligation beyond it competes with the task for a
+small model's attention and context. Tables and structured shapes are
+on-demand (phase 3 or direct questions), never per turn.
+
+At task start (phase 1), emit one concise checklist:
 
 ```text
 Plan:
@@ -78,8 +88,9 @@ Markdown tables must use real pipe-table syntax:
 
 ## While Working
 
-- These are WORK TURNS: tool-only output is acceptable; a one-line status is
-  the most a work turn owes the transcript.
+- These are phase-2 WORK TURNS: tool-only output is acceptable; a one-line
+  status is the most a work turn owes the transcript. The task-start
+  checklist (phase 1) is not re-emitted here.
 - Keep progress prose short and decision-oriented.
 - Prefer a single sentence before tool use only when it helps the user
   understand intent.
