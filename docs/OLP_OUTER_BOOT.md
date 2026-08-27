@@ -46,8 +46,10 @@ octos steer --session '<会话键>' --text '[external-reviewer] ...'
 herdr pane read <pane>                                   # 现场屏幕
 tail -f ~/.octos/instances/<实例>/profiles/<档>/data/events.jsonl
 #   实例哈希 = octoscode 对项目 cwd 的 DefaultHasher;不想自算就
-#   ls -t ~/.octos/instances/ 按 mtime 对号,或订阅 sidecar 电台:
-#   ws://127.0.0.1:50090/events(若已部署,帧==jsonl 行逐字节)
+#   ls -t ~/.octos/instances/ 按 mtime 对号。ws://127.0.0.1:50090 的
+#   sidecar 是外环自建临时观测件(非发行物);终态为 serve 内
+#   /api/events/stream 端点(完整已测实现存档于 archive/olp-evt-ws
+#   tag,待单 serve 多客户端拓扑成熟解冻)。
 octos goal status --goal <id> / octos peer list           # 结构面(项目目录下)
 ```
 
@@ -135,6 +137,9 @@ sub_providers 多模型车道(配置法见 configuration.md),给 octoscode
 - provider 断供(quota/auth 拒付)是系统性风险:备胎车道预配 +
   引擎自动 fallback(整改项);断供时全线空转的形态=连续短 turn 零产出。
 - profile JSON 时间戳必须 RFC3339 带 Z,写坏即 profile 整体失效。
+- **原型/发行判据**:常驻 + 协议 + 发行三占其二必须 Rust(如 OLP-MCP
+  server #31 的 Python 原型一夜后即移植);一次性引导与本地胶水可
+  shell/python(如 olp-init.sh、board_append.sh)。
 
 **哨兵体系**
 - master-sentry(自动续拍):旗标开+空闲即注入续拍令,3 次无板面进展

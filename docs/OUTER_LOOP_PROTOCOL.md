@@ -40,7 +40,7 @@
 | 权威账本 | `goal-ledgers/<goal_id>` | durable,重启幸存 |
 | 求助 | escalation(park 于 approval/question) | 分级升级,见 R3 |
 | 代码 | git log / diff | 审查对象 |
-| **主动问询(MCP 第五信道)** | `olp-mcp-server.py` 工具 `ask_outer`/`report_blocked`;信箱 `~/.octos/outer/mcp/questions|answers|consumed`,审计 `OUTER_LOOP_MCP.md` 署名 `MCP(ask_outer)` | 内环 turn 内同步发问,90s 超时降级,每片限 3 次+tried 必填(防思考外包);取答后归档 consumed/ |
+| **主动问询(MCP 第五信道)** | `octoscode olp-mcp-serve` 子命令(#31 Rust 化,纯 stdlib)工具 `ask_outer`/`report_blocked`;信箱 `~/.octos/outer/mcp/questions|answers|consumed`,审计 `OUTER_LOOP_MCP.md` 署名 `MCP(ask_outer)` | 内环 turn 内同步发问,90s 超时降级,每片限 3 次+tried 必填(防思考外包);取答后归档 consumed/ |
 
 ## 协议语义(核心规则)
 
@@ -126,12 +126,14 @@
    ——所以需要 fork 补丁把 octoscode 编入 Agent 枚举与 manifest,本地
    index.toml 覆盖**不能**新增 agent。降级方案:tmux `send-keys`(注意
    首字符为 `-` 的文本会被当 flag 吃掉,用 `--` 分隔)。
-7. (可选)内环→外环主动问询(第五信道,OLP-MCP):内环 profile 的
-   `~/.octos/profiles/<id>.json` 的 `config.mcp_servers` 挂
-   `scripts/olp-mcp-server.py`(纯标准库,`--self-test` 七件自验)后,
-   内环模型 turn 内可原生调用 `ask_outer(question, context, tried)` —
-   信箱 `~/.octos/outer/mcp/` 传输,90s 超时降级,每片限 3 次、
-   `tried` 必填(防思考外包);取答后问题归档 `consumed/`,全程审计
+7. (可选)内环→外环主动问询(第五信道,OLP-MCP,#31 起纯 Rust):内环
+   profile 的 `~/.octos/profiles/<id>.json` 的 `config.mcp_servers` 挂
+   本仓库二进制——`command` 指向 octoscode 可执行文件、`args` 为
+   `["olp-mcp-serve"]`(契约测试 `cargo test --test olp_mcp_contract`
+   七件自验;Python 原型已归档 scripts/reference/)后,内环模型 turn 内
+   可原生调用 `ask_outer(question, context, tried)` — 信箱
+   `~/.octos/outer/mcp/` 传输,90s 超时降级,每片限 3 次、`tried` 必填
+   (防思考外包);取答后问题归档 `consumed/`,全程审计
    `OUTER_LOOP_MCP.md` 署名 `MCP(ask_outer)`。三个实测坑已入册:
    (a) 落点是 profiles/<id>.json 的 config 对象,**不是**
    instances/.../config.toml(无人加载);(b) profile JSON 时间戳必须

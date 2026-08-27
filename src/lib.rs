@@ -21,6 +21,7 @@ pub mod insert_history;
 pub mod keymap;
 pub mod menu;
 pub mod model;
+pub mod olp_mcp;
 pub mod profiles;
 pub mod sanitize;
 pub mod splash;

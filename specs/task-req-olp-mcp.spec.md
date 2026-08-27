@@ -43,7 +43,7 @@ server 脚本、本规格、以及 S2 的内环工具配置 diff。operator 已�
 
 ### Allowed Changes
 - specs/task-req-olp-mcp.spec.md(本文件)
-- scripts/olp-mcp-server.py(S1 新增,纯标准库单文件)
+- octoscode olp-mcp-serve 子命令(#31 Rust 化:src/olp_mcp.rs + src/cmd/olp_mcp.rs,纯 stdlib 无新依赖;Python 原型归档 scripts/reference/)
 - S2 的内环 MCP 工具配置(配置 diff 先落板给外环过目,确认后再生效)
 
 ### Forbidden
@@ -69,7 +69,9 @@ server 脚本、本规格、以及 S2 的内环工具配置 diff。operator 已�
 S0:本规格过 `agent-spec guard --spec-dir specs --code .`(lint 无
 ERROR;新 spec 尚无代码可验,verify 全 skipped 可接受)。
 
-S1:`scripts/olp-mcp-server.py --self-test` 全绿,逐条对应下列断言:
+S1(#31 Rust 化后):`cargo test --test olp_mcp_contract` 全绿(真子进程
+  `octoscode olp-mcp-serve` stdio 驱动;Python 原型归档于
+  scripts/reference/olp-mcp-server.py),逐条对应下列断言:
 
 Scenario: initialize 握手
   测试: self_test_initialize_handshake
