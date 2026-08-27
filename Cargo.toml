@@ -66,6 +66,12 @@ rustix = "1.1.4"
 # tree transitively via crossterm/signal-hook-mio).
 signal-hook = "0.3.18"
 
+[dev-dependencies]
+# Pure-documentation OLP v1 contract tests parse the lane-template TOML block
+# in docs/OUTER_LOOP_PROTOCOL.md (tests/olp_contract.rs). toml is already in
+# the lockfile transitively; pinning the same line keeps this a zero-delta add.
+toml = "0.8"
+
 [features]
 default = ["update"]
 # Enables axoupdater-backed in-place self-update for cargo-dist installs.
