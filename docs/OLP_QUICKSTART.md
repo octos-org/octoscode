@@ -100,18 +100,18 @@ description = "长链推理与跨文件判断:审查定级、分歧裁决、多�
 ```json
 {
   "llm": {
-    "primary": { "provider": "openrouter", "model": "zai-org/glm-4.6" },
+    "primary": { "provider": "zai-coding", "model": "glm-5.3" },
     "fallbacks": [
-      { "provider": "moonshot",  "model": "kimi/kimi-k2-turbo" },
-      { "provider": "deepseek",  "model": "deepseek/deepseek-chat" }
+      { "provider": "moonshot-coding", "model": "k3" },
+      { "provider": "deepseek",        "model": "deepseek-chat" }
     ]
   }
 }
 ```
 
-- `primary`:常驻主道(如 zai glm-4.6——战役实测的性价比主力)。
+- `primary`:常驻主道(如 zai-coding 的 glm-5.3——战役实测主力)。
 - `fallbacks[]`:断供自动降级序列(quota/auth 拒付逐道切,k3 兜底、
-  deepseek 应急);顺序即优先级。
+  deepseek 应急);顺序即优先级(例:k3(moonshot-coding)兜底、deepseek 应急)。
 - 修改后**新建会话**生效(工具与配置在会话建立时快照);profile JSON
   时间戳字段必须 RFC3339 带 Z。
 - **回执体感**:断供发生时对话不停——状态栏闪一次降级提示,响应继续;

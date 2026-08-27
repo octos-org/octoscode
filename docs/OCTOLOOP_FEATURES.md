@@ -11,16 +11,21 @@
   时引擎按 profile `llm.fallbacks` 自动换道,不再全线空转。缺省:
   未配 fallbacks 则单道;配了则逐道自动切换。体感:断供期对话继续
   响应而非报错停摆,恢复后主道自动回归。
-- **孤儿 peer 回收(Parked)**:父 goal 结束时未终结的 peer 归档为
-  Parked 状态而非悬死。缺省:开。体感:`octos peer list` 不再有
-  永远 running 的僵尸行。
-- **malformed 指令自纠**:修复循环中识别并跳过畸形注入帧,不吞后续
-  合法指令。缺省:开。体感:坏帧只丢自己,队列继续走。
-- **预算 checkpoint**:goal 按预算档自动落 checkpoint,断档续跑不
-  重来。缺省:goal 建立即有。体感:`/goal` 面板 tokens_used 连续。
-- **断拍自续(master-sentry)**:旗标开+空闲即自动续拍黑板队列;3 次
-  无进展升级外环自停。缺省:外环旗标控制。体感:黑板有条目时内环
-  不停摆,队列空则落 QUEUE-EMPTY 旗标。
+- **孤儿 peer 恢复态(Parked)**:serve **重启**导致 client 绑定丢失的
+  peer_handoff 孤儿转为 Parked 可恢复态(其余孤儿仍真 Failed)。
+  缺省:开。体感:重启后 agents 栏出现 parked·orphaned across
+  restart 而非 failed。
+- **malformed 自纠**:模型自己产出的畸形 tool_call 参数,诊断作为
+  tool result 喂回模型自纠,限每 turn 3 次,耗尽才终止(stream 层
+  不可重试语义不变)。缺省:开。体感:畸形参数不直接终结 turn,
+  模型拿到纠错反馈重发。
+- **预算 checkpoint**:50 轮迭代耗尽且工作树脏时,自动 wip commit +
+  阶段版 result(有 .result-owner 时写 result.checkpoint.md,不覆盖
+  peer 终稿),goal 转 budget_exhausted 独立状态。缺省:开。体感:
+  超时任务的工作不再全丢,可从 checkpoint 续。
+- **turn-continuation 钩子**:活 goal 的 turn 之间零延迟自动续拍
+  (引擎特性)。缺省:开。体感:goal 推进不再等外环唤醒节拍。
+  (备注:master-sentry 是外环侧的兜底哨兵,非引擎机制。)
 
 ## 结果与审计(交付侧)
 
