@@ -85,9 +85,9 @@ app:
     title: "Diff Preview"
     inline_patch: "Inline patch"
     loading: "Loading diff preview..."
-    select_stage_hint: "Alt+H next hunk | Alt+C stage selected diff context"
-    toggle_side_by_side_hint: "Alt+V side-by-side"
-    toggle_unified_hint: "Alt+V unified"
+    select_stage_hint: "Alt+H/Ctrl+N next hunk | Alt+C/Ctrl+X stage selected diff context"
+    toggle_side_by_side_hint: "Alt+V/Ctrl+V side-by-side"
+    toggle_unified_hint: "Alt+V/Ctrl+V unified"
     side_by_side_too_narrow: "side-by-side needs %{min}+ cols"
     more_files_hidden: "+%{count} more file(s) hidden"
     line_unavailable: "line diff unavailable for this mutation"
@@ -210,6 +210,7 @@ app:
     ctrl_o_expand: "Ctrl+O expand"
     task_output_modal: "o read more | PgUp/PgDn | Esc close"
     scroll_modal: "PgUp/PgDn | Esc close"
+    diff_preview_modal: "j/k scroll | PgUp/PgDn | [/] hunk | v view | c stage | Esc collapse"
   plan:
     live: "live"
   workspace:
@@ -302,6 +303,7 @@ onboarding:
   value_saved: "%{value} (saved)"
   value_suggested: "%{value} (suggested)"
   api_key_saved: "saved in profile"
+  api_key_not_needed: "not needed (keyless)"
   value_not_set: "not set"
   action_edit: "Enter edit"
   make_default:
@@ -702,6 +704,7 @@ status:
   onboarding_provider_selection_incomplete: "Onboarding provider selection is incomplete"
   onboarding_api_key_empty_onboard: "Onboarding API key is empty; use /onboard key <secret>"
   onboarding_api_key_empty_provider: "Onboarding API key is empty; use /provider key <secret>"
+  onboarding_loading_catalog: "Loading the provider catalog to check key requirements — retry once it loads"
   saving_provider: "Saving provider"
   saving_provider_config: "Saving provider configuration"
   onboarding_fallback_selection_incomplete: "Onboarding fallback provider selection is incomplete"
@@ -710,6 +713,7 @@ status:
   testing_provider: "Testing provider"
   testing_provider_connection: "Testing provider connection"
   cannot_open_profile_unresolved: "Cannot open session: profile unresolved. Use /onboard profile <profile_id>."
+  profile_model_setup_required: "Profile %{profile} needs an AI model. Choose one to continue."
   cannot_open_workspace_invalid: "Cannot open session: workspace invalid — %{reason}."
   workspace_validation_in_progress: "Workspace validation in progress; try /onboard finish again in a moment."
   cannot_open_workspace_not_validated: "Cannot open session: workspace not validated. Use /onboard workspace <path> then /onboard workspace-validate."
@@ -812,6 +816,8 @@ status:
   diff_view_side_by_side: "Side-by-side diff view"
   diff_view_unified: "Unified diff view"
   diff_view_too_narrow: "Terminal too narrow for side-by-side diff (needs %{min}+ cols)"
+  diff_overlay_expanded: "Expanded diff preview to full screen (Esc collapses)"
+  diff_overlay_collapsed: "Collapsed diff preview to inline"
   staged_diff_context: "Staged selected diff hunk context for next turn: %{path}"
   added_diff_context: "Added selected diff hunk context to composer: %{path}"
   accepted: "accepted"
@@ -895,6 +901,11 @@ status:
   bang_failed: "failed"
   bang_usage: "usage: !<command>"
   bang_no_output: "(no output)"
+  bang_terminal_complete: "output shown in the interactive terminal"
+  bang_terminal_signalled: "interactive local shell command terminated by a signal"
+  bang_terminal_spawn_failed: "failed to spawn interactive local shell command: %{error}"
+  bang_terminal_prepare_failed: "failed to prepare interactive local shell command: %{error}"
+  bang_terminal_handoff_missed: "local shell command missed the terminal handoff"
   bang_mode_hint: "local shell — Enter runs on this machine in %{cwd} · Esc cancels"
   bang_mode_cancelled: "local shell cancelled"
   bang_cwd: "cwd: %{cwd}"
@@ -1245,6 +1256,7 @@ menu:
     enter_run_esc_close: Enter run | Esc close
     esc_back: Esc back
     esc_close: Esc close
+    preview_scroll_esc_close: "PgUp/PgDn or < > preview | Esc close"
     multi: "Up/Down move | Enter confirm | Esc cancel"
     select: "Enter accept | Esc cancel | Up/Down move"
   help:

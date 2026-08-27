@@ -7,6 +7,7 @@
 pub mod availability;
 #[allow(dead_code)]
 pub mod multi_select_view;
+pub mod preview_layout;
 pub mod providers;
 pub mod registry;
 #[allow(dead_code)]

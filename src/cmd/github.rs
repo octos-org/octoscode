@@ -63,23 +63,20 @@ fn authed(req: reqwest::blocking::RequestBuilder) -> reqwest::blocking::RequestB
     }
 }
 
-/// Query the latest release. When `allow_prerelease` is set and the newest
-/// release overall is a prerelease, prefer it; otherwise return the latest
-/// stable (the dedicated `/releases/latest` endpoint, which excludes
-/// prereleases and drafts).
+/// Query the target release for the requested channel. `prerelease_channel`
+/// selects the newest non-draft prerelease; otherwise this returns the latest
+/// stable release from GitHub's dedicated `/releases/latest` endpoint.
 ///
-/// Returns `Ok(None)` when the repo has **no published releases yet** (GitHub
-/// answers `404` on `/releases/latest`). That is not an error — callers treat
-/// it as "nothing newer to offer" — so a brand-new repo doesn't make
-/// `update --check`/`doctor` look broken. A real failure (network, 5xx,
-/// rate-limit) still surfaces as `Err`.
-pub fn latest_release(allow_prerelease: bool) -> Result<Option<LatestRelease>> {
+/// Returns `Ok(None)` when the selected channel has no published releases
+/// (GitHub answers `404` on `/releases/latest` for an empty stable channel, and
+/// the releases list contains no matching entry for an empty prerelease
+/// channel). That is not an error. A real failure (network, 5xx, rate-limit)
+/// still surfaces as `Err`.
+pub fn latest_release(prerelease_channel: bool) -> Result<Option<LatestRelease>> {
     let client = client()?;
 
-    if allow_prerelease {
-        if let Some(release) = newest_including_prerelease(&client)? {
-            return Ok(Some(release));
-        }
+    if prerelease_channel {
+        return newest_prerelease(&client);
     }
 
     let resp = authed(client.get(RELEASES_LATEST_URL))
@@ -103,28 +100,35 @@ pub fn latest_release(allow_prerelease: bool) -> Result<Option<LatestRelease>> {
     }))
 }
 
-/// Newest non-draft release including prereleases (first entry of `/releases`,
-/// which GitHub returns newest-first). Returns `None` if there are no releases.
-fn newest_including_prerelease(
-    client: &reqwest::blocking::Client,
-) -> Result<Option<LatestRelease>> {
+/// Newest non-draft prerelease (first matching entry of `/releases`, which
+/// GitHub returns newest-first). Stable releases are deliberately skipped: an
+/// explicit prerelease-channel request must not snap back to stable merely
+/// because stable has higher SemVer precedence.
+fn newest_prerelease(client: &reqwest::blocking::Client) -> Result<Option<LatestRelease>> {
     let resp = authed(client.get(RELEASES_URL))
-        .query(&[("per_page", "10")])
+        .query(&[("per_page", "100")])
         .send()
         .wrap_err("failed to reach api.github.com")?;
-    if !resp.status().is_success() {
-        return Ok(None);
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(eyre!(
+            "GitHub returned {status} while querying octoscode prereleases"
+        ));
     }
     let payloads: Vec<ReleasePayload> = resp
         .json()
         .wrap_err("failed to decode GitHub releases list")?;
-    Ok(payloads
+    Ok(select_newest_prerelease(payloads))
+}
+
+fn select_newest_prerelease(payloads: Vec<ReleasePayload>) -> Option<LatestRelease> {
+    payloads
         .into_iter()
-        .find(|r| !r.draft)
+        .find(|r| !r.draft && r.prerelease)
         .map(|r| LatestRelease {
             tag: r.tag_name,
             prerelease: r.prerelease,
-        }))
+        })
 }
 
 /// Whether `api.github.com` is reachable (a cheap GET against the API root).
@@ -152,4 +156,41 @@ pub enum Reachability {
     RateLimited,
     /// Not reachable (network/proxy/DNS).
     Unreachable(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn release(tag: &str, prerelease: bool, draft: bool) -> ReleasePayload {
+        ReleasePayload {
+            tag_name: tag.to_string(),
+            prerelease,
+            draft,
+        }
+    }
+
+    #[test]
+    fn prerelease_channel_skips_newer_stable_and_draft_entries() {
+        let selected = select_newest_prerelease(vec![
+            release("v0.3.0", false, false),
+            release("v0.3.0-rc.9", true, true),
+            release("v0.3.0-rc.8", true, false),
+        ])
+        .expect("published prerelease");
+
+        assert_eq!(selected.tag, "v0.3.0-rc.8");
+        assert!(selected.prerelease);
+    }
+
+    #[test]
+    fn prerelease_channel_returns_none_without_a_published_prerelease() {
+        assert!(
+            select_newest_prerelease(vec![
+                release("v0.3.0", false, false),
+                release("v0.4.0-rc.1", true, true),
+            ])
+            .is_none()
+        );
+    }
 }

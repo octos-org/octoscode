@@ -62,7 +62,6 @@ fn inline_diff_marker_style_for_test(kind: &str, palette: Palette) -> Style {
     diff_line_marker_style(kind, palette)
 }
 mod tests {
-    use super::super::*;
     use super::*;
     use crate::{
         cli::ThemeName,
@@ -2627,10 +2626,13 @@ mod tests {
                 .with_success(true),
         );
 
-        app.expanded_tool_outputs = true;
+        // Collapsed inline preview: the diff stays in the transcript above the
+        // composer. (Expanded state now opens the full-screen overlay instead —
+        // see specs/task-diff-preview-overlay-scroll.spec R1.)
+        app.expanded_tool_outputs = false;
         let buffer = rendered_buffer(&app, Palette::for_theme(ThemeName::Codex));
         let rows = rendered_rows(&buffer);
-        let activity = row_index_containing(&rows, "Read");
+        let activity = row_index_containing(&rows, "Agent task completed");
         let diff = row_index_containing(&rows, "Diff Preview");
         let composer = row_index_containing(&rows, "Composer");
 
@@ -2645,6 +2647,121 @@ mod tests {
         assert!(!rows.join("\n").contains("Work  sticky"));
         assert!(!rows.join("\n").contains("Activity"));
         assert!(!rows.join("\n").contains("**Hero**"));
+    }
+
+    #[test]
+    fn diff_overlay_modal_marks_selection_renders_all_hunks_and_never_wraps() {
+        // specs/task-diff-preview-overlay-scroll.spec R7: the full-screen overlay
+        // renders EVERY hunk body, carries the inline view's `›` selected-hunk
+        // marker (it is what `c` stages), and hard-clips long lines instead of
+        // wrapping them (wrapped rows would break the 1:1 scroll math).
+        let long_line = format!("{}ENDMARK", "x".repeat(300));
+        let mut app = app_with_diff(DiffPreviewGetResult {
+            status: "ready".into(),
+            source: "pending_store".into(),
+            preview: DiffPreview {
+                session_id: SessionKey("local:test".into()),
+                preview_id: PreviewId::new(),
+                title: Some("Patch".into()),
+                files: vec![DiffPreviewFile {
+                    path: "src/lib.rs".into(),
+                    old_path: None,
+                    status: "modified".into(),
+                    hunks: vec![
+                        DiffPreviewHunk {
+                            header: "@@ -1 +1 @@".into(),
+                            lines: vec![mixed_hunk_line("added", "first-hunk-body", None, Some(1))],
+                        },
+                        DiffPreviewHunk {
+                            header: "@@ -9 +9 @@".into(),
+                            lines: vec![mixed_hunk_line("added", &long_line, None, Some(9))],
+                        },
+                    ],
+                }],
+            },
+        });
+        app.diff_preview.expanded = true;
+        app.diff_preview.selected_hunk = 1;
+
+        let buffer = rendered_buffer(&app, Palette::for_theme(ThemeName::Codex));
+        let rows = rendered_rows(&buffer);
+        let joined = rows.join("\n");
+
+        assert!(
+            joined.contains("› @@ -9 +9 @@"),
+            "selected hunk carries the › marker"
+        );
+        assert!(
+            joined.contains("├ @@ -1 +1 @@"),
+            "non-selected hunk keeps the ├ marker"
+        );
+        assert!(
+            joined.contains("first-hunk-body"),
+            "the overlay renders non-selected hunk bodies too (inline caps them)"
+        );
+        // Clip assertions are scoped to the modal's own footprint — the 8%
+        // margins around it still show the inline transcript underneath,
+        // which wraps the same long line.
+        let modal = diff_overlay_area(Rect::new(0, 0, 120, 42));
+        let modal_rows: Vec<String> = rows
+            [usize::from(modal.y)..usize::from(modal.y + modal.height)]
+            .iter()
+            .map(|row| {
+                row.chars()
+                    .skip(usize::from(modal.x))
+                    .take(usize::from(modal.width))
+                    .collect()
+            })
+            .collect();
+        assert!(
+            !modal_rows.join("\n").contains("ENDMARK"),
+            "an over-wide diff line is clipped at the pane edge"
+        );
+        assert_eq!(
+            modal_rows.iter().filter(|row| row.contains("xxxx")).count(),
+            1,
+            "an over-wide diff line occupies exactly one row (clip, not wrap)"
+        );
+    }
+
+    #[test]
+    fn diff_overlay_modal_honors_side_by_side_view_mode() {
+        // specs/task-diff-preview-overlay-scroll.spec R8: `v` must visibly change the
+        // overlay — side-by-side renders the paired `old │ new` columns.
+        let mut app = app_with_diff(DiffPreviewGetResult {
+            status: "ready".into(),
+            source: "pending_store".into(),
+            preview: DiffPreview {
+                session_id: SessionKey("local:test".into()),
+                preview_id: PreviewId::new(),
+                title: Some("Patch".into()),
+                files: vec![DiffPreviewFile {
+                    path: "src/lib.rs".into(),
+                    old_path: None,
+                    status: "modified".into(),
+                    hunks: vec![DiffPreviewHunk {
+                        header: "@@ -1 +1 @@".into(),
+                        lines: vec![
+                            mixed_hunk_line("removed", "old-side", Some(1), None),
+                            mixed_hunk_line("added", "new-side", None, Some(1)),
+                        ],
+                    }],
+                }],
+            },
+        });
+        app.diff_preview.expanded = true;
+        app.diff_preview.side_by_side = true;
+
+        let buffer = rendered_buffer(&app, Palette::for_theme(ThemeName::Codex));
+        let rows = rendered_rows(&buffer);
+        let paired = rows
+            .iter()
+            .find(|row| row.contains("old-side") && row.contains("new-side"))
+            .expect("side-by-side pairs old and new on one row");
+        assert!(
+            paired.contains(" │ "),
+            "side-by-side row carries the column separator"
+        );
     }
 
     fn mixed_hunk_line(
@@ -2778,6 +2895,7 @@ mod tests {
             true,
             wrap_width,
             None,
+            DiffRowFit::Wrap,
         );
         assert_eq!(lines.len(), 3, "context + paired change + surplus removed");
         let widths: Vec<usize> = lines
@@ -2844,6 +2962,7 @@ mod tests {
             true,
             wrap_width,
             None,
+            DiffRowFit::Wrap,
         );
         assert_eq!(lines.len(), 2, "context + paired change");
         let rendered: Vec<String> = lines
@@ -2977,7 +3096,7 @@ mod tests {
             "surplus removed line keeps a blank right column: {left_only:?}"
         );
         assert!(
-            rows.iter().any(|row| row.contains("Alt+V unified")),
+            rows.iter().any(|row| row.contains("Alt+V/Ctrl+V unified")),
             "footer hint advertises the toggle back to unified"
         );
     }
@@ -3036,9 +3155,87 @@ mod tests {
             "default mode stays unified: {removed_row:?}"
         );
         assert!(
-            rows.iter().any(|row| row.contains("Alt+V side-by-side")),
-            "footer hint advertises the side-by-side toggle"
+            rows.iter()
+                .any(|row| row.contains("Alt+V/Ctrl+V side-by-side")),
+            "footer hint advertises the side-by-side toggle and its portable Ctrl twin"
         );
+    }
+
+    /// One added line far wider than any sane terminal — the case unified
+    /// mode used to hand to the transcript paragraph verbatim.
+    fn overlong_added_line_diff_result() -> DiffPreviewGetResult {
+        DiffPreviewGetResult {
+            status: "ready".into(),
+            source: "pending_store".into(),
+            preview: DiffPreview {
+                session_id: SessionKey("local:test".into()),
+                preview_id: PreviewId::new(),
+                title: Some("Wide patch".into()),
+                files: vec![DiffPreviewFile {
+                    path: "src/wide.rs".into(),
+                    old_path: None,
+                    status: "modified".into(),
+                    hunks: vec![DiffPreviewHunk {
+                        header: "@@ -1,1 +1,1 @@".into(),
+                        lines: vec![mixed_hunk_line(
+                            "added",
+                            "HEADTOKEN aaaa bbbb cccc dddd eeee ffff gggg hhhh \
+                             iiii jjjj kkkk llll mmmm nnnn oooo pppp TAILTOKEN",
+                            None,
+                            Some(1),
+                        )],
+                    }],
+                }],
+            },
+        }
+    }
+
+    /// A long added line used to reach the transcript paragraph unwrapped, so
+    /// ratatui wrapped it at column 0 — the continuation ran out to the LEFT
+    /// of the `+` sign and the line-number gutter, past the pane's own left
+    /// edge (user screenshot). Continuations must hang under the content
+    /// column instead.
+    #[test]
+    fn unified_diff_wraps_long_lines_under_the_sign_gutter() {
+        let app = app_with_diff(overlong_added_line_diff_result());
+        let buffer = rendered_buffer_with_size(&app, Palette::for_theme(ThemeName::Codex), 80, 42);
+        let rows = rendered_rows(&buffer);
+
+        let head = rows
+            .iter()
+            .position(|row| row.contains("HEADTOKEN"))
+            .expect("the long added line renders");
+        let tail = rows
+            .iter()
+            .position(|row| row.contains("TAILTOKEN"))
+            .expect("the tail of the long added line renders");
+        assert!(
+            tail > head,
+            "the line is too wide for 80 columns, so it must wrap onto later rows"
+        );
+
+        assert_wrapped_rows_hang_under(&rows[head..=tail]);
+    }
+
+    /// Every row after the first must keep its content at or right of the
+    /// first row's content column: only padding and the code block's `│` rule
+    /// may sit left of it.
+    fn assert_wrapped_rows_hang_under(rows: &[String]) {
+        let head_byte = rows[0].find("HEADTOKEN").expect("first row content column");
+        // Column, not byte offset: the code block's `│` rule is 3 bytes wide.
+        let content_col = rows[0][..head_byte].chars().count();
+        for row in &rows[1..] {
+            let before: String = row.chars().take(content_col).collect();
+            assert!(
+                before.chars().all(|ch| ch == ' ' || ch == '│'),
+                "wrapped rows hang under the content column, never left of the sign: {row:?}"
+            );
+            let after: String = row.chars().skip(content_col).collect();
+            assert!(
+                !after.starts_with(' '),
+                "wrapped content starts exactly at the content column: {row:?}"
+            );
+        }
     }
 
     #[test]
@@ -4213,6 +4410,83 @@ mod tests {
         let added_style = style_for_text(&buffer, "native").expect("added diff style");
         assert_eq!(added_style.fg, Some(palette.success));
         assert_eq!(added_style.bg, Some(palette.success_bg));
+    }
+
+    /// A plain highlighted fence has the same left-overshoot as the diff
+    /// fence: an over-wide source line reached the transcript paragraph
+    /// unwrapped and its tail restarted at column 0, breaking out of the
+    /// block's `│` rule.
+    #[test]
+    fn render_code_fence_wraps_long_lines_inside_the_block_rule() {
+        let app = AppState::new(
+            vec![SessionView {
+                id: SessionKey("local:test".into()),
+                title: "test".into(),
+                profile_id: Some("coding".into()),
+                messages: vec![Message::assistant(
+                    "```rust\nHEADTOKEN = aaaa + bbbb + cccc + dddd + eeee + ffff + gggg + hhhh + iiii + jjjj + TAILTOKEN;\n```",
+                )],
+                tasks: vec![],
+                live_reply: None,
+            }],
+            0,
+            "ready".into(),
+            None,
+            false,
+        );
+        let buffer = rendered_buffer_with_size(&app, Palette::for_theme(ThemeName::Codex), 80, 42);
+        let rows = rendered_rows(&buffer);
+
+        let head = rows
+            .iter()
+            .position(|row| row.contains("HEADTOKEN"))
+            .expect("the long source line renders");
+        let tail = rows
+            .iter()
+            .position(|row| row.contains("TAILTOKEN"))
+            .expect("the tail of the long source line renders");
+        assert!(tail > head, "the line is too wide for 80 columns");
+
+        assert_wrapped_rows_hang_under(&rows[head..=tail]);
+    }
+
+    /// The same left-overshoot as the diff pane, on the fenced-diff path a
+    /// model reply actually uses: a `+` line wider than the terminal reached
+    /// the transcript paragraph unwrapped, so ratatui restarted it at column
+    /// 0 — the continuation printed left of both the `+` sign and the code
+    /// block's `│` rule (user screenshot).
+    #[test]
+    fn render_diff_fence_wraps_long_added_lines_under_the_sign() {
+        let app = AppState::new(
+            vec![SessionView {
+                id: SessionKey("local:test".into()),
+                title: "test".into(),
+                profile_id: Some("coding".into()),
+                messages: vec![Message::assistant(
+                    "```diff\n@@ -1 +1 @@\n+HEADTOKEN aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm nnnn oooo pppp TAILTOKEN\n```",
+                )],
+                tasks: vec![],
+                live_reply: None,
+            }],
+            0,
+            "ready".into(),
+            None,
+            false,
+        );
+        let buffer = rendered_buffer_with_size(&app, Palette::for_theme(ThemeName::Codex), 80, 42);
+        let rows = rendered_rows(&buffer);
+
+        let head = rows
+            .iter()
+            .position(|row| row.contains("HEADTOKEN"))
+            .expect("the long added line renders");
+        let tail = rows
+            .iter()
+            .position(|row| row.contains("TAILTOKEN"))
+            .expect("the tail of the long added line renders");
+        assert!(tail > head, "the line is too wide for 80 columns");
+
+        assert_wrapped_rows_hang_under(&rows[head..=tail]);
     }
 
     #[test]
@@ -14723,7 +14997,6 @@ mod tests {
     }
 }
 mod running_row_regression {
-    use super::super::*;
     use super::*;
     use crate::model::*;
     use crate::store::Store;

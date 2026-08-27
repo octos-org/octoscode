@@ -116,6 +116,33 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
+thread_local! {
+    /// goal_05 / OUTER_LOOP_REVIEW #11 candidate (a): when set, `highlight_block`
+    /// renders every code block in the plain fallback style — no syntect work at
+    /// all. The full-history rebuild on a hydrate/session-switch discontinuity
+    /// (`finalized_history_lines`) sets this so the UI thread isn't blocked
+    /// re-highlighting every code block in the history on a cold cache (measured:
+    /// syntect was 88% of the rebuild, 31-38% of total load time). The scrollback
+    /// snapshot therefore shows code blocks unhighlighted; the live viewport and
+    /// the pager rebuild every frame and highlight normally.
+    static DEFER_HIGHLIGHT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with code-block highlighting deferred (plain fallback rendering).
+/// Restores the previous setting on return — safe to nest.
+pub fn with_deferred_highlight<R>(f: impl FnOnce() -> R) -> R {
+    DEFER_HIGHLIGHT.with(|c| {
+        let previous = c.replace(true);
+        let result = f();
+        c.set(previous);
+        result
+    })
+}
+
+fn highlight_deferred() -> bool {
+    DEFER_HIGHLIGHT.with(std::cell::Cell::get)
+}
+
 /// Highlight a complete fenced block, memoized by `(language, body)`.
 ///
 /// Committed transcript blocks are immutable, yet the pager re-renders every
@@ -130,6 +157,16 @@ pub fn highlight_block(
     cacheable: bool,
     theme_name: &str,
 ) -> Rc<Vec<Vec<Span<'static>>>> {
+    // goal_05 candidate (a): the hydrate/session-switch full rebuild defers all
+    // syntect work — plain fallback rows, no cache read or write (a deferred
+    // render must not poison the cache with unhighlighted rows).
+    if highlight_deferred() {
+        return Rc::new(
+            body.iter()
+                .map(|line| vec![Span::styled(line.clone(), fallback)])
+                .collect(),
+        );
+    }
     let render = |language: &str, body: &[String]| -> Vec<Vec<Span<'static>>> {
         let mut highlighter = CodeHighlighter::for_language(language, theme_name);
         body.iter()

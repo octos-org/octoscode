@@ -76,9 +76,9 @@ app:
     title: "差异预览"
     inline_patch: "内联补丁"
     loading: "正在加载差异预览……"
-    select_stage_hint: "Alt+H 下一个代码块 | Alt+C 暂存所选差异上下文"
-    toggle_side_by_side_hint: "Alt+V 并排视图"
-    toggle_unified_hint: "Alt+V 统一视图"
+    select_stage_hint: "Alt+H/Ctrl+N 下一个代码块 | Alt+C/Ctrl+X 暂存所选差异上下文"
+    toggle_side_by_side_hint: "Alt+V/Ctrl+V 并排视图"
+    toggle_unified_hint: "Alt+V/Ctrl+V 统一视图"
     side_by_side_too_narrow: "并排视图需要至少 %{min} 列"
     more_files_hidden: "还有 %{count} 个文件已隐藏"
     line_unavailable: "此更改无可用的行级差异"
@@ -194,6 +194,7 @@ app:
     ctrl_o_expand: "Ctrl+O 展开"
     task_output_modal: "o 查看更多 | PgUp/PgDn | Esc 关闭"
     scroll_modal: "PgUp/PgDn | Esc 关闭"
+    diff_preview_modal: "j/k 滚动 | PgUp/PgDn | [/] 代码块 | v 视图 | c 暂存 | Esc 收起"
   plan:
     live: "实时"
   workspace:
@@ -284,6 +285,7 @@ onboarding:
   value_saved: "%{value}（已保存）"
   value_suggested: "%{value}（建议）"
   api_key_saved: "已保存于档案"
+  api_key_not_needed: "无需密钥（keyless）"
   value_not_set: "未设置"
   action_edit: "回车编辑"
   make_default:
@@ -741,6 +743,7 @@ menu:
     enter_run_esc_close: 回车 执行 | Esc 关闭
     esc_back: Esc 返回
     esc_close: Esc 关闭
+    preview_scroll_esc_close: "PgUp/PgDn 或 < > 滚动预览 | Esc 关闭"
     multi: "上/下 移动 | Enter 确认 | Esc 取消"
     select: "Enter 确认 | Esc 取消 | 上/下 移动"
   help:
@@ -1460,6 +1463,7 @@ status:
   onboarding_provider_selection_incomplete: "引导供应商选择不完整"
   onboarding_api_key_empty_onboard: "引导 API 密钥为空；请使用 /onboard key <secret>"
   onboarding_api_key_empty_provider: "引导 API 密钥为空；请使用 /provider key <secret>"
+  onboarding_loading_catalog: "正在加载提供商目录以检查密钥要求——加载完成后请重试"
   saving_provider: "正在保存供应商"
   saving_provider_config: "正在保存供应商配置"
   onboarding_fallback_selection_incomplete: "引导备用供应商选择不完整"
@@ -1468,6 +1472,7 @@ status:
   testing_provider: "正在测试供应商"
   testing_provider_connection: "正在测试供应商连接"
   cannot_open_profile_unresolved: "无法打开会话：档案未解析。请使用 /onboard profile <profile_id>。"
+  profile_model_setup_required: "档案 %{profile} 需要配置 AI 模型。请选择一个模型以继续。"
   cannot_open_workspace_invalid: "无法打开会话：工作区无效 — %{reason}。"
   workspace_validation_in_progress: "工作区验证进行中；请稍后再次 /onboard finish。"
   cannot_open_workspace_not_validated: "无法打开会话：工作区未验证。请使用 /onboard workspace <path> 然后 /onboard workspace-validate。"
@@ -1570,6 +1575,8 @@ status:
   diff_view_side_by_side: "并排差异视图"
   diff_view_unified: "统一差异视图"
   diff_view_too_narrow: "终端宽度不足，无法并排显示差异（需要至少 %{min} 列）"
+  diff_overlay_expanded: "差异预览已全屏展开（Esc 收起）"
+  diff_overlay_collapsed: "差异预览已收起为内联显示"
   staged_diff_context: "已为下一回合暂存所选差异代码块上下文：%{path}"
   added_diff_context: "已将所选差异代码块上下文添加到输入框：%{path}"
   accepted: "已接受"
@@ -1650,6 +1657,11 @@ status:
   bang_failed: "失败"
   bang_usage: "用法：!<命令>"
   bang_no_output: "（无输出）"
+  bang_terminal_complete: "输出已显示在交互式终端中"
+  bang_terminal_signalled: "交互式本地 shell 命令被信号终止"
+  bang_terminal_spawn_failed: "无法启动交互式本地 shell 命令：%{error}"
+  bang_terminal_prepare_failed: "无法准备交互式本地 shell 命令：%{error}"
+  bang_terminal_handoff_missed: "本地 shell 命令未完成终端接管"
   bang_mode_hint: "本地 shell —— Enter 在本机 %{cwd} 中运行 · Esc 取消"
   bang_mode_cancelled: "已取消本地 shell"
   bang_cwd: "工作目录：%{cwd}"

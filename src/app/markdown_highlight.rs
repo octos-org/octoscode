@@ -95,7 +95,7 @@ pub(super) fn markdown_highlight_line(
 /// Should the span stream ever disagree with the chunk text (defensive; it
 /// cannot when the spans concatenate to the full line), the remainder falls
 /// back to `base` rather than altering a single character.
-pub(super) fn split_highlighted_spans(
+pub(crate) fn split_highlighted_spans(
     spans: &[Span<'static>],
     chunks: &[String],
     base: Style,

@@ -237,12 +237,6 @@ pub struct ProtocolAppUiBackend {
     refresh_capabilities_on_reconnect: bool,
     queue: VecDeque<ClientEvent>,
     protocol: ProtocolExchange,
-    /// Completion channel for `!`-bang client-local shell commands. The
-    /// command runs as a detached tokio task on `runtime` and sends its
-    /// result here; `next_event` drains it (try_recv) into the `queue` so the
-    /// synchronous render loop never blocks on a running command.
-    local_shell_tx: mpsc::UnboundedSender<LocalShellResultEvent>,
-    local_shell_rx: mpsc::UnboundedReceiver<LocalShellResultEvent>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -365,6 +359,13 @@ struct PendingRequest {
     /// the response updates exactly that session's caches — correlation by
     /// JSON-RPC request id, immune to reply reordering and queue drift.
     select_session: Option<SessionKey>,
+    /// OUTER_LOOP_REVIEW #22b-r1: for `session/hydrate`, the session the
+    /// request hydrates — so an error/cancel/invalid-result for THIS request
+    /// releases only this session's in-flight marker (never a blanket clear
+    /// that drops another session's genuinely in-flight hydrate). Same
+    /// local-attribution mechanism as `select_session`; the wire schema is
+    /// unchanged.
+    hydrate_session: Option<SessionKey>,
 }
 
 #[derive(Debug, Default)]
@@ -382,11 +383,27 @@ struct ProtocolExchange {
 struct CancelledRequest {
     method: String,
     event: AppUiEvent,
+    /// #22b-r1: hydrate session attribution carried from the pending entry —
+    /// the store releases only this session's marker on cancel.
+    hydrate_session: Option<SessionKey>,
 }
 
 impl CancelledRequest {
     fn is_capabilities_probe(&self) -> bool {
         self.method == crate::model::APPUI_METHOD_CONFIG_CAPABILITIES_LIST
+    }
+
+    fn into_client_event(self) -> ClientEvent {
+        if let Some(session_id) = self.hydrate_session
+            && let AppUiEvent::Error(error) = self.event
+        {
+            return ClientEvent::HydrateError(crate::client_event::HydrateErrorClientEvent {
+                session_id,
+                code: error.code,
+                message: error.message,
+            });
+        }
+        self.event.into()
     }
 }
 
@@ -464,6 +481,10 @@ impl ProtocolExchange {
             AppUiCommand::ProfileLlmSelect(params) => params.session_id.clone(),
             _ => None,
         };
+        let hydrate_session = match &command {
+            AppUiCommand::HydrateSession(params) => Some(params.session_id.clone()),
+            _ => None,
+        };
         let request_id = self.next_request_id();
         let request = rpc_request_from_command(request_id.clone(), command)?;
 
@@ -472,6 +493,7 @@ impl ProtocolExchange {
             PendingRequest {
                 method,
                 select_session,
+                hydrate_session,
             },
         );
 
@@ -539,7 +561,11 @@ impl ProtocolExchange {
                     "request_cancelled",
                     format!("{method} request {id} cancelled: {reason}"),
                 );
-                CancelledRequest { method, event }
+                CancelledRequest {
+                    method,
+                    event,
+                    hydrate_session: request.hydrate_session,
+                }
             })
             .collect()
     }
@@ -1457,8 +1483,6 @@ impl ProtocolAppUiBackend {
             Err(err) => (None, Some(err.to_string())),
         };
 
-        let (local_shell_tx, local_shell_rx) = mpsc::unbounded_channel();
-
         Self {
             launch,
             runtime,
@@ -1472,8 +1496,6 @@ impl ProtocolAppUiBackend {
             refresh_capabilities_on_reconnect: false,
             queue: VecDeque::new(),
             protocol: ProtocolExchange::default(),
-            local_shell_tx,
-            local_shell_rx,
         }
     }
 
@@ -1483,47 +1505,6 @@ impl ProtocolAppUiBackend {
             .as_ref()
             .map(|endpoint| endpoint.label().to_string())
             .ok_or_else(|| eyre!("--mode protocol requires --endpoint <ws://...|wss://...> or --stdio-command <CMD>"))
-    }
-
-    /// Spawn a `!`-bang client-local shell command on the tokio runtime and
-    /// arrange for its result to flow back through `local_shell_tx`.
-    ///
-    /// This intentionally bypasses every server-side guard (no SafePolicy /
-    /// blocklist, no sandbox, no `BLOCKED_ENV_VARS` scrub) — that is the
-    /// Claude Code `!` model: the command runs on the machine octoscode runs
-    /// on, with the TUI launch dir as cwd and the inherited environment. The
-    /// activity card labels it as a local shell command (the mitigation).
-    ///
-    /// Non-blocking: the synchronous render loop returns immediately; the
-    /// detached task drives the child, enforces the 30 s timeout (killing the
-    /// child on expiry), captures stdout+stderr, and truncates the combined
-    /// output at the 10 KB cap before emitting the result.
-    fn spawn_local_shell(&mut self, cmd: String, local_id: String) {
-        let tx = self.local_shell_tx.clone();
-        let cwd = std::env::current_dir().ok();
-
-        let Some(runtime) = self.runtime.as_ref() else {
-            // No tokio runtime: report a synthetic failure so the chip still
-            // completes rather than spinning forever on "running".
-            let _ = tx.send(LocalShellResultEvent {
-                local_id,
-                cmdline: cmd,
-                cwd: cwd.as_ref().map(|path| path.display().to_string()),
-                stdout: String::new(),
-                stderr: runtime_unavailable(self.runtime_error.as_deref()).to_string(),
-                exit_code: None,
-                duration_ms: 0,
-                truncated: false,
-            });
-            return;
-        };
-
-        runtime.spawn(async move {
-            let event = run_local_shell_command(cmd, cwd, local_id).await;
-            // Receiver lives as long as the backend; a send error only means
-            // the TUI is shutting down, so there is nothing to recover.
-            let _ = tx.send(event);
-        });
     }
 
     fn ensure_driver(&mut self) -> Result<()> {
@@ -1684,7 +1665,7 @@ impl ProtocolAppUiBackend {
         }
         self.queue
             .extend(cancelled_requests.into_iter().filter_map(|cancelled| {
-                (!cancelled.is_capabilities_probe()).then_some(cancelled.event.into())
+                (!cancelled.is_capabilities_probe()).then_some(cancelled.into_client_event())
             }));
     }
 
@@ -1980,7 +1961,8 @@ impl ProtocolAppUiBackend {
                     let cancelled = self.protocol.cancel_pending_requests(reason);
                     self.queue
                         .extend(cancelled.into_iter().filter_map(|cancelled| {
-                            (!cancelled.is_capabilities_probe()).then_some(cancelled.event.into())
+                            (!cancelled.is_capabilities_probe())
+                                .then_some(cancelled.into_client_event())
                         }));
                 }
                 self.queue
@@ -2172,10 +2154,27 @@ impl AppUiBackend for ProtocolAppUiBackend {
     fn send(&mut self, command: AppUiCommand) -> Result<()> {
         // `!`-bang local exec is a client-local action, not a backend turn:
         // intercept it before the readonly gate and before any JSON-RPC
-        // encoding. It runs the command on the tokio runtime and reports back
-        // via the local-shell channel that `next_event` drains.
+        // encoding. The real event loop consumes it first because only that
+        // layer can safely hand the controlling terminal to the child.
         if let AppUiCommand::LocalShellExec { cmd, local_id } = command {
-            self.spawn_local_shell(cmd, local_id);
+            // The event loop normally consumes this variant before it can
+            // reach the transport because only that layer owns the TUI's
+            // raw-mode and alternate-screen state. Fail closed if a future
+            // call site bypasses the handoff instead of silently recreating
+            // the detached-stdin hang this mode exists to prevent.
+            self.queue
+                .push_back(ClientEvent::LocalShellResult(LocalShellResultEvent {
+                    local_id,
+                    cmdline: cmd,
+                    cwd: std::env::current_dir()
+                        .ok()
+                        .map(|path| path.display().to_string()),
+                    stdout: String::new(),
+                    stderr: t!("status.bang_terminal_handoff_missed").into_owned(),
+                    exit_code: None,
+                    duration_ms: 0,
+                    truncated: false,
+                }));
             return Ok(());
         }
 
@@ -2191,7 +2190,19 @@ impl AppUiBackend for ProtocolAppUiBackend {
             // that was just blocked. Without this the store cannot
             // tell which command lost its slot in the queue.
             let method = command.method();
-            self.queue.push_back(
+            // #22b-r1: a hydrate refusal is attributable LOCALLY from the
+            // in-hand command — emit the attributed event so the store
+            // releases only that session's marker.
+            let event: ClientEvent = if let AppUiCommand::HydrateSession(params) = &command {
+                ClientEvent::HydrateError(crate::client_event::HydrateErrorClientEvent {
+                    session_id: params.session_id.clone(),
+                    code: "too_many_pending_requests".into(),
+                    message: format!(
+                        "UI protocol has {} pending request(s); refusing to enqueue {method} request",
+                        self.protocol.pending_requests.len()
+                    ),
+                })
+            } else {
                 AppUiEvent::Error(AppUiError {
                     code: "too_many_pending_requests".into(),
                     message: format!(
@@ -2199,8 +2210,9 @@ impl AppUiBackend for ProtocolAppUiBackend {
                         self.protocol.pending_requests.len()
                     ),
                 })
-                .into(),
-            );
+                .into()
+            };
+            self.queue.push_back(event);
             return Ok(());
         }
 
@@ -2214,45 +2226,70 @@ impl AppUiBackend for ProtocolAppUiBackend {
         let method = request.method.clone();
         let text = serde_json::to_string(&request).wrap_err("failed to encode JSON-RPC request")?;
         if text.len() > MAX_TEXT_FRAME_BYTES {
-            self.protocol.pending_requests.remove(&request_id);
-            self.queue.push_back(
-                AppUiEvent::Error(AppUiError {
+            // #22b-r1: recover the hydrate session attribution before dropping
+            // the pending entry.
+            let hydrate_session = self
+                .protocol
+                .pending_requests
+                .remove(&request_id)
+                .and_then(|pending| pending.hydrate_session);
+            let message = format!(
+                "encoded {method} request {request_id} is {} bytes; max is {MAX_TEXT_FRAME_BYTES}",
+                text.len()
+            );
+            let event: ClientEvent = match hydrate_session {
+                Some(session_id) => {
+                    ClientEvent::HydrateError(crate::client_event::HydrateErrorClientEvent {
+                        session_id,
+                        code: "frame_too_large".into(),
+                        message,
+                    })
+                }
+                None => AppUiEvent::Error(AppUiError {
                     code: "frame_too_large".into(),
-                    message: format!(
-                        "encoded {method} request {request_id} is {} bytes; max is {MAX_TEXT_FRAME_BYTES}",
-                        text.len()
-                    ),
+                    message,
                 })
                 .into(),
-            );
+            };
+            self.queue.push_back(event);
             return Ok(());
         }
 
         if let Err(err) = self.send_text(text) {
+            // Remove the pending entry before mark_disconnected so that
+            // cancel_pending_requests does not emit a duplicate "cancelled"
+            // event for this request on top of the transport_send error below.
+            // #22b-r1: recover the hydrate session attribution (see above).
+            let hydrate_session = self
+                .protocol
+                .pending_requests
+                .remove(&request_id)
+                .and_then(|pending| pending.hydrate_session);
             self.mark_disconnected(format!(
                 "UI protocol disconnected; reconnect will retry on next send/read: {err:#}"
             ));
-            self.protocol.pending_requests.remove(&request_id);
-            self.queue.push_back(
-                AppUiEvent::Error(AppUiError {
+            let message = format!("failed to send {method} request {request_id}: {err:#}");
+            let event: ClientEvent = match hydrate_session {
+                Some(session_id) => {
+                    ClientEvent::HydrateError(crate::client_event::HydrateErrorClientEvent {
+                        session_id,
+                        code: "transport_send".into(),
+                        message,
+                    })
+                }
+                None => AppUiEvent::Error(AppUiError {
                     code: "transport_send".into(),
-                    message: format!("failed to send {method} request {request_id}: {err:#}"),
+                    message,
                 })
                 .into(),
-            );
+            };
+            self.queue.push_back(event);
         }
 
         Ok(())
     }
 
     fn next_event(&mut self) -> Result<Option<ClientEvent>> {
-        // Drain any completed `!`-bang local shell results first so a finished
-        // command surfaces promptly even while the transport is quiet. These
-        // are pushed into `queue` so the existing pop-first ordering holds.
-        while let Ok(result) = self.local_shell_rx.try_recv() {
-            self.queue.push_back(ClientEvent::LocalShellResult(result));
-        }
-
         if let Some(event) = self.queue.pop_front() {
             return Ok(Some(event));
         }
@@ -2279,20 +2316,6 @@ fn runtime_unavailable(error: Option<&str>) -> eyre::Report {
     )
 }
 
-/// Wall-clock budget for a `!`-bang local shell command. On expiry the child
-/// is killed (SIGTERM → SIGKILL on unix, `taskkill /F` on windows).
-const LOCAL_SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// Combined stdout+stderr cap for `!`-bang output. Output past this is dropped
-/// and a `[truncated: N bytes]` marker is appended (see [`truncate_local_shell_output`]).
-const LOCAL_SHELL_MAX_OUTPUT_BYTES: usize = 10 * 1024;
-
-/// Hard per-stream READ cap so a chatty command can't balloon memory before the
-/// 10 KB display truncation. We stop reading each pipe at this many bytes; a
-/// command that exceeds it then blocks on the full pipe and is reaped by the
-/// timeout. Larger than the display cap so the captured slice is honest.
-const LOCAL_SHELL_READ_CAP: u64 = 256 * 1024;
-
 /// Build the cross-platform `(program, args)` for running `cmd` through the
 /// system shell, mirroring octos conventions: `sh -c <cmd>` on unix,
 /// `cmd /C <cmd>` on windows. The command string is passed as a single
@@ -2305,42 +2328,59 @@ fn local_shell_command_args(cmd: &str) -> (&'static str, Vec<String>) {
     }
 }
 
-/// Truncate `output` to at most [`LOCAL_SHELL_MAX_OUTPUT_BYTES`], on a UTF-8
-/// boundary, appending a `[truncated: N bytes]` marker recording how many
-/// bytes were dropped. Returns `(text, truncated)`.
-fn truncate_local_shell_output(output: &str) -> (String, bool) {
-    if output.len() <= LOCAL_SHELL_MAX_OUTPUT_BYTES {
-        return (output.to_string(), false);
+/// Install a process-lifetime parent signal shield for terminal-generated
+/// cancellation while a `!` child is in the foreground process group. In TUI
+/// raw mode Ctrl+C is delivered as a key event, so keeping this handler for the
+/// rest of the process does not change the normal double-Ctrl+C / Ctrl+Q UX.
+/// A spawned shell resets caught signals to their defaults on exec and still
+/// terminates normally. `signal-hook` provides the equivalent SIGINT handling
+/// on Windows consoles; SIGQUIT only exists on Unix.
+pub(crate) fn install_local_shell_parent_signal_shield() -> std::io::Result<()> {
+    use std::sync::{Arc, OnceLock, atomic::AtomicBool};
+
+    static INSTALL_ERROR: OnceLock<Option<String>> = OnceLock::new();
+    let error = INSTALL_ERROR.get_or_init(|| {
+        let intercepted = Arc::new(AtomicBool::new(false));
+        signal_hook::flag::register(
+            signal_hook::consts::signal::SIGINT,
+            Arc::clone(&intercepted),
+        )
+        .err()
+        .map(|err| format!("failed to shield parent from SIGINT: {err}"))
+        .or_else(|| {
+            #[cfg(not(windows))]
+            {
+                signal_hook::flag::register(signal_hook::consts::signal::SIGQUIT, intercepted)
+                    .err()
+                    .map(|err| format!("failed to shield parent from SIGQUIT: {err}"))
+            }
+            #[cfg(windows)]
+            {
+                None
+            }
+        })
+    });
+
+    match error {
+        Some(error) => Err(std::io::Error::other(error.clone())),
+        None => Ok(()),
     }
-    // Find the largest char boundary at or below the cap so we never split a
-    // multi-byte codepoint.
-    let mut cut = LOCAL_SHELL_MAX_OUTPUT_BYTES;
-    while cut > 0 && !output.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    let dropped = output.len() - cut;
-    let mut text = output[..cut].to_string();
-    text.push_str(&format!("\n[truncated: {dropped} bytes]"));
-    (text, true)
 }
 
-/// Run a `!`-bang client-local shell command to completion (or timeout) and
-/// build its [`LocalShellResultEvent`]. Captures stdout and stderr separately,
-/// truncating each against the shared 10 KB combined cap. On timeout the child
-/// is killed (tokio's `Child::kill` sends SIGKILL on unix; on windows tokio
-/// maps `kill` to `TerminateProcess`, the same effect as `taskkill /F`).
-///
-/// Interactive commands (vim, ssh, …) get no TTY and so are unsupported; they
-/// will typically read EOF on stdin and exit, or hit the timeout.
-async fn run_local_shell_command(
+/// Run a terminal-attached `!` command synchronously with all three standard
+/// streams inherited from octoscode. The event loop disables raw mode and
+/// clears/reserves its inline viewport around this call, so prompts,
+/// device-login selectors, editors, and password input see a real controlling
+/// terminal while child output remains in normal-screen scrollback.
+/// There is intentionally no timeout: once the terminal is handed to the child,
+/// cancellation belongs to that child (normally Ctrl+C) just as it does in a
+/// regular shell.
+pub(crate) fn run_attached_local_shell_command(
     cmd: String,
     cwd: Option<std::path::PathBuf>,
     local_id: String,
 ) -> LocalShellResultEvent {
     let started = std::time::Instant::now();
-    // Display form of the directory the command runs in, for the transcript
-    // card's cwd label. An explicit `cwd` wins; otherwise the child inherits
-    // this process's working directory, so resolve that for the label.
     let cwd_display = cwd
         .as_ref()
         .map(|path| path.display().to_string())
@@ -2350,138 +2390,54 @@ async fn run_local_shell_command(
                 .map(|path| path.display().to_string())
         });
     let (program, args) = local_shell_command_args(&cmd);
-
-    let mut builder = Command::new(program);
+    let mut builder = std::process::Command::new(program);
     builder
         .args(&args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // Reap the child if the task/future is dropped (e.g. on timeout):
-        // tokio does NOT kill child processes on drop unless this is set.
-        .kill_on_drop(true);
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
     if let Some(cwd) = cwd {
         builder.current_dir(cwd);
     }
-    // Environment is inherited (no BLOCKED_ENV_VARS scrub — that is a
-    // server-side concern; this is a client-local action by design).
 
-    let child = match builder.spawn() {
-        Ok(child) => child,
-        Err(err) => {
-            return LocalShellResultEvent {
-                local_id,
-                cmdline: cmd,
-                cwd: cwd_display,
-                stdout: String::new(),
-                stderr: format!("failed to spawn local shell command: {err}"),
-                exit_code: None,
-                duration_ms: started.elapsed().as_millis() as u64,
-                truncated: false,
-            };
-        }
-    };
-
-    let mut child = child;
-    let mut stdout_pipe = child.stdout.take();
-    let mut stderr_pipe = child.stderr.take();
-
-    // Read stdout+stderr concurrently, each BOUNDED at LOCAL_SHELL_READ_CAP so a
-    // runaway command can't balloon memory before the 10 KB display truncation;
-    // then wait for exit. The whole thing runs under the timeout. (If output
-    // exceeds the cap, reading stops, the child blocks on the full pipe, and the
-    // timeout reaps it via kill_on_drop.)
-    let collect = async {
-        use tokio::io::AsyncReadExt;
-        let mut so = Vec::new();
-        let mut se = Vec::new();
-        let read_out = async {
-            if let Some(p) = stdout_pipe.as_mut() {
-                let _ = p.take(LOCAL_SHELL_READ_CAP).read_to_end(&mut so).await;
-            }
+    if let Err(err) = install_local_shell_parent_signal_shield() {
+        return LocalShellResultEvent {
+            local_id,
+            cmdline: cmd,
+            cwd: cwd_display,
+            stdout: String::new(),
+            stderr: t!("status.bang_terminal_prepare_failed", error = err).into_owned(),
+            exit_code: None,
+            duration_ms: started.elapsed().as_millis() as u64,
+            truncated: false,
         };
-        let read_err = async {
-            if let Some(p) = stderr_pipe.as_mut() {
-                let _ = p.take(LOCAL_SHELL_READ_CAP).read_to_end(&mut se).await;
-            }
-        };
-        tokio::join!(read_out, read_err);
-        let status = child.wait().await;
-        (so, se, status)
-    };
+    }
 
-    let timed_out;
-    let captured = match tokio::time::timeout(LOCAL_SHELL_TIMEOUT, collect).await {
-        Ok((so, se, Ok(status))) => {
-            timed_out = false;
-            Some((so, se, status.code()))
-        }
-        Ok((_so, _se, Err(err))) => {
-            return LocalShellResultEvent {
-                local_id,
-                cmdline: cmd,
-                cwd: cwd_display,
-                stdout: String::new(),
-                stderr: format!("local shell command failed: {err}"),
-                exit_code: None,
-                duration_ms: started.elapsed().as_millis() as u64,
-                truncated: false,
-            };
-        }
-        Err(_elapsed) => {
-            // The `collect` future (and its borrow of `child`) is now dropped;
-            // kill + reap the still-running process promptly. `kill_on_drop`
-            // is the backstop; this makes the kill immediate + awaited.
-            let _ = child.kill().await;
-            timed_out = true;
-            None
-        }
-    };
-
-    let duration_ms = started.elapsed().as_millis() as u64;
-    let (raw_stdout, raw_stderr, exit_code) = match captured {
-        Some((so, se, code)) => (
-            String::from_utf8_lossy(&so).into_owned(),
-            String::from_utf8_lossy(&se).into_owned(),
-            code,
-        ),
-        None => (
-            String::new(),
-            format!(
-                "local shell command timed out after {}s and was killed",
-                LOCAL_SHELL_TIMEOUT.as_secs()
-            ),
-            None,
-        ),
-    };
-
-    // Truncate against the combined cap: budget stdout first, then give the
-    // remainder to stderr, so a chatty stdout cannot starve stderr entirely
-    // while the total still honours the 10 KB limit.
-    let (stdout, stdout_trunc) = truncate_local_shell_output(&raw_stdout);
-    let remaining = LOCAL_SHELL_MAX_OUTPUT_BYTES.saturating_sub(stdout.len());
-    let (stderr, stderr_trunc) = if raw_stderr.len() <= remaining {
-        (raw_stderr, false)
-    } else {
-        let mut cut = remaining;
-        while cut > 0 && !raw_stderr.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        let dropped = raw_stderr.len() - cut;
-        let mut text = raw_stderr[..cut].to_string();
-        text.push_str(&format!("\n[truncated: {dropped} bytes]"));
-        (text, true)
-    };
-
-    LocalShellResultEvent {
-        local_id,
-        cmdline: cmd,
-        cwd: cwd_display,
-        stdout,
-        stderr,
-        exit_code,
-        duration_ms,
-        truncated: timed_out || stdout_trunc || stderr_trunc,
+    match builder.status() {
+        Ok(status) => LocalShellResultEvent {
+            local_id,
+            cmdline: cmd,
+            cwd: cwd_display,
+            stdout: String::new(),
+            stderr: if status.code().is_none() {
+                t!("status.bang_terminal_signalled").into_owned()
+            } else {
+                String::new()
+            },
+            exit_code: status.code(),
+            duration_ms: started.elapsed().as_millis() as u64,
+            truncated: false,
+        },
+        Err(err) => LocalShellResultEvent {
+            local_id,
+            cmdline: cmd,
+            cwd: cwd_display,
+            stdout: String::new(),
+            stderr: t!("status.bang_terminal_spawn_failed", error = err).into_owned(),
+            exit_code: None,
+            duration_ms: started.elapsed().as_millis() as u64,
+            truncated: false,
+        },
     }
 }
 
@@ -2914,9 +2870,7 @@ fn rpc_value_to_app_event(
         }
 
         return if has_error {
-            Ok(Some(
-                error_response_to_app_event(frame, pending_requests).into(),
-            ))
+            Ok(Some(error_response_to_app_event(frame, pending_requests)))
         } else {
             success_response_to_app_event(frame, pending_requests)
         };
@@ -3386,7 +3340,24 @@ fn success_response_to_app_event(
         }
         methods::SESSION_HYDRATE => match serde_json::from_value::<SessionHydrateResult>(result) {
             Ok(result) => Ok(Some(ClientEvent::SessionHydrate(result))),
-            Err(err) => Ok(Some(autonomy_decode_error(methods::SESSION_HYDRATE, err))),
+            Err(err) => {
+                // #22b-r1: decode failure is attributable LOCALLY via the
+                // pending entry — release only that session's marker.
+                let message = format!(
+                    "failed to decode UI protocol result for {}: {err}",
+                    methods::SESSION_HYDRATE
+                );
+                Ok(Some(match pending_request.hydrate_session.clone() {
+                    Some(session_id) => {
+                        ClientEvent::HydrateError(crate::client_event::HydrateErrorClientEvent {
+                            session_id,
+                            code: "invalid_result".into(),
+                            message,
+                        })
+                    }
+                    None => app_error("invalid_result", message).into(),
+                }))
+            }
         },
         methods::SESSION_LIST => match serde_json::from_value::<SessionListResult>(result) {
             Ok(result) => Ok(Some(ClientEvent::SessionList(result))),
@@ -4220,22 +4191,24 @@ fn interrupt_ack_status(result: &Value) -> String {
 fn error_response_to_app_event(
     frame: &serde_json::Map<String, Value>,
     pending_requests: &mut HashMap<String, PendingRequest>,
-) -> AppUiEvent {
+) -> ClientEvent {
     let request_id = match response_id(frame) {
         Ok(request_id) => request_id,
-        Err(event) => return *event,
+        Err(event) => return (*event).into(),
     };
     let Some(error) = frame.get("error") else {
         return app_error(
             "malformed_frame",
             "UI protocol response is missing error field",
-        );
+        )
+        .into();
     };
     if !error.is_object() {
         return app_error(
             "malformed_frame",
             "UI protocol error response error field must be an object",
-        );
+        )
+        .into();
     }
 
     let pending_request = request_id
@@ -4243,6 +4216,12 @@ fn error_response_to_app_event(
         .and_then(|id| pending_requests.remove(id));
     let code = rpc_error_code(error);
     let message = rpc_error_message(error);
+    // #22b-r1: a hydrate failure is attributable LOCALLY via the pending
+    // entry — emit the attributed event so the store releases only that
+    // session's in-flight marker.
+    let hydrate_session = pending_request
+        .as_ref()
+        .and_then(|request| request.hydrate_session.clone());
     let message = match (pending_request, request_id) {
         (Some(request), Some(id)) => {
             format!("{} request {id} failed: {message}", request.method)
@@ -4251,7 +4230,16 @@ fn error_response_to_app_event(
         (_, None) => message,
     };
 
-    app_error(code, message)
+    match hydrate_session {
+        Some(session_id) => {
+            ClientEvent::HydrateError(crate::client_event::HydrateErrorClientEvent {
+                session_id,
+                code,
+                message,
+            })
+        }
+        None => app_error(code, message).into(),
+    }
 }
 
 fn response_id(
@@ -5283,6 +5271,18 @@ fn mock_profile_llm_catalog() -> ProfileLlmCatalogResult {
             }]
         }),
     );
+    // Keyless local-server family (empty env) so --mock runs can exercise the
+    // keyless onboarding path at all (red-team pass, octoscode#562).
+    families.insert(
+        "local".into(),
+        serde_json::json!({
+            "env": "",
+            "models": [{
+                "id": "local-default",
+                "endpoints": [{"id": "official", "label": "Official API (local)"}]
+            }]
+        }),
+    );
     families.insert(
         "minimax".into(),
         serde_json::json!({
@@ -5859,63 +5859,46 @@ mod tests {
     }
 
     #[test]
-    fn local_shell_output_short_is_not_truncated() {
-        let (text, truncated) = truncate_local_shell_output("hello world");
-        assert_eq!(text, "hello world");
-        assert!(!truncated);
-    }
-
-    #[test]
-    fn local_shell_output_over_cap_is_truncated_with_marker() {
-        let big = "x".repeat(LOCAL_SHELL_MAX_OUTPUT_BYTES + 500);
-        let (text, truncated) = truncate_local_shell_output(&big);
-        assert!(truncated);
-        // Kept bytes are at or below the cap (plus the appended marker).
-        assert!(text.contains("[truncated: 500 bytes]"));
-        assert!(text.starts_with(&"x".repeat(LOCAL_SHELL_MAX_OUTPUT_BYTES)));
-    }
-
-    #[test]
-    fn local_shell_truncation_respects_utf8_boundary() {
-        // Fill with a 3-byte codepoint so the cap lands mid-character; the
-        // helper must back off to a boundary and never panic.
-        let snowman = "\u{2603}"; // 3 bytes
-        let big = snowman.repeat(LOCAL_SHELL_MAX_OUTPUT_BYTES); // ~30 KB
-        let (text, truncated) = truncate_local_shell_output(&big);
-        assert!(truncated);
-        // The kept prefix must still be valid UTF-8 (no split codepoint).
-        assert!(text.contains("[truncated:"));
-    }
-
-    #[tokio::test]
-    async fn run_local_shell_echo_completes_with_output() {
-        // Deterministic cross-platform: `echo hi` via the shell wrapper.
-        let event = run_local_shell_command("echo hi".into(), None, "local-shell:t1".into()).await;
-        assert_eq!(event.local_id, "local-shell:t1");
-        assert_eq!(event.exit_code, Some(0));
-        assert!(event.stdout.contains("hi"));
-        assert!(!event.truncated);
-        // With no explicit cwd the child inherits the process cwd — the event
-        // labels that so the transcript card can show WHERE the command ran.
-        assert_eq!(
-            event.cwd,
-            std::env::current_dir()
-                .ok()
-                .map(|path| path.display().to_string())
-        );
-    }
-
-    #[tokio::test]
-    async fn run_local_shell_labels_explicit_cwd() {
+    fn attached_local_shell_reports_exit_status_and_explicit_cwd() {
         let dir = std::env::temp_dir();
-        let event =
-            run_local_shell_command("echo hi".into(), Some(dir.clone()), "local-shell:t2".into())
-                .await;
+        let event = run_attached_local_shell_command(
+            "exit 0".into(),
+            Some(dir.clone()),
+            "local-shell:t2".into(),
+        );
         assert_eq!(event.exit_code, Some(0));
+        assert!(event.stdout.is_empty());
+        assert!(event.stderr.is_empty());
         assert_eq!(
             event.cwd.as_deref(),
             Some(dir.display().to_string().as_str())
         );
+    }
+
+    #[test]
+    fn attached_local_shell_preserves_nonzero_exit_status() {
+        let event =
+            run_attached_local_shell_command("exit 7".into(), None, "local-shell:failed".into());
+        assert_eq!(event.exit_code, Some(7));
+        assert!(event.stderr.is_empty());
+    }
+
+    #[test]
+    fn protocol_backend_never_recreates_a_detached_local_shell() {
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch::default());
+        backend
+            .send(AppUiCommand::LocalShellExec {
+                cmd: "read value".into(),
+                local_id: "local-shell:missed-handoff".into(),
+            })
+            .unwrap();
+
+        let event = backend.next_event().unwrap().expect("synthetic result");
+        let ClientEvent::LocalShellResult(result) = event else {
+            panic!("expected local shell result");
+        };
+        assert_eq!(result.exit_code, None);
+        assert!(result.stderr.contains("missed the terminal handoff"));
     }
 
     struct ProtocolCaptureServer {
@@ -7333,6 +7316,7 @@ mod tests {
             PendingRequest {
                 select_session: None,
                 method: crate::model::APPUI_METHOD_PROFILE_SKILLS_LIST.into(),
+                hydrate_session: None,
             },
         );
         let frame = json!({
@@ -7401,6 +7385,7 @@ mod tests {
             PendingRequest {
                 method: crate::model::APPUI_METHOD_PEER_PREPARE.into(),
                 select_session: None,
+                hydrate_session: None,
             },
         );
         let frame = json!({
@@ -7467,6 +7452,7 @@ mod tests {
             PendingRequest {
                 method: crate::model::APPUI_METHOD_PEER_PREPARE.into(),
                 select_session: None,
+                hydrate_session: None,
             },
         );
         let frame = json!({
@@ -7559,6 +7545,7 @@ mod tests {
             PendingRequest {
                 method: crate::model::APPUI_METHOD_TURN_STEER.into(),
                 select_session: None,
+                hydrate_session: None,
             },
         );
         let frame = json!({
@@ -7584,6 +7571,7 @@ mod tests {
             PendingRequest {
                 method: crate::model::APPUI_METHOD_TURN_STEER.into(),
                 select_session: None,
+                hydrate_session: None,
             },
         );
         let frame = json!({
@@ -7874,6 +7862,7 @@ mod tests {
             PendingRequest {
                 method: crate::model::APPUI_METHOD_PEER_GATHER.into(),
                 select_session: None,
+                hydrate_session: None,
             },
         );
         let frame = json!({
@@ -7980,6 +7969,7 @@ mod tests {
             PendingRequest {
                 method: crate::model::APPUI_METHOD_SESSION_STATUS_READ.into(),
                 select_session: None,
+                hydrate_session: None,
             },
         );
         let frame = json!({
@@ -8985,6 +8975,7 @@ mod tests {
 
     // --- stdio driver end-to-end: exit race + stderr tail + oversized skip ---
 
+    #[cfg(unix)]
     fn drive_stdio_until_disconnect(
         command: &str,
     ) -> (Vec<String>, Vec<(String, String, bool)>, String) {
@@ -9393,6 +9384,7 @@ mod tests {
             Some(&PendingRequest {
                 select_session: None,
                 method: methods::APPROVAL_SCOPES_LIST.into(),
+                hydrate_session: None,
             })
         );
 
@@ -9746,6 +9738,7 @@ mod tests {
                 PendingRequest {
                     select_session: None,
                     method: methods::APPROVAL_SCOPES_LIST.into(),
+                    hydrate_session: None,
                 },
             );
         }
@@ -9826,6 +9819,7 @@ mod tests {
             Some(&PendingRequest {
                 select_session: None,
                 method: methods::TURN_START.into(),
+                hydrate_session: None,
             })
         );
 

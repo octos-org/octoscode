@@ -45,6 +45,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use crate::cli::{Cli, Mode};
 use eyre::{Result, WrapErr, eyre};
@@ -636,7 +637,7 @@ fn have(program: &str) -> bool {
 /// v2.0.3-rc.1 while this stayed on v2.0.2, so a fresh install auto-provisioned
 /// a server whose protocol predated the client's. [`REQUIRED_OCTOS_CORE_REV`]
 /// and the test beside it now make the pair checkable instead of a comment.
-pub(crate) const REQUIRED_OCTOS_RELEASE: &str = "v2.0.3-rc.2";
+pub(crate) const REQUIRED_OCTOS_RELEASE: &str = "v2.0.3-rc.9";
 
 /// The `octos-core` rev that [`REQUIRED_OCTOS_RELEASE`] resolves to — i.e. the
 /// commit the release tag points at, and the rev Cargo.toml must pin.
@@ -649,16 +650,8 @@ pub(crate) const REQUIRED_OCTOS_RELEASE: &str = "v2.0.3-rc.2";
 ///
 /// Test-only: its whole job is to be compared against Cargo.toml, so it would
 /// be dead weight in a real build.
-///
-/// task-consume-turn-steer-dropped: this rev (octos `1ff2e3d8`, branch
-/// `fix/return-unconsumed-steer-inputs`) is AHEAD of [`REQUIRED_OCTOS_RELEASE`]
-/// on purpose — no octos release contains it yet. The protocol delta is
-/// additive only (the server-emitted `turn/steer_dropped` notification): a
-/// v2.0.3-rc.2 server simply never sends it and the client falls back to its
-/// terminal re-stage (task-steer-retained-until-echo). Bump
-/// `REQUIRED_OCTOS_RELEASE` to the first release tag containing this rev.
 #[cfg(test)]
-pub(crate) const REQUIRED_OCTOS_CORE_REV: &str = "f6d5ef550f49189850646e7421cf21063b771895";
+pub(crate) const REQUIRED_OCTOS_CORE_REV: &str = "5ea987813de4fd2afdd1d78f2106ad2868f0d923";
 /// Env var overriding the octos release tag to install (fork / pinned build).
 const OCTOS_RELEASE_ENV: &str = "OCTOSCODE_OCTOS_RELEASE";
 /// The octos server-bundle asset name for THIS build's target platform, or
@@ -744,6 +737,7 @@ fn install_octos_bundle() -> Result<()> {
 fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
     Ok(http_client()?
         .get(url)
+        .timeout(HTTP_BUNDLE_DOWNLOAD_TIMEOUT)
         .send()?
         .error_for_status()?
         .bytes()?
@@ -755,9 +749,16 @@ fn http_get_string(url: &str) -> Result<String> {
     Ok(http_client()?.get(url).send()?.error_for_status()?.text()?)
 }
 
+/// Octos release bundles are large enough that an active download can
+/// legitimately exceed reqwest's 30-second default timeout. Keep the transfer
+/// bounded, but allow enough time for the bundle to arrive over a slow link.
+const HTTP_BUNDLE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn http_client() -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .user_agent(concat!("octoscode/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
         .build()
         .map_err(Into::into)
 }
@@ -946,6 +947,18 @@ mod tests {
             assert!(a.starts_with("octos-bundle-"));
             assert!(a.ends_with(".zip") || a.ends_with(".tar.gz"));
         }
+    }
+
+    #[test]
+    fn bundle_download_timeout_allows_large_archives_but_remains_bounded() {
+        assert!(
+            HTTP_BUNDLE_DOWNLOAD_TIMEOUT > Duration::from_secs(30),
+            "the bundle timeout must exceed reqwest's too-short 30-second default"
+        );
+        assert!(
+            !HTTP_BUNDLE_DOWNLOAD_TIMEOUT.is_zero() && !HTTP_CONNECT_TIMEOUT.is_zero(),
+            "connection establishment and the overall transfer must remain bounded"
+        );
     }
 
     #[test]

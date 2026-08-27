@@ -809,8 +809,12 @@ pub fn core_command_specs() -> Vec<CommandSpec> {
             description: "command.profiles.desc",
             category: CommandCategory::Session,
             // Local-solo only: managing on-disk profiles (list/default/delete)
-            // makes sense where the client can see the data dir.
-            availability: CommandAvailability::app_ui_read(&[APPUI_METHOD_PROFILE_LOCAL_CREATE]),
+            // makes sense where the client can see the data dir. Profile
+            // recovery must remain reachable before `session/open`: an unknown
+            // project-sticky or `--profile-id` is exactly when this surface is
+            // needed, and requiring an open session creates a deadlock.
+            availability: CommandAvailability::app_ui_read(&[APPUI_METHOD_PROFILE_LOCAL_CREATE])
+                .with_session(SessionRequirement::Any),
             inline_args: InlineArgMode::None,
             entry: CommandEntry::LocalAction(LocalAction::OpenProfilesSurface),
         },
@@ -1529,6 +1533,7 @@ mod tests {
         let registry = CommandRegistry::with_core_commands();
         let capabilities = CapabilitySet::from_methods([
             APPUI_METHOD_AUTH_STATUS,
+            APPUI_METHOD_PROFILE_LOCAL_CREATE,
             APPUI_METHOD_PROFILE_LLM_CATALOG,
             methods::APPROVAL_SCOPES_LIST,
             APPUI_METHOD_MODEL_LIST,
@@ -1555,6 +1560,10 @@ mod tests {
 
         assert!(visible.contains(&"status"));
         assert!(visible.contains(&"login"));
+        assert!(
+            visible.contains(&"profiles"),
+            "/profiles is the recovery path for a profile-unresolved session"
+        );
         assert!(visible.contains(&"model"));
         assert!(visible.contains(&"skills"));
         assert!(!visible.contains(&"permissions"));

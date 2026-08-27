@@ -49,6 +49,8 @@ pub(crate) struct MultiSelectPreview {
     pub lines: Vec<String>,
     /// See [`crate::menu::selection_view::SelectionPreview::single_line`].
     pub single_line: bool,
+    /// See [`crate::menu::selection_view::SelectionPreview::scroll`].
+    pub scroll: usize,
 }
 
 impl MultiSelectPreview {
@@ -57,6 +59,7 @@ impl MultiSelectPreview {
             title: title.into(),
             lines,
             single_line: false,
+            scroll: 0,
         }
     }
 }
@@ -368,27 +371,18 @@ fn render_preview(
     let Some(preview) = preview else {
         return;
     };
-    let mut lines = vec![Line::from(Span::styled(
-        preview.title.clone(),
-        palette.title().add_modifier(Modifier::BOLD),
-    ))];
-    lines.extend(
-        preview
-            .lines
-            .iter()
-            .take(usize::from(area.height.saturating_sub(1)))
-            .map(|line| {
-                let text = if preview.single_line {
-                    crate::app::truncate_to_display_width(line, usize::from(area.width))
-                } else {
-                    line.clone()
-                };
-                Line::from(Span::styled(text, palette.text()))
-            }),
+    let lines = crate::menu::preview_layout::preview_lines(
+        &preview.title,
+        &preview.lines,
+        preview.single_line,
+        preview.scroll,
+        area,
+        palette,
     );
     let paragraph = Paragraph::new(Text::from(lines))
         .style(Style::default().fg(palette.text).bg(palette.surface_alt));
-    // See the sibling renderer in `selection_view`.
+    // Truncated rows already fit the pane width; wrapping them would only
+    // re-introduce the overflow the truncation exists to prevent.
     if preview.single_line {
         paragraph.render(area, buf);
     } else {

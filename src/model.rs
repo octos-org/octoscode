@@ -294,7 +294,7 @@ pub const APPUI_METHOD_LOOP_RESUME: &str = "loop/resume";
 pub const APPUI_METHOD_LOOP_FIRE_NOW: &str = "loop/fire_now";
 
 /// Pseudo-method for the `!`-bang client-local shell exec. This command is
-/// never sent over the UI protocol wire — the transport intercepts it and
+/// never sent over the UI protocol wire — the event loop intercepts it and
 /// runs the command locally — so this string is purely for diagnostics /
 /// `AppUiCommand::method()` exhaustiveness, prefixed `local/` to make the
 /// non-RPC nature obvious.
@@ -899,10 +899,12 @@ pub enum AppUiCommand {
     /// `!`-bang client-local shell exec (Claude Code's `!` model). Runs a
     /// native shell command on the machine octoscode runs on — NOT the
     /// agent's sandboxed server `shell` tool — so it intentionally bypasses
-    /// every server-side guard. Carries NO JSON-RPC method: the transport
-    /// intercepts it directly, spawns the command on its tokio runtime, and
-    /// surfaces the result as a [`crate::client_event::ClientEvent::LocalShellResult`]
-    /// keyed by `local_id`. The mock backend stubs it as a no-op.
+    /// every server-side guard. Carries NO JSON-RPC method: the event loop
+    /// intercepts it directly and surfaces the result as a
+    /// [`crate::client_event::ClientEvent::LocalShellResult`] keyed by
+    /// `local_id`. The event loop intercepts this command so it can suspend the
+    /// TUI and lend the real terminal to the child. The mock backend stubs it
+    /// as a no-op.
     LocalShellExec {
         cmd: String,
         local_id: String,
@@ -997,8 +999,8 @@ impl AppUiCommand {
             Self::PauseLoop(_) => APPUI_METHOD_LOOP_PAUSE,
             Self::ResumeLoop(_) => APPUI_METHOD_LOOP_RESUME,
             Self::FireLoopNow(_) => APPUI_METHOD_LOOP_FIRE_NOW,
-            // `!`-bang local exec never crosses the wire; the transport
-            // intercepts it before building a JSON-RPC request. This pseudo
+            // `!`-bang local exec never crosses the wire; the event loop
+            // intercepts it before backend dispatch. This pseudo
             // method only exists so diagnostics can name the command.
             Self::LocalShellExec { .. } => APPUI_METHOD_LOCAL_SHELL_EXEC,
         }
@@ -2772,6 +2774,32 @@ impl OnboardingWizardState {
         self.api_key.as_ref().is_some_and(|key| !key.is_empty())
     }
 
+    /// A staged key with the empty string filtered out — the ONLY form that
+    /// may leave the client. `/onboard key` with no argument stages
+    /// `Some("")`; pre-keyless the empty-key gate kept it off the wire, but
+    /// keyless dispatches pass that gate, and serializing `"api_key": ""`
+    /// trips the server's key-without-env rejection (review round, #562).
+    fn staged_api_key(&self) -> Option<SecretString> {
+        self.api_key.clone().filter(|key| !key.is_empty())
+    }
+
+    /// Whether the STAGED selection needs no API key: the catalog marks the
+    /// family keyless AND the staged route does not itself demand a key env.
+    /// The route override matters because key requirements are per-ENDPOINT —
+    /// a keyless family can expose a keyed hosted route (the AutoDL pattern),
+    /// which must keep requiring its key. Fails closed when the catalog is
+    /// absent (callers handle that case by fetching it first).
+    pub fn selection_is_keyless(&self, catalog: Option<&ProfileLlmCatalogResult>) -> bool {
+        let route_keyed = self
+            .provider
+            .route
+            .api_key_env
+            .as_deref()
+            .is_some_and(|env| !env.trim().is_empty());
+        !route_keyed
+            && catalog.is_some_and(|catalog| catalog.family_is_keyless(&self.provider.family_id))
+    }
+
     pub fn selection_ready(&self) -> bool {
         !self.provider.family_id.trim().is_empty()
             && !self.provider.model_id.trim().is_empty()
@@ -2877,6 +2905,10 @@ impl OnboardingWizardState {
         if !self.selection_ready() {
             return OnboardingProviderStatus::NotSelected;
         }
+        // NOTE: this method has no catalog access, so `KeyMissing` is a false
+        // positive for keyless families (local/ollama/vllm). Callers that can
+        // see the catalog should prefer `selection_is_keyless`; today no
+        // renderer surfaces KeyMissing, so the inaccuracy is latent.
         if !self.has_api_key() {
             return OnboardingProviderStatus::KeyMissing;
         }
@@ -2884,6 +2916,16 @@ impl OnboardingWizardState {
     }
 
     pub fn apply_selection(&mut self, selection: LlmSelectionConfig) {
+        // A staged key belongs to the family it was pasted for: switching
+        // families must not let it ride along to a different endpoint
+        // (keyless local servers made this silent — security pass, #562).
+        if !self
+            .provider
+            .family_id
+            .eq_ignore_ascii_case(&selection.family_id)
+        {
+            self.api_key = None;
+        }
         self.provider = selection;
         self.provider_tested = false;
         self.provider_pending = None;
@@ -2924,7 +2966,7 @@ impl OnboardingWizardState {
         self.selection_ready().then(|| ProfileLlmUpsertParams {
             profile_id: self.effective_profile_id(current_profile),
             selection: self.provider.clone(),
-            api_key: self.api_key.clone(),
+            api_key: self.staged_api_key(),
             set_primary,
         })
     }
@@ -2933,7 +2975,7 @@ impl OnboardingWizardState {
         self.selection_ready().then(|| ProfileLlmTestParams {
             profile_id: self.effective_profile_id(current_profile),
             selection: self.provider.clone(),
-            api_key: self.api_key.clone(),
+            api_key: self.staged_api_key(),
         })
     }
 
@@ -2944,7 +2986,7 @@ impl OnboardingWizardState {
         self.selection_ready().then(|| ProfileLlmFetchModelsParams {
             profile_id: self.effective_profile_id(current_profile),
             selection: self.provider.clone(),
-            api_key: self.api_key.clone(),
+            api_key: self.staged_api_key(),
         })
     }
 
@@ -2986,7 +3028,7 @@ impl OnboardingWizardState {
                 api_type: route.api_type.clone(),
                 ..Default::default()
             },
-            api_key: self.api_key.clone(),
+            api_key: self.staged_api_key(),
         })
     }
 
@@ -3986,6 +4028,47 @@ pub struct ProfileLlmCatalogResult {
     pub families: serde_json::Map<String, Value>,
 }
 
+impl ProfileLlmCatalogResult {
+    /// The catalog entry for `family_id`. Lookup is case-INsensitive: catalog
+    /// keys are canonical, but typed selections (`/onboard select LOCAL …`)
+    /// arrive verbatim, and the codebase's existing convention for family ids
+    /// is tolerance (`eq_ignore_ascii_case`, see the aliasing note in
+    /// store.rs). Exact match is tried first.
+    pub fn family_entry(&self, family_id: &str) -> Option<&Value> {
+        let family_id = family_id.trim();
+        if family_id.is_empty() {
+            return None;
+        }
+        self.families.get(family_id).or_else(|| {
+            self.families
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(family_id))
+                .map(|(_, value)| value)
+        })
+    }
+
+    /// The trimmed, non-empty key-env the catalog declares for `family_id`.
+    /// Single home for the `"env"` field of the server contract.
+    pub fn family_key_env(&self, family_id: &str) -> Option<&str> {
+        self.family_entry(family_id)?
+            .get("env")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|env| !env.is_empty())
+    }
+
+    /// Whether the catalog reports `family_id` as keyless — the server's
+    /// marker for local server families (local/ollama/vllm). The wire
+    /// contract types key-env fields as `string | null` optional, so for a
+    /// PRESENT family an empty string, JSON null, or absent `env` all mean
+    /// "no key required"; an unknown family stays keyed (fail closed).
+    /// Keyless families save and test without an API key; requiring one
+    /// dead-ended their onboarding (octos#2096 review round).
+    pub fn family_is_keyless(&self, family_id: &str) -> bool {
+        self.family_entry(family_id).is_some() && self.family_key_env(family_id).is_none()
+    }
+}
+
 impl<'de> Deserialize<'de> for ProfileLlmCatalogResult {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -4039,6 +4122,21 @@ pub struct LlmConfiguredProvider {
 }
 
 impl LlmConfiguredProvider {
+    /// Whether this saved provider's key requirement is satisfied: it has a
+    /// stored key, OR its own record declares no key-env (keyless local
+    /// families publish `has_api_key: false` with an empty/absent
+    /// `api_key_env`). Gating session-open on `has_api_key` alone dead-ended
+    /// a rehydrated keyless primary after every TUI restart (red-team pass,
+    /// #562). Deliberately catalog-independent — at restart the catalog may
+    /// not be fetched yet.
+    pub fn key_satisfied(&self) -> bool {
+        self.has_api_key
+            || self
+                .api_key_env
+                .as_deref()
+                .is_none_or(|env| env.trim().is_empty())
+    }
+
     pub fn to_model_status(&self) -> ModelStatus {
         let provider = non_empty(self.provider.clone())
             .or_else(|| self.family_id.clone())
@@ -4460,6 +4558,27 @@ pub enum GoalObjectiveFold {
     Unfolded,
 }
 
+/// Hit rectangle (screen cells) of the pager's floating "jump to latest"
+/// button. Kept as plain `u16` fields instead of ratatui's `Rect` so the
+/// model layer stays free of UI-crate imports; the renderer converts on the
+/// way in, the mouse handler only needs `contains`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollToBottomHit {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+impl ScrollToBottomHit {
+    pub fn contains(&self, column: u16, row: u16) -> bool {
+        column >= self.x
+            && column < self.x.saturating_add(self.width)
+            && row >= self.y
+            && row < self.y.saturating_add(self.height)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AppState {
     /// Active TUI palette, chosen at launch (`--theme`/config) and switchable
@@ -4549,6 +4668,20 @@ pub struct AppState {
     /// selected sub-agent's live output. Resets to `Main` on session switch.
     pub chat_view: ChatViewTarget,
     pub transcript_scroll: usize,
+    /// The largest meaningful `transcript_scroll` (wrapped-rows − visible-rows),
+    /// recorded by the transcript renderer each frame — it is the only place
+    /// that knows the wrapped-row count. `scroll_transcript_up/down` clamp
+    /// against it so over-scroll (or scroll keys pressed when the content fits
+    /// the screen, `max_scroll == 0`) can't push the offset past the top and
+    /// leave PageDown/wheel-down "stuck" unwinding a phantom offset — and so
+    /// `transcript_scroll > 0` always means "really reviewing history" (the
+    /// `HintBarMode::PagerReviewing` gate). `usize::MAX` means "not measured
+    /// yet" (unbounded) — the pager always draws before a scroll key is read,
+    /// so production sees a real bound first; the sentinel only relaxes the
+    /// clamp in render-less unit tests. A `Cell` because rendering borrows
+    /// `&AppState`; stale by at most one frame. Same discipline as
+    /// [`Self::agent_view_scroll_max`].
+    pub transcript_scroll_max: std::cell::Cell<usize>,
     /// Scroll offset (rows from the bottom) for the sub-agent peek overlay. Kept
     /// separate from `transcript_scroll` so the main view's scroll is preserved
     /// across a peek, and — critically — so incoming activity rows that bump the
@@ -4570,6 +4703,13 @@ pub struct AppState {
     /// pinned to the bottom row — the inline chat flow cannot offer that
     /// because committed history lives in the terminal's own scrollback.
     pub transcript_pager_active: bool,
+    /// Screen rect of the pager's floating "jump to latest" arrow button (▼),
+    /// recorded by the renderer each frame — only the renderer knows the
+    /// laid-out transcript area. `None` while the button is hidden (view at
+    /// the bottom, or no pager). A `Cell` because rendering borrows
+    /// `&AppState`; stale by at most one frame (the same discipline as
+    /// [`AppState::agent_view_scroll_max`]).
+    pub scroll_to_bottom_button: std::cell::Cell<Option<ScrollToBottomHit>>,
     /// Agent Dock (#323): collapse the sub-agent strip to a one-line summary
     /// pill (`🐙 N agents · R running · U● unread`) instead of the per-agent
     /// rows. Toggled by Alt+D or the `/agents` menu; a UI preference, not
@@ -4824,6 +4964,20 @@ pub struct AppState {
     /// episode. Cleared when the session leaves the phantom shape so the next
     /// episode gets its own probe.
     pub phantom_probe_sent: std::collections::HashSet<SessionKey>,
+    /// OUTER_LOOP_REVIEW #12: sessions with a `session/hydrate` request already
+    /// dispatched (or queued for dispatch) and not yet answered. Both hydrate
+    /// producers (`hydrate_session_state_command` on `session/opened` /
+    /// phantom probe, and `resume_session_command` on `/resume`) record here
+    /// and refuse to emit a SECOND hydrate while one is in flight — the two
+    /// startup producers used to fire identical hydrates 1ms apart, doubling
+    /// serve busy time and writing the history into native scrollback twice.
+    /// Cleared when the hydrate result lands, when an attributed
+    /// `session/hydrate` error frame arrives, and on backend relaunch (the old
+    /// child's in-flight requests die with it). The wire include sets of both
+    /// producers are equivalent (`resume` adds `pending_questions`, which the
+    /// open-path include silently omits), so the first dispatch wins — no
+    /// merge needed.
+    pub hydrate_in_flight: std::collections::HashSet<SessionKey>,
     /// #324 Phase C: per-session unread counters — turns that reached a
     /// terminal while the session was NOT focused. Incremented by the store's
     /// terminal appliers, cleared when the session gains focus.
@@ -5568,9 +5722,7 @@ impl UserQuestionEntry {
             }
         } else {
             let already = self.option_selected.get(row).copied().unwrap_or(false);
-            for slot in &mut self.option_selected {
-                *slot = false;
-            }
+            self.option_selected.fill(false);
             if let Some(slot) = self.option_selected.get_mut(row) {
                 *slot = !already;
             }
@@ -6123,6 +6275,15 @@ pub struct DiffPreviewPaneState {
     /// preference, not per-preview data: it survives `apply_result` and a
     /// reload (`open_loading_for_turn`); only `close()` resets it.
     pub side_by_side: bool,
+    /// Ctrl+O while the preview is open: the diff takes over the screen as a
+    /// full-screen scrollable overlay. Deliberately its OWN bit, not the global
+    /// `expanded_tool_outputs` flag: previews auto-open on turn events, and a
+    /// user whose transcript-wide expansion preference is on must not be thrown
+    /// into (or collapsed out of) a modal they never asked for. Reset by
+    /// `open_loading_for_turn` (a NEW preview never opens pre-expanded) and by
+    /// `close()`; survives `apply_result` so a refresh doesn't collapse the
+    /// view mid-read.
+    pub expanded: bool,
 }
 
 impl DiffPreviewPaneState {
@@ -6144,6 +6305,7 @@ impl DiffPreviewPaneState {
             selected_file: 0,
             selected_hunk: 0,
             side_by_side: self.side_by_side,
+            expanded: false,
         };
     }
 
@@ -6186,15 +6348,25 @@ impl DiffPreviewPaneState {
             .is_some_and(|preview| preview.files.iter().any(|file| !file.hunks.is_empty()))
     }
 
+    /// Whether the full-screen diff overlay owns the screen right now. The ONE
+    /// gate shared by render, key routing, wheel routing and
+    /// `modal_owns_keyboard` — any drift between those four is a modal that
+    /// renders without keys or takes keys while invisible. Includes the same
+    /// renderability check as the inline box (C6): an expanded-but-empty
+    /// preview falls back to inline handling instead of a near-blank modal
+    /// that swallows every plain key.
+    pub fn overlay_active(&self) -> bool {
+        self.active && self.expanded && self.has_renderable_diff()
+    }
+
     pub fn close(&mut self) {
         *self = Self::default();
     }
 
-    // NOTE: currently dead code — nothing calls these and the diff renderer
-    // does not read `scroll` (hunk selection drives the viewport instead).
-    // They already use the from-bottom convention (up = add, down = sub)
-    // shared by the transcript and the detail modals, so a future caller
-    // inherits the right direction.
+    // From-bottom scroll semantics (up = add, down = sub), shared with the
+    // transcript and the detail modals. Read by the full-screen diff overlay;
+    // the event loop clamps after every scroll-up so the offset can't build a
+    // dead zone past the top (`clamp_diff_overlay_scroll`).
     pub fn scroll_up(&mut self, lines: usize) {
         self.scroll = self.scroll.saturating_add(lines);
     }
@@ -6782,9 +6954,11 @@ impl AppState {
             selected_task: 0,
             chat_view: ChatViewTarget::Main,
             transcript_scroll: 0,
+            transcript_scroll_max: std::cell::Cell::new(usize::MAX),
             agent_view_scroll: 0,
             agent_view_scroll_max: std::cell::Cell::new(usize::MAX),
             transcript_pager_active: false,
+            scroll_to_bottom_button: std::cell::Cell::new(None),
             agent_dock_collapsed: false,
             peer_dock_collapsed: false,
             goal_objective_fold: GoalObjectiveFold::default(),
@@ -6839,6 +7013,7 @@ impl AppState {
             interrupt_dropped_output: std::collections::HashSet::new(),
             last_started_turn: std::collections::HashMap::new(),
             phantom_probe_sent: std::collections::HashSet::new(),
+            hydrate_in_flight: std::collections::HashSet::new(),
             unread_turns: std::collections::HashMap::new(),
             pending_turn_steers: std::collections::VecDeque::new(),
             retained_steers: Vec::new(),
@@ -7295,10 +7470,20 @@ impl AppState {
     /// Enqueue a pending reconnect hydration command. Bounded — extra
     /// commands beyond a small cap are dropped to keep the queue O(1) —
     /// fresh hydration on the next reconnect is cheap.
+    ///
+    /// OUTER_LOOP_REVIEW #20 (ymote P1): evicting a queued
+    /// `HydrateSession` without clearing its `hydrate_in_flight` marker
+    /// latches the session out of hydration until a backend relaunch — the
+    /// marker was set at construction time but only answered/error/relaunch
+    /// paths cleared it. Release the evicted command's marker here.
     pub fn enqueue_autonomy_hydration(&mut self, command: AppUiCommand) {
         const MAX_PENDING_HYDRATION: usize = 16;
         if self.pending_autonomy_hydration.len() >= MAX_PENDING_HYDRATION {
-            self.pending_autonomy_hydration.pop_front();
+            if let Some(AppUiCommand::HydrateSession(params)) =
+                self.pending_autonomy_hydration.pop_front()
+            {
+                self.hydrate_in_flight.remove(&params.session_id);
+            }
         }
         self.pending_autonomy_hydration.push_back(command);
     }
@@ -8600,6 +8785,9 @@ impl AppState {
             // discipline keeps the card on screen).
             if let Some(mut approval) = self.pending_session_approvals.remove(&session_id) {
                 approval.visible = true;
+                // The promoted dialog takes key priority over the expanded
+                // diff overlay but renders beneath it — collapse the overlay.
+                self.diff_preview.expanded = false;
                 let title = approval.title.clone();
                 self.approval = Some(approval);
                 self.focus = FocusPane::Composer;
@@ -8607,6 +8795,7 @@ impl AppState {
             }
             if let Some(mut picker) = self.pending_session_questions.remove(&session_id) {
                 picker.visible = true;
+                self.diff_preview.expanded = false;
                 self.user_question_auto_open = true;
                 let title = picker.title.clone();
                 self.user_question = Some(picker);
@@ -9006,22 +9195,61 @@ impl AppState {
     pub fn enter_transcript_pager(&mut self) {
         self.transcript_pager_active = true;
         self.transcript_scroll = 0;
+        // The pager's transcript area has its own height/wrap, so any bound
+        // recorded from the inline viewport (or a previous pager frame) is
+        // meaningless; reset to "not measured yet" — the next pager draw
+        // re-records the real bound before a scroll key is read.
+        self.transcript_scroll_max.set(usize::MAX);
     }
 
     /// Close the transcript pager. The scroll offset is reset so the inline
     /// live tail follows the newest output again instead of inheriting the
-    /// pager's read position.
+    /// pager's read position. The jump-to-latest hit rect is cleared here
+    /// rather than waiting for the next frame: in pinned mode capture stays on
+    /// after the pager closes, and a stale rect would keep eating clicks.
     pub fn exit_transcript_pager(&mut self) {
         self.transcript_pager_active = false;
         self.transcript_scroll = 0;
+        self.scroll_to_bottom_button.set(None);
     }
 
+    /// Renderer write-back of the pager's "jump to latest" button rect (or
+    /// `None` while hidden) — the same one-frame-stale `Cell` discipline as
+    /// [`Self::record_agent_view_scroll_max`].
+    pub fn record_scroll_to_bottom_button(&self, hit: Option<ScrollToBottomHit>) {
+        self.scroll_to_bottom_button.set(hit);
+    }
+
+    /// Record the transcript's maximum scroll offset (wrapped-rows −
+    /// visible-rows). The renderer is the only code that knows the wrapped-row
+    /// count, so it feeds it back here for `scroll_transcript_up/down` to
+    /// clamp against — same `Cell` discipline as
+    /// [`Self::record_agent_view_scroll_max`].
+    pub fn record_transcript_scroll_max(&self, max: usize) {
+        self.transcript_scroll_max.set(max);
+    }
+
+    /// Scroll the transcript toward older output (up), clamped to the
+    /// last-rendered maximum so a non-overflowing transcript (`max_scroll ==
+    /// 0`) never leaves the bottom — and so `transcript_scroll > 0` always
+    /// means a real review offset (the `HintBarMode::PagerReviewing` gate) —
+    /// and so over-scroll at the top can't accumulate a phantom offset that
+    /// Down/PageDown must first unwind.
     pub fn scroll_transcript_up(&mut self, lines: usize) {
-        self.transcript_scroll = self.transcript_scroll.saturating_add(lines);
+        self.transcript_scroll = self
+            .transcript_scroll
+            .saturating_add(lines)
+            .min(self.transcript_scroll_max.get());
     }
 
+    /// Scroll toward the newest output (down). Snaps any over-shoot down to
+    /// the last-rendered maximum BEFORE subtracting — mirrors
+    /// [`Self::scroll_agent_view_down`].
     pub fn scroll_transcript_down(&mut self, lines: usize) {
-        self.transcript_scroll = self.transcript_scroll.saturating_sub(lines);
+        self.transcript_scroll = self
+            .transcript_scroll
+            .min(self.transcript_scroll_max.get())
+            .saturating_sub(lines);
     }
 
     pub fn scroll_transcript_to_latest(&mut self) {
@@ -9223,7 +9451,16 @@ impl AppState {
 
     pub fn preserve_transcript_position_after_append(&mut self, estimated_rows: usize) {
         if self.transcript_scroll > 0 && estimated_rows > 0 {
-            self.transcript_scroll = self.transcript_scroll.saturating_add(estimated_rows);
+            // Normalize any pre-existing stale overshoot against the OLD
+            // rendered ceiling, then add the new rows. Clamping the final sum
+            // to that old ceiling would discard the append delta and make a
+            // scrolled-up viewport drift toward the tail as output arrives.
+            // The next render records the new ceiling; scroll-down also snaps
+            // an estimated overshoot before subtracting.
+            self.transcript_scroll = self
+                .transcript_scroll
+                .min(self.transcript_scroll_max.get())
+                .saturating_add(estimated_rows);
         }
     }
 
@@ -9586,6 +9823,22 @@ impl AppState {
         } else {
             "Collapsed tool output + diff".into()
         };
+    }
+
+    /// Ctrl+O with a renderable diff preview open: the preview takes over the
+    /// screen as the full-screen overlay. Distinct status text from the global
+    /// tool-output toggle (which Ctrl+O still drives when no preview is open)
+    /// so the user can tell which surface the key just acted on.
+    pub fn expand_diff_preview_overlay(&mut self) {
+        self.diff_preview.expanded = true;
+        self.status = t!("status.diff_overlay_expanded").into_owned();
+    }
+
+    /// Esc / Ctrl+O inside the overlay: back to the inline preview (the
+    /// preview itself stays open — a second Esc closes it).
+    pub fn collapse_diff_preview_overlay(&mut self) {
+        self.diff_preview.expanded = false;
+        self.status = t!("status.diff_overlay_collapsed").into_owned();
     }
 
     pub fn persist_composer_draft_for_selected_session(&mut self) {
@@ -10777,6 +11030,127 @@ fn preview_id_from_text(text: &str) -> Option<PreviewId> {
 mod tests {
     use super::*;
     use octos_core::Message;
+
+    fn catalog(json: serde_json::Value) -> ProfileLlmCatalogResult {
+        serde_json::from_value(json).expect("catalog fixture deserializes")
+    }
+
+    /// The wire contract types key-env as `string | null` optional: for a
+    /// PRESENT family, empty string, null, and absent env all mean keyless;
+    /// unknown families stay keyed (fail closed). Lookup tolerates case and
+    /// whitespace, matching the codebase's family-id aliasing convention.
+    #[test]
+    fn family_is_keyless_covers_env_contract_variants() {
+        let catalog = catalog(serde_json::json!({
+            "families": {
+                "local": { "env": "" },
+                "nullenv": { "env": null },
+                "noenv": {},
+                "keyed": { "env": "X_KEY" }
+            }
+        }));
+        assert!(catalog.family_is_keyless("local"));
+        assert!(catalog.family_is_keyless("nullenv"));
+        assert!(catalog.family_is_keyless("noenv"));
+        assert!(catalog.family_is_keyless("LOCAL"));
+        assert!(catalog.family_is_keyless(" local "));
+        assert!(!catalog.family_is_keyless("keyed"));
+        assert!(!catalog.family_is_keyless("absent"));
+        assert!(!catalog.family_is_keyless(""));
+        assert!(!catalog.family_is_keyless("   "));
+        assert_eq!(catalog.family_key_env("keyed"), Some("X_KEY"));
+        assert_eq!(catalog.family_key_env("local"), None);
+    }
+
+    /// Key requirements are per-ENDPOINT: a staged route carrying its own
+    /// key-env stays keyed even under a keyless family (AutoDL pattern), and
+    /// a missing catalog fails closed.
+    #[test]
+    fn selection_is_keyless_respects_route_override_and_missing_catalog() {
+        let catalog = catalog(serde_json::json!({
+            "families": { "local": { "env": "" } }
+        }));
+        let mut state = OnboardingWizardState {
+            provider: LlmSelectionConfig {
+                family_id: "local".into(),
+                model_id: "local-default".into(),
+                route: LlmRouteConfig {
+                    route_id: "official".into(),
+                    ..LlmRouteConfig::default()
+                },
+                ..LlmSelectionConfig::default()
+            },
+            ..OnboardingWizardState::default()
+        };
+        assert!(state.selection_is_keyless(Some(&catalog)));
+        assert!(!state.selection_is_keyless(None), "no catalog fails closed");
+        state.provider.route.api_key_env = Some("HOSTED_KEY".into());
+        assert!(
+            !state.selection_is_keyless(Some(&catalog)),
+            "a keyed route overrides a keyless family"
+        );
+    }
+
+    /// A staged key never leaves the client empty (`/onboard key` with no
+    /// argument stages Some("")), and switching families clears it — a key
+    /// belongs to the endpoint it was pasted for.
+    #[test]
+    fn staged_key_is_filtered_empty_and_cleared_on_family_switch() {
+        let mut state = OnboardingWizardState {
+            provider: LlmSelectionConfig {
+                family_id: "openai".into(),
+                model_id: "gpt-4o".into(),
+                route: LlmRouteConfig {
+                    route_id: "official".into(),
+                    ..LlmRouteConfig::default()
+                },
+                ..LlmSelectionConfig::default()
+            },
+            api_key: Some(SecretString::new("")),
+            ..OnboardingWizardState::default()
+        };
+        let params = state.build_test_params(Some("p")).expect("selection ready");
+        assert!(params.api_key.is_none(), "empty key stays off the wire");
+
+        state.api_key = Some(SecretString::new("sk-real"));
+        // Same family: key survives.
+        state.apply_selection(LlmSelectionConfig {
+            family_id: "openai".into(),
+            model_id: "gpt-4o-mini".into(),
+            ..LlmSelectionConfig::default()
+        });
+        assert!(state.has_api_key(), "same-family reselect keeps the key");
+        // Different family: key is cleared.
+        state.apply_selection(LlmSelectionConfig {
+            family_id: "local".into(),
+            model_id: "local-default".into(),
+            ..LlmSelectionConfig::default()
+        });
+        assert!(
+            !state.has_api_key(),
+            "family switch must not carry the old key"
+        );
+    }
+
+    /// Saved-provider key satisfaction is record-based (catalog-independent):
+    /// a stored key satisfies, and so does a record that declares no key-env
+    /// (keyless local families publish has_api_key=false).
+    #[test]
+    fn configured_provider_key_satisfied_variants() {
+        let provider = |has_key: bool, env: Option<&str>| -> LlmConfiguredProvider {
+            serde_json::from_value(serde_json::json!({
+                "provider": "x", "model": "y",
+                "has_api_key": has_key,
+                "api_key_env": env,
+            }))
+            .expect("provider fixture deserializes")
+        };
+        assert!(provider(true, Some("OPENAI_API_KEY")).key_satisfied());
+        assert!(provider(false, None).key_satisfied());
+        assert!(provider(false, Some("")).key_satisfied());
+        assert!(provider(false, Some("  ")).key_satisfied());
+        assert!(!provider(false, Some("OPENAI_API_KEY")).key_satisfied());
+    }
     use octos_core::ui_protocol::{
         UiArtifactPaneItem, UiArtifactPaneSnapshot, UiGitHistoryItem, UiGitPaneSnapshot,
         UiGitStatusItem, UiWorkspacePaneEntry, UiWorkspacePaneSnapshot,
@@ -11139,6 +11513,26 @@ mod tests {
 
         git.scroll_up(99);
         assert_eq!(git.scroll, 0);
+    }
+
+    #[test]
+    fn transcript_append_preserves_scrolled_view_beyond_the_old_ceiling() {
+        let mut state = AppState::new(Vec::new(), 0, "ready".into(), None, false);
+        state.transcript_scroll = 5;
+        state.record_transcript_scroll_max(5);
+
+        state.preserve_transcript_position_after_append(3);
+
+        assert_eq!(
+            state.transcript_scroll, 8,
+            "new rows increase the from-bottom offset instead of being cut off by the old max"
+        );
+
+        // A stale pre-append overshoot is normalized first, then the same
+        // preservation delta is applied.
+        state.transcript_scroll = 99;
+        state.preserve_transcript_position_after_append(3);
+        assert_eq!(state.transcript_scroll, 8);
     }
 
     /// `completed_turns` grows on EVERY terminal for the life of the session;

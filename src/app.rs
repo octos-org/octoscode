@@ -20,10 +20,10 @@ use crate::{
     model::{
         ActivityItem, ActivityKind, ActivityNavigatorFilter, AppState, ApprovalModalState,
         ArtifactDetailState, ComposerPresentation, DiffPreviewPaneState, FocusPane,
-        GoalObjectiveFold, PeerMeta, PlanStep as RenderedPlanStep, SessionAutonomyState,
-        SessionRunState, SessionView, TaskOutputDetailState, TaskView, ThreadGraphDetailState,
-        TurnActivityLog, TurnPromptAnchor, TurnStateDetailState, UserQuestionEntry,
-        UserQuestionPickerState, extract_plan_steps, task_state_label,
+        GoalObjectiveFold, PeerMeta, PlanStep as RenderedPlanStep, ScrollToBottomHit,
+        SessionAutonomyState, SessionRunState, SessionView, TaskOutputDetailState, TaskView,
+        ThreadGraphDetailState, TurnActivityLog, TurnPromptAnchor, TurnStateDetailState,
+        UserQuestionEntry, UserQuestionPickerState, extract_plan_steps, task_state_label,
     },
     theme::Palette,
     tui_terminal::FrameLike,
@@ -104,6 +104,12 @@ pub fn wants_fullscreen_overlay(app: &AppState) -> bool {
         || app.artifact_detail.active
         || app.thread_graph_detail.active
         || app.turn_state_detail.active
+        // Ctrl+O on a diff preview expands to a full-screen scrollable detail:
+        // the inline live-tail viewport is bounded (it must leave scrollback
+        // rows above), so a fully-expanded diff has nowhere to render and no
+        // scroll surface of its own — the overlay is what makes "see every
+        // change" actually reachable.
+        || app.diff_preview.overlay_active()
 }
 
 /// The detail overlays that render full-screen (alt-screen, no native scrollback
@@ -116,6 +122,7 @@ fn scrollable_detail_modal_active(app: &AppState) -> bool {
         || app.artifact_detail.active
         || app.thread_graph_detail.active
         || app.turn_state_detail.active
+        || app.diff_preview.overlay_active()
 }
 
 /// Mouse capture policy. In the default `native` scroll-mode, capture is on
@@ -6271,7 +6278,7 @@ mod render;
 #[allow(unused_imports)]
 pub(crate) use render::*;
 mod activity_nav;
-mod markdown_highlight;
+pub(crate) mod markdown_highlight;
 #[allow(unused_imports)]
 pub(crate) use activity_nav::*;
 

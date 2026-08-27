@@ -167,7 +167,16 @@ impl ScrollbackTracker {
                 // full current history so the up-to-date content is selectable
                 // below the (now-stale) prior block. Rare (reconnect / session
                 // switch).
-                lines_to_insert.extend(app::finalized_history_lines(app, palette, wrap_width));
+                //
+                // goal_05 candidate (a): defer syntect highlighting for this
+                // full rebuild — cold-cache highlighting of every code block in
+                // history measured at 88% of the rebuild cost and 31-38% of the
+                // whole load. The scrollback snapshot shows code blocks in the
+                // plain fallback style; the live viewport and the pager rebuild
+                // every frame and highlight normally.
+                lines_to_insert.extend(crate::highlight::with_deferred_highlight(|| {
+                    app::finalized_history_lines(app, palette, wrap_width)
+                }));
                 self.flushed_messages = fingerprint.message_count;
                 self.last = fingerprint;
                 self.completed_live.clear();

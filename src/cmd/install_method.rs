@@ -96,7 +96,8 @@ https://github.com/octos-org/octoscode/releases/latest/download/octoscode-instal
     ///   formula in this repo's tap; the stable `octoscode` formula is untouched.
     ///   (`brew install` upgrades in place if the formula has moved.)
     /// - **cargo-dist installer**: `None` — it self-updates in place via
-    ///   `octoscode update --prerelease` (axoupdater `LatestMaybePrerelease`).
+    ///   `octoscode update --prerelease`, which resolves and installs the exact
+    ///   latest prerelease tag.
     /// - **cargo install / unknown**: `None` — no rc-specific channel; the
     ///   caller points at the universal npm `@next` channel or the installer.
     pub fn prerelease_upgrade_command(&self) -> Option<String> {

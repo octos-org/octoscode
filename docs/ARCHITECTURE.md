@@ -497,7 +497,7 @@ added without a row here.
 | File | Lines | Responsibility |
 |---|---:|---|
 | `src/client_event.rs` | 377 | Decoded RPC results and autonomy results, in the shape the store reduces. |
-| `src/event_loop.rs` | 6328 | Terminal raw mode, alternate screen, draw loop, keyboard dispatch, backend polling, send-error handling. |
+| `src/event_loop.rs` | 7047 | Terminal raw mode, alternate screen, draw loop, keyboard dispatch, backend polling, send-error handling. |
 | `src/model.rs` | 11612 | `AppState`, the TUI view models, `AppUiCommand`, and the mapping from AppUI snapshots/tasks/messages into renderable state. |
 | `src/store.rs` | 37021 | The AppUI reducer: snapshots, RPC results, notifications, local commands, approvals, diffs, task output and queued prompts folded into `AppState`. |
 
@@ -534,12 +534,13 @@ added without a row here.
 |---|---:|---|
 | `src/menu/availability.rs` | 695 | Capability gating — which menus the connected server advertises. |
 | `src/menu/mod.rs` | 21 | Menu framework model and generic render surfaces. |
-| `src/menu/multi_select_view.rs` | 487 | Multi-select menu surface. |
-| `src/menu/providers.rs` | 11355 | Local and capability-backed menu providers for the M9.34 framework. |
+| `src/menu/multi_select_view.rs` | 501 | Multi-select menu surface. |
+| `src/menu/preview_layout.rs` | 133 | Preview-pane scroll window, row truncation and the range indicator, shared by both menu surfaces. |
+| `src/menu/providers.rs` | 11969 | Local and capability-backed menu providers for the M9.34 framework. |
 | `src/menu/registry.rs` | 1583 | The canonical slash-command registry: names, aliases and capability gating. |
-| `src/menu/render.rs` | 427 | Generic menu renderer shared by every provider. |
-| `src/menu/selection_view.rs` | 551 | Single-select menu surface. |
-| `src/menu/types.rs` | 890 | `MenuSpec` / `MenuItem` / `MenuAction` — the framework core types. |
+| `src/menu/render.rs` | 441 | Generic menu renderer shared by every provider. |
+| `src/menu/selection_view.rs` | 843 | Single-select menu surface. |
+| `src/menu/types.rs` | 921 | `MenuSpec` / `MenuItem` / `MenuAction` — the framework core types. |
 | `src/menu/wizard.rs` | 417 | First-run setup wizard step model. |
 
 ### Composer and input

@@ -959,6 +959,10 @@ pub(super) fn transcript_render_model(
     let visible_height = transcript_visible_height(area);
     let total_rows = transcript_visual_rows(&lines, wrap_width);
     let max_scroll = total_rows.saturating_sub(visible_height);
+    // Feed the true maximum back so `scroll_transcript_up/down` clamp to it
+    // (see `transcript_scroll_max`; same discipline as the peek overlay's
+    // `record_agent_view_scroll_max`).
+    app.record_transcript_scroll_max(max_scroll);
     let scroll_from_bottom = app.transcript_scroll.min(max_scroll);
     let metrics = TranscriptScrollMetrics {
         visible_rows: visible_height,
@@ -1714,6 +1718,9 @@ pub(super) fn push_pending_messages_block(
 /// memoizing block cache. `complete` marks a closed fence (cacheable);
 /// still-streaming blocks render uncached. The fallback style is fg-only —
 /// the row background stays line-level (`chat_line`) per the no-span-bg rule.
+/// `width` is the transcript wrap budget — only the unified-diff path uses it
+/// (to wrap its rows under the sign); plain highlighted blocks still clip.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn push_code_block_lines(
     lines: &mut Vec<Line<'static>>,
     palette: Palette,
@@ -1722,10 +1729,11 @@ pub(super) fn push_code_block_lines(
     language: &str,
     body: &[String],
     complete: bool,
+    width: usize,
 ) {
     if code_block_is_unified_diff(language, body) {
         retitle_last_code_block_header_as_diff(lines);
-        push_unified_diff_code_block_lines(lines, palette, indent, bg, body);
+        push_unified_diff_code_block_lines(lines, palette, indent, bg, body, width);
         return;
     }
 
@@ -1736,13 +1744,43 @@ pub(super) fn push_code_block_lines(
         complete,
         palette.code_theme,
     );
+    // Same reason as the diff paths: an over-wide source line handed whole to
+    // the transcript paragraph gets its tail restarted at column 0, outside
+    // the `│` rule. `wrap_line` breaks it here instead, carrying each
+    // fragment's syntax-highlight style onto the continuation rows.
+    let budget = code_block_content_budget(indent, width);
     for row in rendered.iter() {
-        let mut spans = vec![
-            Span::styled(indent, style_bg(palette.border(), bg)),
-            Span::styled("│ ", style_bg(palette.border(), bg)),
-        ];
-        spans.extend(row.iter().cloned());
-        lines.push(chat_line(spans, bg));
+        let source = Line::from(row.iter().map(sanitized_span).collect::<Vec<_>>());
+        for wrapped in crate::insert_history::wrap_line(&source, budget) {
+            let mut spans = vec![
+                Span::styled(indent, style_bg(palette.border(), bg)),
+                Span::styled("│ ", style_bg(palette.border(), bg)),
+            ];
+            spans.extend(wrapped.spans);
+            lines.push(chat_line(spans, bg));
+        }
+    }
+}
+
+/// Columns left for a code block's content after its indent and `│ ` rule.
+/// Floored so a very narrow transcript shreds the block instead of panicking
+/// or emitting one column per row.
+fn code_block_content_budget(indent: &str, width: usize) -> usize {
+    width.saturating_sub(indent.width() + 2).max(8)
+}
+
+/// Expand tabs and drop other control characters so the wrap budget is
+/// measured in the columns the terminal will actually print — the
+/// `fit_diff_cell` ordering. Untouched (and unallocated) when the span is
+/// already clean, which is the common case.
+fn sanitized_span(span: &Span<'static>) -> Span<'static> {
+    if span.content.chars().any(char::is_control) {
+        Span::styled(
+            crate::insert_history::sanitize_span_content(span.content.as_ref()),
+            span.style,
+        )
+    } else {
+        span.clone()
     }
 }
 
@@ -1752,7 +1790,11 @@ pub(super) fn push_unified_diff_code_block_lines(
     indent: &'static str,
     bg: Option<Color>,
     body: &[String],
+    width: usize,
 ) {
+    // Frame columns before a +/-/context line's content: the block indent,
+    // the `│ ` rule, and the two-column sign cell.
+    let gutter_cols = indent.width() + 2 + 2;
     for raw_line in body {
         let line = raw_line.trim_end_matches(['\r', '\n']);
         let mut spans = vec![
@@ -1802,38 +1844,59 @@ pub(super) fn push_unified_diff_code_block_lines(
             continue;
         }
 
-        if let Some(content) = line.strip_prefix('+') {
-            spans.push(Span::styled("+ ", diff_line_marker_style("added", palette)));
-            spans.push(Span::styled(
-                content.to_string(),
-                diff_line_style("added", palette),
-            ));
-        } else if let Some(content) = line.strip_prefix('-') {
-            spans.push(Span::styled(
-                "- ",
-                diff_line_marker_style("removed", palette),
-            ));
-            spans.push(Span::styled(
-                content.to_string(),
-                diff_line_style("removed", palette),
-            ));
-        } else if let Some(content) = line.strip_prefix(' ') {
-            spans.push(Span::styled(
-                "  ",
-                diff_line_gutter_style("context", palette),
-            ));
-            spans.push(Span::styled(
-                content.to_string(),
-                diff_line_style("context", palette),
-            ));
-        } else {
+        let signed = line
+            .strip_prefix('+')
+            .map(|content| ("+ ", "added", content))
+            .or_else(|| {
+                line.strip_prefix('-')
+                    .map(|content| ("- ", "removed", content))
+            })
+            .or_else(|| {
+                line.strip_prefix(' ')
+                    .map(|content| ("  ", "context", content))
+            });
+
+        let Some((sign, kind, content)) = signed else {
             spans.push(Span::styled(
                 line.to_string(),
                 style_bg(palette.muted(), bg),
             ));
-        }
+            lines.push(chat_line(spans, bg));
+            continue;
+        };
 
-        lines.push(chat_line(spans, bg));
+        let marker_style = if kind == "context" {
+            diff_line_gutter_style(kind, palette)
+        } else {
+            diff_line_marker_style(kind, palette)
+        };
+        let body_style = diff_line_style(kind, palette);
+        // Same reason as the diff pane: wrap here so a line wider than the
+        // transcript hangs under the sign cell instead of the paragraph
+        // restarting it at column 0, left of both the sign and the `│` rule.
+        for (idx, row) in diff_content_rows(content, width, gutter_cols)
+            .into_iter()
+            .enumerate()
+        {
+            let mut row_spans = if idx == 0 {
+                std::mem::take(&mut spans)
+            } else {
+                vec![
+                    Span::styled(indent, style_bg(palette.border(), bg)),
+                    Span::styled("│ ", style_bg(palette.border(), bg)),
+                ]
+            };
+            row_spans.push(Span::styled(
+                if idx == 0 {
+                    sign.to_string()
+                } else {
+                    " ".repeat(sign.width())
+                },
+                marker_style,
+            ));
+            row_spans.push(Span::styled(row, body_style));
+            lines.push(chat_line(row_spans, bg));
+        }
     }
 }
 
@@ -1918,7 +1981,7 @@ pub(super) fn push_formatted_body_marked_seeded(
             flush_prose_paragraph(lines, palette, &mut prose, indent, bg);
             flush_markdown_table(lines, palette, &mut table, indent, bg, width);
             if let Some((language, body)) = in_code.take() {
-                push_code_block_lines(lines, palette, indent, bg, &language, &body, true);
+                push_code_block_lines(lines, palette, indent, bg, &language, &body, true, width);
                 lines.push(chat_line(
                     vec![
                         Span::styled(indent, style_bg(palette.border(), bg)),
@@ -2107,7 +2170,7 @@ pub(super) fn push_formatted_body_marked_seeded(
         // Fence still open at end of input (streaming): render it too so the
         // live tail shows the in-flight code — uncached, the body grows every
         // frame.
-        push_code_block_lines(lines, palette, indent, bg, &language, &body, false);
+        push_code_block_lines(lines, palette, indent, bg, &language, &body, false, width);
     }
     flush_prose_paragraph(lines, palette, &mut prose, indent, bg);
     flush_markdown_table(lines, palette, &mut table, indent, bg, width);
@@ -3726,10 +3789,35 @@ pub(super) fn push_inline_diff_preview(
     }
 }
 
+/// Columns a unified row spends before its content: 4 indent + `"{sign} "` +
+/// `"{old:>4} {new:>4} "`. Wrapped continuations pad to exactly this so they
+/// hang under the first row's content instead of restarting at column 0.
+pub(super) const DIFF_UNIFIED_GUTTER_COLS: usize = 4 + 2 + 10;
+
+/// What a unified diff row does with content wider than the pane.
+///
+/// The inline transcript WRAPS: it hands whole `Line`s to a `Wrap { trim:
+/// false }` paragraph, which restarts every continuation at column 0 — the
+/// tail of a long line lands LEFT of the `+`/`-` sign and the line-number
+/// gutter, outside the pane. Wrapping here with a hanging indent keeps the
+/// tail under the content column.
+///
+/// The expanded overlay CLIPS: `render::diff_preview_modal_lines` hard-clips
+/// every line to the modal width and its scroll geometry
+/// (`diff_preview_overlay_max_scroll`) is exact only because one diff line is
+/// always one row.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum DiffRowFit {
+    Wrap,
+    Clip,
+}
+
 pub(super) fn push_diff_content_line(
     lines: &mut Vec<Line<'static>>,
     palette: Palette,
     line: &crate::model::DiffPreviewLine,
+    wrap_width: usize,
+    fit: DiffRowFit,
 ) {
     let sign = diff_line_sign(&line.kind);
     let old_line = line
@@ -3743,12 +3831,46 @@ pub(super) fn push_diff_content_line(
     let marker_style = diff_line_marker_style(&line.kind, palette);
     let gutter_style = diff_line_gutter_style(&line.kind, palette);
     let body_style = diff_line_style(&line.kind, palette);
-    lines.push(Line::from(vec![
-        Span::styled("    ", gutter_style),
-        Span::styled(format!("{sign} "), marker_style),
-        Span::styled(format!("{old_line:>4} {new_line:>4} "), gutter_style),
-        Span::styled(line.content.clone(), body_style),
-    ]));
+    let rows = match fit {
+        DiffRowFit::Wrap => diff_content_rows(&line.content, wrap_width, DIFF_UNIFIED_GUTTER_COLS),
+        DiffRowFit::Clip => vec![line.content.clone()],
+    };
+    for (idx, row) in rows.into_iter().enumerate() {
+        if idx == 0 {
+            lines.push(Line::from(vec![
+                Span::styled("    ", gutter_style),
+                Span::styled(format!("{sign} "), marker_style),
+                Span::styled(format!("{old_line:>4} {new_line:>4} "), gutter_style),
+                Span::styled(row, body_style),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(" ".repeat(DIFF_UNIFIED_GUTTER_COLS), gutter_style),
+                Span::styled(row, body_style),
+            ]));
+        }
+    }
+}
+
+/// Word-wrap one diff line's content into the columns left over after
+/// `gutter_cols` of sign/number chrome. Tabs and control characters are
+/// expanded first (the `fit_diff_cell` ordering) so the measurement matches
+/// what the terminal actually prints; a very narrow pane still gets a usable
+/// minimum instead of a one-column-per-row shred.
+pub(super) fn diff_content_rows(
+    content: &str,
+    wrap_width: usize,
+    gutter_cols: usize,
+) -> Vec<String> {
+    let budget = wrap_width.saturating_sub(gutter_cols).max(8);
+    if content.chars().any(char::is_control) {
+        wrap_display_width(
+            &crate::insert_history::sanitize_span_content(content),
+            budget,
+        )
+    } else {
+        wrap_display_width(content, budget)
+    }
 }
 
 /// Render one half of a side-by-side row: line number, sign, and the content
@@ -3826,10 +3948,12 @@ pub(super) fn push_diff_side_by_side_row(
     lines.push(Line::from(spans));
 }
 
-/// Render one hunk's body. Unified: one row per `DiffPreviewLine`.
-/// Side-by-side: lines are paired into aligned old/new rows first
-/// (`side_by_side_rows`). `max_rows` caps the output (the collapsed inline
-/// view); returns how many rows the cap hid.
+/// Render one hunk's body. Unified: one row per `DiffPreviewLine`, unless
+/// `fit` is `Wrap` and the content is wider than the pane (then it hangs onto
+/// continuation rows). Side-by-side: lines are paired into aligned old/new
+/// rows first (`side_by_side_rows`) and always truncate inside their cells.
+/// `max_rows` caps the output (the collapsed inline view) and counts DIFF
+/// LINES, not wrapped rows; returns how many the cap hid.
 pub(super) fn push_diff_hunk_body(
     lines: &mut Vec<Line<'static>>,
     palette: Palette,
@@ -3837,6 +3961,7 @@ pub(super) fn push_diff_hunk_body(
     side_by_side: bool,
     wrap_width: usize,
     max_rows: Option<usize>,
+    fit: DiffRowFit,
 ) -> usize {
     if side_by_side {
         let rows = side_by_side_rows(hunk_lines);
@@ -3849,7 +3974,7 @@ pub(super) fn push_diff_hunk_body(
     } else {
         let shown = max_rows.unwrap_or(hunk_lines.len()).min(hunk_lines.len());
         for line in hunk_lines.iter().take(shown) {
-            push_diff_content_line(lines, palette, line);
+            push_diff_content_line(lines, palette, line, wrap_width, fit);
         }
         hunk_lines.len() - shown
     }
@@ -3918,7 +4043,15 @@ pub(super) fn push_diff_file_lines(
                 Span::styled(hunk.header.clone(), diff_hunk_style(palette)),
             ]));
             if selected {
-                push_diff_hunk_body(lines, palette, &hunk.lines, side_by_side, wrap_width, None);
+                push_diff_hunk_body(
+                    lines,
+                    palette,
+                    &hunk.lines,
+                    side_by_side,
+                    wrap_width,
+                    None,
+                    DiffRowFit::Wrap,
+                );
             }
         }
         return;
@@ -3948,6 +4081,7 @@ pub(super) fn push_diff_file_lines(
             side_by_side,
             wrap_width,
             Some(4),
+            DiffRowFit::Wrap,
         );
         if hidden > 0 {
             // Side-by-side hides PAIRED ROWS (one row holds up to two

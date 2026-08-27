@@ -250,6 +250,12 @@ fn menu_subtitle(store: &Store) -> String {
 }
 
 fn saved_moonshot_state_without_key(profile_id: &str) -> ProfileLlmListResult {
+    // `api_key_env` mirrors the server record shape: `configured_provider_json`
+    // always emits the route's env name, and the save path backfills it from
+    // the family default for keyed hosted providers. Omitting it here would
+    // model a record the server cannot produce — and would trip the deliberate
+    // keyless fail-open in `key_satisfied()` (no env declared = keyless local
+    // family), turning this test into a false alarm (#562).
     serde_json::from_value(json!({
         "profile_id": profile_id,
         "primary": {
@@ -258,6 +264,7 @@ fn saved_moonshot_state_without_key(profile_id: &str) -> ProfileLlmListResult {
             "family_id": "moonshot",
             "model_id": "kimi-k2.6",
             "route_id": "moonshot",
+            "api_key_env": "MOONSHOT_API_KEY",
             "has_api_key": false
         }
     }))

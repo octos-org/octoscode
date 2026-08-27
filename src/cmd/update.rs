@@ -9,8 +9,10 @@
 //!
 //! **Prerelease channels (`--prerelease`).** Stable and prerelease live on
 //! SEPARATE channels so opting into rc builds never disturbs a stable install:
-//! - **cargo-dist installer**: self-updates in place to the latest prerelease
-//!   (axoupdater `LatestMaybePrerelease`).
+//! - **cargo-dist installer**: resolves the latest prerelease tag, then
+//!   self-updates in place to that exact tag. Treating this as a channel target
+//!   allows an intentional stable-to-RC switch even though SemVer ranks the
+//!   stable release higher.
 //! - **npm**: prereleases publish under the `next` dist-tag, so
 //!   `@octos-org/octoscode@next` is the latest rc while a bare install / `@latest`
 //!   stay stable. `--prerelease` prints `npm install -g @octos-org/octoscode@next`.
@@ -33,6 +35,9 @@
 
 use eyre::{Result, WrapErr, eyre};
 use semver::Version;
+
+#[cfg(feature = "update")]
+use axoupdater::UpdateRequest;
 
 use super::github;
 #[cfg(feature = "update")]
@@ -125,14 +130,18 @@ fn run_check(
             });
             println!("{}", serde_json::to_string_pretty(&payload)?);
         } else {
-            println!("octoscode {current} — no published releases found yet.");
+            if args.prerelease {
+                println!("octoscode {current} — no published prereleases found yet.");
+            } else {
+                println!("octoscode {current} — no published releases found yet.");
+            }
         }
         return Ok(UpdateOutcome::Success);
     };
     let latest_version = parse_version(&latest.tag)
         .ok_or_else(|| eyre!("could not parse latest release tag `{}`", latest.tag))?;
 
-    let newer = is_newer(current, &latest_version);
+    let newer = is_update_available(current, &latest_version, args.prerelease);
     if args.json {
         let payload = serde_json::json!({
             "current_version": current.to_string(),
@@ -143,12 +152,20 @@ fn run_check(
             "upgrade_command": advertised_command(method, args.prerelease),
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else if newer && args.prerelease {
+        println!(
+            "Prerelease channel target: {current} -> {latest_version} (tag {})",
+            latest.tag
+        );
+        print_method_hint(method, true);
     } else if newer {
         println!(
             "Update available: {current} -> {latest_version} (tag {})",
             latest.tag
         );
         print_method_hint(method, args.prerelease);
+    } else if args.prerelease {
+        println!("octoscode {current} is up to date on the prerelease channel.");
     } else {
         println!("octoscode {current} is up to date (latest is {latest_version}).");
     }
@@ -279,7 +296,7 @@ installer or npm @next:\n    {PRERELEASE_NPM_FALLBACK}",
 /// Self-update path for the cargo-dist installer method.
 #[cfg(feature = "update")]
 fn self_update(args: &UpdateArgs, current: &Version) -> Result<UpdateOutcome> {
-    use axoupdater::{AxoUpdater, UpdateRequest};
+    use axoupdater::AxoUpdater;
 
     let mut updater = AxoUpdater::new_for("octoscode");
     updater
@@ -306,12 +323,27 @@ fn self_update(args: &UpdateArgs, current: &Version) -> Result<UpdateOutcome> {
         let _ = updater.set_current_version(v);
     }
 
-    let specifier = match (&args.version, &args.tag, args.prerelease) {
-        (Some(v), _, _) => UpdateRequest::SpecificVersion(v.clone()),
-        (_, Some(t), _) => UpdateRequest::SpecificTag(t.clone()),
-        (_, _, true) => UpdateRequest::LatestMaybePrerelease,
-        _ => UpdateRequest::Latest,
+    // `LatestMaybePrerelease` still selects by SemVer, so a stable 0.3.0 masks
+    // 0.3.0-rc.8 and makes an explicit channel switch look "up to date". Resolve
+    // the prerelease channel ourselves and use SpecificTag semantics instead:
+    // axoupdater then updates whenever the target differs, including a deliberate
+    // stable-to-RC downgrade, without reinstalling the same RC every time.
+    let prerelease_tag = if args.version.is_none() && args.tag.is_none() && args.prerelease {
+        let Some(release) = github::latest_release(true)
+            .wrap_err("failed to query the latest octoscode prerelease from GitHub")?
+        else {
+            if args.json {
+                print_self_update_json(false, &current.to_string(), None);
+            } else {
+                println!("octoscode {current} — no published prereleases found yet.");
+            }
+            return Ok(UpdateOutcome::Success);
+        };
+        Some(release.tag)
+    } else {
+        None
     };
+    let specifier = update_request(args, prerelease_tag.as_deref());
     updater.configure_version_specifier(specifier);
     updater.always_update(args.force);
 
@@ -460,6 +492,31 @@ pub fn is_newer(current: &Version, candidate: &Version) -> bool {
     candidate > current
 }
 
+/// Whether the selected channel has a different target. Stable updates retain
+/// normal SemVer ordering; an explicit prerelease channel tracks its resolved
+/// tag even when moving from a stable release to its lower-precedence RC.
+fn is_update_available(current: &Version, candidate: &Version, prerelease_channel: bool) -> bool {
+    if prerelease_channel {
+        candidate != current
+    } else {
+        is_newer(current, candidate)
+    }
+}
+
+#[cfg(feature = "update")]
+fn update_request(args: &UpdateArgs, prerelease_tag: Option<&str>) -> UpdateRequest {
+    match (&args.version, &args.tag, args.prerelease) {
+        (Some(version), _, _) => UpdateRequest::SpecificVersion(version.clone()),
+        (_, Some(tag), _) => UpdateRequest::SpecificTag(tag.clone()),
+        (_, _, true) => UpdateRequest::SpecificTag(
+            prerelease_tag
+                .expect("the prerelease channel is resolved before configuring axoupdater")
+                .to_string(),
+        ),
+        _ => UpdateRequest::Latest,
+    }
+}
+
 #[cfg(feature = "update")]
 fn is_tty() -> bool {
     use std::io::IsTerminal;
@@ -509,6 +566,31 @@ mod tests {
         let rel = Version::new(0, 2, 0);
         assert!(is_newer(&rc, &rel));
         assert!(!is_newer(&rel, &rc));
+    }
+
+    #[test]
+    fn prerelease_channel_switch_is_available_from_the_matching_stable() {
+        let stable = parse_version("0.3.0").unwrap();
+        let rc = parse_version("0.3.0-rc.8").unwrap();
+
+        assert!(!is_newer(&stable, &rc), "SemVer ranks the RC below stable");
+        assert!(is_update_available(&stable, &rc, true));
+        assert!(!is_update_available(&stable, &rc, false));
+        assert!(!is_update_available(&rc, &rc, true));
+    }
+
+    #[cfg(feature = "update")]
+    #[test]
+    fn prerelease_channel_uses_specific_tag_semantics() {
+        let args = UpdateArgs {
+            prerelease: true,
+            ..UpdateArgs::default()
+        };
+
+        match update_request(&args, Some("v0.3.0-rc.8")) {
+            UpdateRequest::SpecificTag(tag) => assert_eq!(tag, "v0.3.0-rc.8"),
+            _ => panic!("prerelease channel must resolve to a specific tag"),
+        }
     }
 
     #[test]

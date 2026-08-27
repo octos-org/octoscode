@@ -45,6 +45,16 @@ pub enum ClientEvent {
     /// were dropped from the session and `thread` carries the trimmed
     /// transcript to re-render (same shape as `session/hydrate`).
     SessionRollback(SessionRollbackResult),
+    /// OUTER_LOOP_REVIEW #22b-r1: a `session/hydrate` failure (response error,
+    /// request cancel, or pre-send rejection) with LOCAL session attribution
+    /// resolved by the transport (`PendingRequest` for on-wire failures, the
+    /// in-hand command for pre-send rejections) — the wire `AppUiError` schema
+    /// is unchanged. The store releases ONLY this session's in-flight marker,
+    /// never a blanket clear that would drop another session's genuinely
+    /// in-flight hydrate. The event still surfaces to the user as an error
+    /// (the store converts it into the same `AppUiEvent::Error` shape after
+    /// releasing the marker).
+    HydrateError(HydrateErrorClientEvent),
     ReviewStart(ReviewStartResult),
     AuthStatus(AuthStatusClientEvent),
     AuthSendCode(AuthSendCodeClientEvent),
@@ -104,12 +114,11 @@ pub enum ClientEvent {
     /// typed result from one of the `/agents`, `/goal`, or `/loop`
     /// RPCs so the store can update its per-session autonomy mirror.
     Autonomy(AutonomyClientEvent),
-    /// `!`-bang local-shell completion. Carries the captured output of a
-    /// client-local shell command (run where octoscode runs, NOT the
-    /// agent's sandboxed server `shell` tool). Surfaced into the same
-    /// `queue` that `next_event()` drains, so the synchronous render loop
-    /// never blocks on a running command. The store folds this back into
-    /// the matching "running" activity chip via its `local_id`.
+    /// `!`-bang local-shell completion. Carries the exit result of a
+    /// client-local shell command (run where octoscode runs, NOT the agent's
+    /// sandboxed server `shell` tool). The event loop emits this after it
+    /// restores the TUI from the child-terminal handoff; the store folds it
+    /// back into the matching "running" activity chip via its `local_id`.
     LocalShellResult(LocalShellResultEvent),
     /// The stdio transport relaunched its `serve --stdio` child after a
     /// disconnect. A freshly spawned child has no in-flight turns by
@@ -124,6 +133,16 @@ impl From<AppUiEvent> for ClientEvent {
     fn from(event: AppUiEvent) -> Self {
         Self::App(Box::new(event))
     }
+}
+
+/// See [`ClientEvent::HydrateError`]. The `session_id` is resolved locally by
+/// the transport; `code`/`message` keep the wire error's original shape so
+/// the store can re-emit the identical user-facing `AppUiEvent::Error`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HydrateErrorClientEvent {
+    pub session_id: SessionKey,
+    pub code: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -350,15 +369,15 @@ pub struct AutonomyClientEvent {
     pub result: AutonomyResult,
 }
 
-/// Result of a `!`-bang client-local shell command. The transport spawns the
-/// command on its tokio runtime and emits one of these on completion (or on
-/// timeout / spawn failure), keyed by the `local_id` the store stamped on the
-/// "running" activity chip so the store can complete that chip in place.
+/// Result of a `!`-bang client-local shell command. The event loop runs the
+/// command with inherited stdio while the TUI is suspended and emits one of
+/// these on completion (or spawn failure), keyed by the `local_id` the store
+/// stamped on the "running" activity chip so the store can complete it in place.
 ///
-/// Output is captured (stdout then stderr) and already truncated by the
-/// transport at the 10 KB combined cap; `truncated` records whether the cap
-/// fired. The output is shown locally only and is NOT injected into the next
-/// turn's context (ephemeral, by design).
+/// Child output is rendered directly in the temporary terminal screen rather
+/// than captured. `stdout`/`stderr` carry only a completion note or a spawn /
+/// signal error for the restored activity card. Nothing is injected into the
+/// next turn's context (ephemeral, by design).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalShellResultEvent {
     /// Local chip id stamped by `Store::dispatch_bang_command`.
@@ -369,15 +388,15 @@ pub struct LocalShellResultEvent {
     /// so the transcript card can label WHERE the local command executed.
     /// `None` only when the cwd could not be resolved at spawn time.
     pub cwd: Option<String>,
-    /// Captured stdout (already truncated to fit the combined 10 KB cap).
+    /// Completion note shown after the TUI is restored.
     pub stdout: String,
-    /// Captured stderr (already truncated to fit the combined 10 KB cap).
+    /// Spawn / signal error shown after the TUI is restored.
     pub stderr: String,
-    /// Process exit code, or `None` if it was killed (e.g. timeout) or never
-    /// produced one.
+    /// Process exit code, or `None` if it was signalled or never started.
     pub exit_code: Option<i32>,
     /// Wall-clock duration of the command, in milliseconds.
     pub duration_ms: u64,
-    /// Whether the combined output was truncated at the 10 KB cap.
+    /// Retained for the activity event shape; terminal-attached output is not
+    /// captured and therefore never truncated.
     pub truncated: bool,
 }

@@ -818,6 +818,10 @@ pub struct MenuFrame {
     pub id: MenuId,
     pub selected_index: usize,
     pub search_query: String,
+    /// Row offset of the preview pane's scroll window (PgUp/PgDn). Lives on
+    /// the frame like `selected_index`, so it is per-open-menu and resets
+    /// when a menu is pushed or replaced.
+    pub preview_scroll: usize,
 }
 
 impl MenuFrame {
@@ -826,6 +830,7 @@ impl MenuFrame {
             id: id.into(),
             selected_index: 0,
             search_query: String::new(),
+            preview_scroll: 0,
         }
     }
 }

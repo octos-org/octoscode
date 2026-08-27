@@ -1606,8 +1606,8 @@ dependencies = [
 
 [[package]]
 name = "octos-core"
-version = "2.0.3-rc.6"
-source = "git+https://github.com/octos-org/octos?rev=f6d5ef550f49189850646e7421cf21063b771895#f6d5ef550f49189850646e7421cf21063b771895"
+version = "2.0.3-rc.9"
+source = "git+https://github.com/octos-org/octos?rev=5ea987813de4fd2afdd1d78f2106ad2868f0d923#5ea987813de4fd2afdd1d78f2106ad2868f0d923"
 dependencies = [
  "chrono",
  "eyre",
@@ -1620,7 +1620,7 @@ dependencies = [
 
 [[package]]
 name = "octoscode"
-version = "0.3.0-rc.4"
+version = "0.3.0-rc.8"
 dependencies = [
  "axoupdater",
  "chrono",
@@ -1639,6 +1639,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "shlex 1.3.0",
+ "signal-hook",
  "syntect",
  "tempfile",
  "tokio",

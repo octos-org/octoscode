@@ -1,4 +1,8 @@
 use std::io;
+#[cfg(all(unix, not(test)))]
+use std::sync::Arc;
+#[cfg(all(unix, not(test)))]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 #[cfg(not(test))]
@@ -10,7 +14,8 @@ use crossterm::{
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableBracketedPaste, EnableFocusChange, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+        MouseEventKind,
     },
     execute,
     terminal::{
@@ -27,6 +32,7 @@ use crate::{
     cli::Cli,
     client_event::ClientEvent,
     insert_history::insert_history_lines_with_size,
+    menu::preview_layout,
     model::{AppState, AppUiCommand, ApprovalModalAction, FocusPane},
     store::Store,
     theme::Palette,
@@ -61,6 +67,128 @@ enum RenderMode {
     AltScreen,
 }
 
+/// Whether a SIGTSTP/SIGCONT cycle ran since the event loop last serviced one.
+/// Set by async-signal-safe flag handlers registered via `signal_hook::flag`
+/// (atomic store only — no allocation, no locks, per the POSIX signal-handler
+/// contract) and polled by the main loop, which performs the real teardown /
+/// recovery on the loop thread where terminal I/O is safe.
+///
+/// Pure state, kept out of `run()` so unit tests can drive the same
+/// flag-and-reset flow without a real terminal or real signals.
+#[cfg(all(unix, not(test)))]
+struct SuspendFlags {
+    tstp: Arc<AtomicBool>,
+    cont: Arc<AtomicBool>,
+}
+
+#[cfg(all(unix, not(test)))]
+impl SuspendFlags {
+    /// Register the SIGTSTP + SIGCONT flag handlers via `signal_hook::flag`.
+    /// The handlers only flip atomics; everything else (terminal teardown,
+    /// mode replay, repaint) happens on the event-loop thread.
+    fn install() -> Result<Self> {
+        let tstp = Arc::new(AtomicBool::new(false));
+        let cont = Arc::new(AtomicBool::new(false));
+        signal_hook::flag::register(signal_hook::consts::signal::SIGTSTP, Arc::clone(&tstp))?;
+        signal_hook::flag::register(signal_hook::consts::signal::SIGCONT, Arc::clone(&cont))?;
+        Ok(Self { tstp, cont })
+    }
+
+    /// Returns true exactly once per observed SIGTSTP.
+    fn take_tstp(&self) -> bool {
+        self.tstp.swap(false, Ordering::SeqCst)
+    }
+
+    /// Returns true exactly once per observed SIGCONT.
+    fn take_cont(&self) -> bool {
+        self.cont.swap(false, Ordering::SeqCst)
+    }
+}
+
+/// Bring the terminal back to a sane interactive state WITHOUT unwinding, so
+/// the shell is usable while we are stopped by SIGTSTP (OUTER_LOOP_REVIEW
+/// #10.1). This is the teardown half of `TerminalGuard::drop`, minus the
+/// viewport clearing (a suspend must not erase the live screen — the resume
+/// path repaints it) and minus raw-mode handling (the caller drives that).
+///
+/// Must run on the event-loop thread: it allocates and locks (crossterm
+/// `execute!` on a `BufWriter`-adjacent stdout), so it is NOT
+/// async-signal-safe and can never live in a signal handler.
+#[cfg(all(unix, not(test)))]
+fn restore_terminal_for_suspend(guard: &mut TerminalGuard) {
+    let mut stdout = io::stdout();
+    if guard.mouse_captured {
+        let _ = execute!(stdout, DisableMouseCapture);
+        guard.mouse_captured = false;
+    }
+    if guard.mode == RenderMode::AltScreen {
+        let _ = execute!(stdout, LeaveAlternateScreen);
+        guard.mode = RenderMode::Inline;
+        // The alt-screen overlay owned the whole screen; the inline viewport
+        // we return to needs a full relayout after resume.
+        guard.saved_inline_viewport = None;
+        guard.saved_visible_history_extent = None;
+        guard.saved_inline_screen_size = None;
+    }
+    let _ = disable_raw_mode();
+    let _ = execute!(stdout, DisableBracketedPaste, DisableFocusChange, Show);
+    let _ = io::Write::flush(&mut stdout);
+}
+
+/// Apply the platform default stop action for SIGTSTP so the process genuinely
+/// suspends (OUTER_LOOP_REVIEW #10.1). A plain raise would only run our flag
+/// handler again. Unregistering that handler is also incorrect: signal-hook
+/// deliberately leaves the installed OS handler in place after the last action
+/// is removed, effectively ignoring later SIGTSTP signals. Its documented TUI
+/// pattern is `emulate_default_handler`, which maps a stop-class signal to an
+/// uncatchable SIGSTOP while leaving our flag registration intact for every
+/// later Ctrl+Z cycle.
+///
+/// All steps run on the event-loop thread between frames — no
+/// async-signal-safety constraints apply.
+#[cfg(all(unix, not(test)))]
+fn self_suspend() -> Result<()> {
+    // Returns only after `fg` delivers SIGCONT. signal-hook uses SIGSTOP for a
+    // stop-class default action, so the registered SIGTSTP callback needs no
+    // unregister/re-register dance and remains valid for subsequent cycles.
+    signal_hook::low_level::emulate_default_handler(signal_hook::consts::signal::SIGTSTP)?;
+    Ok(())
+}
+
+/// Re-enter the TUI's terminal state after `fg` (OUTER_LOOP_REVIEW #10.1):
+/// the shell reset the terminal modes while we were stopped, so re-enable raw
+/// mode, replay the startup modes, restore mouse capture per the CURRENT
+/// policy (`app::wants_mouse_capture`, consulted by the next `draw`), and
+/// force a full repaint so no stale/half-drawn frame survives.
+#[cfg(all(unix, not(test)))]
+fn resume_after_sigcont<B>(
+    guard: &mut TerminalGuard,
+    terminal: &mut InlineTerminal<B>,
+    store: &Store,
+) -> Result<()>
+where
+    B: Backend + io::Write,
+{
+    let mut stdout = io::stdout();
+    enable_raw_mode()?;
+    execute!(stdout, EnableBracketedPaste, EnableFocusChange)?;
+    if app::wants_mouse_capture(&store.state) {
+        execute!(stdout, EnableMouseCapture)?;
+        guard.mouse_captured = true;
+    }
+    // Relayout the viewport against whatever geometry the emulator has NOW —
+    // the user may have resized the window while we were stopped.
+    let size = terminal.size()?;
+    if guard.mode == RenderMode::Inline {
+        terminal.last_known_screen_size = size;
+        // Force the next `draw` down the full-relayout path.
+        terminal.viewport_area.width = 0;
+    }
+    terminal.invalidate_viewport();
+    terminal.clear()?;
+    Ok(())
+}
+
 pub fn run(cli: Cli) -> Result<()> {
     enable_raw_mode()?;
     // Warm the one-shot terminal background probe HERE — after raw mode is on
@@ -86,7 +214,11 @@ pub fn run(cli: Cli) -> Result<()> {
         saved_visible_history_extent: None,
         saved_inline_screen_size: None,
         mouse_captured: false,
+        live_inline_viewport: None,
     };
+    // Track the inline viewport from frame one so Drop can clear exactly the
+    // rows the TUI painted (menu / composer / status bar), not a row more.
+    guard.live_inline_viewport = Some(terminal.viewport_area);
 
     // i18n: select the UI language before the first render. `t!()` reads this
     // process-global locale, chosen at launch via --lang / OCTOS_LANG / LANG
@@ -100,6 +232,15 @@ pub fn run(cli: Cli) -> Result<()> {
     // recall works from the first keystroke; preserved across snapshot replays
     // by `Store::apply_event`.
     store.state.composer_history = crate::history::ComposerHistory::load_from_default_path();
+    // Suspend/resume resilience (OUTER_LOOP_REVIEW #10.1): Ctrl+Z delivers
+    // SIGTSTP; the flag handler defers the real work to the main loop, which
+    // restores the terminal, re-raises SIGTSTP under the default disposition
+    // to genuinely stop, and — after `fg` (SIGCONT sets the other flag) —
+    // re-enters raw mode, replays the terminal modes, and forces a full
+    // repaint. Without this the shell resets the terminal modes while we are
+    // stopped and we resume into a garbled screen.
+    #[cfg(all(unix, not(test)))]
+    let suspend_flags = SuspendFlags::install().ok();
     // Seed the runtime palette from the launch theme (`--theme`/config). The
     // `/theme` menu mutates this field, so the palette below is recomputed each
     // frame from `store.state.theme` rather than captured once at startup.
@@ -130,17 +271,18 @@ pub fn run(cli: Cli) -> Result<()> {
             .as_ref()
             .map(|path| path.to_string_lossy().to_string()),
     );
-    // Phase 3 startup picker: remember the pinned `--profile-id` (honored
-    // unchanged, never triggers the picker) and, for a locally-spawned solo
-    // backend, discover the profiles already on disk. Skipped when a profile is
-    // pinned (nothing to pick) or for remote/WebSocket launches (no local
-    // profiles dir to read). Best-effort — an empty list just runs onboarding.
+    // Phase 3 startup picker: remember the pinned `--profile-id` and, for a
+    // locally-spawned solo backend, discover the profiles already on disk. The
+    // registry is needed even when a profile is pinned: it distinguishes
+    // "select this existing profile" from "create this missing profile" and
+    // prevents `session/open` from failing with `profile_unresolved`.
+    // Remote/WebSocket launches still skip discovery because their profile
+    // registry is not locally visible. Best-effort — an empty list runs
+    // onboarding.
     store.state.onboarding.launch_profile_id = cli.profile_id.clone();
-    if cli.profile_id.is_none() {
-        if let Some(stdio_command) = cli.stdio_command.as_deref() {
-            store.state.onboarding.available_profiles =
-                crate::profiles::discover_local_profile_ids(Some(stdio_command));
-        }
+    if let Some(stdio_command) = cli.stdio_command.as_deref() {
+        store.state.onboarding.available_profiles =
+            crate::profiles::discover_local_profile_ids(Some(stdio_command));
     }
     // In-TUI profiles surface (`/profiles`): resolve the on-disk data dir once so
     // set-default / delete can operate on it, and seed the current default so the
@@ -168,6 +310,31 @@ pub fn run(cli: Cli) -> Result<()> {
     let mut last_animation = Instant::now();
 
     loop {
+        // SIGTSTP/SIGCONT recovery (OUTER_LOOP_REVIEW #10.1). Order matters:
+        // a SIGCONT flag left over from a resume that already ran (or a
+        // spurious one) is serviced first so the terminal is TUI-owned before
+        // we consider tearing it down for a new suspend.
+        #[cfg(all(unix, not(test)))]
+        if let Some(ref flags) = suspend_flags {
+            if flags.take_cont() {
+                resume_after_sigcont(&mut guard, &mut terminal, &store)?;
+                input_state.reset_paste_state();
+                dirty = true;
+            }
+            if flags.take_tstp() {
+                restore_terminal_for_suspend(&mut guard);
+                input_state.reset_paste_state();
+                if let Err(err) = self_suspend() {
+                    // Could not stop (e.g. SIGTSTP blocked): re-enter the TUI
+                    // state so we don't sit here with a half-restored tty.
+                    store.apply_event(AppUiEvent::error("suspend_failed", format!("{err:#}")));
+                    let _ = resume_after_sigcont(&mut guard, &mut terminal, &store);
+                }
+                // If the stop succeeded, SIGCONT already ran the flag-handler;
+                // the next loop iteration's `take_cont` drives the repaint.
+                dirty = true;
+            }
+        }
         if drain_backend_events(backend.as_mut(), &mut store)? {
             dirty = true;
         }
@@ -191,14 +358,22 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         if dirty {
             let menu_reserved_now = app::menu_surface_active(&store.state);
-            let menu_just_closed = menu_reserved_last_frame && !menu_reserved_now;
+            // A menu toggle (open OR close) changes the reserved viewport row
+            // block. On close the incremental shrink strands a blank band
+            // (handled below); on open the incremental grow relies on a DECSTBM
+            // scroll-region + partial-clear path that some Windows terminals
+            // (conhost, older Windows Terminal) do not render correctly, leaving
+            // the newly-opened sessions/slash menu invisible. Force a full
+            // visible-screen clear + scrollback re-flush on BOTH edges so the
+            // menu is always painted on a clean surface.
+            let menu_just_toggled = menu_reserved_last_frame != menu_reserved_now;
             menu_reserved_last_frame = menu_reserved_now;
             draw(
                 &mut terminal,
                 &mut guard,
                 &mut store,
                 &mut scrollback,
-                menu_just_closed,
+                menu_just_toggled,
             )?;
             dirty = false;
         }
@@ -232,7 +407,20 @@ pub fn run(cli: Cli) -> Result<()> {
                         break;
                     }
                     KeyAction::Send(command) => {
-                        send_command(backend.as_mut(), &mut store, *command)
+                        if dispatch_input_command(
+                            backend.as_mut(),
+                            &mut terminal,
+                            &mut guard,
+                            &mut store,
+                            *command,
+                        )? {
+                            // The child owned stdin while crossterm polling was
+                            // paused. Drop any paste timing state and stop this
+                            // pre-handoff input batch; queued focus/resize input
+                            // belongs to the freshly restored TUI.
+                            input_state = TerminalInputState::default();
+                            break;
+                        }
                     }
                 }
                 // A resize invalidates the inline viewport layout; force a repaint.
@@ -315,7 +503,7 @@ fn draw<B>(
     guard: &mut TerminalGuard,
     store: &mut Store,
     scrollback: &mut ScrollbackTracker,
-    menu_just_closed: bool,
+    menu_just_toggled: bool,
 ) -> Result<()>
 where
     B: Backend + io::Write,
@@ -328,6 +516,7 @@ where
         guard.sync_mouse_capture(terminal, app::wants_mouse_capture(&store.state))?;
         let size = terminal.size()?;
         store.state.last_terminal_width = size.width;
+        store.state.last_terminal_height = size.height;
         let area = ratatui::layout::Rect::new(0, 0, size.width, size.height);
         let resized = size != terminal.last_known_screen_size || terminal.viewport_area != area;
         if resized {
@@ -372,11 +561,17 @@ where
     // band gaping between it and the composer (a plain committed re-flush alone
     // can't fix it: `insert_history_lines` would append the fresh copy right
     // below the stranded one, duplicating it). So do exactly what a resize does
-    // for a clean re-render: wipe the visible screen and re-flush the whole
-    // committed transcript flush against the now-shrunk viewport. One frame,
-    // and it only fires on the open→closed edge (see the event loop), so
+    // A menu toggle (open OR close) changes the reserved viewport row block.
+    // On close the incremental shrink strands a blank band between the
+    // transcript and the composer. On open the incremental grow relies on a
+    // DECSTBM scroll-region + partial-clear path that some Windows terminals
+    // (conhost, older Windows Terminal) do not render correctly, leaving the
+    // newly-opened sessions/slash menu invisible. On either edge, do exactly
+    // what a resize does for a clean re-render: wipe the visible screen and
+    // re-flush the whole committed transcript against the new viewport. One
+    // frame, and it only fires on the toggle edge (see the event loop), so
     // repeated menu cycles never accumulate blank bands.
-    if menu_just_closed {
+    if menu_just_toggled {
         terminal.clear_visible_screen()?;
         scrollback.mark_flushed_stale();
     }
@@ -460,7 +655,12 @@ where
             update.lines_to_insert,
             live_tail_finalization,
         )
-    }
+    }?;
+    // Keep the guard's clear-on-exit region in lockstep with what the inline
+    // flow actually painted this frame (the viewport moves as the composer
+    // and menus grow/shrink).
+    guard.live_inline_viewport = Some(terminal.viewport_area);
+    Ok(())
 }
 
 fn draw_inline_frame<B>(
@@ -562,9 +762,21 @@ fn drain_backend_events(backend: &mut dyn AppUiBackend, store: &mut Store) -> Re
 }
 
 /// Give the initial protocol capabilities probe a bounded chance to land before
-/// the first frame. First-launch onboarding is capability-gated, so drawing
-/// before this handshake can flash or stick on an empty inline composer.
+/// the first frame — but ONLY on first launch. First-launch onboarding is
+/// capability-gated, so drawing before this handshake can flash or stick on an
+/// empty inline composer. A routine launch (local profiles already on disk, or
+/// a profile pinned via `--profile-id`) skips the wait entirely and draws the
+/// first frame immediately: the composer/status UI needs no capabilities to
+/// render, and the handshake lands asynchronously in the main loop. The
+/// capabilities probe is only ever issued at startup — onboarding opens from
+/// its arrival — so an already-open menu or an already-connected session is
+/// also settled state and skips the wait regardless of profile discovery
+/// (e.g. remote launches, where the registry is not locally visible and
+/// `available_profiles` is always empty).
 fn drain_initial_startup_events(backend: &mut dyn AppUiBackend, store: &mut Store) -> Result<bool> {
+    if !is_first_launch(store) {
+        return Ok(false);
+    }
     let deadline = Instant::now() + INITIAL_CAPABILITIES_HANDSHAKE_TIMEOUT;
     let mut applied = false;
     while should_wait_for_initial_capabilities(store) {
@@ -575,6 +787,17 @@ fn drain_initial_startup_events(backend: &mut dyn AppUiBackend, store: &mut Stor
         std::thread::sleep(INITIAL_CAPABILITIES_HANDSHAKE_POLL);
     }
     Ok(applied)
+}
+
+/// First launch = the launch-time profile probe found no locally-spawned
+/// profile to resume (no discovered profiles, no `--profile-id` pin), no
+/// session is connected yet, and onboarding has not already opened. Only this
+/// case blocks the first frame on the capabilities handshake.
+fn is_first_launch(store: &Store) -> bool {
+    store.state.sessions.is_empty()
+        && store.state.onboarding.available_profiles.is_empty()
+        && store.state.onboarding.launch_profile_id.is_none()
+        && !store.state.menu_stack.is_active()
 }
 
 fn should_wait_for_initial_capabilities(store: &Store) -> bool {
@@ -608,9 +831,215 @@ fn send_command(backend: &mut dyn AppUiBackend, store: &mut Store, command: AppU
     }
 }
 
+/// Dispatch a composer command, intercepting local shell escapes before the
+/// backend. Returns `true` when the real terminal was handed to a child, which
+/// tells the input loop to end its pre-handoff crossterm batch.
+fn dispatch_input_command<B>(
+    backend: &mut dyn AppUiBackend,
+    terminal: &mut InlineTerminal<B>,
+    guard: &mut TerminalGuard,
+    store: &mut Store,
+    command: AppUiCommand,
+) -> Result<bool>
+where
+    B: Backend + io::Write,
+{
+    let AppUiCommand::LocalShellExec { cmd, local_id } = command else {
+        send_command(backend, store, command);
+        return Ok(false);
+    };
+
+    let outcome = run_local_shell_with_terminal(terminal, guard, cmd, local_id)?;
+    apply_client_event_and_send_followup(backend, store, outcome.event);
+    if let Some(error) = outcome.restore_error {
+        return Err(error);
+    }
+    Ok(true)
+}
+
+struct LocalShellHandoffOutcome {
+    event: ClientEvent,
+    /// The child result must still be applied before a post-child terminal
+    /// restoration error is surfaced, so its running report never wedges.
+    restore_error: Option<eyre::Report>,
+}
+
+/// Suspend crossterm's TUI modes, run a `!` command with inherited stdio, and
+/// restore the inline TUI afterwards. The handoff stays on the normal screen:
+/// child output remains in native scrollback after return instead of flashing
+/// briefly in an alternate screen and disappearing.
+fn run_local_shell_with_terminal<B>(
+    terminal: &mut InlineTerminal<B>,
+    guard: &mut TerminalGuard,
+    cmd: String,
+    local_id: String,
+) -> Result<LocalShellHandoffOutcome>
+where
+    B: Backend + io::Write,
+{
+    // Install the parent shield before cooked mode makes terminal-generated
+    // signals possible, closing the gap between disabling raw mode and spawn.
+    crate::transport::install_local_shell_parent_signal_shield()?;
+    let prior_mode = guard.mode;
+    let mouse_was_captured = guard.mouse_captured;
+    guard.sync_mouse_capture(terminal, false)?;
+    guard.leave_alt_screen(terminal)?;
+    let reserved_rows = terminal.viewport_area.height.max(1);
+    // Remove the live composer/status rows before placing the child at their
+    // top. Finalized transcript above the viewport is left untouched.
+    terminal.clear()?;
+
+    #[cfg(not(test))]
+    {
+        disable_raw_mode()?;
+        if let Err(error) = execute!(
+            terminal.backend_mut(),
+            DisableBracketedPaste,
+            DisableFocusChange,
+            Show
+        ) {
+            // Raw mode may already be off and the execute may have applied a
+            // prefix of its commands. Roll every mode forward before
+            // returning instead of leaving a half-suspended TUI.
+            let _ = enable_raw_mode();
+            let _ = execute!(
+                terminal.backend_mut(),
+                EnableBracketedPaste,
+                EnableFocusChange
+            );
+            return Err(error.into());
+        }
+    }
+
+    let mut event = crate::transport::run_attached_local_shell_command(
+        cmd,
+        std::env::current_dir().ok(),
+        local_id,
+    );
+
+    // Restore every mode before the next crossterm poll. Keep the terminal
+    // round-trip independent of the child's exit status: a failed command is
+    // still a normal result, not a reason to strand the parent in cooked mode.
+    // Every cleanup step is attempted; the first error is returned only AFTER
+    // the result event settles the running activity report.
+    let mut restore_error: Option<eyre::Report> = None;
+    #[cfg(not(test))]
+    {
+        if let Err(error) = enable_raw_mode() {
+            restore_error = Some(error.into());
+        }
+        if let Err(error) = execute!(
+            terminal.backend_mut(),
+            EnableBracketedPaste,
+            EnableFocusChange
+        ) && restore_error.is_none()
+        {
+            restore_error = Some(error.into());
+        }
+    }
+
+    let screen_size = match terminal.size() {
+        Ok(size) => size,
+        Err(error) => {
+            if restore_error.is_none() {
+                restore_error = Some(error.into());
+            }
+            terminal.last_known_screen_size
+        }
+    };
+    let fallback_cursor = ratatui::layout::Position {
+        x: 0,
+        y: screen_size.height.saturating_sub(1),
+    };
+    let (cursor, cursor_known) = match terminal.backend_mut().get_cursor_position() {
+        Ok(cursor) => (cursor, true),
+        Err(_) => (fallback_cursor, false),
+    };
+    let rows_below_cursor = screen_size
+        .height
+        .saturating_sub(1)
+        .saturating_sub(cursor.y);
+    let rows_to_reserve = if cursor_known {
+        reserved_rows.max(rows_below_cursor)
+    } else {
+        // Without CPR evidence, walk a full screen: wherever the child left
+        // the cursor, this reaches the bottom and scrolls at least the old
+        // viewport height clear. Output may move farther into scrollback, but
+        // it cannot be overwritten by the restored composer.
+        screen_size.height.max(reserved_rows)
+    };
+
+    // Reserve fresh rows for the TUI before repainting it. Because the child
+    // started at the old viewport top, these line feeds push its last output
+    // above the bottom-pinned composer (and into native scrollback when needed)
+    // instead of letting the first restored frame overwrite it. On a failed
+    // cursor query the bottom-row fallback still guarantees the old viewport's
+    // full-screen fallback still guarantees the old viewport is reserved.
+    let reserve_result: io::Result<()> = (|| {
+        for _ in 0..rows_to_reserve {
+            terminal.backend_mut().write_all(b"\r\n")?;
+        }
+        io::Write::flush(terminal.backend_mut())
+    })();
+    if let Err(error) = reserve_result
+        && restore_error.is_none()
+    {
+        restore_error = Some(error.into());
+    }
+    terminal.last_known_cursor_pos = fallback_cursor;
+    terminal.set_visible_history_extent(terminal.viewport_area.top(), terminal.viewport_area.top());
+    terminal.invalidate_viewport();
+
+    if prior_mode == RenderMode::AltScreen
+        && let Err(error) = guard.enter_alt_screen(terminal)
+        && restore_error.is_none()
+    {
+        restore_error = Some(error);
+    }
+    if let Err(error) = guard.sync_mouse_capture(terminal, mouse_was_captured)
+        && restore_error.is_none()
+    {
+        restore_error = Some(error);
+    }
+
+    if event.stdout.is_empty() && event.stderr.is_empty() {
+        event.stdout = t!("status.bang_terminal_complete").into_owned();
+    }
+    Ok(LocalShellHandoffOutcome {
+        event: ClientEvent::LocalShellResult(event),
+        restore_error,
+    })
+}
+
+/// Window in which a preceding text key counts as evidence that a paste
+/// burst (rapid char delivery) is in progress, used to gate the initial
+/// activation of the unbracketed-paste newline heuristic. A real paste
+/// delivers all characters within microseconds; manual typing has gaps of
+/// 50ms+ even for fast typists. 50ms is conservative enough to avoid
+/// false positives while still catching every paste.
+const PASTE_RAPID_TEXT_WINDOW: Duration = Duration::from_millis(50);
+
+/// Hard ceiling for an unbracketed paste burst. The per-event 80ms extension
+/// below assumes bytes keep arriving; a pathological stream (or a terminal that
+/// stopped sending the bracketed-paste END sequence, OUTER_LOOP_REVIEW #10.2)
+/// would otherwise keep Enter swallowed as "paste newline" forever. Past this
+/// window from the FIRST paste byte, the burst is declared over and Enter
+/// recovers its submit semantics regardless of `next_event_waiting`.
+const UNBRACKETED_PASTE_MAX_WINDOW: Duration = Duration::from_millis(200);
+
 #[derive(Default)]
 struct TerminalInputState {
     unbracketed_paste_until: Option<Instant>,
+    /// Timestamp of the most recent plain-text key (Char with no/ctrl-only
+    /// modifiers) while the composer was focused. Used to distinguish a real
+    /// unbracketed paste (rapid chars followed by Enter) from a lone manual
+    /// Enter on Windows, where next_event_waiting is always true because a
+    /// key-release event is queued right after every press.
+    last_text_key_at: Option<Instant>,
+    /// When the current paste burst STARTED — bounds the total burst length so
+    /// a lost bracketed-paste END (or a terminal stuck mid-paste after a
+    /// suspend) cannot swallow Enter forever (OUTER_LOOP_REVIEW #10.2).
+    unbracketed_paste_started: Option<Instant>,
 }
 
 impl TerminalInputState {
@@ -619,27 +1048,86 @@ impl TerminalInputState {
         now: Instant,
         next_event_waiting: bool,
     ) -> bool {
-        if next_event_waiting || self.unbracketed_paste_active(now) {
-            self.extend_unbracketed_paste(now);
-            true
-        } else {
-            false
+        // The max-window ceiling takes priority over everything below: a
+        // burst older than UNBRACKETED_PASTE_MAX_WINDOW means the END
+        // sequence was lost — Enter must recover its submit semantics even
+        // while bytes keep arriving (OUTER_LOOP_REVIEW #10.2). Reset the
+        // burst so subsequent keys start fresh instead of staying stuck.
+        if self.paste_burst_exceeded_max_window(now) {
+            self.reset_paste_state();
+            return false;
         }
+        // Already inside a paste burst: every Enter (and text key) keeps the
+        // window alive so multi-line pastes round-trip correctly.
+        if self.unbracketed_paste_active(now) {
+            self.extend_unbracketed_paste(now);
+            return true;
+        }
+        // Initial activation. next_event_waiting alone is insufficient: on
+        // Windows a manual Enter press queues a key-release event, making
+        // next_event_waiting true for every keypress — which used to turn
+        // every manual Enter into a composer newline. Require a recently
+        // typed text key as evidence that a paste burst (rapid char delivery)
+        // is in progress, not just a lone manual Enter.
+        if next_event_waiting && self.recent_text_key_indicates_paste(now) {
+            self.extend_unbracketed_paste(now);
+            return true;
+        }
+        false
+    }
+
+    /// True when the current paste burst started longer than
+    /// [`UNBRACKETED_PASTE_MAX_WINDOW`] ago — the bracketed-paste END was lost
+    /// and the burst must be declared over regardless of incoming bytes.
+    fn paste_burst_exceeded_max_window(&self, now: Instant) -> bool {
+        self.unbracketed_paste_started
+            .is_some_and(|started| now.duration_since(started) > UNBRACKETED_PASTE_MAX_WINDOW)
     }
 
     fn note_text_key(&mut self, now: Instant) {
+        // Always record the timestamp so the paste-detection gate can see
+        // rapid char delivery. Extending the active paste window is kept
+        // separate so a lone manual char does not by itself start paste mode.
+        self.last_text_key_at = Some(now);
         if self.unbracketed_paste_active(now) {
             self.extend_unbracketed_paste(now);
         }
     }
 
+    fn recent_text_key_indicates_paste(&self, now: Instant) -> bool {
+        self.last_text_key_at
+            .is_some_and(|at| now <= at + PASTE_RAPID_TEXT_WINDOW)
+    }
+
     fn unbracketed_paste_active(&self, now: Instant) -> bool {
-        self.unbracketed_paste_until
-            .is_some_and(|deadline| now <= deadline)
+        // Timeout fallback (#10.2): even if the 80ms deadline hasn't elapsed,
+        // a burst older than the max window is over — the END sequence was
+        // lost and we must not keep treating Enter as a paste newline.
+        let within_max_window = self
+            .unbracketed_paste_started
+            .is_some_and(|started| now.duration_since(started) <= UNBRACKETED_PASTE_MAX_WINDOW);
+        within_max_window
+            && self
+                .unbracketed_paste_until
+                .is_some_and(|deadline| now <= deadline)
     }
 
     fn extend_unbracketed_paste(&mut self, now: Instant) {
+        if self.unbracketed_paste_started.is_none() {
+            self.unbracketed_paste_started = Some(now);
+        }
         self.unbracketed_paste_until = Some(now + Duration::from_millis(80));
+    }
+
+    /// Forget any in-flight paste burst. Called on focus change / resize and
+    /// on the suspend/resume path: those are the observable seams where a
+    /// suspend (Ctrl+Z) or a terminal reset can silently drop the
+    /// bracketed-paste END sequence — without the reset the very next Enter
+    /// would still be misread as a paste newline (OUTER_LOOP_REVIEW #10.2).
+    fn reset_paste_state(&mut self) {
+        self.unbracketed_paste_until = None;
+        self.unbracketed_paste_started = None;
+        self.last_text_key_at = None;
     }
 }
 
@@ -665,13 +1153,17 @@ fn handle_terminal_event_with_input_state(
     now: Instant,
 ) -> KeyAction {
     if let Event::Key(key) = event {
-        // Skip the unbracketed-paste newline heuristic while a modal or a peek
-        // owns the keyboard — both force Composer focus, so without this an
-        // Enter (or pasted newline) lands in the hidden draft and never reaches
-        // the modal's / peek's Enter handler. Those surfaces handle Enter
-        // themselves downstream.
+        // Skip the unbracketed-paste newline heuristic while a modal, a peek,
+        // or a menu owns the keyboard — all three can leave Composer focus in
+        // place (menus are overlays that do not switch focus), so without this
+        // an Enter (or pasted newline) lands in the draft behind the overlay
+        // and never reaches the overlay's own Enter handler. On Windows terminals
+        // a manual Enter press often has next_event_waiting=true (key-release
+        // event queued), which made the heuristic fire for a real Enter and
+        // insert a composer newline instead of selecting the onboarding item.
         if !modal_owns_keyboard(store)
             && !app::agent_view_active(&store.state)
+            && !store.state.menu_stack.is_active()
             && is_plain_composer_enter(store, &key)
             && input_state.should_insert_unbracketed_paste_newline(now, next_event_waiting)
         {
@@ -686,6 +1178,17 @@ fn handle_terminal_event_with_input_state(
             input_state.note_text_key(now);
         }
         return action;
+    }
+
+    // Focus change / resize are the observable seams where a suspend or a
+    // terminal reset can silently drop a bracketed-paste END sequence. Reset
+    // the paste heuristic so the next Enter recovers its submit semantics
+    // instead of being swallowed as a paste newline (OUTER_LOOP_REVIEW #10.2).
+    if matches!(
+        event,
+        Event::FocusGained | Event::FocusLost | Event::Resize(_, _)
+    ) {
+        input_state.reset_paste_state();
     }
 
     handle_terminal_event(store, event)
@@ -715,6 +1218,19 @@ fn handle_mouse(store: &mut Store, mouse: MouseEvent) -> KeyAction {
     match mouse.kind {
         MouseEventKind::ScrollUp => scroll_current_surface_up(store, lines),
         MouseEventKind::ScrollDown => scroll_current_surface_down(store, lines),
+        MouseEventKind::Down(MouseButton::Left)
+            if store.state.transcript_pager_active
+                && store
+                    .state
+                    .scroll_to_bottom_button
+                    .get()
+                    .is_some_and(|hit| hit.contains(mouse.column, mouse.row)) =>
+        {
+            // Mouse counterpart of End: stay in the pager but return to its
+            // live tail. The pager gate prevents a stale hit rect from eating
+            // clicks after close while pinned mode keeps capture enabled.
+            store.state.scroll_transcript_to_latest();
+        }
         _ => {}
     }
     KeyAction::Continue
@@ -736,11 +1252,11 @@ fn is_plain_text_key(key: &KeyEvent) -> bool {
 /// True while a modal overlay (not a menu) owns the keyboard — the same set,
 /// in the same order, that `handle_plain_key` routes to before the menu/global
 /// arms: the activity navigator, the approval modal, the AskUserQuestion
-/// picker, and the task-output / artifact / thread-graph / turn-state detail
-/// viewers. While any of these is up, global composer edits (Ctrl+U, modified
-/// cursor/word keys) and pastes must not mutate the composer hidden underneath
-/// — `show_pending_approval` force-focuses the composer, so a focus check
-/// alone cannot catch this.
+/// picker, the task-output / artifact / thread-graph / turn-state detail
+/// viewers, and the expanded diff-preview overlay. While any of these is up,
+/// global composer edits (Ctrl+U, modified cursor/word keys) and pastes must
+/// not mutate the composer hidden underneath — `show_pending_approval`
+/// force-focuses the composer, so a focus check alone cannot catch this.
 fn modal_owns_keyboard(store: &Store) -> bool {
     store.state.activity_navigator.active
         || store
@@ -757,6 +1273,7 @@ fn modal_owns_keyboard(store: &Store) -> bool {
         || store.state.artifact_detail.active
         || store.state.thread_graph_detail.active
         || store.state.turn_state_detail.active
+        || store.state.diff_preview.overlay_active()
 }
 
 pub(crate) fn handle_key(store: &mut Store, key: KeyEvent) -> KeyAction {
@@ -828,7 +1345,27 @@ pub(crate) fn handle_key(store: &mut Store, key: KeyEvent) -> KeyAction {
     }
 
     if is_control_char(&key, 'o') {
-        store.state.toggle_tool_output_expansion();
+        // With a renderable diff preview open, Ctrl+O toggles the diff's OWN
+        // full-screen overlay instead of the global tool-output expansion —
+        // the dedicated bit keeps a user's transcript-wide expansion
+        // preference out of the modal's lifecycle (auto-opened previews must
+        // never fling a surprise full-screen modal, and collapsing the
+        // overlay must not collapse every other tool output). Expansion is
+        // gated on no OTHER modal owning the keyboard, so Ctrl+O can't stack
+        // an overlay over a dialog that would keep routing the keys.
+        // Collapse checks the raw `expanded` bit (not `overlay_active`) so a
+        // preview that lost its renderable diff while expanded still resets
+        // instead of popping the overlay back later.
+        if store.state.diff_preview.active && store.state.diff_preview.expanded {
+            store.state.collapse_diff_preview_overlay();
+        } else if !modal_owns_keyboard(store)
+            && store.state.diff_preview.active
+            && store.state.diff_preview.has_renderable_diff()
+        {
+            store.state.expand_diff_preview_overlay();
+        } else {
+            store.state.toggle_tool_output_expansion();
+        }
         return KeyAction::Continue;
     }
 
@@ -909,13 +1446,27 @@ pub(crate) fn handle_key(store: &mut Store, key: KeyEvent) -> KeyAction {
     // in. These modified binds are that way in.
     //
     // Alt+V is two-in-one: open the preview when closed, toggle
-    // unified <-> side-by-side when open. Alt+C stages the selected hunk,
-    // Alt+N / Alt+M walk hunks; those three are gated on the preview being
-    // active so the binds stay free otherwise.
+    // unified <-> side-by-side when open. Alt+C stages the selected hunk and
+    // Alt+H walks them; the latter two are gated on the preview being active so
+    // the binds stay free otherwise.
     //
     // NOT Alt+D — the composer readline layer claims it as
     // delete-word-forward (see the Agent Dock note below).
-    if is_alt_char(&key, 'v') {
+    //
+    // Ctrl+V/X/N are the portable twins (see `is_ctrl_char`): macOS Terminal.app
+    // only emits ALT with "Use Option as Meta key" enabled, so without a Ctrl
+    // alias this whole family is unreachable there. Remapping the chars Option
+    // *does* produce (Option+V → `√`, Option+C → `ç`) is not an option — `å`,
+    // `ç` and `ß` are ordinary letter keys on Nordic, French and German
+    // layouts, and stealing them would make those letters untypable.
+    //
+    // Ctrl+V/X/N are the only free slots left: the composer readline layer runs
+    // first and claims Ctrl+A/B/D/E/F/H/J/K/W, and Ctrl+C/G/L/O/P/Q/R/S/T/U/Y
+    // are bound above. Ctrl+I/M are Tab/Return at the wire level.
+    //
+    // Alt+Y/Alt+N (peer approve/deny) get no twin — no slot is left. Reach a
+    // peer's approval with Ctrl+S and answer y/n in the modal instead.
+    if is_alt_char(&key, 'v') || is_ctrl_char(&key, 'v') {
         if store.state.diff_preview.active {
             store.toggle_diff_view_mode();
             return KeyAction::Continue;
@@ -934,8 +1485,16 @@ pub(crate) fn handle_key(store: &mut Store, key: KeyEvent) -> KeyAction {
         return KeyAction::Continue;
     }
 
-    if is_alt_char(&key, 'c') && store.state.diff_preview.active {
+    // Ctrl+X, not Ctrl+C — Ctrl+C is the interrupt and is claimed at the top.
+    if (is_alt_char(&key, 'c') || is_ctrl_char(&key, 'x')) && store.state.diff_preview.active {
+        // Same contract as the overlay's plain `c` (spec R6): staging lands
+        // the hunk prompt in the composer, so a still-expanded overlay would
+        // hide what just happened and keep swallowing plain keys over it.
+        let had_context = store.state.diff_preview.selected_hunk_context().is_some();
         store.stage_selected_diff_context();
+        if had_context {
+            store.state.diff_preview.expanded = false;
+        }
         return KeyAction::Continue;
     }
 
@@ -949,7 +1508,12 @@ pub(crate) fn handle_key(store: &mut Store, key: KeyEvent) -> KeyAction {
     // as a pair anyway: Ctrl+M is carriage return, so it cannot be aliased for
     // terminals without Option-as-Meta. Alt+H also dodges the macOS dead keys
     // (Option+E/I/N/U compose accents and emit nothing on their own).
-    if is_alt_char(&key, 'h') && store.state.diff_preview.active {
+    //
+    // The Ctrl twin IS Ctrl+N ("next"), which does not reopen the Alt+N problem
+    // above: peer-deny is bound to Alt+N only, so the two never collide. Ctrl+H
+    // was unavailable anyway — the composer readline layer claims it as
+    // backspace before this arm runs.
+    if (is_alt_char(&key, 'h') || is_ctrl_char(&key, 'n')) && store.state.diff_preview.active {
         store.select_next_diff_hunk();
         return KeyAction::Continue;
     }
@@ -1364,6 +1928,15 @@ fn handle_plain_key(store: &mut Store, key: KeyEvent) -> KeyAction {
 
     if store.state.turn_state_detail.active {
         return handle_turn_state_detail_key(store, key);
+    }
+
+    // Expanded (Ctrl+O) diff preview is a full-screen overlay; give it the
+    // same modal scrolling keys as the other detail panes before any
+    // composer/focus routing sees the key. LAST among the modals — every
+    // other modal takes keys ahead of it, matching the render order where the
+    // overlay draws beneath them.
+    if store.state.diff_preview.overlay_active() {
+        return handle_diff_preview_key(store, key);
     }
 
     if store.state.menu_stack.is_active() {
@@ -2011,6 +2584,15 @@ fn handle_menu_key(store: &mut Store, key: KeyEvent) -> KeyAction {
             KeyCode::Enter => {
                 return handle_composer_enter(store);
             }
+            // The page keys are not composer edits, and the preview pane is on
+            // screen behind this draft — scroll it rather than swallowing them.
+            // (`<`/`>` are NOT bound here: in this branch a character is text.)
+            KeyCode::PageUp => {
+                scroll_menu_preview(store, -(preview_layout::PREVIEW_SCROLL_STEP as isize));
+            }
+            KeyCode::PageDown => {
+                scroll_menu_preview(store, preview_layout::PREVIEW_SCROLL_STEP as isize);
+            }
             KeyCode::Char(ch) => {
                 store.state.insert_composer_char(ch);
             }
@@ -2127,6 +2709,29 @@ fn handle_menu_key(store: &mut Store, key: KeyEvent) -> KeyAction {
         }
         KeyCode::Up | KeyCode::Char('k') => {
             store.select_prev_menu_item();
+        }
+        // The preview pane (the Snapshot rows) scrolls on PgUp/PgDn — menus
+        // bind neither, so Up/Down/j/k keep driving the item selection on the
+        // left while these move the pane on the right. Rows below the pane
+        // used to be simply unreachable.
+        //
+        // `<`/`>` (and the unshifted `,`/`.`) are the SAME scroll, bound
+        // because PgUp/PgDn are not reliably deliverable here: the chat runs
+        // in the terminal's NORMAL buffer (see `run` — inline viewport, no
+        // alternate screen), and terminals bind the page keys to their own
+        // scrollback in exactly that mode. VS Code is the case in hand — its
+        // `terminal.scrollUpPage`/`scrollDownPage` default to plain PgUp/PgDn
+        // on macOS, `when: terminalFocus && !terminalAltBufferActive`, and
+        // both sit in `commandsToSkipShell`, so the escape sequence never
+        // reaches this process. A plain character always does. Deliberately
+        // placed AFTER the search-capture arms, so in a SEARCHABLE menu these
+        // still type into the filter; previews live on the info menus, which
+        // are not searchable.
+        KeyCode::PageUp | KeyCode::Char('<') | KeyCode::Char(',') => {
+            scroll_menu_preview(store, -(preview_layout::PREVIEW_SCROLL_STEP as isize));
+        }
+        KeyCode::PageDown | KeyCode::Char('>') | KeyCode::Char('.') => {
+            scroll_menu_preview(store, preview_layout::PREVIEW_SCROLL_STEP as isize);
         }
         // RIGHT fires the selected row's quick secondary action (e.g. the
         // loops list's pause⇄resume toggle) and keeps the menu open. Rows
@@ -2246,6 +2851,31 @@ fn slash_help_should_capture_char(store: &Store, ch: char) -> bool {
     // so a user who opened the popup but hasn't started filtering can move the
     // selection. Any other first letter starts the inline filter immediately.
     slash_help_capture_active(store) && (store.state.composer.len() > 1 || !matches!(ch, 'j' | 'k'))
+}
+
+/// Move the active frame's preview scroll, clamped to the SAME bound the
+/// renderer uses ([`preview_layout::max_preview_scroll`]) — so a keypress
+/// either moves the pane or is a genuine no-op at an end, never a press that
+/// silently ticks a counter the renderer has already clamped away.
+fn scroll_menu_preview(store: &mut Store, delta: isize) {
+    let max = preview_layout::max_preview_scroll(active_menu_preview_row_count(store)) as isize;
+    if let Some(frame) = store.state.menu_stack.active_mut() {
+        let next = frame.preview_scroll as isize + delta;
+        frame.preview_scroll = next.clamp(0, max) as usize;
+    }
+}
+
+/// Rows the active menu's preview would render, counted the same way
+/// `menu::render::preview_lines` splits them.
+fn active_menu_preview_row_count(store: &Store) -> usize {
+    let Some(crate::menu::MenuBuildResult::Ready(spec)) = store.state.active_menu.as_ref() else {
+        return 0;
+    };
+    match spec.preview.as_ref() {
+        Some(crate::menu::MenuPreview::Text { body, .. }) => body.lines().count(),
+        Some(crate::menu::MenuPreview::KeyValues { rows, .. }) => rows.len(),
+        None => 0,
+    }
 }
 
 fn slash_help_menu_active(store: &Store) -> bool {
@@ -2447,6 +3077,80 @@ fn handle_user_question_key(store: &mut Store, key: KeyEvent) -> KeyAction {
     KeyAction::Continue
 }
 
+/// Cap the diff overlay's from-bottom scroll at the top of its content, so
+/// holding k/PageUp at the top can't bank an offset the user then has to
+/// scroll back through before the view moves again ("dead zone").
+fn clamp_diff_overlay_scroll(store: &mut Store) {
+    let palette = Palette::for_theme(store.state.theme);
+    let max_scroll = app::diff_preview_overlay_max_scroll(&store.state, palette);
+    let scroll = &mut store.state.diff_preview.scroll;
+    *scroll = (*scroll).min(max_scroll);
+}
+
+/// Key handling for the expanded (Ctrl+O) diff preview overlay. Keeps the
+/// diff-specific keys (hunk nav / stage / view toggle) and adds the same
+/// scroll keys the other full-screen detail panes have, so a long diff is
+/// actually readable end-to-end.
+fn handle_diff_preview_key(store: &mut Store, key: KeyEvent) -> KeyAction {
+    match key.code {
+        KeyCode::Esc => {
+            // Collapse back to the inline preview (keep the preview open);
+            // Ctrl+O toggles the same way. A second Esc closes it entirely —
+            // handled by the inline Esc arm once we're no longer expanded.
+            store.state.collapse_diff_preview_overlay();
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            store.state.diff_preview.scroll_down(1);
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            store.state.diff_preview.scroll_up(1);
+            clamp_diff_overlay_scroll(store);
+        }
+        KeyCode::PageDown => {
+            store.state.diff_preview.scroll_down(8);
+        }
+        KeyCode::PageUp => {
+            store.state.diff_preview.scroll_up(8);
+            clamp_diff_overlay_scroll(store);
+        }
+        KeyCode::Home => {
+            store.state.diff_preview.scroll_up(usize::MAX);
+            clamp_diff_overlay_scroll(store);
+        }
+        KeyCode::End => {
+            store.state.diff_preview.scroll = 0;
+        }
+        KeyCode::Char(']') => {
+            store.select_next_diff_hunk();
+        }
+        KeyCode::Char('[') => {
+            store.select_prev_diff_hunk();
+        }
+        KeyCode::Char('c') => {
+            // Staging lands the hunk prompt in the composer (or the pending
+            // queue) — collapse so the user can SEE what just happened; a
+            // still-open overlay would keep swallowing their typing over an
+            // invisible composer. Stays open when there was nothing to stage.
+            let had_context = store.state.diff_preview.selected_hunk_context().is_some();
+            store.stage_selected_diff_context();
+            if had_context {
+                store.state.diff_preview.expanded = false;
+            }
+        }
+        KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'v') => {
+            store.toggle_diff_view_mode();
+        }
+        KeyCode::Char('d') => {
+            if let Some(command) = store.read_diff_preview_command() {
+                return KeyAction::send(command);
+            }
+        }
+        _ => {}
+    }
+
+    KeyAction::Continue
+}
+
 fn handle_task_output_key(store: &mut Store, key: KeyEvent) -> KeyAction {
     match key.code {
         KeyCode::Esc => {
@@ -2635,6 +3339,11 @@ fn scroll_current_surface_down(store: &mut Store, lines: usize) {
         store.state.turn_state_detail.scroll_down(lines);
         return;
     }
+    // Expanded (Ctrl+O) diff preview is a full-screen scrollable surface too.
+    if store.state.diff_preview.overlay_active() {
+        store.state.diff_preview.scroll_down(lines);
+        return;
+    }
     // Mirrors `scroll_current_surface_up`: /btw sits under the detail modals but
     // over the focused pane.
     if btw_aside_open(&store.state) {
@@ -2685,6 +3394,12 @@ fn scroll_current_surface_up(store: &mut Store, lines: usize) {
     }
     if store.state.turn_state_detail.active {
         store.state.turn_state_detail.scroll_up(lines);
+        return;
+    }
+    // Expanded (Ctrl+O) diff preview is a full-screen scrollable surface too.
+    if store.state.diff_preview.overlay_active() {
+        store.state.diff_preview.scroll_up(lines);
+        clamp_diff_overlay_scroll(store);
         return;
     }
     // The /btw aside sits under any detail modal (which renders on top of it) but
@@ -2759,6 +3474,12 @@ struct TerminalGuard {
     /// scrolls the pager). It must never be on in the inline chat flow, where
     /// it would defeat native terminal selection/copy.
     mouse_captured: bool,
+    /// The live inline viewport while running in Inline mode. On drop we
+    /// clear from this row down so the composer's last frames (status bar,
+    /// menu, spinner) don't fossilize in the user's scrollback — the inline
+    /// model deliberately owns NO screen real estate once the TUI is gone
+    /// (finalized output lives above the viewport via `insert_history`).
+    live_inline_viewport: Option<ratatui::layout::Rect>,
 }
 
 impl TerminalGuard {
@@ -2806,6 +3527,9 @@ impl TerminalGuard {
         terminal.invalidate_viewport();
         terminal.last_known_screen_size = size;
         self.mode = RenderMode::AltScreen;
+        // While the overlay owns the alternate screen there is no inline
+        // viewport for Drop to clear.
+        self.live_inline_viewport = None;
         Ok(())
     }
 
@@ -2840,6 +3564,7 @@ impl TerminalGuard {
         }
         terminal.invalidate_viewport();
         self.mode = RenderMode::Inline;
+        self.live_inline_viewport = Some(terminal.viewport_area);
         Ok(())
     }
 }
@@ -2854,6 +3579,20 @@ impl Drop for TerminalGuard {
             }
             if self.mode == RenderMode::AltScreen {
                 let _ = execute!(stdout, LeaveAlternateScreen);
+            }
+            // Clear the inline viewport the TUI painted this session. Without
+            // this, the inline model leaves its last frames — status bar,
+            // composer hint, slash menu — fossilized in the user's scrollback
+            // on exit (and they resurface again whenever an alt-screen
+            // overlay drops back to the main screen). Finalized transcript
+            // lives ABOVE the viewport via `insert_history`, so clearing from
+            // the viewport top down only touches TUI-owned rows.
+            if let Some(viewport) = self.live_inline_viewport {
+                let _ = execute!(
+                    stdout,
+                    crossterm::cursor::MoveTo(0, viewport.top()),
+                    crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown)
+                );
             }
             let _ = disable_raw_mode();
             let _ = execute!(stdout, DisableBracketedPaste, DisableFocusChange, Show);
@@ -3610,6 +4349,158 @@ mod tests {
         assert_eq!(
             store.state.composer, "",
             "a trailing space is not an argument"
+        );
+    }
+
+    fn status_menu_store() -> Store {
+        let mut store = store_with_sessions(1);
+        store.state.focus = FocusPane::Composer;
+        store.open_menu(crate::menu::MenuId::from(
+            crate::menu::registry::MENU_STATUS,
+        ));
+        store
+    }
+
+    fn frame_preview_scroll(store: &Store) -> usize {
+        store
+            .state
+            .menu_stack
+            .active()
+            .expect("active frame")
+            .preview_scroll
+    }
+
+    /// PgUp/PgDn scroll the preview pane. Rows past the pane's height used to
+    /// be unreachable entirely — the Snapshot pane silently dropped them.
+    #[test]
+    fn page_keys_scroll_the_menu_preview_and_clamp_at_both_ends() {
+        let mut store = status_menu_store();
+        let rows = active_menu_preview_row_count(&store);
+        assert!(
+            rows > 1,
+            "precondition: the Snapshot preview has rows to scroll, got {rows}"
+        );
+
+        handle_key(&mut store, key(KeyCode::PageDown));
+        assert_eq!(
+            frame_preview_scroll(&store),
+            preview_layout::PREVIEW_SCROLL_STEP.min(rows - 1)
+        );
+
+        // Paging past the end clamps to the shared bound, never beyond.
+        for _ in 0..50 {
+            handle_key(&mut store, key(KeyCode::PageDown));
+        }
+        assert_eq!(
+            frame_preview_scroll(&store),
+            preview_layout::max_preview_scroll(rows),
+            "scrolling stops with the last row at the top of the pane"
+        );
+
+        // And back to the top, without going negative.
+        for _ in 0..50 {
+            handle_key(&mut store, key(KeyCode::PageUp));
+        }
+        assert_eq!(frame_preview_scroll(&store), 0);
+    }
+
+    /// `<`/`>` (and `,`/`.`) are the terminal-proof twin of PgUp/PgDn. The
+    /// chat runs in the terminal's NORMAL buffer, where emulators claim the
+    /// page keys for their own scrollback — VS Code's `terminal.scrollUpPage`
+    /// / `scrollDownPage` default to plain PgUp/PgDn on macOS, gated on
+    /// `!terminalAltBufferActive`, and are skipped from the shell — so the
+    /// escape sequence never reaches this process and the pane looked frozen.
+    /// A plain character always arrives.
+    #[test]
+    fn angle_keys_scroll_the_preview_when_the_terminal_eats_the_page_keys() {
+        let mut store = status_menu_store();
+        let rows = active_menu_preview_row_count(&store);
+        assert!(rows > 1, "precondition: rows to scroll, got {rows}");
+        let step = preview_layout::PREVIEW_SCROLL_STEP.min(rows - 1);
+
+        // `>` arrives as a SHIFTED character on a US layout; `.` is the same
+        // binding unshifted. Both must scroll, and both must come back.
+        for (down, up) in [('>', '<'), ('.', ',')] {
+            handle_key(
+                &mut store,
+                modified_key(KeyCode::Char(down), KeyModifiers::SHIFT),
+            );
+            assert_eq!(
+                frame_preview_scroll(&store),
+                step,
+                "`{down}` pages the preview down"
+            );
+            handle_key(&mut store, key(KeyCode::Char(up)));
+            assert_eq!(
+                frame_preview_scroll(&store),
+                0,
+                "`{up}` pages it back to the top"
+            );
+        }
+    }
+
+    /// A menu opened over a non-empty composer routes keystrokes to the draft,
+    /// which left the page keys dead there. They are not composer edits — the
+    /// pane is on screen and must still scroll — while `<`/`>` stay TEXT.
+    #[test]
+    fn page_keys_still_scroll_the_preview_over_a_composer_draft() {
+        let mut store = status_menu_store();
+        store.state.set_composer_text("half-typed prompt");
+        assert!(
+            menu_composer_edit_active(&store),
+            "precondition: draft branch"
+        );
+
+        handle_key(&mut store, key(KeyCode::PageDown));
+        assert!(
+            frame_preview_scroll(&store) > 0,
+            "PgDn scrolls the pane instead of being swallowed by the draft"
+        );
+
+        handle_key(
+            &mut store,
+            modified_key(KeyCode::Char('>'), KeyModifiers::SHIFT),
+        );
+        assert_eq!(
+            store.state.composer, "half-typed prompt>",
+            "but a character is still text while a draft is being edited"
+        );
+    }
+
+    /// The two axes are independent: item navigation must not disturb the
+    /// preview's scroll, and scrolling must not move the selection.
+    #[test]
+    fn preview_scroll_and_item_selection_are_independent() {
+        let mut store = status_menu_store();
+
+        handle_key(&mut store, key(KeyCode::PageDown));
+        let scrolled = frame_preview_scroll(&store);
+        assert!(scrolled > 0, "precondition: the pane scrolled");
+
+        handle_key(&mut store, key(KeyCode::Down));
+        assert_eq!(
+            frame_preview_scroll(&store),
+            scrolled,
+            "Down leaves the pane where it was"
+        );
+        let selected = store
+            .state
+            .menu_stack
+            .active()
+            .expect("active frame")
+            .selected_index;
+        assert_eq!(selected, 1, "and still moves the selection");
+
+        handle_key(&mut store, key(KeyCode::PageUp));
+        assert_eq!(
+            store
+                .state
+                .menu_stack
+                .active()
+                .expect("active frame")
+                .selected_index,
+            selected,
+            "PgUp scrolls the pane without moving the selection"
         );
     }
 
@@ -4384,6 +5275,7 @@ mod tests {
             saved_visible_history_extent: None,
             saved_inline_screen_size: None,
             mouse_captured: false,
+            live_inline_viewport: None,
         };
         let mut scrollback = ScrollbackTracker::new();
         draw(
@@ -4399,6 +5291,77 @@ mod tests {
         assert!(
             written.contains("Welcome to Octos"),
             "onboarding should render before the first frame; wrote {written:?}"
+        );
+    }
+
+    /// Routine launch (local profiles already on disk): the capabilities
+    /// handshake must NOT block the first frame. The startup drain returns
+    /// immediately with nothing applied, and the probe event stays queued for
+    /// the main loop to apply asynchronously after the first draw. Guards the
+    /// startup fast path: previously this blocked up to
+    /// `INITIAL_CAPABILITIES_HANDSHAKE_TIMEOUT` (1.5 s) — 80%+ of launch time.
+    #[test]
+    fn startup_drain_skips_handshake_wait_when_profiles_exist() {
+        let mut backend = FakeBackend::new(vec![onboarding_capabilities_event()]);
+        let mut store = Store {
+            state: AppState::new(
+                vec![],
+                0,
+                "starting".into(),
+                Some("stdio:octos serve --stdio --solo".into()),
+                false,
+            ),
+        };
+        store.state.onboarding.available_profiles = vec!["glm".into()];
+
+        let started = Instant::now();
+        let applied =
+            drain_initial_startup_events(&mut backend, &mut store).expect("startup drain");
+
+        assert!(
+            !applied,
+            "routine launch applies nothing before the first frame"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "routine launch must not wait on the handshake: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            !app::wants_fullscreen_overlay(&store.state),
+            "onboarding must not open before the first frame on a routine launch"
+        );
+        assert_eq!(
+            backend.events.len(),
+            1,
+            "the handshake lands asynchronously in the main loop"
+        );
+    }
+
+    /// First launch (no locally-spawned profiles discovered): the startup
+    /// drain KEEPS the bounded handshake wait so the capability-gated
+    /// onboarding wizard renders before the first frame, instead of flashing
+    /// or sticking on an empty inline composer.
+    #[test]
+    fn startup_drain_waits_for_handshake_on_first_launch() {
+        let mut backend = FakeBackend::new(vec![onboarding_capabilities_event()]);
+        let mut store = Store {
+            state: AppState::new(
+                vec![],
+                0,
+                "starting".into(),
+                Some("stdio:octos serve --stdio --solo".into()),
+                false,
+            ),
+        };
+
+        let applied =
+            drain_initial_startup_events(&mut backend, &mut store).expect("startup drain");
+
+        assert!(applied);
+        assert!(
+            app::wants_fullscreen_overlay(&store.state),
+            "first-launch onboarding must be open before the first frame"
         );
     }
 
@@ -4447,6 +5410,7 @@ mod tests {
             saved_visible_history_extent: None,
             saved_inline_screen_size: None,
             mouse_captured: false,
+            live_inline_viewport: None,
         };
         let mut scrollback = ScrollbackTracker::new();
 
@@ -4507,6 +5471,7 @@ mod tests {
             saved_visible_history_extent: None,
             saved_inline_screen_size: None,
             mouse_captured: false,
+            live_inline_viewport: None,
         };
         let mut scrollback = ScrollbackTracker::new();
 
@@ -4624,6 +5589,7 @@ mod tests {
             saved_visible_history_extent: None,
             saved_inline_screen_size: None,
             mouse_captured: false,
+            live_inline_viewport: None,
         };
         let mut scrollback = ScrollbackTracker::new();
 
@@ -4690,6 +5656,7 @@ mod tests {
             saved_visible_history_extent: None,
             saved_inline_screen_size: None,
             mouse_captured: false,
+            live_inline_viewport: None,
         };
 
         guard
@@ -4749,6 +5716,7 @@ mod tests {
             saved_visible_history_extent: None,
             saved_inline_screen_size: None,
             mouse_captured: false,
+            live_inline_viewport: None,
         };
 
         guard
@@ -4783,6 +5751,59 @@ mod tests {
         assert_eq!(terminal.backend().cursor, Position { x: 0, y: 0 });
         assert_eq!(terminal.visible_history_rows(), 0);
         assert_eq!(terminal.visible_history_bottom(), 0);
+    }
+
+    #[test]
+    fn diff_overlay_resize_updates_the_scroll_geometry_height() {
+        let mut store = store_with_expanded_diff_overlay();
+        let mut terminal =
+            InlineTerminal::new(RecordingBackend::new(100, 30)).expect("recording terminal");
+        let mut guard = TerminalGuard {
+            mode: RenderMode::Inline,
+            saved_inline_viewport: None,
+            saved_visible_history_extent: None,
+            saved_inline_screen_size: None,
+            mouse_captured: false,
+            live_inline_viewport: None,
+        };
+        let mut scrollback = ScrollbackTracker::new();
+
+        draw(
+            &mut terminal,
+            &mut guard,
+            &mut store,
+            &mut scrollback,
+            false,
+        )
+        .expect("initial overlay draw");
+        let tall_max = app::diff_preview_overlay_max_scroll(
+            &store.state,
+            Palette::for_theme(store.state.theme),
+        );
+        assert_eq!(store.state.last_terminal_height, 30);
+
+        terminal.backend_mut().size = Size::new(100, 18);
+        draw(
+            &mut terminal,
+            &mut guard,
+            &mut store,
+            &mut scrollback,
+            false,
+        )
+        .expect("resized overlay draw");
+        let short_max = app::diff_preview_overlay_max_scroll(
+            &store.state,
+            Palette::for_theme(store.state.theme),
+        );
+
+        assert_eq!(
+            store.state.last_terminal_height, 18,
+            "the overlay draw must cache the same live height it renders"
+        );
+        assert!(
+            short_max > tall_max,
+            "shrinking the overlay must increase its scroll ceiling"
+        );
     }
 
     #[test]
@@ -5329,6 +6350,171 @@ mod tests {
         ));
     }
 
+    /// Regression: on Windows, a manual Enter press often arrives with
+    /// `next_event_waiting=true` (a key-release event is queued right after
+    /// the press). The unbracketed-paste newline heuristic used to fire on
+    /// that signal even while a menu (e.g. the onboarding wizard) was open,
+    /// inserting a newline into the composer behind the overlay instead of
+    /// letting the menu's Enter handler select the highlighted item. The
+    /// heuristic must be skipped whenever any menu owns the keyboard.
+    #[test]
+    fn enter_during_paste_burst_reaches_menu_when_menu_active() {
+        let mut store = Store {
+            state: AppState::new(
+                vec![],
+                0,
+                "ready".into(),
+                Some("stdio:octos serve --stdio".into()),
+                false,
+            ),
+        };
+        store.state.set_capabilities(UiProtocolCapabilities::new(
+            &[crate::model::APPUI_METHOD_PROFILE_LOCAL_CREATE],
+            &[],
+        ));
+        store.open_menu(crate::menu::MenuId::from(
+            crate::menu::registry::MENU_ONBOARD,
+        ));
+        // Menus are overlays: they do not move focus off the composer, and
+        // the composer may carry prior draft text — exactly the state that
+        // made the heuristic misfire on Windows.
+        store.state.focus = FocusPane::Composer;
+        store.state.composer = "draft".into();
+
+        let mut input_state = TerminalInputState::default();
+        let now = Instant::now();
+
+        // next_event_waiting=true is the Windows manual-Enter signature: a
+        // key-release event sits in the queue right after the press.
+        let action = handle_terminal_event_with_input_state(
+            &mut store,
+            Event::Key(key(KeyCode::Enter)),
+            &mut input_state,
+            true, // next_event_waiting
+            now,
+        );
+
+        // The heuristic must NOT have inserted a newline into the composer.
+        assert!(
+            !store.state.composer.contains('\n'),
+            "Enter must not insert a composer newline while a menu is active; got {:?}",
+            store.state.composer
+        );
+        // The key must have reached the menu layer (not been swallowed by the
+        // paste heuristic). Accepting an onboarding item returns Continue
+        // (it advances the wizard / closes the menu) rather than Send.
+        assert!(
+            matches!(action, KeyAction::Continue),
+            "Enter should be handled by the menu and return Continue"
+        );
+    }
+
+    /// OUTER_LOOP_REVIEW #10.2 contract: a paste burst whose END sequence is
+    /// lost (suspend, terminal reset) must NOT keep Enter swallowed as a paste
+    /// newline forever. Past the hard timeout window from the FIRST pasted
+    /// byte, Enter recovers its submit semantics even though paste bytes were
+    /// arriving continuously.
+    #[test]
+    fn paste_timeout_restores_enter_submit_semantics() {
+        let mut store = store_with_sessions(1);
+        store.state.focus = FocusPane::Composer;
+        let mut input_state = TerminalInputState::default();
+        let start = Instant::now();
+
+        // Simulate an unbracketed paste stream: text keys + an Enter that the
+        // heuristic correctly turns into a newline while the burst is young.
+        for ch in ['h', 'e', 'l', 'l', 'o'] {
+            handle_terminal_event_with_input_state(
+                &mut store,
+                Event::Key(key(KeyCode::Char(ch))),
+                &mut input_state,
+                true,
+                start,
+            );
+        }
+        handle_terminal_event_with_input_state(
+            &mut store,
+            Event::Key(key(KeyCode::Enter)),
+            &mut input_state,
+            true,
+            start,
+        );
+        assert_eq!(store.state.composer, "hello\n");
+
+        // The END sequence never arrives; the "stream" keeps delivering bytes
+        // past the max window (e.g. user keeps typing after a lost-END paste,
+        // each keystroke extending the 80ms deadline). At start+250ms — past
+        // UNBRACKETED_PASTE_MAX_WINDOW — Enter must submit, not newline.
+        let later = start + UNBRACKETED_PASTE_MAX_WINDOW + Duration::from_millis(50);
+        handle_terminal_event_with_input_state(
+            &mut store,
+            Event::Key(key(KeyCode::Char('x'))),
+            &mut input_state,
+            true,
+            later,
+        );
+        assert_eq!(store.state.composer, "hello\nx");
+        assert!(
+            matches!(
+                handle_terminal_event_with_input_state(
+                    &mut store,
+                    Event::Key(key(KeyCode::Enter)),
+                    &mut input_state,
+                    true,
+                    later,
+                ),
+                KeyAction::Send(_)
+            ),
+            "Enter must submit once the paste burst exceeded the max window"
+        );
+    }
+
+    /// OUTER_LOOP_REVIEW #10.2 contract: a focus change or resize (the seams
+    /// where a suspend/reset drops the bracketed-paste END) resets the paste
+    /// heuristic, so the Enter right after the seam recovers its submit
+    /// semantics instead of being swallowed as a paste newline.
+    #[test]
+    fn focus_and_resize_reset_stuck_paste_state() {
+        for seam in [Event::FocusLost, Event::FocusGained, Event::Resize(100, 40)] {
+            let mut store = store_with_sessions(1);
+            store.state.focus = FocusPane::Composer;
+            store.state.composer = "draft".into();
+            let mut input_state = TerminalInputState::default();
+            let now = Instant::now();
+
+            // Enter a paste burst.
+            handle_terminal_event_with_input_state(
+                &mut store,
+                Event::Key(key(KeyCode::Char('a'))),
+                &mut input_state,
+                true,
+                now,
+            );
+            // The seam event arrives (suspend happened here): paste state resets.
+            handle_terminal_event_with_input_state(
+                &mut store,
+                seam.clone(),
+                &mut input_state,
+                false,
+                now,
+            );
+            // Enter immediately after — within the old 80ms window — must submit.
+            assert!(
+                matches!(
+                    handle_terminal_event_with_input_state(
+                        &mut store,
+                        Event::Key(key(KeyCode::Enter)),
+                        &mut input_state,
+                        false,
+                        now + Duration::from_millis(10),
+                    ),
+                    KeyAction::Send(_)
+                ),
+                "Enter must submit after {seam:?} reset the paste state"
+            );
+        }
+    }
+
     #[test]
     fn terminal_focus_resize_and_mouse_events_are_stable_noops() {
         let mut store = store_with_sessions(1);
@@ -5524,6 +6710,213 @@ mod tests {
             KeyAction::Continue
         ));
         assert_eq!(store.state.composer, "g");
+    }
+
+    /// A renderable preview tall enough that the overlay has real scroll room
+    /// at the 100x30 terminal the overlay tests pin.
+    fn diff_result_with_long_hunk(session_id: SessionKey) -> crate::model::DiffPreviewGetResult {
+        crate::model::DiffPreviewGetResult {
+            status: "ready".into(),
+            source: "pending_store".into(),
+            preview: crate::model::DiffPreview {
+                session_id,
+                preview_id: PreviewId::new(),
+                title: Some("Patch".into()),
+                files: vec![crate::model::DiffPreviewFile {
+                    path: "src/lib.rs".into(),
+                    old_path: None,
+                    status: "modified".into(),
+                    hunks: vec![crate::model::DiffPreviewHunk {
+                        header: "@@ -1,60 +1,60 @@".into(),
+                        lines: (1..=60)
+                            .map(|n| crate::model::DiffPreviewLine {
+                                kind: "added".into(),
+                                content: format!("line {n}"),
+                                old_line: None,
+                                new_line: Some(n),
+                            })
+                            .collect(),
+                    }],
+                }],
+            },
+        }
+    }
+
+    fn store_with_expanded_diff_overlay() -> Store {
+        let mut store = store_with_sessions(1);
+        store.state.last_terminal_width = 100;
+        store.state.last_terminal_height = 30;
+        let session_id = store.state.sessions[0].id.clone();
+        store
+            .state
+            .diff_preview
+            .apply_result(diff_result_with_long_hunk(session_id));
+        handle_key(
+            &mut store,
+            modified_key(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        );
+        assert!(
+            store.state.diff_preview.overlay_active(),
+            "Ctrl+O on a renderable preview expands the overlay"
+        );
+        store
+    }
+
+    #[test]
+    fn diff_preview_overlay_scrolls_and_collapses() {
+        // specs/task-diff-preview-overlay-scroll.spec R1/R2: Ctrl+O opens the
+        // expanded diff as a full-screen scrollable overlay on its OWN state
+        // bit; j/k/PgUp/PgDn and the wheel move `diff_preview.scroll`, clamped
+        // at the top; Esc collapses back to the inline preview WITHOUT closing
+        // it and WITHOUT touching the global tool-output expansion.
+        let mut store = store_with_expanded_diff_overlay();
+        assert!(
+            !store.state.expanded_tool_outputs,
+            "the overlay must not hijack the global tool-output flag"
+        );
+
+        // j / Down scroll down (from-bottom: decreases), k / Up scroll up.
+        handle_key(&mut store, key(KeyCode::Char('j')));
+        assert_eq!(store.state.diff_preview.scroll, 0, "j at bottom stays 0");
+        handle_key(&mut store, key(KeyCode::Char('k')));
+        assert_eq!(store.state.diff_preview.scroll, 1, "k scrolls up");
+        handle_key(&mut store, key(KeyCode::PageUp));
+        assert_eq!(store.state.diff_preview.scroll, 9, "PgUp jumps 8");
+        handle_key(&mut store, key(KeyCode::PageDown));
+        assert_eq!(store.state.diff_preview.scroll, 1, "PgDown jumps back");
+        handle_key(&mut store, key(KeyCode::End));
+        assert_eq!(store.state.diff_preview.scroll, 0, "End returns to bottom");
+
+        // Over-scrolling past the top clamps instead of banking a dead zone:
+        // the very next PgDown must move the view.
+        let max_scroll = app::diff_preview_overlay_max_scroll(
+            &store.state,
+            Palette::for_theme(store.state.theme),
+        );
+        assert!(max_scroll > 8, "fixture must give the overlay scroll room");
+        for _ in 0..40 {
+            handle_key(&mut store, key(KeyCode::PageUp));
+        }
+        assert_eq!(
+            store.state.diff_preview.scroll, max_scroll,
+            "scroll clamps at the top of the content"
+        );
+        handle_key(&mut store, key(KeyCode::PageDown));
+        assert_eq!(
+            store.state.diff_preview.scroll,
+            max_scroll - 8,
+            "no dead zone after over-scrolling"
+        );
+
+        // Wheel routes to the expanded diff surface.
+        handle_key(&mut store, key(KeyCode::End));
+        scroll_current_surface_up(&mut store, 3);
+        assert_eq!(store.state.diff_preview.scroll, 3, "wheel up scrolls up");
+        scroll_current_surface_down(&mut store, 3);
+        assert_eq!(
+            store.state.diff_preview.scroll, 0,
+            "wheel down scrolls down"
+        );
+
+        // Esc collapses to inline — the preview itself stays open.
+        handle_key(&mut store, key(KeyCode::Esc));
+        assert!(
+            !store.state.diff_preview.expanded,
+            "Esc collapses the overlay"
+        );
+        assert!(
+            store.state.diff_preview.active,
+            "Esc must not close the preview"
+        );
+    }
+
+    #[test]
+    fn diff_overlay_owns_keyboard_and_ctrl_o_falls_back_without_renderable_diff() {
+        // specs/task-diff-preview-overlay-scroll.spec R3/R4: while the overlay is up
+        // it OWNS the keyboard — Ctrl+U must not clear the hidden composer —
+        // and Ctrl+O without a renderable diff keeps its global tool-output
+        // meaning instead of opening a near-empty modal.
+        let mut store = store_with_expanded_diff_overlay();
+        store.state.composer = "draft".into();
+        handle_key(
+            &mut store,
+            modified_key(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(
+            store.state.composer, "draft",
+            "Ctrl+U is swallowed while the overlay owns the keyboard"
+        );
+
+        // Ctrl+O inside the overlay collapses it (round trip)...
+        handle_key(
+            &mut store,
+            modified_key(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        );
+        assert!(!store.state.diff_preview.expanded);
+        assert!(
+            !store.state.expanded_tool_outputs,
+            "collapsing the overlay must not flip the global flag"
+        );
+
+        // ...and with no renderable diff (active but empty), Ctrl+O falls
+        // back to the global tool-output toggle instead of expanding.
+        let mut store = store_with_sessions(1);
+        store.state.diff_preview.active = true;
+        handle_key(
+            &mut store,
+            modified_key(KeyCode::Char('o'), KeyModifiers::CONTROL),
+        );
+        assert!(
+            !store.state.diff_preview.expanded,
+            "an empty preview never expands to a full-screen modal"
+        );
+        assert!(store.state.expanded_tool_outputs);
+    }
+
+    #[test]
+    fn diff_overlay_stage_key_collapses_so_the_composer_is_visible() {
+        // specs/task-diff-preview-overlay-scroll.spec R6: `c` stages the selected hunk
+        // into the composer and collapses the overlay — otherwise the staged
+        // prompt sits under a modal that keeps swallowing every keystroke.
+        let mut store = store_with_expanded_diff_overlay();
+        handle_key(&mut store, key(KeyCode::Char('c')));
+        assert!(
+            !store.state.diff_preview.expanded,
+            "staging collapses the overlay"
+        );
+        assert!(store.state.composer.contains("file: src/lib.rs"));
+        assert_eq!(store.state.focus, FocusPane::Composer);
+    }
+
+    #[test]
+    fn showing_a_pending_decision_collapses_the_diff_overlay() {
+        // specs/task-diff-preview-overlay-scroll.spec R5: the approval/question dialogs
+        // take key priority over the overlay but render beneath it — becoming
+        // visible must collapse the overlay so the user never blind-types at a
+        // covered dialog.
+        let mut store = store_with_expanded_diff_overlay();
+        store.state.approval = Some(crate::model::ApprovalModalState {
+            session_id: store.state.sessions[0].id.clone(),
+            approval_id: octos_core::ui_protocol::ApprovalId::new(),
+            turn_id: octos_core::ui_protocol::TurnId::new(),
+            tool_name: "shell".into(),
+            title: "Run command".into(),
+            body: "approve?".into(),
+            approval_kind: None,
+            risk: None,
+            typed_details: None,
+            render_hints: None,
+            visible: false,
+        });
+        assert!(store.show_pending_approval());
+        assert!(
+            !store.state.diff_preview.expanded,
+            "a shown approval collapses the overlay"
+        );
+        assert!(
+            store.state.diff_preview.active,
+            "the inline preview survives the collapse"
+        );
     }
 
     #[test]
@@ -6320,6 +7713,78 @@ mod tests {
         assert!(store.state.composer.is_empty(), "draft cleared on dispatch");
     }
 
+    #[test]
+    fn every_bang_command_is_run_through_the_terminal_handoff() {
+        let mut store = store_with_sessions(1);
+        store.state.set_composer_text("!exit 0");
+        let command = store.compose_command().expect("bang dispatches");
+        let mut backend = FakeBackend::new(Vec::new());
+        let mut terminal = InlineTerminal::new(RecordingBackend::new(80, 24)).unwrap();
+        terminal.set_viewport_area(Rect::new(0, 16, 80, 8));
+        let mut guard = TerminalGuard {
+            mode: RenderMode::Inline,
+            saved_inline_viewport: None,
+            saved_visible_history_extent: None,
+            saved_inline_screen_size: None,
+            mouse_captured: false,
+            live_inline_viewport: Some(terminal.viewport_area),
+        };
+
+        let handed_off =
+            dispatch_input_command(&mut backend, &mut terminal, &mut guard, &mut store, command)
+                .unwrap();
+
+        assert!(handed_off);
+        assert!(
+            backend.sent.is_empty(),
+            "local shell never reaches the RPC backend"
+        );
+        assert_eq!(guard.mode, RenderMode::Inline, "normal screen is restored");
+        assert_eq!(
+            terminal.backend().buf,
+            b"\r\n\r\n\r\n\r\n\r\n\r\n\r\n\r\n",
+            "reserve exactly the old live viewport beneath child output"
+        );
+        let report = store.state.activity.last().expect("settled bang report");
+        assert_eq!(report.success, Some(true));
+        assert_eq!(report.status, "complete");
+        assert!(
+            report
+                .output_preview
+                .as_deref()
+                .is_some_and(|output| !output.is_empty()),
+            "the restored TUI explains that output was shown in the terminal"
+        );
+    }
+
+    #[test]
+    fn terminal_handoff_restores_prior_alt_screen_and_mouse_capture() {
+        let mut terminal = InlineTerminal::new(RecordingBackend::new(80, 24)).unwrap();
+        terminal.set_viewport_area(Rect::new(0, 16, 80, 8));
+        let mut guard = TerminalGuard {
+            mode: RenderMode::Inline,
+            saved_inline_viewport: None,
+            saved_visible_history_extent: None,
+            saved_inline_screen_size: None,
+            mouse_captured: false,
+            live_inline_viewport: Some(terminal.viewport_area),
+        };
+        guard.enter_alt_screen(&mut terminal).unwrap();
+        guard.sync_mouse_capture(&mut terminal, true).unwrap();
+
+        let outcome = run_local_shell_with_terminal(
+            &mut terminal,
+            &mut guard,
+            "exit 0".into(),
+            "local-shell:restore-state".into(),
+        )
+        .unwrap();
+
+        assert!(outcome.restore_error.is_none());
+        assert_eq!(guard.mode, RenderMode::AltScreen);
+        assert!(guard.mouse_captured);
+    }
+
     /// Enter with a `!` draft DURING a live steer-capable turn must still
     /// dispatch the local exec — never a `TurnSteer`, never a staged message
     /// (#406 interaction; the steer chokepoint sits after the bang intercept).
@@ -6734,6 +8199,122 @@ mod tests {
         );
     }
 
+    /// macOS Terminal.app only sends ALT when "Use Option as Meta key" is on;
+    /// without it Option+V emits a bare `√` and the Alt binds are unreachable.
+    /// Ctrl+V/X/N are the layout-independent twins (see `is_ctrl_char`) — the
+    /// alternative, remapping the Option-produced chars, would steal `å`/`ç`
+    /// from Nordic and French layouts, where they are ordinary letter keys.
+    #[test]
+    fn ctrl_v_toggles_view_mode_from_composer_focus() {
+        let mut store = store_with_sessions(1);
+        store.state.focus = FocusPane::Composer;
+        let session_id = store.state.sessions[0].id.clone();
+        store
+            .state
+            .diff_preview
+            .apply_result(diff_result_with_two_hunks(session_id));
+        assert!(!store.state.diff_preview.side_by_side);
+
+        let action = handle_key(
+            &mut store,
+            modified_key(KeyCode::Char('v'), KeyModifiers::CONTROL),
+        );
+
+        assert!(matches!(action, KeyAction::Continue));
+        assert!(
+            store.state.diff_preview.side_by_side,
+            "Ctrl+V must be the Alt+V twin"
+        );
+        assert_eq!(
+            store.state.composer, "",
+            "Ctrl+V must not leak a literal 'v' into the composer"
+        );
+    }
+
+    #[test]
+    fn ctrl_x_stages_the_selected_hunk_from_composer_focus() {
+        let mut store = store_with_sessions(1);
+        store.state.focus = FocusPane::Composer;
+        let session_id = store.state.sessions[0].id.clone();
+        store
+            .state
+            .diff_preview
+            .apply_result(diff_result_with_two_hunks(session_id));
+
+        handle_key(
+            &mut store,
+            modified_key(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        );
+
+        assert!(
+            store.state.composer.contains("src/lib.rs"),
+            "Ctrl+X must stage the hunk like Alt+C, got: {:?}",
+            store.state.composer
+        );
+    }
+
+    #[test]
+    fn ctrl_n_cycles_hunks_and_wraps_from_composer_focus() {
+        let mut store = store_with_sessions(1);
+        store.state.focus = FocusPane::Composer;
+        let session_id = store.state.sessions[0].id.clone();
+        store
+            .state
+            .diff_preview
+            .apply_result(diff_result_with_two_hunks(session_id));
+
+        let ctrl_n = || modified_key(KeyCode::Char('n'), KeyModifiers::CONTROL);
+        let mut walk = vec![store.state.diff_preview.selected_hunk];
+        for _ in 0..4 {
+            handle_key(&mut store, ctrl_n());
+            walk.push(store.state.diff_preview.selected_hunk);
+        }
+
+        assert_eq!(
+            walk,
+            vec![0, 1, 0, 1, 0],
+            "Ctrl+N must cycle like Alt+H, not stop at the last hunk"
+        );
+    }
+
+    /// The Ctrl twins are gated on the preview exactly like their Alt originals,
+    /// so Ctrl+X/Ctrl+N stay free for the terminal otherwise.
+    #[test]
+    fn ctrl_hunk_keys_are_inert_when_no_preview_is_open() {
+        let mut store = store_with_sessions(1);
+        store.state.focus = FocusPane::Composer;
+        assert!(!store.state.diff_preview.active);
+
+        for ch in ['x', 'n'] {
+            handle_key(
+                &mut store,
+                modified_key(KeyCode::Char(ch), KeyModifiers::CONTROL),
+            );
+        }
+
+        assert!(!store.state.diff_preview.active);
+        assert_eq!(store.state.diff_preview.selected_hunk, 0);
+    }
+
+    /// Regression: a bare Option-produced char must reach the composer as
+    /// literal text. `å` is a dedicated letter key on Nordic layouts and `ç` on
+    /// French/Portuguese ones — remapping them to Alt binds made those letters
+    /// untypable, on every platform and regardless of what produced them.
+    #[test]
+    fn option_produced_chars_stay_literal_composer_text() {
+        let mut store = store_with_sessions(1);
+        store.state.focus = FocusPane::Composer;
+
+        for ch in ['©', 'å', '∆', '˚', '√', 'ç'] {
+            handle_key(&mut store, KeyEvent::from(KeyCode::Char(ch)));
+        }
+
+        assert_eq!(
+            store.state.composer, "©å∆˚√ç",
+            "unmodified chars must be composer text, never remapped to Alt binds"
+        );
+    }
+
     /// With no preview open, Alt+C/H must stay free rather than silently
     /// swallowing the keystroke.
     #[test]
@@ -6848,7 +8429,7 @@ mod tests {
     }
 
     #[test]
-    fn v_toggles_diff_view_round_trip_preserving_scroll_position() {
+    fn v_toggles_diff_view_round_trip_and_clamps_scroll_to_each_layout() {
         let mut store = store_with_sessions(1);
         store.state.focus = FocusPane::Transcript;
         let session_id = store.state.sessions[0].id.clone();
@@ -6864,9 +8445,14 @@ mod tests {
             KeyAction::Continue
         ));
         assert!(store.state.diff_preview.side_by_side);
+        let side_by_side_max = app::diff_preview_overlay_max_scroll(
+            &store.state,
+            Palette::for_theme(store.state.theme),
+        );
         assert_eq!(
-            store.state.diff_preview.scroll, 7,
-            "toggle must preserve scroll position"
+            store.state.diff_preview.scroll,
+            7.min(side_by_side_max),
+            "toggle preserves a reachable position and clamps stale overscroll"
         );
         assert_eq!(
             store.state.diff_preview.selected_hunk, 1,
@@ -6881,7 +8467,14 @@ mod tests {
             !store.state.diff_preview.side_by_side,
             "second press round-trips back to unified"
         );
-        assert_eq!(store.state.diff_preview.scroll, 7);
+        let unified_max = app::diff_preview_overlay_max_scroll(
+            &store.state,
+            Palette::for_theme(store.state.theme),
+        );
+        assert_eq!(
+            store.state.diff_preview.scroll,
+            7.min(side_by_side_max).min(unified_max)
+        );
         assert_eq!(store.state.diff_preview.selected_hunk, 1);
     }
 

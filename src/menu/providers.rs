@@ -724,17 +724,17 @@ fn keymap_menu() -> MenuSpec {
         ),
         (
             "diff.open-toggle",
-            "Alt+V",
+            "Alt+V/Ctrl+V",
             t!("menu.keymap.item.diff_open_toggle.desc"),
         ),
         (
             "diff.stage-hunk",
-            "Alt+C",
+            "Alt+C/Ctrl+X",
             t!("menu.keymap.item.diff_stage_hunk.desc"),
         ),
         (
             "diff.next-hunk",
-            "Alt+H",
+            "Alt+H/Ctrl+N",
             t!("menu.keymap.item.diff_next_hunk.desc"),
         ),
     ];
@@ -829,7 +829,9 @@ fn status_menu(ctx: &MenuContext<'_>) -> MenuSpec {
         tabs: Vec::new(),
         searchable: false,
         search_placeholder: None,
-        footer_hint: Some(t!("menu.footer.esc_close").into_owned()),
+        // The Snapshot pane routinely holds more rows than fit, so the footer
+        // advertises the scroll keys rather than Esc alone.
+        footer_hint: Some(t!("menu.footer.preview_scroll_esc_close").into_owned()),
         preview: Some(MenuPreview::KeyValues {
             title: Some(t!("menu.status.preview_title").into_owned()),
             rows: status_preview_rows(ctx),
@@ -1805,6 +1807,14 @@ fn onboarding_menu(ctx: &MenuContext<'_>) -> MenuBuildResult {
                     t!("menu.onboard.item.api_key.label"),
                     state.api_key_label()
                 )
+            } else if state.selection_is_keyless(ctx.app.profile_llm_catalog) {
+                // Keyless selections must not render the key as an unmet
+                // requirement (octoscode#562 review round).
+                format!(
+                    "{}: {}",
+                    t!("menu.onboard.item.api_key.label"),
+                    t!("onboarding.api_key_not_needed")
+                )
             } else {
                 format!(
                     "{}: {}",
@@ -1815,7 +1825,9 @@ fn onboarding_menu(ctx: &MenuContext<'_>) -> MenuBuildResult {
             MenuAction::Noop,
         )
         .with_description(t!("menu.onboard.item.api_key.desc"))
-        .with_state(MenuItemState::required(state.has_api_key())),
+        .with_state(MenuItemState::required(
+            state.has_api_key() || state.selection_is_keyless(ctx.app.profile_llm_catalog),
+        )),
         MenuItem::new(
             "onboard.provider.fetch",
             t!("menu.onboard.item.fetch_models.label"),
@@ -2599,10 +2611,15 @@ fn provider_config_rows(
 
         // Draft-first, saved-fallback for the API key row: a key already saved in
         // the profile (server-confirmed `has_api_key`) must not read as "not set".
+        // Keyless selections show "not needed" and never render as an unmet
+        // required field (octoscode#562 review round).
+        let selection_keyless = state.selection_is_keyless(ctx.app.profile_llm_catalog);
         let api_key_display = if state.has_api_key() {
             Some(state.api_key_label().to_string())
         } else if saved_primary.is_some_and(|provider| provider.has_api_key) {
             Some(t!("onboarding.api_key_saved").into_owned())
+        } else if selection_keyless {
+            Some(t!("onboarding.api_key_not_needed").into_owned())
         } else {
             None
         };
@@ -3132,7 +3149,9 @@ fn onboarding_next_action_hint(
         if !state.selection_ready() {
             return t!("onboarding.wizard.next.choose_route").into_owned();
         }
-        if !state.has_api_key() {
+        // Keyless selections advance straight to the test step — telling the
+        // user to paste a key here contradicted the enabled Test/Save rows.
+        if !state.has_api_key() && !state.selection_is_keyless(ctx.app.profile_llm_catalog) {
             return t!("onboarding.wizard.next.paste_key").into_owned();
         }
         if !state.provider_tested
@@ -3826,9 +3845,13 @@ fn onboarding_provider_disabled_reason(
     method: &'static str,
 ) -> Option<String> {
     action_missing_reason(ctx, method).or_else(|| {
+        // Keyless selections (catalog-keyless family, no keyed route
+        // override: local/ollama/vllm) test and save without an API key —
+        // don't disable their actions.
+        let keyless = state.selection_is_keyless(ctx.app.profile_llm_catalog);
         if !state.selection_ready() {
             Some(t!("onboarding.disabled.provider_incomplete").into_owned())
-        } else if !state.has_api_key() {
+        } else if !state.has_api_key() && !keyless {
             Some(t!("onboarding.disabled.api_key_empty").into_owned())
         } else {
             None
@@ -3938,7 +3961,10 @@ fn onboarding_has_saved_primary_provider(
                         .is_none_or(|profile_id| Some(profile_id) == current_profile)
             })
             .and_then(|llm| llm.primary_provider())
-            .is_some_and(|provider| provider.has_api_key)
+            // key_satisfied, not has_api_key: a rehydrated keyless primary
+            // publishes has_api_key=false and must not disable the finish /
+            // open-session rows after a TUI restart (red-team, octoscode#562).
+            .is_some_and(|provider| provider.key_satisfied())
 }
 
 fn onboarding_provider_test_label(state: &OnboardingWizardState) -> String {
@@ -8574,6 +8600,90 @@ mod tests {
         assert!(
             body.contains("/onboard workspace"),
             "info pane should show how to change the workspace: {body:?}"
+        );
+    }
+
+    /// Keyless selections keep the Test/Save rows enabled with no key and
+    /// render the key row as "not needed"; without a fetched catalog the
+    /// same rows stay disabled (fail closed) — octoscode#562 review round.
+    #[test]
+    fn onboarding_provider_menu_keyless_rows_enabled_without_key() {
+        let registry = core_menu_registry();
+        let capabilities = CapabilitySet::from_methods([
+            APPUI_METHOD_PROFILE_LLM_TEST,
+            APPUI_METHOD_PROFILE_LLM_UPSERT,
+        ]);
+        let catalog: crate::model::ProfileLlmCatalogResult =
+            serde_json::from_value(serde_json::json!({
+                "families": { "local": { "env": "", "models": [{ "id": "local-default" }] } }
+            }))
+            .expect("catalog fixture deserializes");
+        let onboarding = OnboardingWizardState {
+            provider: LlmSelectionConfig {
+                family_id: "local".into(),
+                model_id: "local-default".into(),
+                route: LlmRouteConfig {
+                    route_id: "official".into(),
+                    api_type: Some("openai".into()),
+                    ..LlmRouteConfig::default()
+                },
+                ..LlmSelectionConfig::default()
+            },
+            ..OnboardingWizardState::default()
+        };
+
+        let build = |catalog: Option<&crate::model::ProfileLlmCatalogResult>| {
+            let ctx = MenuContext {
+                availability: AvailabilityContext::protocol(&capabilities),
+                app: MenuAppSnapshot {
+                    current_profile: Some("coding"),
+                    onboarding: Some(&onboarding),
+                    profile_llm_catalog: catalog,
+                    ..MenuAppSnapshot::default()
+                },
+                terminal: TerminalSize::default(),
+                theme_name: None,
+                selected_path: &[],
+            };
+            let MenuBuildResult::Ready(spec) = registry.build(&MenuId::from(MENU_ONBOARD), &ctx)
+            else {
+                panic!("expected onboarding provider menu");
+            };
+            spec
+        };
+
+        let spec = build(Some(&catalog));
+        for id in ["onboard.provider.test", "onboard.provider.save"] {
+            let item = spec
+                .items
+                .iter()
+                .find(|item| item.id == id)
+                .unwrap_or_else(|| panic!("{id} row present"));
+            assert_eq!(item.disabled_reason, None, "{id} must be enabled keylessly");
+        }
+        let key_row = spec
+            .items
+            .iter()
+            .find(|item| item.id == "onboard.provider.key")
+            .expect("key row present");
+        assert!(
+            key_row
+                .label
+                .contains(t!("onboarding.api_key_not_needed").as_ref()),
+            "key row reads as not-needed: {:?}",
+            key_row.label
+        );
+
+        // No catalog: fail closed — the rows stay disabled.
+        let spec = build(None);
+        let test_row = spec
+            .items
+            .iter()
+            .find(|item| item.id == "onboard.provider.test")
+            .expect("test row present");
+        assert_eq!(
+            test_row.disabled_reason,
+            Some(t!("onboarding.disabled.api_key_empty").into_owned())
         );
     }
 

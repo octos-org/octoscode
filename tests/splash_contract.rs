@@ -97,6 +97,11 @@ fn splash_text_carries_logo_and_version() {
     let text = splash_text();
     assert!(text.contains(env!("CARGO_PKG_VERSION")));
     assert!(text.lines().count() >= 6, "logo should be multi-line");
+    assert_eq!(
+        text.lines().last(),
+        Some(format!("octoscode v{}", env!("CARGO_PKG_VERSION")).as_str()),
+        "the shared block-centering path owns footer alignment"
+    );
 }
 
 use octoscode::splash::{SessionOpts, SplashSession};
@@ -113,7 +118,7 @@ fn test_opts() -> SessionOpts {
 fn curated_effects_produce_frames_on_virtual_clock() {
     for args in SPLASH_EFFECTS {
         let name = args[0];
-        let mut session = SplashSession::new(args, &splash_text(), test_opts())
+        let mut session = SplashSession::new(args, &splash_text(), test_opts(), 80, String::new())
             .unwrap_or_else(|e| panic!("{name}: session builds: {e}"));
         let mut out: Vec<u8> = Vec::new();
         let stats = session
@@ -131,7 +136,8 @@ fn curated_effects_produce_frames_on_virtual_clock() {
 #[test]
 fn truncated_run_ends_with_full_logo() {
     let text = splash_text();
-    let mut session = SplashSession::new(&["decrypt"], &text, test_opts()).expect("session builds");
+    let mut session = SplashSession::new(&["decrypt"], &text, test_opts(), 80, String::new())
+        .expect("session builds");
     let mut out: Vec<u8> = Vec::new();
     let mut calls = 0;
     let stats = session
@@ -158,6 +164,6 @@ fn truncated_run_ends_with_full_logo() {
 fn play_swallows_engine_errors() {
     // Empty input makes the splash session build fail; the run path must
     // surface that as Err (never panic), which `play` then discards.
-    let result = SplashSession::new(&["decrypt"], "", test_opts());
+    let result = SplashSession::new(&["decrypt"], "", test_opts(), 80, String::new());
     assert!(result.is_err(), "empty input should fail session build");
 }

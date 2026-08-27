@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use octos_core::app_ui::{AppUiEvent, AppUiSnapshot};
+use octos_core::app_ui::{AppUiError, AppUiEvent, AppUiSnapshot};
 use octos_core::ui_protocol::{
     ApprovalAutoResolvedEvent, ApprovalCancelledEvent, ApprovalDecidedEvent, ApprovalId,
     ApprovalRespondParams, AttachmentOwnerV2, DiffPreviewGetParams, Envelope, EnvelopeNotification,
@@ -404,6 +404,15 @@ fn should_record_in_history(prompt: &str) -> bool {
         } => command.history_safe() && invocation.args.trim().is_empty(),
         CommandResolution::Unknown { .. } | CommandResolution::EmptyCommand => false,
     }
+}
+
+/// Outcome of the shared onboarding empty-key gate
+/// ([`Store::onboarding_require_api_key`]): proceed, or stop dispatch —
+/// optionally substituting a command (the catalog fetch) for the blocked one.
+enum OnboardingKeyGate {
+    Satisfied,
+    // Boxed: AppUiCommand is large and Satisfied is the hot variant.
+    Blocked(Option<Box<AppUiCommand>>),
 }
 
 impl Store {
@@ -2928,6 +2937,33 @@ impl Store {
         };
     }
 
+    /// Enter the local-profile creation step for a profile id that launch
+    /// resolution selected but the on-disk registry does not contain. This is
+    /// the recovery path for stale project-local `active-profile` pointers and
+    /// new names passed through `--profile-id`.
+    fn begin_missing_local_profile_creation(&mut self, requested_id: String) {
+        self.reset_onboarding_for_new_profile();
+        self.state.onboarding.requested_id = requested_id;
+        self.close_all_menus();
+        self.open_menu(MenuId::from(crate::menu::registry::MENU_ONBOARD));
+    }
+
+    /// `Some(true)` means the locally-visible profile registry definitively
+    /// lacks `profile_id`; `None` means this is a remote launch, where the
+    /// client must not infer server-side profile existence from an empty local
+    /// list.
+    fn local_profile_is_missing(&self, profile_id: &str) -> Option<bool> {
+        self.state.onboarding.profiles_data_dir.as_ref()?;
+        Some(
+            !self
+                .state
+                .onboarding
+                .available_profiles
+                .iter()
+                .any(|candidate| candidate.trim() == profile_id.trim()),
+        )
+    }
+
     /// Re-read the on-disk profile ids + `default-profile` pointer into state so
     /// the profiles surface renders current truth (on open, and after a
     /// set-default / delete). No-op for a remote launch (no local data dir).
@@ -2951,6 +2987,10 @@ impl Store {
     fn dispatch_switch_to_profile(&mut self, id: &str) -> Option<AppUiCommand> {
         self.close_all_menus();
         self.state.onboarding.selected_profile = None;
+        // Keep the target available if `session/open` reports that this known
+        // profile still needs a model; the error event carries only the error
+        // kind/message, not the request's profile id.
+        self.state.onboarding.profile_id = Some(id.to_owned());
         let cwd = self.current_switch_cwd();
         let session_id = octos_core::SessionKey::with_profile_topic(id, "local", "tui", "coding");
         self.state.status = t!("status.switching_profile", profile = id.to_string()).into_owned();
@@ -3169,6 +3209,11 @@ impl Store {
         // active) — drain them now that it is active again.
         self.enqueue_staged_drain_after_switch();
         self.state.status = format!("Resuming {}…", session_id.0);
+        // OUTER_LOOP_REVIEW #12: an in-flight hydrate (e.g. the `session/opened`
+        // dispatch) already fetches this same transcript — skip the duplicate.
+        if !self.state.hydrate_in_flight.insert(session_id.clone()) {
+            return None;
+        }
         Some(AppUiCommand::HydrateSession(SessionHydrateParams {
             session_id,
             after: None,
@@ -4131,10 +4176,17 @@ impl Store {
                     } else {
                         self.open_model_config_surface();
                     }
-                    self.focus_provider_api_key_row();
+                    // Keyless selections skip the key-row focus — landing the
+                    // cursor on a field the flow doesn't need contradicts the
+                    // enabled Test/Save rows beside it.
+                    if !self.onboarding_selected_family_is_keyless() {
+                        self.focus_provider_api_key_row();
+                    }
                 } else {
                     self.refresh_active_menu_if_open();
-                    self.focus_provider_api_key_row();
+                    if !self.onboarding_selected_family_is_keyless() {
+                        self.focus_provider_api_key_row();
+                    }
                 }
                 None
             }
@@ -4144,7 +4196,20 @@ impl Store {
                 }
                 let from_family_menu =
                     self.active_menu_id_is(crate::menu::registry::MENU_ONBOARD_FAMILY);
-                self.state.onboarding.provider.family_id = value.trim().to_owned();
+                let new_family = value.trim().to_owned();
+                // A staged key belongs to the family it was pasted for —
+                // switching families must not let it ride along to a
+                // different endpoint (security pass, octoscode#562).
+                if !self
+                    .state
+                    .onboarding
+                    .provider
+                    .family_id
+                    .eq_ignore_ascii_case(&new_family)
+                {
+                    self.state.onboarding.api_key = None;
+                }
+                self.state.onboarding.provider.family_id = new_family;
                 self.state.onboarding.provider.model_id.clear();
                 self.state.onboarding.provider.route = LlmRouteConfig {
                     api_type: Some("openai".into()),
@@ -4817,9 +4882,10 @@ impl Store {
             self.state.status = t!("status.onboarding_provider_selection_incomplete").into_owned();
             return None;
         };
-        if !self.state.onboarding.has_api_key() {
-            self.state.status = t!("status.onboarding_api_key_empty_onboard").into_owned();
-            return None;
+        if let OnboardingKeyGate::Blocked(command) =
+            self.onboarding_require_api_key("status.onboarding_api_key_empty_onboard")
+        {
+            return command.map(|command| *command);
         }
         self.state.onboarding.last_message = Some(t!("status.saving_provider").into_owned());
         self.state.onboarding.provider_pending = Some(OnboardingProviderPending::Save);
@@ -4925,9 +4991,10 @@ impl Store {
             self.state.status = t!("status.onboarding_fallback_selection_incomplete").into_owned();
             return None;
         };
-        if !self.state.onboarding.has_api_key() {
-            self.state.status = t!("status.onboarding_api_key_empty_provider").into_owned();
-            return None;
+        if let OnboardingKeyGate::Blocked(command) =
+            self.onboarding_require_api_key("status.onboarding_api_key_empty_provider")
+        {
+            return command.map(|command| *command);
         }
         self.state.onboarding.last_message =
             Some(t!("status.saving_fallback_provider").into_owned());
@@ -4936,6 +5003,42 @@ impl Store {
         self.state.status = t!("status.saving_fallback_provider_config").into_owned();
         self.refresh_active_menu_if_open();
         Some(AppUiCommand::ProfileLlmUpsert(params))
+    }
+
+    /// Whether the family currently selected in onboarding is keyless per the
+    /// fetched provider catalog (empty key-env — local/ollama/vllm), with the
+    /// staged route's own key-env overriding toward keyed. Gates that
+    /// normally require an API key are skipped for these selections.
+    fn onboarding_selected_family_is_keyless(&self) -> bool {
+        self.state
+            .onboarding
+            .selection_is_keyless(self.state.profile_llm_catalog.as_ref())
+    }
+
+    /// The single key-satisfaction predicate for onboarding dispatch gates:
+    /// a non-empty key is staged, or the selection is catalog-keyless.
+    fn onboarding_api_key_satisfied(&self) -> bool {
+        self.state.onboarding.has_api_key() || self.onboarding_selected_family_is_keyless()
+    }
+
+    /// Shared empty-key gate for the test/save commands. When no key is staged
+    /// and the catalog was never fetched (command-driven flows skip the menu
+    /// auto-fetch), the selection might be keyless — fetch the catalog and say
+    /// so instead of mis-reporting "API key is empty" (adversarial pass,
+    /// octoscode#562). `Blocked(Some(cmd))` = dispatch `cmd` (the fetch).
+    fn onboarding_require_api_key(&mut self, empty_status: &str) -> OnboardingKeyGate {
+        if self.onboarding_api_key_satisfied() {
+            return OnboardingKeyGate::Satisfied;
+        }
+        if self.state.profile_llm_catalog.is_none() && self.profile_llm_catalog_supported() {
+            self.state.status = t!("status.onboarding_loading_catalog").into_owned();
+            self.refresh_active_menu_if_open();
+            return OnboardingKeyGate::Blocked(Some(Box::new(AppUiCommand::ProfileLlmCatalog(
+                ProfileLlmCatalogParams::default(),
+            ))));
+        }
+        self.state.status = t!(empty_status).into_owned();
+        OnboardingKeyGate::Blocked(None)
     }
 
     fn onboarding_test_provider_command(&mut self) -> Option<AppUiCommand> {
@@ -4956,9 +5059,10 @@ impl Store {
             self.state.status = t!("status.onboarding_provider_selection_incomplete").into_owned();
             return None;
         };
-        if !self.state.onboarding.has_api_key() {
-            self.state.status = t!("status.onboarding_api_key_empty_onboard").into_owned();
-            return None;
+        if let OnboardingKeyGate::Blocked(command) =
+            self.onboarding_require_api_key("status.onboarding_api_key_empty_onboard")
+        {
+            return command.map(|command| *command);
         }
         self.state.onboarding.last_message = Some(t!("status.testing_provider").into_owned());
         self.state.onboarding.provider_pending = Some(OnboardingProviderPending::Test);
@@ -5292,7 +5396,11 @@ impl Store {
                         .is_none_or(|state_profile| state_profile == profile_id)
                 })
                 .and_then(|state| state.primary_provider())
-                .is_some_and(|provider| provider.has_api_key)
+                // key_satisfied, not has_api_key: a rehydrated keyless
+                // primary (local/ollama/vllm) publishes has_api_key=false and
+                // must still unblock session open after a TUI restart
+                // (red-team pass, octoscode#562).
+                .is_some_and(|provider| provider.key_satisfied())
     }
 
     fn local_profile_create_supported(&self) -> bool {
@@ -5743,7 +5851,9 @@ impl Store {
                 )
                 .into_owned(),
             }
-        } else if onboarding.selection_ready() && onboarding.has_api_key() {
+        } else if onboarding.selection_ready()
+            && (onboarding.has_api_key() || self.onboarding_selected_family_is_keyless())
+        {
             OnboardingDoctorOutcome::Warn {
                 reason: t!("status.doctor_provider_unsaved").into_owned(),
                 recovery: t!("status.doctor_provider_unsaved_recovery").into_owned(),
@@ -6038,6 +6148,14 @@ impl Store {
                     if params.session_id.is_none() {
                         params.session_id = self.active_session().map(|session| session.id.clone());
                     }
+                }
+                // Launch-prompt rows send `session/open` directly from the
+                // menu. Remember their target so a `profile_unconfigured`
+                // response can route into model setup for the right profile.
+                if let AppUiCommand::OpenSession(params) = command.as_ref()
+                    && let Some(profile_id) = params.profile_id.as_deref()
+                {
+                    self.state.onboarding.profile_id = Some(profile_id.to_owned());
                 }
                 Some(*command)
             }
@@ -6377,12 +6495,12 @@ impl Store {
     /// model). Pushes a "running" Tool activity chip immediately — stamped
     /// with a process-unique `local_id` so the completion event can find it —
     /// clears the composer draft, and returns the [`AppUiCommand::LocalShellExec`]
-    /// the transport runs locally off the render loop. An empty `!` is a usage
-    /// warning with no exec.
+    /// the event loop runs locally while the TUI lends its terminal to the
+    /// child. An empty `!` is a usage warning with no exec.
     ///
     /// The command runs on the machine octoscode runs on, NOT the agent's
-    /// sandboxed server `shell` tool, and its output is ephemeral — shown in
-    /// the chip only, never injected into the next turn's context.
+    /// sandboxed server `shell` tool. Its output stays in local terminal
+    /// scrollback and is never injected into the next turn's context.
     fn dispatch_bang_command(&mut self, cmd: &str) -> Option<AppUiCommand> {
         self.state.clear_current_composer_draft();
 
@@ -6403,8 +6521,9 @@ impl Store {
         let local_id = format!("local-shell:{}", TurnId::new().0);
         let running = t!("status.bang_running").into_owned();
         // Label the card with the cwd the command runs in (#364): the child
-        // inherits THIS process's working directory (see the transport's
-        // `spawn_local_shell`), so the running chip can already say where.
+        // inherits THIS process's working directory (see
+        // `run_attached_local_shell_command`), so the running chip can already
+        // say where.
         // `cmd`/cwd are terminal-tainted input for the transcript — sanitize
         // at composition (codex on #513: output was sanitized, labels not).
         let clean_cmd = crate::sanitize::strip_terminal_controls(cmd).into_owned();
@@ -6445,7 +6564,7 @@ impl Store {
     }
 
     /// Fold a completed `!`-bang local shell result back into its "running"
-    /// activity chip, completing it in place with the captured output.
+    /// activity chip after the child-terminal handoff finishes.
     fn apply_local_shell_result(&mut self, event: crate::client_event::LocalShellResultEvent) {
         let success = matches!(event.exit_code, Some(0));
         let status = if success {
@@ -7159,6 +7278,11 @@ impl Store {
             approval.title.clone()
         };
 
+        // The approval prompt renders in the transcript, UNDER the detail
+        // overlays, yet takes key priority over all of them — an expanded
+        // diff overlay left up would cover the very dialog now receiving
+        // approve/deny keys. Collapse it (keep the preview open inline).
+        self.state.diff_preview.expanded = false;
         self.state.approval_auto_open = true;
         self.state.focus = FocusPane::Composer;
         self.state.status = t!("status.approval_shown", title = title).into_owned();
@@ -7345,6 +7469,10 @@ impl Store {
             picker.title.clone()
         };
 
+        // Same as `show_pending_approval`: the picker takes key priority over
+        // the expanded diff overlay but renders beneath it — collapse the
+        // overlay so the user answers a dialog they can actually see.
+        self.state.diff_preview.expanded = false;
         self.state.user_question_auto_open = true;
         self.state.focus = FocusPane::Composer;
         self.state.status = t!("status.question_shown", title = title).into_owned();
@@ -7600,6 +7728,14 @@ impl Store {
             return;
         }
         self.state.diff_preview.toggle_view_mode();
+        // Unified and side-by-side layouts can have different physical line
+        // counts. Keep the current from-bottom position when it is still
+        // reachable, but never retain an offset above the new layout's top.
+        let max_scroll = crate::app::diff_preview_overlay_max_scroll(
+            &self.state,
+            crate::theme::Palette::for_theme(self.state.theme),
+        );
+        self.state.diff_preview.scroll = self.state.diff_preview.scroll.min(max_scroll);
         self.state.status = if self.state.diff_preview.side_by_side {
             t!("status.diff_view_side_by_side").into_owned()
         } else {
@@ -7631,9 +7767,438 @@ impl Store {
         self.state.scroll_transcript_to_latest();
     }
 
+    /// Error handling with the hydrate arm removed — used by the
+    /// `ClientEvent::HydrateError` path (#22b-r1), where attribution was
+    /// already resolved by the transport and the per-session marker released;
+    /// re-running the hydrate matcher would take the unattributed clear-all
+    /// fallback on the re-emitted message.
+    fn apply_non_hydrate_error(&mut self, code: String, message: String) -> Option<AppUiCommand> {
+        let error = AppUiError { code, message };
+        match AppUiEvent::Error(error) {
+            AppUiEvent::Error(error) => {
+                // OUTER_LOOP_REVIEW #12: an attributed `session/hydrate`
+                // failure/cancellation answers the in-flight request — clear
+                // every session's marker so a later resume/reconnect can
+                // re-dispatch. Errors carry no session attribution (same
+                // discipline as the `/btw` arm below); concurrent in-flight
+                // hydrates across sessions fail together, which is the safe
+                // direction (a spurious clear only re-permits a cheap probe).
+                //
+                // #20 (ymote P1): the marker latches forever when the command
+                // never gets an answer — match the FULL set of shapes the
+                // transport produces for this method, mirroring the `/btw` and
+                // `turn/steer` exhaustiveness discipline immediately below:
+                //   - response error/cancel formats the method FIRST
+                //     ("session/hydrate …"),
+                //   - pre-send rejections name the method in fixed trailers
+                //     (pending-cap refusal) or prefixes (oversized frame,
+                //     send failure, result decode).
+                //
+                // `/btw` failure/cancellation. Match ONLY the two shapes the
+                // transport actually produces for an aside — the response
+                // error/cancel ("{method} request {id} …" formats the method
+                // FIRST) and the pre-send pending-cap rejection (its fixed
+                // trailer names the method) — never a bare substring: an
+                // unrelated error merely echoing "session/btw" (e.g. inside a
+                // session key) must fall through to the normal error handling
+                // below, not be swallowed by this early return. Errors carry
+                // no session attribution; with concurrent asides across
+                // sessions all answering cards fail together (rare; each card
+                // invites a retry). CRUCIALLY: an aside failure is NOT a
+                // turn/transport failure — return before the generic path
+                // below flips the run state to error for a perfectly healthy
+                // main turn.
+                let is_btw_error = error.message.starts_with("session/btw ")
+                    || (error.code == "too_many_pending_requests"
+                        && error.message.ends_with("enqueue session/btw request"))
+                    || (error.code == "invalid_result"
+                        && error
+                            .message
+                            .starts_with("failed to decode UI protocol result for session/btw"))
+                    || (error.code == "frame_too_large"
+                        && error.message.starts_with("encoded session/btw request"));
+                if is_btw_error && self.state.fail_btw_answering(&error.message) > 0 {
+                    self.state.status = t!("status.btw_failed").into_owned();
+                    return None;
+                }
+                // octos#1807: a dead `turn/steer` falls back to STAGING its
+                // prompt so the typed text is never lost. Same
+                // attribution discipline as `/btw` above — match ONLY the
+                // shapes the transport actually produces for this method
+                // (response error/cancel formats the method FIRST; the
+                // pre-send rejections carry fixed method-naming trailers) —
+                // and, crucially, EARLY-RETURN: a steer failing says nothing
+                // about the MAIN turn, which is still streaming; falling
+                // through would flip the run state to Error under a healthy
+                // turn. `invalid_result` means the response ARRIVED (the
+                // server acted — steered or started a turn) but did not
+                // decode: re-staging would submit the text twice, so only
+                // the stash entry is consumed (the optimistic row + the
+                // server's own echo keep the transcript truthful).
+                let is_steer_error = error.message.starts_with("turn/steer ")
+                    || (error.code == "too_many_pending_requests"
+                        && error.message.ends_with("enqueue turn/steer request"))
+                    || (error.code == "frame_too_large"
+                        && error.message.starts_with("encoded turn/steer request"))
+                    || (error.code == "transport_send"
+                        && error
+                            .message
+                            .starts_with("failed to send turn/steer request"))
+                    || (error.code == "invalid_result"
+                        && error
+                            .message
+                            .starts_with("failed to decode UI protocol result for turn/steer"));
+                if is_steer_error {
+                    if let Some(pending) = self.state.pending_turn_steers.pop_front() {
+                        if error.code != "invalid_result" {
+                            self.state.withdraw_steered_user_prompt(
+                                &pending.session_id,
+                                &pending.turn_id,
+                                &pending.prompt,
+                            );
+                            self.state
+                                .stage_prompt_back(&pending.session_id, pending.prompt);
+                            self.state.status = t!("status.message_staged").into_owned();
+                            return None;
+                        }
+                    }
+                    self.state.status = t!(
+                        "status.error_code_message",
+                        code = error.code,
+                        message = error.message
+                    )
+                    .into_owned();
+                    return None;
+                }
+                // A configured local profile may still lack its required LLM
+                // selection (for example immediately after profile creation).
+                // `session/open` reports that as the structured
+                // `profile_unconfigured` kind. Treat it as a setup transition,
+                // not a terminal session error: open the provider step for the
+                // remembered target profile and leave the UI idle/usable.
+                let is_unconfigured_session_open = error.code == "profile_unconfigured"
+                    && error.message.starts_with("session/open ");
+                if is_unconfigured_session_open
+                    && let Some(profile_id) = self.current_profile_for_onboarding()
+                {
+                    self.state.onboarding.profile_id = Some(profile_id.clone());
+                    self.state.onboarding.creating_new_profile = false;
+                    self.close_all_menus();
+                    self.open_menu(MenuId::from(crate::menu::registry::MENU_ONBOARD));
+                    self.state.status =
+                        t!("status.profile_model_setup_required", profile = profile_id)
+                            .into_owned();
+                    self.state.push_activity(
+                        ActivityItem::new(ActivityKind::Warning, error.code, error.message)
+                            .with_detail("opened model setup"),
+                    );
+                    self.state.set_run_state_idle();
+                    return None;
+                }
+                // A staged-drain SubmitPrompt can die at the TRANSPORT layer —
+                // no turn/started or terminal will ever arrive for it, so the
+                // FIFO in-flight gate would wedge the session's remaining
+                // staged queue (codex P2 on the gate). Release PRECISELY
+                // (codex round-3: an over-broad clear drops gates whose
+                // turn/start is still alive → concurrent submits), and
+                // RE-STAGE the dead submit's prompt from the gate (P2 tri-repo
+                // #246: the drain already pulled it off the queue, so a bare
+                // release LOST it — "queue 3 prompts, hit a reconnect burst →
+                // the drained one vanishes"):
+                //
+                // * `request_cancelled` carries "{method} request {id}
+                //   cancelled: {reason}" — only a dead `turn/start` affects
+                //   the gate, and cancellation is cancel-ALL (disconnect /
+                //   skipped frame), so every in-flight turn/start died with
+                //   it: re-stage every gate's prompt into its own session.
+                // * send-layer refusals (`send_failed`,
+                //   `too_many_pending_requests`, `transport_send`) carry no
+                //   method attribution; the staged submit rides the ACTIVE
+                //   session's follow-up queue, so release that gate only.
+                // * recoverable parser noise (`malformed_frame`, skipped
+                //   frames themselves) cancels nothing — their pending
+                //   requests emit their own `request_cancelled` events.
+                //
+                // Each re-stage leaves a BACKOFF-only gate and deliberately
+                // does NOT wake the drain: the transport just failed, so an
+                // immediate resubmit would spin submit→fail→re-stage at
+                // event-loop speed (and a repeat wire error before the retry
+                // must not re-stage the same prompt twice). The per-tick
+                // `drain_staged_backstop` retries on the gate-TTL cadence.
+                let restaged = match error.code.as_str() {
+                    "request_cancelled"
+                        if error
+                            .message
+                            .starts_with(octos_core::ui_protocol::methods::TURN_START) =>
+                    {
+                        let gates: Vec<(SessionKey, StagedSubmitGate)> =
+                            self.state.staged_submit_in_flight.drain().collect();
+                        let mut restaged = false;
+                        for (session_id, gate) in gates {
+                            restaged |= self.restage_dead_staged_submit(&session_id, gate);
+                            // EVERY drained gate comes back as a FRESH backoff
+                            // — including backoff-only ones (codex fold: a
+                            // repeat error must extend the backoff, not strip
+                            // it and let the tick backstop retry immediately).
+                            self.state
+                                .staged_submit_in_flight
+                                .insert(session_id, StagedSubmitGate::backoff());
+                        }
+                        restaged
+                    }
+                    "send_failed" | "too_many_pending_requests" | "transport_send" => {
+                        let active = self
+                            .state
+                            .active_session()
+                            .map(|session| session.id.clone());
+                        if let Some(session_id) = active
+                            && let Some(gate) =
+                                self.state.staged_submit_in_flight.remove(&session_id)
+                        {
+                            let restaged = self.restage_dead_staged_submit(&session_id, gate);
+                            // Fresh backoff for BOTH gate kinds (see above).
+                            self.state
+                                .staged_submit_in_flight
+                                .insert(session_id, StagedSubmitGate::backoff());
+                            restaged
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                };
+                // M22-B: route `profile/local/create` failures back
+                // into the onboarding step so the user lands on a
+                // typed recovery instead of a generic status line.
+                //
+                // Order matters here:
+                //
+                // 1. Transport-level codes (`transport_read`,
+                //    `transport_send`, `malformed_frame`) take
+                //    PRECEDENCE: even if the message text mentions
+                //    `profile/local/create`, the failure is a wire-
+                //    level event, not a profile rejection. Clear the
+                //    pending flag so the user can retry without
+                //    pretending the username was at fault.
+                // 2. Otherwise attribution requires a POSITIVE
+                //    signal — a known local-create error code or an
+                //    explicit method-prefixed error message
+                //    (`profile/local/create request tui-N failed: …`,
+                //    see `error_response_to_app_event`). The bare
+                //    `local_profile_create_pending` boolean is NOT
+                //    enough on its own because an unrelated RPC
+                //    failing during the pending window would
+                //    otherwise be misclassified.
+                // Codes the client raises that are NOT profile-
+                // level rejections. The substring check below MUST
+                // NOT route these through profile recovery even
+                // when the message names `profile/local/create` —
+                // the wire/policy/cancellation failure is not a
+                // field problem.
+                let is_client_synth_error = matches!(
+                    error.code.as_str(),
+                    "transport_read"
+                        | "transport_send"
+                        | "malformed_frame"
+                        | "malformed_json"
+                        | "frame_too_large"
+                        | "readonly"
+                        | "too_many_pending_requests"
+                        | "request_cancelled"
+                );
+                let attribute_to_local_create = !is_client_synth_error
+                    && (is_local_create_error_code(&error.code)
+                        || error.message.contains("profile/local/create"));
+
+                // Of those, only the codes that DEFINITIVELY end the
+                // in-flight local-create request should clear the
+                // pending snapshot. Generic `too_many_pending_requests`,
+                // `frame_too_large`, and `malformed_json` can fire
+                // on OTHER commands while the local-create response
+                // is still on its way; clearing the snapshot in
+                // that case would let a second create dispatch
+                // (the overlapping-create finding) and could
+                // misattribute the eventual response to a stale
+                // pending tracker.
+                //
+                // The conservative set is:
+                //   - `transport_read`/`transport_send`: wire-level
+                //     break → no response will arrive for ANY in-
+                //     flight request including the local-create.
+                //   - Other client-synth codes (`request_cancelled`,
+                //     `readonly`, `frame_too_large`,
+                //     `too_many_pending_requests`) when the message
+                //     names `profile/local/create`: the rejection
+                //     is attributed to the local-create RPC itself
+                //     (cancellation, pre-send policy/encoding/queue
+                //     gate) so the request is GONE.
+                //
+                // `malformed_frame` and `malformed_json` are
+                // recoverable parser errors — the transport stays
+                // connected and `pending_requests` is not drained,
+                // so the original `profile/local/create` response
+                // can still arrive. Clearing the pending flag for
+                // those would allow a duplicate create and
+                // misattribute the eventual response.
+                let names_local_create = error.message.contains("profile/local/create");
+                let cancels_in_flight_create =
+                    matches!(error.code.as_str(), "transport_read" | "transport_send")
+                        || (matches!(
+                            error.code.as_str(),
+                            "request_cancelled"
+                                | "readonly"
+                                | "frame_too_large"
+                                | "too_many_pending_requests"
+                        ) && names_local_create);
+                let is_transport_error = matches!(
+                    error.code.as_str(),
+                    "transport_read" | "transport_send" | "malformed_frame"
+                );
+                // Same attribution scheme for the staged provider RPCs
+                // (Test / Save / Fetch models): the error format is
+                // "{method} request tui-N failed: …", so a message naming
+                // the method positively identifies the dead request; a
+                // wire-level break kills every in-flight request including
+                // this one. Clearing `provider_pending` here is what
+                // un-wedges the staged model-config surface — the flag gates
+                // re-dispatch AND every staged edit, so a failed test used
+                // to freeze the whole menu on "Testing connection…" forever
+                // (mini4: profile/llm/test rejected with auth_scope_violation
+                // → stuck spinner + "provider test already in progress").
+                let names_provider_rpc = [
+                    crate::model::APPUI_METHOD_PROFILE_LLM_TEST,
+                    crate::model::APPUI_METHOD_PROFILE_LLM_UPSERT,
+                    crate::model::APPUI_METHOD_PROFILE_LLM_FETCH_MODELS,
+                    // A research-lane save is a staged-wizard RPC too (PR384
+                    // review P2-c): without this, a rejected lane upsert (e.g.
+                    // the #1775 api_key-without-env rule on manual providers)
+                    // freezes the wizard for the full 30s sweep and then shows
+                    // a misleading "timeout" instead of the server's reason.
+                    crate::model::APPUI_METHOD_PROFILE_SUB_PROVIDERS_UPSERT,
+                ]
+                .iter()
+                .any(|method| error.message.contains(method));
+                let cancels_in_flight_provider = self.state.onboarding.provider_pending.is_some()
+                    && (names_provider_rpc
+                        || matches!(error.code.as_str(), "transport_read" | "transport_send"));
+                if cancels_in_flight_provider {
+                    self.state.onboarding.provider_pending = None;
+                    self.state.onboarding.provider_pending_since = None;
+                    self.state.onboarding.pending_research_lane_key = None;
+                    self.state.onboarding.last_message = Some(
+                        t!("status.provider_request_failed", message = error.message).into_owned(),
+                    );
+                    self.refresh_active_menu_if_open();
+                }
+                if cancels_in_flight_create && self.state.onboarding.local_profile_create_pending {
+                    self.state.onboarding.local_profile_create_pending = false;
+                    self.state.onboarding.local_profile_create_pending_username = None;
+                    self.state.status = if is_transport_error {
+                        t!(
+                            "status.local_create_cancelled_transport",
+                            code = error.code,
+                            message = error.message
+                        )
+                        .into_owned()
+                    } else {
+                        t!(
+                            "status.local_create_cancelled",
+                            code = error.code,
+                            message = error.message
+                        )
+                        .into_owned()
+                    };
+                } else if error.code == "frame_too_large" {
+                    // Recoverable pre-send rejection: the frame (e.g. a large
+                    // inline turn input or paste) exceeded the 1 MB UI-protocol
+                    // cap. The connection + session are fine — surface an
+                    // actionable message rather than a raw "Error [...]" and do
+                    // NOT wedge the session in Error (mini5: a 1.1 MB inline send
+                    // left the session stuck in Error, unrecoverable). The
+                    // local-create attribution above runs first so the wizard's
+                    // pending-clear is preserved.
+                    self.state.status =
+                        t!("status.message_too_large", message = error.message).into_owned();
+                } else if is_client_synth_error {
+                    // Surfaced for the user but does NOT touch the
+                    // local-create pending state.
+                    self.state.status = t!(
+                        "status.error_code_message",
+                        code = error.code,
+                        message = error.message
+                    )
+                    .into_owned();
+                } else if attribute_to_local_create {
+                    self.state
+                        .onboarding
+                        .apply_local_profile_error(&error.code, &error.message);
+                    let recovery_message_and_focus = self
+                        .state
+                        .onboarding
+                        .local_profile_recovery
+                        .as_ref()
+                        .map(|recovery| (recovery.message.clone(), recovery.focus_field));
+                    if let Some((message, focus_field)) = recovery_message_and_focus {
+                        self.state.status =
+                            t!("status.local_profile_setup_blocked", message = message)
+                                .into_owned();
+                        self.refresh_active_menu_if_open();
+                        self.focus_local_profile_field(focus_field);
+                    } else {
+                        self.state.status = t!(
+                            "status.error_code_message",
+                            code = error.code,
+                            message = error.message
+                        )
+                        .into_owned();
+                    }
+                } else {
+                    self.state.status = t!(
+                        "status.error_code_message",
+                        code = error.code,
+                        message = error.message
+                    )
+                    .into_owned();
+                }
+                self.state.push_activity(
+                    ActivityItem::new(
+                        ActivityKind::Error,
+                        error.code.clone(),
+                        error.message.clone(),
+                    )
+                    .with_detail("app-ui error"),
+                );
+                // Written LAST so the re-queue outcome is what the user reads
+                // (the raw error stays visible on the activity feed and the
+                // run-state chip below).
+                if restaged {
+                    self.state.status = t!("status.staged_submit_requeued").into_owned();
+                }
+                if error.code == "frame_too_large" {
+                    // Recoverable — keep the session usable (idle) instead of
+                    // wedging it in Error on an oversized inline send.
+                    self.state.set_run_state_idle();
+                } else {
+                    self.state.set_run_state_error(error.message);
+                }
+                None
+            }
+            _ => unreachable!("constructed as Error above"),
+        }
+    }
+
     pub fn apply_client_event(&mut self, event: ClientEvent) -> Option<AppUiCommand> {
         match event {
             ClientEvent::App(event) => self.apply_event(*event),
+            // #22b-r1: transport-attributed hydrate failure — release ONLY
+            // this session's marker, then surface the original error shape.
+            // The message re-emit bypasses `apply_event`'s hydrate arm (its
+            // five-shape matcher would take the unattributed clear-all
+            // fallback), because attribution was already resolved here.
+            ClientEvent::HydrateError(event) => {
+                self.state.hydrate_in_flight.remove(&event.session_id);
+                self.apply_non_hydrate_error(event.code, event.message)
+            }
             ClientEvent::BackendRelaunched => self.reconcile_after_backend_relaunch(),
             ClientEvent::Capabilities(event) => {
                 let follow_up = self.apply_capabilities_event(event);
@@ -8409,11 +8974,20 @@ impl Store {
         commands
     }
 
-    pub fn hydrate_session_state_command(&self, session_id: &SessionKey) -> Option<AppUiCommand> {
+    pub fn hydrate_session_state_command(
+        &mut self,
+        session_id: &SessionKey,
+    ) -> Option<AppUiCommand> {
         let capabilities = self.state.capabilities.as_ref()?;
         if !capabilities.supports_feature(crate::model::APPUI_FEATURE_SESSION_HYDRATE_V1)
             || !capabilities.supports_method(crate::model::APPUI_METHOD_SESSION_HYDRATE)
         {
+            return None;
+        }
+        // OUTER_LOOP_REVIEW #12: never dispatch a second hydrate while one is
+        // already in flight for this session — the duplicate doubles serve
+        // busy time and re-inserts the whole history into native scrollback.
+        if !self.state.hydrate_in_flight.insert(session_id.clone()) {
             return None;
         }
         Some(AppUiCommand::HydrateSession(SessionHydrateParams {
@@ -8424,6 +8998,13 @@ impl Store {
                 octos_core::ui_protocol::hydrate_sections::THREADS.into(),
                 octos_core::ui_protocol::hydrate_sections::TURNS.into(),
                 octos_core::ui_protocol::hydrate_sections::PENDING_APPROVALS.into(),
+                // OUTER_LOOP_REVIEW #12 re-review: the dedupe makes the FIRST
+                // dispatch win, and the open path usually wins — so it must
+                // also carry pending_questions, or a parked question (e.g. a
+                // peer's question escalation) silently loses its modal after
+                // a restart. No hydrate_sections constant exists upstream;
+                // the literal matches the resume path's include.
+                "pending_questions".into(),
             ],
         }))
     }
@@ -8458,7 +9039,13 @@ impl Store {
                 let onboarding = self.state.onboarding.clone();
                 let permission_profiles = self.state.permission_profiles.clone();
                 let session_runtime_statuses = self.state.session_runtime_statuses.clone();
-                let profile_llm_catalog = self.state.profile_llm_catalog.clone();
+                // The provider catalog is deliberately NOT carried across a
+                // snapshot rebuild: a reconnect may land on a restarted or
+                // upgraded server whose key-env markers changed, and stale
+                // keyless flags would then steer what gets SENT (a keyless
+                // save). Dropping it costs one lazy refetch — the menu
+                // auto-fetch and the empty-key gate both re-request it
+                // (adversarial pass, octoscode#562).
                 let profile_llm_state = self.state.profile_llm_state.clone();
                 // One-shot re-flush request: a snapshot replay draining
                 // between an aside dismissal and the next draw must not eat
@@ -8588,7 +9175,6 @@ impl Store {
                 state.onboarding = onboarding;
                 state.permission_profiles = permission_profiles;
                 state.session_runtime_statuses = session_runtime_statuses;
-                state.profile_llm_catalog = profile_llm_catalog;
                 state.profile_llm_state = profile_llm_state;
                 state.transcript_reflush_requested = transcript_reflush_requested;
                 state.profile_skills = profile_skills;
@@ -8655,6 +9241,55 @@ impl Store {
                 None
             }
             AppUiEvent::Error(error) => {
+                // OUTER_LOOP_REVIEW #12: an attributed `session/hydrate`
+                // failure/cancellation answers the in-flight request — clear
+                // every session's marker so a later resume/reconnect can
+                // re-dispatch. Errors carry no session attribution (same
+                // discipline as the `/btw` arm below); concurrent in-flight
+                // hydrates across sessions fail together, which is the safe
+                // direction (a spurious clear only re-permits a cheap probe).
+                //
+                // #20 (ymote P1): the marker latches forever when the command
+                // never gets an answer — match the FULL set of shapes the
+                // transport produces for this method, mirroring the `/btw` and
+                // `turn/steer` exhaustiveness discipline immediately below:
+                //   - response error/cancel formats the method FIRST
+                //     ("session/hydrate …"),
+                //   - pre-send rejections name the method in fixed trailers
+                //     (pending-cap refusal) or prefixes (oversized frame,
+                //     send failure, result decode).
+                //
+                // #22b-r1 (codex round-2, 外环(claude) 让步): hydrate errors
+                // now arrive ATTRIBUTED via `ClientEvent::HydrateError`
+                // (transport resolves the session from `PendingRequest.
+                // hydrate_session` or the in-hand command — same mechanism as
+                // `select_session`; wire schema unchanged) and release only
+                // that session's marker at the `apply_client_event` arm
+                // above. This `.clear()` remains ONLY as a defensive fallback
+                // for a hydrate error that somehow still arrives WITHOUT
+                // attribution (a legacy-shaped `AppUiEvent::Error` from a
+                // path outside the five transport synthesis points — none is
+                // known today): a spurious clear merely re-permits a cheap
+                // probe, the safe direction.
+                let is_hydrate_error = error.message.starts_with("session/hydrate ")
+                    || (error.code == "too_many_pending_requests"
+                        && error.message.ends_with("enqueue session/hydrate request"))
+                    || (error.code == "frame_too_large"
+                        && error.message.starts_with("encoded session/hydrate request"))
+                    || (error.code == "transport_send"
+                        && error
+                            .message
+                            .starts_with("failed to send session/hydrate request"))
+                    || (error.code == "invalid_result"
+                        && error.message.starts_with(
+                            "failed to decode UI protocol result for session/hydrate",
+                        ));
+                if is_hydrate_error {
+                    self.state.hydrate_in_flight.clear();
+                    // #22b-r1: the marker is released; the remaining error
+                    // handling (status surface, btw/turn arms) still applies.
+                    return self.apply_non_hydrate_error(error.code, error.message);
+                }
                 // `/btw` failure/cancellation. Match ONLY the two shapes the
                 // transport actually produces for an aside — the response
                 // error/cancel ("{method} request {id} …" formats the method
@@ -8729,6 +9364,31 @@ impl Store {
                         message = error.message
                     )
                     .into_owned();
+                    return None;
+                }
+                // A configured local profile may still lack its required LLM
+                // selection (for example immediately after profile creation).
+                // `session/open` reports that as the structured
+                // `profile_unconfigured` kind. Treat it as a setup transition,
+                // not a terminal session error: open the provider step for the
+                // remembered target profile and leave the UI idle/usable.
+                let is_unconfigured_session_open = error.code == "profile_unconfigured"
+                    && error.message.starts_with("session/open ");
+                if is_unconfigured_session_open
+                    && let Some(profile_id) = self.current_profile_for_onboarding()
+                {
+                    self.state.onboarding.profile_id = Some(profile_id.clone());
+                    self.state.onboarding.creating_new_profile = false;
+                    self.close_all_menus();
+                    self.open_menu(MenuId::from(crate::menu::registry::MENU_ONBOARD));
+                    self.state.status =
+                        t!("status.profile_model_setup_required", profile = profile_id)
+                            .into_owned();
+                    self.state.push_activity(
+                        ActivityItem::new(ActivityKind::Warning, error.code, error.message)
+                            .with_detail("opened model setup"),
+                    );
+                    self.state.set_run_state_idle();
                     return None;
                 }
                 // A staged-drain SubmitPrompt can die at the TRANSPORT layer —
@@ -9175,10 +9835,14 @@ impl Store {
             // the send_code/verify rows, leaving no way to authenticate — so a
             // legacy `--profile-id` launch falls through to the OTP path below.
             crate::model::StartupProfileDecision::Pinned(profile_id) if supports_local_solo => {
-                if self.state.onboarding.effective_profile_id(None).is_none() {
-                    self.state.onboarding.profile_id = Some(profile_id);
+                if self.local_profile_is_missing(&profile_id) == Some(true) {
+                    self.begin_missing_local_profile_creation(profile_id);
+                } else {
+                    if self.state.onboarding.effective_profile_id(None).is_none() {
+                        self.state.onboarding.profile_id = Some(profile_id);
+                    }
+                    self.open_menu(MenuId::from(crate::menu::registry::MENU_ONBOARD));
                 }
-                self.open_menu(MenuId::from(crate::menu::registry::MENU_ONBOARD));
             }
             // A first-ever run with no profiles, a legacy-auth server (incl. a
             // legacy `--profile-id` launch), or a non-solo Pick/Attach:
@@ -9201,6 +9865,17 @@ impl Store {
         result: crate::model::LaunchResolveResult,
     ) -> Option<AppUiCommand> {
         use crate::model::{LaunchDecisionKind, LaunchPromptState};
+        // The project-local sticky pointer and `--profile-id` are launch hints,
+        // not proof that a local profile exists. Route a missing id into the
+        // create step before showing an activation prompt or issuing the doomed
+        // `session/open` that produced `profile_unresolved`.
+        if let Some(profile_id) = result.resolved_profile.as_deref()
+            && self.local_profile_create_supported()
+            && self.local_profile_is_missing(profile_id) == Some(true)
+        {
+            self.begin_missing_local_profile_creation(profile_id.to_owned());
+            return None;
+        }
         match result.decision {
             LaunchDecisionKind::Resume => match result.resolved_profile {
                 Some(profile_id) => self.open_resolved_launch_session(profile_id),
@@ -9239,6 +9914,10 @@ impl Store {
     fn open_resolved_launch_session(&mut self, profile_id: String) -> Option<AppUiCommand> {
         let session_id =
             octos_core::SessionKey::with_profile_topic(&profile_id, "local", "tui", "coding");
+        // Preserve the target across a rejected `session/open`; AppUiError does
+        // not carry request params, and profile-unconfigured recovery needs the
+        // id to open model setup for the correct profile.
+        self.state.onboarding.profile_id = Some(profile_id.clone());
         self.state.status = t!(
             "status.opening_coding_session",
             profile = profile_id.clone()
@@ -9521,6 +10200,9 @@ impl Store {
         result: SessionHydrateResult,
     ) -> Option<AppUiCommand> {
         let session_id = result.session_id.clone();
+        // OUTER_LOOP_REVIEW #12: the in-flight hydrate is answered — the next
+        // producer (resume, reconnect, phantom probe) may dispatch again.
+        self.state.hydrate_in_flight.remove(&session_id);
         // Staged-queue drain released when a stale live turn is finalized below.
         let mut drain: Option<AppUiCommand> = None;
         let projected_messages = hydrated_projection_messages(&result);
@@ -9948,7 +10630,13 @@ impl Store {
                 .is_some_and(|approval| &approval.session_id == session_id)
             {
                 self.state.approval = None;
-                self.state.set_run_state_idle();
+                if self.event_targets_active_session(session_id) {
+                    if self.state.active_turn().is_some() {
+                        self.state.set_run_state_in_progress();
+                    } else if self.state.run_state.is_active() {
+                        self.state.set_run_state_idle();
+                    }
+                }
             }
             // tui#398: an empty hydrate is the reconnect-truth "nothing
             // pending" for this session — clear its background stash too.
@@ -9980,6 +10668,12 @@ impl Store {
         );
         let mut approval = ApprovalModalState::from_event(event);
         approval.visible = self.state.approval_auto_open;
+        if approval.visible {
+            // A visible approval takes key priority over the expanded diff
+            // overlay but renders beneath it — collapse the overlay so the
+            // dialog receiving approve/deny keys is on screen.
+            self.state.diff_preview.expanded = false;
+        }
         self.state.approval = Some(approval);
         self.state.focus = FocusPane::Composer;
         self.state.set_run_state_blocked(title);
@@ -10000,7 +10694,13 @@ impl Store {
                 .is_some_and(|picker| &picker.session_id == session_id)
             {
                 self.state.user_question = None;
-                self.state.set_run_state_idle();
+                if self.event_targets_active_session(session_id) {
+                    if self.state.active_turn().is_some() {
+                        self.state.set_run_state_in_progress();
+                    } else if self.state.run_state.is_active() {
+                        self.state.set_run_state_idle();
+                    }
+                }
             }
             // tui#398: reconnect-truth clear for the background stash too.
             self.state.pending_session_questions.remove(session_id);
@@ -10029,6 +10729,12 @@ impl Store {
         );
         let mut picker = UserQuestionPickerState::from_event(event);
         picker.visible = self.state.user_question_auto_open;
+        if picker.visible {
+            // A visible question owns the keyboard before the expanded diff
+            // overlay, but renders below it. Collapse the overlay so hydrate
+            // cannot leave the user answering an invisible dialog.
+            self.state.diff_preview.expanded = false;
+        }
         self.state.user_question = Some(picker);
         self.state.focus = FocusPane::Composer;
         self.state.set_run_state_blocked(title);
@@ -11157,6 +11863,12 @@ impl Store {
                 }
                 let mut approval = ApprovalModalState::from_event(event);
                 approval.visible = self.state.approval_auto_open;
+                if approval.visible {
+                    // A visible approval takes key priority over the expanded
+                    // diff overlay but renders beneath it — collapse the
+                    // overlay so approve/deny keys act on a visible dialog.
+                    self.state.diff_preview.expanded = false;
+                }
                 let diff_preview_id = approval.diff_preview_id();
                 let diff_preview_turn_id = approval.turn_id.clone();
                 self.state.approval = Some(approval);
@@ -12682,6 +13394,10 @@ impl Store {
         // and their answers never reached the model. Force it visible and mark
         // auto-open so the peek yields to it.
         picker.visible = true;
+        // The picker takes key priority over the expanded diff overlay but
+        // renders beneath it — collapse the overlay so the question is
+        // answered on a visible dialog.
+        self.state.diff_preview.expanded = false;
         self.state.user_question_auto_open = true;
         self.state.user_question = Some(picker);
         // Salience (spec task-approval-ux-salience): a live decision arrival
@@ -13983,6 +14699,10 @@ impl Store {
         // orchestration tick re-asserts any session that is genuinely active.
         self.state.orchestration.clear();
         self.state.session_retry.clear();
+        // OUTER_LOOP_REVIEW #12: in-flight `session/hydrate` requests died with
+        // the old child (its transport is gone), so their markers must not
+        // suppress the re-hydration the new child's `session/opened` triggers.
+        self.state.hydrate_in_flight.clear();
         // Optimistic-idle interrupt bookkeeping dies with the old child for the
         // same reason: the NEW child never knew these turns and will never emit
         // their terminals, so a marker for a turn that never latched a
@@ -14431,9 +15151,9 @@ impl Store {
 }
 
 /// Display form of the directory a `!`-bang command runs in — the TUI process
-/// cwd, which is exactly what the transport's `spawn_local_shell` hands the
-/// child (same process). Used to label the RUNNING chip; the completion event
-/// then carries the authoritative cwd back from the transport.
+/// cwd, which is exactly what the attached shell runner hands the child (same
+/// process). Used to label the RUNNING chip; the completion event then carries
+/// the authoritative cwd back from the runner.
 fn local_shell_cwd_display() -> Option<String> {
     std::env::current_dir()
         .ok()
@@ -14451,10 +15171,9 @@ fn local_shell_card_detail(cmd: &str, cwd: Option<&str>) -> String {
     }
 }
 
-/// Compose the displayed output for a completed `!`-bang shell result: stdout
-/// then stderr (both already truncated by the transport against the 10 KB
-/// combined cap). Empty output renders a `(no output)` placeholder so the chip
-/// still reads as complete rather than blank.
+/// Compose the displayed result for a completed `!`-bang shell handoff:
+/// completion note first, then any spawn/signal error. Empty data renders a
+/// `(no output)` fallback so the chip still reads as complete rather than blank.
 fn local_shell_output_preview(event: &crate::client_event::LocalShellResultEvent) -> String {
     let mut parts: Vec<&str> = Vec::new();
     if !event.stdout.is_empty() {
@@ -22700,6 +23419,207 @@ now analyzing the bus module"
         );
     }
 
+    /// A keyless family (empty key-env in the fetched catalog — the octos
+    /// `local`/`ollama`/`vllm` server families) tests and saves WITHOUT an
+    /// API key. The empty-key gate used to dead-end this flow entirely
+    /// (octos#2096 review round).
+    #[test]
+    fn onboarding_keyless_family_tests_and_saves_without_api_key() {
+        let mut store = protocol_store_with_methods(&[
+            crate::model::APPUI_METHOD_PROFILE_LLM_TEST,
+            crate::model::APPUI_METHOD_PROFILE_LLM_UPSERT,
+        ]);
+        store.state.profile_llm_catalog = Some(
+            serde_json::from_value(serde_json::json!({
+                "families": {
+                    "local": { "env": "", "models": [{ "id": "local-default" }] },
+                    "openai": { "env": "OPENAI_API_KEY", "models": [{ "id": "gpt-4o" }] }
+                }
+            }))
+            .expect("catalog fixture deserializes"),
+        );
+
+        store.state.composer =
+            "/onboard select local local-default official http://127.0.0.1:8080/v1".into();
+        assert!(store.compose_command().is_none());
+
+        // No `/onboard key` — the family is keyless, test must still emit.
+        store.state.composer = "/onboard test".into();
+        let command = store
+            .compose_command()
+            .expect("keyless test emits profile/llm/test");
+        let AppUiCommand::ProfileLlmTest(params) = command else {
+            panic!("expected profile/llm/test");
+        };
+        assert_eq!(params.selection.family_id, "local");
+        assert!(
+            params.api_key.is_none(),
+            "no key is sent for keyless families"
+        );
+        store.state.onboarding.provider_pending = None;
+
+        store.state.composer = "/onboard save".into();
+        let command = store
+            .compose_command()
+            .expect("keyless save emits profile/llm/upsert");
+        assert!(matches!(command, AppUiCommand::ProfileLlmUpsert(_)));
+    }
+
+    /// The keyless bypass is scoped to catalog-keyless families: a keyed
+    /// family with no key still hits the empty-key gate.
+    #[test]
+    fn onboarding_keyed_family_still_requires_api_key() {
+        let mut store = protocol_store_with_methods(&[crate::model::APPUI_METHOD_PROFILE_LLM_TEST]);
+        store.state.profile_llm_catalog = Some(
+            serde_json::from_value(serde_json::json!({
+                "families": { "openai": { "env": "OPENAI_API_KEY", "models": [{ "id": "gpt-4o" }] } }
+            }))
+            .expect("catalog fixture deserializes"),
+        );
+        store.state.composer = "/onboard select openai gpt-4o official".into();
+        assert!(store.compose_command().is_none());
+        store.state.composer = "/onboard test".into();
+        assert!(
+            store.compose_command().is_none(),
+            "keyed family without a key must not emit a test"
+        );
+        assert_eq!(
+            store.state.status,
+            t!("status.onboarding_api_key_empty_onboard")
+        );
+    }
+
+    fn keyless_catalog() -> crate::model::ProfileLlmCatalogResult {
+        serde_json::from_value(serde_json::json!({
+            "families": { "local": { "env": "", "models": [{ "id": "local-default" }] } }
+        }))
+        .expect("catalog fixture deserializes")
+    }
+
+    /// The fallback-save gate has the same keyless bypass as primary save
+    /// and test — reachable via the /provider composer family.
+    #[test]
+    fn onboarding_keyless_family_saves_fallback_without_api_key() {
+        let mut store =
+            protocol_store_with_methods(&[crate::model::APPUI_METHOD_PROFILE_LLM_UPSERT]);
+        store.state.profile_llm_catalog = Some(keyless_catalog());
+        store.state.composer =
+            "/provider select local local-default official http://127.0.0.1:8080/v1".into();
+        assert!(store.compose_command().is_none());
+        store.state.composer = "/provider add-fallback".into();
+        let command = store
+            .compose_command()
+            .expect("keyless fallback save emits profile/llm/upsert");
+        let AppUiCommand::ProfileLlmUpsert(params) = command else {
+            panic!("expected profile/llm/upsert");
+        };
+        assert!(!params.set_primary);
+        assert!(params.api_key.is_none());
+    }
+
+    /// Command-driven flows never open the catalog menus, so the empty-key
+    /// gate must FETCH the catalog (with an accurate status) instead of
+    /// mis-reporting "API key is empty" — and fall back to the empty-key
+    /// message only when the server cannot serve a catalog at all.
+    #[test]
+    fn onboarding_gate_fetches_catalog_when_absent() {
+        let mut store = protocol_store_with_methods(&[
+            crate::model::APPUI_METHOD_PROFILE_LLM_TEST,
+            crate::model::APPUI_METHOD_PROFILE_LLM_CATALOG,
+        ]);
+        assert!(store.state.profile_llm_catalog.is_none());
+        store.state.composer =
+            "/onboard select local local-default official http://127.0.0.1:8080/v1".into();
+        assert!(store.compose_command().is_none());
+        store.state.composer = "/onboard test".into();
+        let command = store.compose_command().expect("gate fetches the catalog");
+        assert!(matches!(command, AppUiCommand::ProfileLlmCatalog(_)));
+        assert_eq!(store.state.status, t!("status.onboarding_loading_catalog"));
+
+        // Old server without profile/llm/catalog: fail closed with the
+        // empty-key message (the only actionable advice left).
+        let mut store = protocol_store_with_methods(&[crate::model::APPUI_METHOD_PROFILE_LLM_TEST]);
+        store.state.composer =
+            "/onboard select local local-default official http://127.0.0.1:8080/v1".into();
+        assert!(store.compose_command().is_none());
+        store.state.composer = "/onboard test".into();
+        assert!(store.compose_command().is_none());
+        assert_eq!(
+            store.state.status,
+            t!("status.onboarding_api_key_empty_onboard")
+        );
+    }
+
+    /// A staged key belongs to the family it was pasted for — switching
+    /// families through the selection flow clears it.
+    #[test]
+    fn onboarding_family_switch_clears_staged_key() {
+        let mut store = protocol_store_with_methods(&[crate::model::APPUI_METHOD_PROFILE_LLM_TEST]);
+        store.state.composer = "/onboard select openai gpt-4o official".into();
+        assert!(store.compose_command().is_none());
+        store.state.composer = "/onboard key sk-cloud-secret".into();
+        assert!(store.compose_command().is_none());
+        assert!(store.state.onboarding.has_api_key());
+        store.state.composer =
+            "/onboard select local local-default official http://127.0.0.1:8080/v1".into();
+        assert!(store.compose_command().is_none());
+        assert!(
+            !store.state.onboarding.has_api_key(),
+            "family switch must clear the staged key"
+        );
+    }
+
+    /// A route carrying its own key-env stays keyed even under a keyless
+    /// family (per-endpoint requirement — AutoDL pattern).
+    #[test]
+    fn keyed_route_override_blocks_keyless_family() {
+        let mut store = protocol_store_with_methods(&[crate::model::APPUI_METHOD_PROFILE_LLM_TEST]);
+        store.state.profile_llm_catalog = Some(keyless_catalog());
+        store.state.composer =
+            "/onboard select local local-default hosted https://hosted.example/v1 HOSTED_API_KEY"
+                .into();
+        assert!(store.compose_command().is_none());
+        store.state.composer = "/onboard test".into();
+        assert!(
+            store.compose_command().is_none(),
+            "keyed route under a keyless family still requires its key"
+        );
+        assert_eq!(
+            store.state.status,
+            t!("status.onboarding_api_key_empty_onboard")
+        );
+    }
+
+    /// A rehydrated keyless primary (has_api_key=false, no key-env) must
+    /// still count as a saved provider after a TUI restart — gating on
+    /// has_api_key alone forced a full re-onboard every restart.
+    #[test]
+    fn saved_keyless_primary_counts_after_restart() {
+        let mut store =
+            protocol_store_with_methods(&[crate::model::APPUI_METHOD_PROFILE_LLM_UPSERT]);
+        assert!(!store.state.onboarding.provider_saved, "restart state");
+        let llm_state = |env: serde_json::Value| -> crate::model::ProfileLlmListResult {
+            serde_json::from_value(serde_json::json!({
+                "profile_id": "octos",
+                "primary": {
+                    "provider": "local", "model": "local-default",
+                    "has_api_key": false, "api_key_env": env, "selected": true
+                }
+            }))
+            .expect("llm state fixture deserializes")
+        };
+        store.state.profile_llm_state = Some(llm_state(serde_json::Value::Null));
+        assert!(
+            store.profile_has_saved_primary_provider("octos"),
+            "keyless primary unblocks session open"
+        );
+        store.state.profile_llm_state = Some(llm_state(serde_json::json!("OPENAI_API_KEY")));
+        assert!(
+            !store.profile_has_saved_primary_provider("octos"),
+            "keyed primary without a stored key stays blocked"
+        );
+    }
+
     #[test]
     fn onboarding_provider_test_shows_pending_until_result() {
         let mut store = protocol_store_with_methods(&[crate::model::APPUI_METHOD_PROFILE_LLM_TEST]);
@@ -24416,6 +25336,8 @@ now analyzing the bus module"
     fn launch_resolve_resume_opens_folder_session() {
         let mut store = protocol_store_without_sessions();
         store.state.workspace.root = "/tmp/launch-project".into();
+        store.state.onboarding.available_profiles = vec!["dev".into()];
+        store.state.onboarding.profiles_data_dir = Some("/tmp/local-octos".into());
 
         let follow_up = store.apply_client_event(ClientEvent::LaunchResolve(
             crate::model::LaunchResolveResult {
@@ -24430,6 +25352,85 @@ now analyzing the bus module"
         };
         assert_eq!(params.profile_id.as_deref(), Some("dev"));
         assert_eq!(params.cwd.as_deref(), Some("/tmp/launch-project"));
+    }
+
+    #[test]
+    fn launch_resolve_missing_local_profile_opens_creation_instead_of_session() {
+        let mut store = protocol_store_without_sessions();
+        store.state.workspace.root = "/tmp/launch-project".into();
+        store.state.onboarding.available_profiles = vec!["other".into()];
+        store.state.onboarding.profiles_data_dir = Some("/tmp/local-octos".into());
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods([
+            crate::model::APPUI_METHOD_PROFILE_LOCAL_CREATE,
+        ]));
+
+        let follow_up = store.apply_client_event(ClientEvent::LaunchResolve(
+            crate::model::LaunchResolveResult {
+                decision: crate::model::LaunchDecisionKind::Resume,
+                resolved_profile: Some("dev".into()),
+                existing_profiles: Vec::new(),
+            },
+        ));
+
+        assert!(follow_up.is_none(), "missing profile must not be opened");
+        assert!(store.active_menu_id_is(crate::menu::registry::MENU_ONBOARD));
+        assert!(store.state.onboarding.creating_new_profile);
+        assert_eq!(store.state.onboarding.requested_id, "dev");
+        assert!(store.state.onboarding.profile_id.is_none());
+    }
+
+    #[test]
+    fn profile_unconfigured_session_open_routes_to_model_onboarding() {
+        use octos_core::app_ui::AppUiError;
+
+        let mut store = protocol_store_without_sessions();
+        store.state.workspace.root = "/tmp/launch-project".into();
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods([
+            crate::model::APPUI_METHOD_PROFILE_LOCAL_CREATE,
+        ]));
+        let open = store
+            .open_resolved_launch_session("dev".into())
+            .expect("launch emits session/open");
+        assert!(matches!(open, AppUiCommand::OpenSession(_)));
+        store.state.set_run_state_error("session open failed");
+
+        let follow_up = store.apply_event(AppUiEvent::Error(AppUiError {
+            code: "profile_unconfigured".into(),
+            message: "session/open request tui-3 failed: session/open requires the routed profile to have an LLM selection".into(),
+        }));
+
+        assert!(follow_up.is_none());
+        assert!(store.active_menu_id_is(crate::menu::registry::MENU_ONBOARD));
+        assert!(!store.state.onboarding.creating_new_profile);
+        assert_eq!(store.state.onboarding.profile_id.as_deref(), Some("dev"));
+        assert_active_menu_has_row(&store, "onboard.provider.add_model");
+        assert!(matches!(
+            store.state.run_state,
+            crate::model::SessionRunState::Idle
+        ));
+        assert_eq!(
+            store.state.status,
+            t!("status.profile_model_setup_required", profile = "dev").into_owned()
+        );
+    }
+
+    #[test]
+    fn profile_unconfigured_non_session_error_stays_an_error() {
+        use octos_core::app_ui::AppUiError;
+
+        let mut store = protocol_store_without_sessions();
+        store.state.onboarding.profile_id = Some("dev".into());
+
+        store.apply_event(AppUiEvent::Error(AppUiError {
+            code: "profile_unconfigured".into(),
+            message: "profile/llm/test request tui-4 failed: profile is not configured".into(),
+        }));
+
+        assert!(!store.active_menu_id_is(crate::menu::registry::MENU_ONBOARD));
+        assert!(matches!(
+            store.state.run_state,
+            crate::model::SessionRunState::Error { .. }
+        ));
     }
 
     /// An `Activate` decision (this folder has no conversation yet) stages the
@@ -24703,7 +25704,9 @@ now analyzing the bus module"
     fn first_launch_pin_attaches_pinned_profile_and_skips_picker() {
         let mut store = protocol_store_without_sessions();
         store.state.onboarding.launch_profile_id = Some("coding".into());
-        store.state.onboarding.available_profiles = vec!["glm".into(), "deepseek".into()];
+        store.state.onboarding.available_profiles =
+            vec!["glm".into(), "deepseek".into(), "coding".into()];
+        store.state.onboarding.profiles_data_dir = Some("/tmp/local-octos".into());
 
         store.apply_client_event(local_solo_capabilities_event());
 
@@ -24712,6 +25715,21 @@ now analyzing the bus module"
         // setup) instead of routing to profile/local/create for a new profile.
         assert!(store.active_menu_id_is(crate::menu::registry::MENU_ONBOARD));
         assert_eq!(store.state.onboarding.profile_id.as_deref(), Some("coding"));
+    }
+
+    #[test]
+    fn first_launch_missing_local_pin_opens_profile_creation() {
+        let mut store = protocol_store_without_sessions();
+        store.state.onboarding.launch_profile_id = Some("ymote".into());
+        store.state.onboarding.available_profiles = vec!["dev".into()];
+        store.state.onboarding.profiles_data_dir = Some("/tmp/local-octos".into());
+
+        store.apply_client_event(local_solo_capabilities_event());
+
+        assert!(store.active_menu_id_is(crate::menu::registry::MENU_ONBOARD));
+        assert!(store.state.onboarding.creating_new_profile);
+        assert_eq!(store.state.onboarding.requested_id, "ymote");
+        assert!(store.state.onboarding.profile_id.is_none());
     }
 
     #[test]
@@ -32431,6 +33449,44 @@ now analyzing the bus module"
     }
 
     #[test]
+    fn hydrated_visible_question_collapses_the_expanded_diff_overlay() {
+        let mut store = store_with_empty_session();
+        let session_id = store.state.sessions[0].id.clone();
+        store.state.diff_preview.open_loading(PreviewId::new());
+        store.state.diff_preview.expanded = true;
+        assert!(store.state.diff_preview.overlay_active());
+
+        store.apply_hydrated_pending_questions(
+            &session_id,
+            vec![UserQuestionRequestedEvent::new(
+                session_id.clone(),
+                QuestionId::new(),
+                TurnId::new(),
+                "Pick a framework",
+                "The reconnect still has a pending decision.",
+                vec![single_select(
+                    "Framework",
+                    "Which framework?",
+                    vec![option("axum", "tokio-native")],
+                )],
+            )],
+        );
+
+        assert!(
+            store
+                .state
+                .user_question
+                .as_ref()
+                .is_some_and(|picker| picker.visible),
+            "hydrate must restore the active question visibly"
+        );
+        assert!(
+            !store.state.diff_preview.expanded,
+            "the visible question must not remain hidden below the diff overlay"
+        );
+    }
+
+    #[test]
     fn user_question_single_select_takes_at_most_one_label() {
         let mut store = store_with_live_reply(TurnId::new(), "working");
         let (session_id, question_id, _) = open_user_question(
@@ -37356,6 +38412,11 @@ now analyzing the bus module"
                         octos_core::ui_protocol::hydrate_sections::THREADS.to_string(),
                         octos_core::ui_protocol::hydrate_sections::TURNS.to_string(),
                         octos_core::ui_protocol::hydrate_sections::PENDING_APPROVALS.to_string(),
+                        // OUTER_LOOP_REVIEW #12 re-review: the dedupe makes the
+                        // first dispatch win, so the open path must also carry
+                        // pending_questions or a parked question's modal is
+                        // silently lost after a restart.
+                        "pending_questions".to_string(),
                     ]
                 );
             }
@@ -40827,6 +41888,409 @@ now analyzing the bus module"
             std::iter::from_fn(|| store.state.dequeue_autonomy_hydration()).collect();
         assert_eq!(drained.len(), 1);
         assert!(matches!(drained[0], AppUiCommand::HydrateSession(_)));
+    }
+
+    // ---- OUTER_LOOP_REVIEW #12: startup double-hydrate dedupe ----
+
+    /// Both hydrate producers hit during startup (session/open → open-path
+    /// hydrate enqueued; active-session restore → `/resume` hydrate returned):
+    /// the session key is already in flight, so the second producer must NOT
+    /// emit a duplicate — and the transcript must be applied exactly once when
+    /// the single answer lands (the pre-fix bug wrote history into native
+    /// scrollback twice).
+    #[test]
+    fn startup_double_hydrate_dedupes_to_one_request_and_one_apply() {
+        use crate::client_event::ClientEvent;
+        use octos_core::ui_protocol::SessionOpened;
+
+        let mut store = protocol_store_with_autonomy();
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods_and_features(
+            [crate::model::APPUI_METHOD_SESSION_HYDRATE],
+            [crate::model::APPUI_FEATURE_SESSION_HYDRATE_V1],
+        ));
+        store.state.sessions.clear();
+        let session_id = SessionKey("local:test".into());
+        // Dispatch point 1: session list / session-opened path.
+        let opened: SessionOpened = serde_json::from_value(serde_json::json!({
+            "session_id": session_id,
+            "active_profile_id": "coding",
+            "workspace_root": null,
+            "cursor": null,
+            "panes": null,
+        }))
+        .expect("session_opened payload");
+        store.apply_event(AppUiEvent::Protocol(UiNotification::SessionOpened(opened)));
+        assert!(
+            store.state.hydrate_in_flight.contains(&session_id),
+            "the open-path hydrate marks the session in flight"
+        );
+        // Dispatch point 2: active-session restore via the /resume path, 1ms
+        // later — must be swallowed by the in-flight marker.
+        let second = store.resume_session_command(session_id.0.clone());
+        assert!(
+            second.is_none(),
+            "the duplicate hydrate is deduped: {second:?}"
+        );
+        let drained: Vec<_> =
+            std::iter::from_fn(|| store.state.dequeue_autonomy_hydration()).collect();
+        assert_eq!(
+            drained
+                .iter()
+                .filter(|command| matches!(command, AppUiCommand::HydrateSession(_)))
+                .count(),
+            1,
+            "exactly one hydrate request left the store: {drained:?}"
+        );
+        // The single answer applies the transcript ONCE (each apply installs
+        // a full transcript snapshot; a second apply was the double scrollback
+        // insert the operator saw).
+        let hydrate = SessionHydrateResult {
+            replayed_tool_envelopes: None,
+            session_id: session_id.clone(),
+            cursor: octos_core::ui_protocol::UiCursor {
+                stream: session_id.0.clone(),
+                seq: 1,
+            },
+            context: None,
+            context_state: None,
+            messages: Some(vec![HydratedMessage {
+                seq: 1,
+                role: "user".into(),
+                content: "earlier committed prompt".into(),
+                turn_id: None,
+                thread_id: None,
+                client_message_id: None,
+                persisted_at: chrono::Utc::now(),
+                message_id: None,
+                source: None,
+                media: Vec::new(),
+                reasoning_content: None,
+            }]),
+            threads: None,
+            turns: None,
+            pending_approvals: None,
+            pending_questions: None,
+            replayed_envelopes: None,
+        };
+        store.apply_client_event(ClientEvent::SessionHydrate(hydrate));
+        let session = store
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .expect("session view");
+        assert_eq!(
+            session.messages.len(),
+            1,
+            "the history was installed exactly once"
+        );
+        assert!(
+            !store.state.hydrate_in_flight.contains(&session_id),
+            "the answer clears the in-flight marker"
+        );
+    }
+
+    /// The reverse startup order (resume first, then the open-path hydrate)
+    /// dedupes the same way — the marker is producer-agnostic.
+    #[test]
+    fn hydrate_in_flight_dedupes_open_path_after_resume() {
+        let mut store = store_with_empty_session();
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods_and_features(
+            [crate::model::APPUI_METHOD_SESSION_HYDRATE],
+            [crate::model::APPUI_FEATURE_SESSION_HYDRATE_V1],
+        ));
+        let session_id = store.state.sessions[0].id.clone();
+
+        let first = store.resume_session_command(session_id.0.clone());
+        assert!(matches!(first, Some(AppUiCommand::HydrateSession(_))));
+        assert!(
+            store.hydrate_session_state_command(&session_id).is_none(),
+            "the open-path hydrate is deduped while the resume hydrate is in flight"
+        );
+    }
+
+    /// A hydrate answer re-arms the producers: after the in-flight request is
+    /// answered, a later resume dispatches a fresh hydrate.
+    #[test]
+    fn hydrate_answer_re_arms_dispatch() {
+        use crate::client_event::ClientEvent;
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+        assert!(store.hydrate_session_state_command(&session_id).is_some());
+        store.apply_client_event(ClientEvent::SessionHydrate(hydrate_result_with_turns(
+            &session_id,
+            vec![],
+        )));
+        assert!(
+            store.hydrate_session_state_command(&session_id).is_some(),
+            "the next producer may dispatch again once the answer landed"
+        );
+    }
+
+    /// An attributed `session/hydrate` error frame clears the in-flight
+    /// marker so a later resume/reconnect can retry — a failed hydrate must
+    /// not wedge the session out of hydration forever.
+    #[test]
+    fn hydrate_error_clears_in_flight_marker() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+        assert!(store.hydrate_session_state_command(&session_id).is_some());
+        assert!(store.state.hydrate_in_flight.contains(&session_id));
+
+        store.apply_event(AppUiEvent::error(
+            "internal",
+            "session/hydrate request tui-5 failed: boom".to_string(),
+        ));
+
+        assert!(
+            !store.state.hydrate_in_flight.contains(&session_id),
+            "the attributed error releases the marker"
+        );
+        assert!(
+            store.hydrate_session_state_command(&session_id).is_some(),
+            "a retry may dispatch after the failure"
+        );
+    }
+
+    /// A backend relaunch kills the old child's in-flight requests; their
+    /// markers must not suppress the new child's re-hydration.
+    #[test]
+    fn backend_relaunch_clears_in_flight_hydrates() {
+        use crate::client_event::ClientEvent;
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+        assert!(store.hydrate_session_state_command(&session_id).is_some());
+
+        store.apply_client_event(ClientEvent::BackendRelaunched);
+
+        assert!(
+            store.state.hydrate_in_flight.is_empty(),
+            "relaunch drops dead in-flight markers"
+        );
+    }
+
+    // ---- OUTER_LOOP_REVIEW #20 (ymote P1): latch-free in-flight markers ----
+
+    /// Queue eviction must release the evicted hydrate's marker: the bounded
+    /// pending_autonomy_hydration queue drops the oldest command at 16 — if
+    /// that drop keeps the marker, the session is latched out of hydration
+    /// until relaunch.
+    #[test]
+    fn queue_eviction_releases_evicted_hydrate_marker() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+        // Mark the session in flight via the open path, then enqueue the
+        // command exactly as the dispatch sites do.
+        let command = store
+            .hydrate_session_state_command(&session_id)
+            .expect("hydrate dispatch");
+        assert!(store.state.hydrate_in_flight.contains(&session_id));
+        store.state.enqueue_autonomy_hydration(command);
+
+        // Fill the queue to the cap with non-hydrate commands, then one more —
+        // the hydrate (oldest) is evicted and its marker must be released.
+        let filler = || {
+            AppUiCommand::ReadSessionStatus(crate::model::SessionStatusReadParams {
+                session_id: session_id.clone(),
+            })
+        };
+        for _ in 0..16 {
+            store.state.enqueue_autonomy_hydration(filler());
+        }
+        assert!(
+            !store.state.hydrate_in_flight.contains(&session_id),
+            "evicting the queued hydrate releases its marker"
+        );
+        assert!(
+            store.hydrate_session_state_command(&session_id).is_some(),
+            "the session can re-dispatch after the eviction"
+        );
+    }
+
+    /// Pre-send rejections that never reach the wire must release the marker —
+    /// pinned for the pending-cap refusal and the transport send failure (the
+    /// two shapes ymote's review called out), plus oversized-frame and
+    /// result-decode for parity with the /btw and turn/steer arms.
+    #[test]
+    fn pre_send_rejections_release_hydrate_marker() {
+        for (code, message) in [
+            (
+                "too_many_pending_requests",
+                "UI protocol has 16 pending request(s); refusing to enqueue session/hydrate request".to_string(),
+            ),
+            (
+                "transport_send",
+                "failed to send session/hydrate request tui-5: broken pipe".to_string(),
+            ),
+            (
+                "frame_too_large",
+                "encoded session/hydrate request tui-5 is 999999 bytes; max is 262144".to_string(),
+            ),
+            (
+                "invalid_result",
+                "failed to decode UI protocol result for session/hydrate: missing field".to_string(),
+            ),
+        ] {
+            let (mut store, session_id) = phantom_in_progress_store();
+            store.state.capabilities = Some(hydrate_capabilities());
+            assert!(store.hydrate_session_state_command(&session_id).is_some());
+            assert!(store.state.hydrate_in_flight.contains(&session_id));
+
+            store.apply_event(AppUiEvent::error(code, message.clone()));
+
+            assert!(
+                !store.state.hydrate_in_flight.contains(&session_id),
+                "pre-send rejection must release the marker: code={code} message={message}"
+            );
+        }
+    }
+
+    /// #22b-r1: an ATTRIBUTED hydrate failure in session A releases ONLY A's
+    /// marker — session B's genuinely in-flight hydrate marker must SURVIVE
+    /// (the codex P1: a blanket clear would re-permit a duplicate hydrate for
+    /// B → doubled serve busy time and duplicate scrollback).
+    #[test]
+    fn attributed_hydrate_error_releases_only_that_session() {
+        let (mut store, session_a) = phantom_in_progress_store();
+        // Add session B alongside the phantom session A.
+        store.state.sessions.push(SessionView {
+            id: SessionKey("local:test-b".into()),
+            title: "test-b".into(),
+            profile_id: Some("coding".into()),
+            messages: vec![],
+            tasks: vec![],
+            live_reply: None,
+        });
+        let session_b = store.state.sessions[1].id.clone();
+        store.state.capabilities = Some(hydrate_capabilities());
+        assert!(store.hydrate_session_state_command(&session_a).is_some());
+        assert!(store.hydrate_session_state_command(&session_b).is_some());
+        assert!(store.state.hydrate_in_flight.contains(&session_a));
+        assert!(store.state.hydrate_in_flight.contains(&session_b));
+
+        // A's pre-send rejection arrives WITH transport-resolved attribution.
+        store.apply_client_event(ClientEvent::HydrateError(
+            crate::client_event::HydrateErrorClientEvent {
+                session_id: session_a.clone(),
+                code: "too_many_pending_requests".into(),
+                message: "UI protocol has 16 pending request(s); refusing to enqueue session/hydrate request".to_string(),
+            },
+        ));
+
+        assert!(
+            !store.state.hydrate_in_flight.contains(&session_a),
+            "the failed session's marker must be released"
+        );
+        assert!(
+            store.state.hydrate_in_flight.contains(&session_b),
+            "session B's in-flight marker must SURVIVE session A's failure (#22b-r1)"
+        );
+        // A can re-dispatch; B is still deduped while its hydrate is in flight.
+        assert!(store.hydrate_session_state_command(&session_a).is_some());
+        assert!(store.hydrate_session_state_command(&session_b).is_none());
+    }
+
+    /// #22b-r1 fallback: a hydrate error that arrives WITHOUT attribution
+    /// (legacy-shaped `AppUiEvent::Error` from outside the transport's five
+    /// synthesis points) still conservatively clears all markers — a spurious
+    /// clear only re-permits a cheap probe; the latch was the P1.
+    #[test]
+    fn unattributed_hydrate_error_falls_back_to_clear_all() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+        assert!(store.hydrate_session_state_command(&session_id).is_some());
+        assert!(store.state.hydrate_in_flight.contains(&session_id));
+
+        store.apply_event(AppUiEvent::error(
+            "too_many_pending_requests",
+            "UI protocol has 16 pending request(s); refusing to enqueue session/hydrate request"
+                .to_string(),
+        ));
+
+        assert!(
+            !store.state.hydrate_in_flight.contains(&session_id),
+            "unattributed fallback still releases the marker (no latch)"
+        );
+    }
+
+    /// An unrelated error that merely CONTAINS the method name must not clear
+    /// the marker (same discipline as /btw: never a bare substring).
+    #[test]
+    fn hydrate_unrelated_error_keeps_marker() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+        assert!(store.hydrate_session_state_command(&session_id).is_some());
+        assert!(store.state.hydrate_in_flight.contains(&session_id));
+
+        store.apply_event(AppUiEvent::error(
+            "internal",
+            "session/open failed while session/hydrate was mentioned in a payload".to_string(),
+        ));
+
+        assert!(
+            store.state.hydrate_in_flight.contains(&session_id),
+            "an unrelated error echoing the method name must not clear the marker"
+        );
+    }
+
+    /// OUTER_LOOP_REVIEW #12 re-review: the dedupe makes the FIRST dispatch
+    /// win, and the open path usually wins — so the open path's include must
+    /// carry `pending_questions`, or a parked question (e.g. a peer's question
+    /// escalation) silently loses its modal after a restart.
+    #[test]
+    fn open_path_hydrate_includes_pending_questions() {
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+
+        let Some(AppUiCommand::HydrateSession(params)) =
+            store.hydrate_session_state_command(&session_id)
+        else {
+            panic!("expected a hydrate dispatch");
+        };
+        assert!(
+            params.include.iter().any(|s| s == "pending_questions"),
+            "the open-path include must carry pending_questions: {:?}",
+            params.include
+        );
+    }
+
+    /// The end-to-end half of the re-review contract: a hydrate answer whose
+    /// `pending_questions` carries a parked question surfaces it as a visible
+    /// modal after a restart.
+    #[test]
+    fn hydrated_parked_question_surfaces_as_modal() {
+        use crate::client_event::ClientEvent;
+        let (mut store, session_id) = phantom_in_progress_store();
+        store.state.capabilities = Some(hydrate_capabilities());
+        let turn_id = store
+            .state
+            .active_session()
+            .and_then(|s| s.live_reply.as_ref().map(|l| l.turn_id.clone()))
+            .unwrap_or_else(octos_core::ui_protocol::TurnId::new);
+
+        let question = octos_core::ui_protocol::UserQuestionRequestedEvent::new(
+            session_id.clone(),
+            octos_core::ui_protocol::QuestionId::new(),
+            turn_id,
+            "Parked question",
+            "Answer me after restart",
+            Vec::<octos_core::ui_protocol::UserQuestion>::new(),
+        );
+        let hydrate = hydrate_result_with_turns(&session_id, vec![]);
+        let hydrate = octos_core::ui_protocol::SessionHydrateResult {
+            pending_questions: Some(vec![question]),
+            ..hydrate
+        };
+        store.apply_client_event(ClientEvent::SessionHydrate(hydrate));
+
+        assert!(
+            store
+                .state
+                .user_question
+                .as_ref()
+                .is_some_and(|picker| picker.visible),
+            "the parked question must surface as a visible modal after hydrate"
+        );
     }
 
     #[test]
