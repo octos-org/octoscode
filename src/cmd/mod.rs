@@ -12,6 +12,7 @@ pub mod config;
 pub mod doctor;
 pub mod github;
 pub mod install_method;
+pub mod olp_mcp;
 pub mod update;
 
 use clap::Parser;
@@ -22,7 +23,7 @@ use doctor::DoctorArgs;
 use update::UpdateArgs;
 
 /// Recognized subcommand names. Kept tiny so we never shadow a flag.
-const SUBCOMMANDS: &[&str] = &["update", "doctor", "config"];
+const SUBCOMMANDS: &[&str] = &["update", "doctor", "config", "olp-mcp-serve"];
 
 /// Inspect `argv` (excluding the program name) for a leading subcommand. If the
 /// first non-flag positional is `update`/`doctor`, run it and return its exit
@@ -41,6 +42,7 @@ where
         Some(Route::Update(args)) => Ok(Some(update::run(args)?.exit_code())),
         Some(Route::Doctor(args)) => Ok(Some(doctor::run(args)?)),
         Some(Route::Config(args)) => Ok(Some(config::run(args)?)),
+        Some(Route::OlpMcpServe) => Ok(Some(olp_mcp::run())),
         None => Ok(None),
     }
 }
@@ -52,6 +54,9 @@ where
 enum Route {
     Update(UpdateArgs),
     Doctor(DoctorArgs),
+    /// `octoscode olp-mcp-serve` — OUTER_LOOP_REVIEW #31: the Rust OLP-MCP
+    /// outer-loop server (newline-delimited JSON-RPC over stdio).
+    OlpMcpServe,
     Config(ConfigArgs),
 }
 
@@ -72,6 +77,7 @@ fn route(argv: &[String]) -> Option<Route> {
         "update" => Some(Route::Update(UpdateCli::parse_from(&sub_argv).into_args())),
         "doctor" => Some(Route::Doctor(DoctorCli::parse_from(&sub_argv).into_args())),
         "config" => Some(Route::Config(ConfigCli::parse_from(&sub_argv).into_args())),
+        "olp-mcp-serve" => Some(Route::OlpMcpServe),
         _ => unreachable!("guarded by SUBCOMMANDS"),
     }
 }
