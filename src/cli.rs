@@ -151,6 +151,9 @@ pub struct Cli {
     /// Skip the ttfx startup animation (also skipped for non-TTY/CI, or via
     /// OCTOSCODE_NO_SPLASH).
     pub no_splash: bool,
+    /// Startup prompt text (`--prompt`): auto-submitted as ONE turn/start
+    /// once the session bootstrap + hydrate completes. See CliArgs::prompt.
+    pub prompt: Option<String>,
 }
 
 /// Version string like `0.2.2-rc.7 (94e43fd 2026-07-17)` — the Cargo version
@@ -240,6 +243,18 @@ struct CliArgs {
     /// Force read-write mode when the config file sets readonly=true.
     #[arg(long = "no-readonly", conflicts_with = "readonly")]
     pub no_readonly: bool,
+
+    /// Startup prompt: after the UI Protocol session bootstrap completes
+    /// (launch/resolve → session/open + hydrate ready), automatically start
+    /// ONE turn with this text — exactly like typing it into the composer and
+    /// pressing Enter. The TUI stays fully interactive (this is a startup
+    /// prompt, not headless). Dispatched exactly once: the dispatch marker
+    /// latches when the transport accepts the turn/start, a reconnect after
+    /// a pre-dispatch connection death re-issues it (at-least-once until
+    /// dispatched), and a reconnect after dispatch never re-sends
+    /// (exactly-once after dispatch). OUTER_LOOP_REVIEW #30.
+    #[arg(long, value_name = "TEXT", conflicts_with = "readonly")]
+    pub prompt: Option<String>,
 
     /// Color palette.
     #[arg(long, value_enum)]
@@ -371,6 +386,18 @@ impl Cli {
             file_config.readonly.unwrap_or(false)
         };
 
+        // #30: `--prompt` auto-submits a turn/start — meaningless under a
+        // read-only client (turn/start sends are disabled). The CLI-level
+        // `--readonly` conflict is caught by clap (conflicts_with); the
+        // config-file `readonly=true` + `--prompt` combination is caught
+        // here at parse time with the same explicitness.
+        if args.prompt.is_some() && readonly {
+            return Err(eyre::eyre!(
+                "--prompt cannot be combined with read-only mode (readonly=true in config); \
+                 remove --prompt or pass --no-readonly"
+            ));
+        }
+
         // Mode resolution: an explicit mode (CLI flag, then config) always
         // wins. With NO explicit mode, default to the real backend
         // (`Protocol`) — a bare `octoscode` launch spawns/auto-provisions
@@ -400,6 +427,7 @@ impl Cli {
             cwd: args.cwd.or(file_config.cwd),
             auth_token: args.auth_token.or(file_config.auth_token),
             readonly,
+            prompt: args.prompt,
             theme: args.theme.or(file_config.theme).unwrap_or(ThemeName::Codex),
             lang: args
                 .lang
@@ -1085,5 +1113,72 @@ mod tests {
 
         assert!(error.contains("unknown field"));
         assert!(error.contains("provider"));
+    }
+}
+
+#[cfg(test)]
+mod startup_prompt_tests {
+    use super::*;
+
+    #[test]
+    fn prompt_flag_parses_into_cli() {
+        let cli = Cli::try_parse_from(["octoscode", "--prompt", "fix the flaky test"])
+            .expect("--prompt parses");
+        assert_eq!(cli.prompt.as_deref(), Some("fix the flaky test"));
+        assert!(!cli.readonly);
+    }
+
+    #[test]
+    fn prompt_conflicts_with_readonly_flag() {
+        let err = Cli::try_parse_from(["octoscode", "--prompt", "hi", "--readonly"])
+            .expect_err("clap conflict");
+        let text = format!("{err}");
+        assert!(
+            text.contains("cannot be used with") || text.contains("conflict"),
+            "clap conflict error: {text}"
+        );
+    }
+
+    #[test]
+    fn prompt_conflicts_with_config_readonly() {
+        let path = {
+            let dir = std::env::temp_dir().join(format!("octoscode-test-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("readonly-prompt.json");
+            std::fs::write(&path, r#"{"readonly": true}"#).unwrap();
+            path
+        };
+        let err = Cli::try_parse_from([
+            "octoscode",
+            "--config",
+            path.to_str().unwrap(),
+            "--prompt",
+            "hi",
+        ])
+        .expect_err("config readonly + --prompt must fail at parse time");
+        assert!(
+            err.to_string()
+                .contains("--prompt cannot be combined with read-only mode"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn prompt_with_no_readonly_flag_overrides_config() {
+        let dir = std::env::temp_dir().join(format!("octoscode-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("readonly-off.json");
+        std::fs::write(&path, r#"{"readonly": true}"#).unwrap();
+        let cli = Cli::try_parse_from([
+            "octoscode",
+            "--config",
+            path.to_str().unwrap(),
+            "--no-readonly",
+            "--prompt",
+            "go",
+        ])
+        .expect("--no-readonly clears the config readonly");
+        assert_eq!(cli.prompt.as_deref(), Some("go"));
+        assert!(!cli.readonly);
     }
 }

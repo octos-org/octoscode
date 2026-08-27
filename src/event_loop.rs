@@ -228,6 +228,13 @@ pub fn run(cli: Cli) -> Result<()> {
     let mut backend = build_backend(&cli);
     let snapshot = backend.bootstrap()?;
     let mut store = Store::from_snapshot(snapshot);
+    // OUTER_LOOP_REVIEW #30: arm the startup prompt. The arm survives until
+    // dispatch (the #27 reconnect replay drives a fresh hydrate that lands
+    // back at the dispatch site); once dispatched the latch prevents any
+    // post-dispatch re-send. Mock mode: the mock backend auto-answers, so
+    // the prompt simply fires once the same way (implementation choice —
+    // documented in the ACK).
+    store.state.startup_prompt_pending = cli.prompt.clone();
     // Seed cross-session command history from disk (best-effort) so Up/Down
     // recall works from the first keystroke; preserved across snapshot replays
     // by `Store::apply_event`.

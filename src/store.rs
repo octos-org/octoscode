@@ -10494,7 +10494,37 @@ impl Store {
         if self.state.capabilities.as_ref().is_some_and(|caps| {
             caps.supports_method(crate::model::APPUI_METHOD_SESSION_STATUS_READ)
         }) {
-            self.state.enqueue_session_status_probe(session_id);
+            self.state.enqueue_session_status_probe(session_id.clone());
+        }
+        // OUTER_LOOP_REVIEW #30: the session bootstrap + hydrate is complete
+        // — if a startup prompt is armed (and not yet dispatched), emit its
+        // single turn/start now. The arm survives reconnects (the #27
+        // replay drives a fresh hydrate, which lands here again) until
+        // dispatch; once emitted the arm clears and `startup_prompt_dispatched`
+        // latches, so a post-dispatch reconnect's re-hydrate never re-sends.
+        if self.state.startup_prompt_pending.is_some()
+            && !self.state.startup_prompt_dispatched
+            && !self.state.readonly
+        {
+            let text = self
+                .state
+                .startup_prompt_pending
+                .take()
+                .expect("checked is_some");
+            self.state.startup_prompt_dispatched = true;
+            let turn_id = TurnId::new();
+            let prompt_command = AppUiCommand::SubmitPrompt(TurnStartParams {
+                tool_context: None,
+                session_id: session_id.clone(),
+                turn_id,
+                input: vec![InputItem::Text { text }],
+                media: Vec::new(),
+                topic: None,
+                rewrite_for: None,
+                reasoning_effort: None,
+                live_video: false,
+            });
+            drain = drain.or(Some(prompt_command));
         }
         drain
     }
@@ -42112,6 +42142,87 @@ now analyzing the bus module"
             store.state.hydrate_in_flight.is_empty(),
             "relaunch drops dead in-flight markers"
         );
+    }
+
+    // ---- OUTER_LOOP_REVIEW #30: startup prompt exactly-once state machine ----
+
+    fn minimal_hydrate_result(session_id: &SessionKey) -> SessionHydrateResult {
+        serde_json::from_value(serde_json::json!({
+            "session_id": session_id.0,
+            "cursor": {"stream": "session", "seq": 1},
+        }))
+        .expect("minimal hydrate result decodes")
+    }
+
+    /// Hydrate completion with an armed startup prompt emits exactly ONE
+    /// turn/start and latches; a second hydrate (e.g. after a post-dispatch
+    /// reconnect) never re-sends.
+    #[test]
+    fn startup_prompt_dispatches_once_after_hydrate() {
+        let mut store = protocol_store_with_autonomy();
+        let session_id = SessionKey("local:test".into());
+        store.state.startup_prompt_pending = Some("fix the flaky test".into());
+
+        let follow_up = store.apply_client_event(ClientEvent::SessionHydrate(
+            minimal_hydrate_result(&session_id),
+        ));
+        let Some(AppUiCommand::SubmitPrompt(params)) = follow_up else {
+            panic!("armed startup prompt must emit a turn/start after hydrate");
+        };
+        assert_eq!(params.session_id, session_id);
+        assert!(
+            matches!(&params.input[0], InputItem::Text { text } if text == "fix the flaky test")
+        );
+        assert!(store.state.startup_prompt_pending.is_none());
+        assert!(store.state.startup_prompt_dispatched);
+
+        // Post-dispatch reconnect re-hydrate: no re-send.
+        let again = store.apply_client_event(ClientEvent::SessionHydrate(minimal_hydrate_result(
+            &session_id,
+        )));
+        assert!(
+            !matches!(again, Some(AppUiCommand::SubmitPrompt(_))),
+            "post-dispatch re-hydrate must not re-send the startup prompt"
+        );
+    }
+
+    /// The arm SURVIVES a hydrate that never dispatched (pre-dispatch
+    /// connection death → #27 replay → fresh hydrate): a re-hydrate with the
+    /// arm still set dispatches (at-least-once until dispatched).
+    #[test]
+    fn startup_prompt_arm_survives_until_dispatch() {
+        let mut store = protocol_store_with_autonomy();
+        let session_id = SessionKey("local:test".into());
+        store.state.startup_prompt_pending = Some("ping".into());
+        // Simulate "previous hydrate completed but the dispatch never reached
+        // the wire": clear the latch, keep the arm (the #27 replay re-arms
+        // nothing — the arm was never consumed because the emit is what
+        // consumes it; this test pins that an unconsumed arm dispatches on
+        // the NEXT hydrate).
+        store.state.startup_prompt_dispatched = false;
+
+        let follow_up = store.apply_client_event(ClientEvent::SessionHydrate(
+            minimal_hydrate_result(&session_id),
+        ));
+        assert!(matches!(follow_up, Some(AppUiCommand::SubmitPrompt(_))));
+    }
+
+    /// Readonly state must never emit the startup prompt turn.
+    #[test]
+    fn startup_prompt_never_fires_when_readonly() {
+        let mut store = protocol_store_with_autonomy();
+        let session_id = SessionKey("local:test".into());
+        store.state.readonly = true;
+        store.state.startup_prompt_pending = Some("should not send".into());
+        let follow_up = store.apply_client_event(ClientEvent::SessionHydrate(
+            minimal_hydrate_result(&session_id),
+        ));
+        assert!(
+            !matches!(follow_up, Some(AppUiCommand::SubmitPrompt(_))),
+            "readonly must not dispatch the startup prompt"
+        );
+        // The arm stays (defensive); the CLI conflict gate is the primary bar.
+        assert!(store.state.startup_prompt_pending.is_some());
     }
 
     // ---- OUTER_LOOP_REVIEW #20 (ymote P1): latch-free in-flight markers ----

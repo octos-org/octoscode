@@ -4978,6 +4978,21 @@ pub struct AppState {
     /// open-path include silently omits), so the first dispatch wins — no
     /// merge needed.
     pub hydrate_in_flight: std::collections::HashSet<SessionKey>,
+    /// OUTER_LOOP_REVIEW #30: startup prompt (`--prompt`) exactly-once
+    /// state machine. `Some(text)` = armed, awaiting the session bootstrap +
+    /// hydrate to complete; the arm is NOT part of the #27 bootstrap replay
+    /// sequence — the transport replays launch/resolve/session-open on a
+    /// reconnect, which drives a fresh hydrate, and this arm simply survives
+    /// until dispatch. Cleared to `None` the moment the turn/start command
+    /// is emitted for dispatch (at-least-once until dispatched): a
+    /// connection death BEFORE dispatch re-arms nothing (the arm was never
+    /// cleared), and after dispatch `startup_prompt_dispatched` latches so a
+    /// post-dispatch reconnect + re-hydrate never re-sends
+    /// (exactly-once after dispatch).
+    pub startup_prompt_pending: Option<String>,
+    /// #30: latched when the startup-prompt turn/start has been dispatched
+    /// (transport accepted). Guards the exactly-once-after-dispatch half.
+    pub startup_prompt_dispatched: bool,
     /// #324 Phase C: per-session unread counters — turns that reached a
     /// terminal while the session was NOT focused. Incremented by the store's
     /// terminal appliers, cleared when the session gains focus.
@@ -7014,6 +7029,8 @@ impl AppState {
             last_started_turn: std::collections::HashMap::new(),
             phantom_probe_sent: std::collections::HashSet::new(),
             hydrate_in_flight: std::collections::HashSet::new(),
+            startup_prompt_pending: None,
+            startup_prompt_dispatched: false,
             unread_turns: std::collections::HashMap::new(),
             pending_turn_steers: std::collections::VecDeque::new(),
             retained_steers: Vec::new(),
