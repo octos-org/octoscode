@@ -11,22 +11,13 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 fn server_binary() -> std::path::PathBuf {
-    // cargo builds the bin under target/{debug,release}/octoscode; env
-    // override lets CI point elsewhere.
+    // OLP_MCP_SERVER_BIN overrides the binary path (CI / custom installs);
+    // the default is cargo's own integration-test compile of the bin target —
+    // correct under any CARGO_TARGET_DIR (no fragile target/debug probing).
     if let Ok(path) = std::env::var("OLP_MCP_SERVER_BIN") {
         return std::path::PathBuf::from(path);
     }
-    let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("debug")
-        .join("octoscode");
-    if !path.exists() {
-        path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("release")
-            .join("octoscode");
-    }
-    path
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_octoscode"))
 }
 
 struct ServerProc {
