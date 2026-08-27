@@ -40,6 +40,7 @@
 | 权威账本 | `goal-ledgers/<goal_id>` | durable,重启幸存 |
 | 求助 | escalation(park 于 approval/question) | 分级升级,见 R3 |
 | 代码 | git log / diff | 审查对象 |
+| **主动问询(MCP 第五信道)** | `olp-mcp-server.py` 工具 `ask_outer`/`report_blocked`;信箱 `~/.octos/outer/mcp/questions|answers|consumed`,审计 `OUTER_LOOP_MCP.md` 署名 `MCP(ask_outer)` | 内环 turn 内同步发问,90s 超时降级,每片限 3 次+tried 必填(防思考外包);取答后归档 consumed/ |
 
 ## 协议语义(核心规则)
 
@@ -68,6 +69,18 @@
 - **R4 — 工作区共存**:同一工作区多写者(master/peers/outer)各自只
   `git add` 自己改的文件,禁止 `git add -A`;改动即原子 commit,不留长时间
   未提交状态。来源不明的 dirty 文件必须保留并报告,不得自动清理或提交。
+- **R4b — 树主权与自动围栏(多 goal 防撞默认机制)**:同一工作区并行多
+  goal 时,主工作树只属一个 goal。①**自动围栏**:peer_handoff 未显式指定
+  worktree 时,撞车谓词(active goal>1 / peer 目标分支≠主树当前分支 /
+  主树有未围栏在途 peer)命中即自动开围栏(worktree clone,branch
+  peer/<slug>);显式 worktree=false 仍可覆盖,但谓词命中时记 model_note
+  警告。单 goal 单分支零开销不回归。②**树主权**:第一个在主树落非默认
+  分支的 goal 记为主树 owner(持久化进 goal-ledger 随重启恢复);此后任何
+  不属 owner goal 的会话在主树执行跨分支 `git checkout`/`git switch` 一律
+  拒绝并提示"开围栏",不静默切换。fenced peer 的 clone 内 checkout 放行;
+  read-only git 与 pathspec restore 不拦。③外环 steer 不再是防撞的唯一
+  手段——防撞为系统默认,外环只在谓词未覆盖的边界人工补位。
+  (octos #20-20c 移交,作为 R4 子条款,不升协议版本。)
 - **R5 — 指导幂等**:outer 的意见带日期与唯一编号,只在 `Active` 区可执行;
   ACK 后移入历史区且永不重放。重复投递以 ACK 为去重依据。
 - **R6 — 版本协商**:本文件头部 `protocol: olp/vN`;`AGENTS.md` 引用同版本。
@@ -113,6 +126,17 @@
    ——所以需要 fork 补丁把 octoscode 编入 Agent 枚举与 manifest,本地
    index.toml 覆盖**不能**新增 agent。降级方案:tmux `send-keys`(注意
    首字符为 `-` 的文本会被当 flag 吃掉,用 `--` 分隔)。
+7. (可选)内环→外环主动问询(第五信道,OLP-MCP):内环 profile 的
+   `~/.octos/profiles/<id>.json` 的 `config.mcp_servers` 挂
+   `scripts/olp-mcp-server.py`(纯标准库,`--self-test` 七件自验)后,
+   内环模型 turn 内可原生调用 `ask_outer(question, context, tried)` —
+   信箱 `~/.octos/outer/mcp/` 传输,90s 超时降级,每片限 3 次、
+   `tried` 必填(防思考外包);取答后问题归档 `consumed/`,全程审计
+   `OUTER_LOOP_MCP.md` 署名 `MCP(ask_outer)`。三个实测坑已入册:
+   (a) 落点是 profiles/<id>.json 的 config 对象,**不是**
+   instances/.../config.toml(无人加载);(b) profile JSON 时间戳必须
+   RFC3339 带 Z,缺时区解析全挂;(c) 工具注册表在会话建立时快照,
+   改配置/换二进制后**必须新建会话**才见新工具。
 
 ## 路线
 
