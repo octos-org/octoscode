@@ -47,6 +47,14 @@ Scenario: Result defaults to first real change
   When the result is applied
   Then the selected hunk is the first hunk with added/removed lines.
 
+Scenario: Wrapped diff rows keep the code's own whitespace
+  Test: diff_content_rows_preserve_indentation_and_interior_spacing
+  Given a diff content line carrying leading indentation and an interior run
+       of spaces
+  When the row is wrapped into the columns left of the sign gutter
+  Then the leading indentation is preserved
+  And interior space runs are not collapsed.
+
 ## Non-goals
 
 - No character-level intra-line diff.

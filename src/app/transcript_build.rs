@@ -3857,20 +3857,32 @@ pub(super) fn push_diff_content_line(
 /// expanded first (the `fit_diff_cell` ordering) so the measurement matches
 /// what the terminal actually prints; a very narrow pane still gets a usable
 /// minimum instead of a one-column-per-row shred.
+///
+/// Wraps with `insert_history::wrap_line`, NOT `wrap_display_width`: a diff
+/// row's whitespace is the code's structure. The prose wrapper splits on
+/// `' '` and rebuilds rows with single separators, which drops the leading
+/// indent and collapses interior runs — its card callers `.trim()` first, so
+/// only diff content ever noticed.
 pub(super) fn diff_content_rows(
     content: &str,
     wrap_width: usize,
     gutter_cols: usize,
 ) -> Vec<String> {
     let budget = wrap_width.saturating_sub(gutter_cols).max(8);
-    if content.chars().any(char::is_control) {
-        wrap_display_width(
-            &crate::insert_history::sanitize_span_content(content),
-            budget,
-        )
+    let sanitized = if content.chars().any(char::is_control) {
+        crate::insert_history::sanitize_span_content(content)
     } else {
-        wrap_display_width(content, budget)
-    }
+        content.to_string()
+    };
+    crate::insert_history::wrap_line(&Line::from(Span::raw(sanitized)), budget)
+        .into_iter()
+        .map(|row| {
+            row.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect()
 }
 
 /// Render one half of a side-by-side row: line number, sign, and the content

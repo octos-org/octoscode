@@ -2873,6 +2873,26 @@ mod tests {
         assert_eq!(fit_diff_cell("a\u{1b}[31mb", 8), "a[31mb  ");
     }
 
+    /// A diff row's whitespace is the code's structure, not prose spacing:
+    /// wrapping the content must keep the leading indent and every interior
+    /// run intact. `wrap_display_width` was written for question-card PROSE
+    /// (its callers `.trim()` first) and collapses both — reusing it for diff
+    /// content silently reindented every rendered diff row to column 0.
+    #[test]
+    fn diff_content_rows_preserve_indentation_and_interior_spacing() {
+        use super::transcript_build::diff_content_rows;
+        assert_eq!(
+            diff_content_rows("        let indented = true;", 120, 16),
+            vec!["        let indented = true;".to_string()],
+            "leading indentation survives the wrap"
+        );
+        assert_eq!(
+            diff_content_rows("let aligned  = 1;", 120, 16),
+            vec!["let aligned  = 1;".to_string()],
+            "interior space runs are not collapsed"
+        );
+    }
+
     /// Row-level guarantee for the scrollback flush: side-by-side rows carry
     /// no raw control characters (so `sanitize_line_in_place` is a no-op on
     /// them) and every row — full pair, tab-indented, or blank-half — shares
