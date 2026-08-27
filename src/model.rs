@@ -4973,10 +4973,11 @@ pub struct AppState {
     /// serve busy time and writing the history into native scrollback twice.
     /// Cleared when the hydrate result lands, when an attributed
     /// `session/hydrate` error frame arrives, and on backend relaunch (the old
-    /// child's in-flight requests die with it). The wire include sets of both
-    /// producers are equivalent (`resume` adds `pending_questions`, which the
-    /// open-path include silently omits), so the first dispatch wins — no
-    /// merge needed.
+    /// child's in-flight requests die with it). The first dispatch wins with no
+    /// merge, which is only sound because both producers send the SAME include
+    /// set — pinned by `both_hydrate_producers_request_the_same_sections`.
+    /// Adding a section to one producer alone loses it whenever the other wins
+    /// the race.
     pub hydrate_in_flight: std::collections::HashSet<SessionKey>,
     /// #324 Phase C: per-session unread counters — turns that reached a
     /// terminal while the session was NOT focused. Incremented by the store's

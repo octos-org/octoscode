@@ -3217,10 +3217,16 @@ impl Store {
         Some(AppUiCommand::HydrateSession(SessionHydrateParams {
             session_id,
             after: None,
+            // Identical to the open path's include (see
+            // `hydrate_session_state_command`): the dedupe above makes the
+            // FIRST dispatch win and either producer can be first, so a
+            // section only one of them asks for is lost whenever the other
+            // wins the race.
             include: vec![
-                "messages".into(),
-                "turns".into(),
-                "pending_approvals".into(),
+                octos_core::ui_protocol::hydrate_sections::MESSAGES.into(),
+                octos_core::ui_protocol::hydrate_sections::THREADS.into(),
+                octos_core::ui_protocol::hydrate_sections::TURNS.into(),
+                octos_core::ui_protocol::hydrate_sections::PENDING_APPROVALS.into(),
                 "pending_questions".into(),
             ],
         }))
@@ -42006,6 +42012,45 @@ now analyzing the bus module"
         assert!(
             store.hydrate_session_state_command(&session_id).is_none(),
             "the open-path hydrate is deduped while the resume hydrate is in flight"
+        );
+    }
+
+    /// The dedupe makes the FIRST dispatch win and either producer can be
+    /// first (`hydrate_in_flight_dedupes_open_path_after_resume` pins the
+    /// resume-first order), so the two include sets must be IDENTICAL — any
+    /// section only one producer asks for is silently lost whenever the other
+    /// wins the race. `threads` was the asymmetry: a resume-first startup
+    /// hydrated without it, leaving an open thread-graph overlay stale.
+    #[test]
+    fn both_hydrate_producers_request_the_same_sections() {
+        let mut store = store_with_empty_session();
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods_and_features(
+            [crate::model::APPUI_METHOD_SESSION_HYDRATE],
+            [crate::model::APPUI_FEATURE_SESSION_HYDRATE_V1],
+        ));
+        let session_id = store.state.sessions[0].id.clone();
+
+        let Some(AppUiCommand::HydrateSession(resume)) =
+            store.resume_session_command(session_id.0.clone())
+        else {
+            panic!("the resume path dispatches a hydrate");
+        };
+        store.state.hydrate_in_flight.clear();
+        let Some(AppUiCommand::HydrateSession(open)) =
+            store.hydrate_session_state_command(&session_id)
+        else {
+            panic!("the open path dispatches a hydrate");
+        };
+
+        let resume_sections: BTreeSet<&str> = resume.include.iter().map(String::as_str).collect();
+        let open_sections: BTreeSet<&str> = open.include.iter().map(String::as_str).collect();
+        assert_eq!(
+            resume_sections, open_sections,
+            "whichever producer wins the dedupe must fetch the same sections"
+        );
+        assert!(
+            resume_sections.contains(octos_core::ui_protocol::hydrate_sections::THREADS),
+            "threads is part of the shared include set"
         );
     }
 
