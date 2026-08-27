@@ -19,6 +19,10 @@
 内环模型便宜、可反复重跑;外环模型贵、只花在审查与裁决上。推送权只在
 外环,每个 commit 都过两双眼睛。
 
+**命名落地**:OLP = 协议名(Outer-Loop Protocol,文档/ACK 定式沿用);
+**OctoLoop** = 产品名——用户视角的一键化封装(`.claude/skills/octoloop`
+三模式入口:init/outer/inner;能力全景见 `docs/OCTOLOOP_FEATURES.md`)。
+
 ## 1. 环境依赖清单
 
 | 依赖 | 必须? | 说明 |
@@ -89,6 +93,29 @@ description = "机械性、低风险、可回滚:测试诊断、日志分类、A
 model = "anthropic/claude-opus"
 description = "长链推理与跨文件判断:审查定级、分歧裁决、多步调试。"
 ```
+
+**主对话车道**(profile `~/.octos/profiles/<id>.json` 的 `config.llm`,
+与 sub_providers 独立——后者只喂 pipeline 节点):
+
+```json
+{
+  "llm": {
+    "primary": { "provider": "openrouter", "model": "zai-org/glm-4.6" },
+    "fallbacks": [
+      { "provider": "moonshot",  "model": "kimi/kimi-k2-turbo" },
+      { "provider": "deepseek",  "model": "deepseek/deepseek-chat" }
+    ]
+  }
+}
+```
+
+- `primary`:常驻主道(如 zai glm-4.6——战役实测的性价比主力)。
+- `fallbacks[]`:断供自动降级序列(quota/auth 拒付逐道切,k3 兜底、
+  deepseek 应急);顺序即优先级。
+- 修改后**新建会话**生效(工具与配置在会话建立时快照);profile JSON
+  时间戳字段必须 RFC3339 带 Z。
+- **回执体感**:断供发生时对话不停——状态栏闪一次降级提示,响应继续;
+  恢复后主道自动回归,无需重启。
 
 ## 4. 外环最小接入(任何 CLI agent 三步上岗)
 
