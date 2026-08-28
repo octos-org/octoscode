@@ -7,13 +7,40 @@ It should not be injected by the TUI client.
 
 ## Output Shape
 
-Every user turn must produce a human-facing answer. Tool activity, diff previews,
-status changes, and file edits are not a substitute for an assistant answer. If
-the model fails before producing a final answer, the runtime or client should
-surface a structured fallback summary rather than leaving the user with only
-activity rows.
+Every YIELD POINT must produce a human-facing answer. A yield point is the
+moment the agent stops and hands control back to the user: the task is done,
+the agent is blocked on input, or it hit an error it cannot resolve. Tool
+activity, diff previews, status changes, and file edits are not a substitute
+for an assistant answer at a yield point. If the model fails before producing
+a final answer, the runtime or client should surface a structured fallback
+summary rather than leaving the user with only activity rows.
 
-When starting implementation work, emit one concise checklist:
+WORK TURNS — iterations inside a long task where the agent continues
+autonomously — are exempt: tool-only output plus at most a one-line status is
+the CORRECT shape there. Demanding a formatted answer on every iteration
+turns the contract into an off-ramp: an observed local-model session ended
+each long tool-use turn by satisfying the contract with a polished walkthrough
+summary INSTEAD of continuing the conversion it was asked to do.
+
+A task therefore has exactly three output phases, and each formatting
+requirement in this document belongs to exactly one of them:
+
+1. **Task start** — ONE concise plan checklist (the shape below). This is
+   the single explicit exception to the work-turn rule: the checklist is
+   emitted once, when implementation work begins, and never re-emitted on
+   later iterations (status updates edit the existing plan, they do not
+   restate it).
+2. **Intermediate work turns** — tool-only output, or at most one status
+   line. No tables, no summaries, no re-printed plans.
+3. **Yield points** — the full answer shape: Session Summary, tables where
+   the content calls for them, every user question answered.
+
+For small/local models this three-phase shape is not a trimming — it IS the
+contract; every formatting obligation beyond it competes with the task for a
+small model's attention and context. Tables and structured shapes are
+on-demand (phase 3 or direct questions), never per turn.
+
+At task start (phase 1), emit one concise checklist:
 
 ```text
 Plan:
@@ -38,18 +65,22 @@ Rules:
 
 ## Structured Output Purposes
 
-The coding prompt should force predictable shapes for common UX states:
+The coding prompt should force predictable shapes for common UX states.
+Every shape belongs to a phase (or to answering a direct user question,
+which is always in scope); NONE of them applies during phase-2 autonomous
+tool use, where the only permitted prose is the optional single status
+line:
 
-| Purpose | Required Shape | Notes |
-| --- | --- | --- |
-| Ask for input | `Question` plus `A`, `B`, `C` choices | Each choice states the impact or tradeoff. |
-| Status | Table: `Area`, `State`, `Next` | Use for "status", "are you working", and "what remains". |
-| Work summary | `Session Summary` bullets | Include files, validation, risks, and next step. |
-| Shell/tool use | `Command`, `Purpose`, `Expected result` | Use before non-trivial commands, not every trivial read. |
-| File edits | Table: `File`, `Change`, `Validation` | Keep paths exact and concise. |
-| Code generation | Planned diff then actual diff summary | Do not paste large diffs unless asked. |
-| Background tasks | Checklist with state words | Use `pending`, `running`, `blocked`, or `done`. |
-| Review findings | Table: `Finding`, `Impact`, `Fix` | Findings lead; summary is secondary. |
+| Purpose | When | Required Shape | Notes |
+| --- | --- | --- | --- |
+| Ask for input | Yield point (blocked on input) | `Question` plus `A`, `B`, `C` choices | Each choice states the impact or tradeoff. |
+| Status | Direct user question | Table: `Area`, `State`, `Next` | Use for "status", "are you working", and "what remains". |
+| Work summary | Phase 3 (yield point) | `Session Summary` bullets | Include files, validation, risks, and next step. |
+| Shell/tool use | Phase 2 | Optional ONE-line status, or nothing | No `Command` / `Purpose` / `Expected result` block during autonomous work — that structured narration is exactly the per-tool context tax the phases exist to remove. Explain a command in prose only when answering a direct question about it. |
+| File edits | Phase 3 (yield point) | Table: `File`, `Change`, `Validation` | Keep paths exact and concise. |
+| Code generation | Phase 3, or on request | Planned diff then actual diff summary | Do not paste large diffs unless asked. |
+| Background tasks | Phase 3, or direct question | Checklist with state words | Use `pending`, `running`, `blocked`, or `done`. |
+| Review findings | Phase 3 (yield point) | Table: `Finding`, `Impact`, `Fix` | Findings lead; summary is secondary. |
 
 Markdown tables must use real pipe-table syntax:
 
@@ -61,15 +92,19 @@ Markdown tables must use real pipe-table syntax:
 
 ## While Working
 
+- These are phase-2 WORK TURNS: tool-only output is acceptable; a one-line
+  status is the most a work turn owes the transcript. The task-start
+  checklist (phase 1) is not re-emitted here.
 - Keep progress prose short and decision-oriented.
-- Prefer a single sentence before tool use only when it helps the user
-  understand intent.
+- The optional single status line is the ONLY narration a phase-2 tool call
+  carries — one sentence, only when it helps the user understand intent;
+  never the structured `Command`/`Purpose`/`Expected result` shape.
 - Do not restate raw tool output unless it changes the next action.
 - When blocked on approval or input, say exactly what is needed and stop.
 
 ## Completion
 
-Finish with:
+Completion is a yield point. Finish with:
 
 ```text
 Session Summary

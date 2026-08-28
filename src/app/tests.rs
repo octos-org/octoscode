@@ -2873,6 +2873,43 @@ mod tests {
         assert_eq!(fit_diff_cell("a\u{1b}[31mb", 8), "a[31mb  ");
     }
 
+    /// A diff row's whitespace is the code's structure, not prose spacing:
+    /// wrapping the content must keep the leading indent and every interior
+    /// run intact. `wrap_display_width` was written for question-card PROSE
+    /// (its callers `.trim()` first) and collapses both — reusing it for diff
+    /// content silently reindented every rendered diff row to column 0.
+    ///
+    /// Both budgets matter. A row that FITS takes `wrap_line`'s
+    /// `line.width() <= width` early return, which is what the regression hit:
+    /// even short rows came out at column 0. A row that does NOT fit walks the
+    /// unit loop, where the leading indent is a whitespace unit at
+    /// `cur_width == 0` (kept) and the whitespace at a break is a whitespace
+    /// unit at `cur_width == 0` after a flush (dropped) — so the first row hangs
+    /// under the code's own indent and continuations start at the content
+    /// column, where `push_diff_content_line` pads them.
+    #[test]
+    fn diff_content_rows_preserve_indentation_and_interior_spacing() {
+        use super::transcript_build::diff_content_rows;
+        assert_eq!(
+            diff_content_rows("        let indented = true;", 120, 16),
+            vec!["        let indented = true;".to_string()],
+            "leading indentation survives the wrap"
+        );
+        assert_eq!(
+            diff_content_rows("let aligned  = 1;", 120, 16),
+            vec!["let aligned  = 1;".to_string()],
+            "interior space runs are not collapsed"
+        );
+        // 36 - 16 = a 20-column budget against 28 columns of content, so this
+        // one actually wraps instead of returning early.
+        assert_eq!(
+            diff_content_rows("        let indented = true;", 36, 16),
+            vec!["        let indented".to_string(), "= true;".to_string()],
+            "the wrapped first row keeps the indent; the continuation starts at \
+             the content column"
+        );
+    }
+
     /// Row-level guarantee for the scrollback flush: side-by-side rows carry
     /// no raw control characters (so `sanitize_line_in_place` is a no-op on
     /// them) and every row — full pair, tab-indented, or blank-half — shares
