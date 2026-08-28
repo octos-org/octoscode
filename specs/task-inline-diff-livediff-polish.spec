@@ -53,7 +53,9 @@ Scenario: Wrapped diff rows keep the code's own whitespace
        of spaces
   When the row is wrapped into the columns left of the sign gutter
   Then the leading indentation is preserved
-  And interior space runs are not collapsed.
+  And interior space runs are not collapsed
+  And a row too wide for the budget keeps its indent on the first row while
+       continuations start at the content column.
 
 ## Non-goals
 
