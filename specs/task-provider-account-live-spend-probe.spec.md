@@ -36,6 +36,21 @@ which never touches provider billing.
 - Spend cap: `--max-spend-usd-per-provider <f64>`, default `0.05`. The estimated
   cost of the request is computed from the provider's configured price table
   **before** sending; if the estimate exceeds the cap the request is not sent.
+- The price the estimate reads is `cost_per_m`, which is `Option<Value>`
+  (`src/model.rs:3474`) — optional, and untyped even when present. So the
+  estimator has two failure modes, neither of them exotic: no price resolved at
+  all, and a price in a shape it cannot read. Both yield the verdict `unpriced`
+  at warn and **no request**, because the cap's guarantee is that nothing goes
+  out unpriced-unchecked; a gate that silently opens whenever its input is
+  missing is not a gate. Neither case is ever treated as an estimate of `0.0` —
+  a missing price read as free passes every cap that will ever be set, which is
+  the exact inversion of what the flag is for.
+- `--allow-unpriced` opts back in, per invocation: providers whose price cannot
+  be resolved are probed anyway on the strength of the fixed request shape
+  (`max_tokens = 16`, a fixed prompt, non-streaming — bounded by token count
+  rather than by the price table), and their row carries the response's normal
+  verdict with `cost_usd` null. Opt-in for the same reason `--live-provider`
+  itself is: it spends money the tool could not price in advance.
 - The flag is named for its unit because the cap is **per provider, not per
   invocation**, and the difference is the user's money. The probe walks every
   configured provider, so a run authorizes up to `cap × configured providers` —
@@ -55,6 +70,7 @@ which never touches provider billing.
   | unreachable         | connect, DNS, or TLS error; timeout        | fail        |
   | rate_limited        | 429 without insufficient_quota             | warn        |
   | over_cap            | estimate exceeds the per-provider cap     | warn        |
+  | unpriced            | no price resolved, or an unreadable price | warn        |
   | unconfigured        | no key resolved for that provider          | warn        |
 
 - `unfunded` and `unauthorized` are separate verdicts. Collapsing them is the
@@ -103,6 +119,9 @@ which never touches provider billing.
 - Do not commit an API key, a funded account credential, or a `.env` file.
 - Do not send a provider request when `--live-provider` is absent.
 - Do not modify `src/transport.rs` or `src/menu/providers.rs`.
+- Do not treat a missing or unreadable `cost_per_m` as a zero-cost estimate,
+  and do not send a request for a provider the estimator could not price
+  unless `--allow-unpriced` was passed.
 - Do not add a new runtime dependency.
 
 ## Out of Scope
@@ -189,6 +208,42 @@ Scenario: the run states what it is authorized to spend
   Then the output names the provider count "3" and the per-provider cap "0.02"
   And the output names the authorized ceiling "0.06" for the invocation
   And the ceiling is reported before the transport receives any request
+
+Scenario: a provider with no price data is not probed
+  Test: test_unpriced_provider_sends_no_request
+  Level: integration
+  Test Double: loopback `std::net::TcpListener` stub on port 0
+  Given a configured provider whose key resolves
+  And the provider's selected model resolves no `cost_per_m`
+  When doctor runs with "--live-provider" without "--strict"
+  Then the provider verdict is "unpriced"
+  And the check status is "warn"
+  And the transport receives exactly "0" requests
+  And the process exit code is "0"
+  And the detail contains the provider identifier and the selected model id
+
+Scenario: an unreadable price is not read as free
+  Test: test_malformed_price_is_not_treated_as_zero
+  Level: integration
+  Test Double: loopback `std::net::TcpListener` stub on port 0
+  Given a configured provider whose `cost_per_m` is present but not a shape the
+       estimator can read
+  When doctor runs with "--live-provider --max-spend-usd-per-provider 0.05"
+  Then the provider verdict is "unpriced"
+  And the transport receives exactly "0" requests
+  And the verdict is not "over_cap"
+  And no estimate of "0.0" is recorded for that provider
+
+Scenario: allow-unpriced probes and reports a null cost
+  Test: test_allow_unpriced_probes_and_reports_null_cost
+  Level: integration
+  Test Double: loopback `std::net::TcpListener` stub on port 0
+  Given a configured provider whose selected model resolves no `cost_per_m`
+  And the transport returns 200 with a usage block
+  When doctor runs with "--live-provider --allow-unpriced --json"
+  Then the transport receives exactly "1" request
+  And the provider verdict is "ok"
+  And that entry's "cost_usd" is null
 
 Scenario: an estimate above the cap sends no request
   Test: test_estimate_over_cap_sends_no_request
