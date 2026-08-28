@@ -65,6 +65,17 @@ workstream.
   stale build fifty times while every deploy reported `ok`. The runner treats a
   heartbeat that disagrees with the installed scenario as a hard failure before
   any driving happens.
+- `setup_scenario.py`'s `data_files()` enumerates the data set as every
+  `index.json` `results` entry plus the ONE hardcoded sibling
+  `index["turn_stream"]["file"]` — deliberately read from the index rather than
+  globbed, so a stray JSON never becomes part of the baseline. `agent_stream` is
+  declared as a second sibling and carries no `results` entry, so that function
+  cannot see it: `--seed` would never copy it into `pristine/`, and `--restore`,
+  which walks `pristine/`, would therefore never put it back. A scenario that
+  mutates the roster stream would leave the mutation in place permanently while
+  every restore reported success. `data_files()` therefore enumerates every
+  declared stream sibling instead of `turn_stream` alone, and `pristine/` is
+  reseeded so it holds the extended data set.
 - No octoscode source changes. A client that mishandles a served case is a
   finding this contract reports, not a fix it makes.
 
@@ -77,6 +88,7 @@ workstream.
 - examples/automation/octos/README.md
 - examples/automation/octos/gen_scenario.py
 - examples/automation/octos/run_campaign.py
+- examples/automation/octos/setup_scenario.py
 - examples/automation/octos/pristine/**
 - examples/automation/mock_octos.rs
 - build.rs
@@ -167,6 +179,15 @@ Scenario: a stale deploy aborts the run before driving
   When `run_campaign.py agents` reaches that scenario
   Then the run fails naming both the installed and the reported scenario
   And the client is never driven for that scenario
+
+Scenario: the pushed stream is part of the restorable baseline
+  Test: test_agent_stream_is_seeded_and_restored
+  Level: integration
+  Test Double: temporary data dir seeded from the committed corpus
+  Given `agent_stream.json` declared as an `index.json` sibling with no `results` entry
+  When `setup_scenario.py --seed` runs and then a dock scenario mutates the stream
+  Then `pristine/` contains "agent_stream.json"
+  And `setup_scenario.py --restore` returns the file to its baseline bytes
 
 Scenario: an aborted run restores the baseline
   Test: test_campaign_restores_baseline_on_failure
