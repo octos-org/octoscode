@@ -33,10 +33,18 @@ which never touches provider billing.
 - The probe issues **at most one** completion request per provider per invocation:
   a fixed prompt, `max_tokens = 16`, temperature 0, non-streaming. It is a
   billability check, not a benchmark.
-- Spend cap: `--max-spend-usd <f64>`, default `0.05` per provider per invocation.
-  The estimated cost of the request is computed from the provider's configured
-  price table **before** sending; if the estimate exceeds the cap the request is
-  not sent.
+- Spend cap: `--max-spend-usd-per-provider <f64>`, default `0.05`. The estimated
+  cost of the request is computed from the provider's configured price table
+  **before** sending; if the estimate exceeds the cap the request is not sent.
+- The flag is named for its unit because the cap is **per provider, not per
+  invocation**, and the difference is the user's money. The probe walks every
+  configured provider, so a run authorizes up to `cap × configured providers` —
+  with the seven providers named in the Intent, a default run authorizes `0.35`,
+  seven times what a flag called `--max-spend-usd` would have read as. A cap the
+  user types must be a number they can reason about, so the name carries the
+  unit and the run states the arithmetic: before issuing any request, the probe
+  reports the provider count, the per-provider cap, and their product as the
+  authorized ceiling for that invocation.
 - Verdict taxonomy, one per provider, mapped onto the existing `CheckStatus`:
 
   | verdict             | trigger                                   | CheckStatus |
@@ -46,7 +54,7 @@ which never touches provider billing.
   | model_unavailable   | 404 / model_not_found                     | fail        |
   | unreachable         | connect, DNS, or TLS error; timeout        | fail        |
   | rate_limited        | 429 without insufficient_quota             | warn        |
-  | over_cap            | pre-send estimate exceeds `--max-spend-usd`| warn        |
+  | over_cap            | estimate exceeds the per-provider cap     | warn        |
   | unconfigured        | no key resolved for that provider          | warn        |
 
 - `unfunded` and `unauthorized` are separate verdicts. Collapsing them is the
@@ -172,10 +180,20 @@ Scenario: model absent from the account plan is named as such
   Then the provider verdict is "model_unavailable"
   And the detail names the model that was requested
 
+Scenario: the run states what it is authorized to spend
+  Test: test_authorized_ceiling_is_reported_before_any_request
+  Level: integration
+  Test Double: loopback `std::net::TcpListener` stub on port 0
+  Given three configured providers whose keys resolve
+  When doctor runs with "--live-provider --max-spend-usd-per-provider 0.02"
+  Then the output names the provider count "3" and the per-provider cap "0.02"
+  And the output names the authorized ceiling "0.06" for the invocation
+  And the ceiling is reported before the transport receives any request
+
 Scenario: an estimate above the cap sends no request
   Test: test_estimate_over_cap_sends_no_request
   Given a configured provider
-  When doctor runs with "--live-provider --max-spend-usd 0.0"
+  When doctor runs with "--live-provider --max-spend-usd-per-provider 0.0"
   Then the provider verdict is "over_cap"
   And the check status is "warn"
   And the transport receives exactly "0" requests
