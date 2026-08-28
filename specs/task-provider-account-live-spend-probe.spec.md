@@ -45,12 +45,22 @@ which never touches provider billing.
   | unfunded            | 402, or 429 with insufficient_quota        | fail        |
   | model_unavailable   | 404 / model_not_found                     | fail        |
   | unreachable         | connect, DNS, or TLS error; timeout        | fail        |
+  | rate_limited        | 429 without insufficient_quota             | warn        |
   | over_cap            | pre-send estimate exceeds `--max-spend-usd`| warn        |
   | unconfigured        | no key resolved for that provider          | warn        |
 
 - `unfunded` and `unauthorized` are separate verdicts. Collapsing them is the
   specific failure this task exists to prevent — "your card ran out" and "your key
   is wrong" have different fixes.
+- The two `429`s split for the same reason. `insufficient_quota` is a funding
+  problem and terminal until the user pays; every other `429` — the plain
+  `rate_limit_exceeded` — says the account is fine and the probe was merely too
+  early. It is therefore `rate_limited` at **warn**, never `fail` and never
+  `unreachable`: nothing is wrong with the key, the credit, or the network, so a
+  verdict that sends the user to check any of those three is a wrong answer, not
+  a conservative one. `unreachable` keeps exactly one meaning — no HTTP response
+  arrived at all — so a `--json` consumer can still tell a dead DNS from a busy
+  provider.
 - The probe's base URL is injectable via `ProviderProbeTransport`. Contract tests
   do not mock the HTTP layer: they bind a loopback `std::net::TcpListener` stub on
   port 0 that serves canned status codes and bodies, and point the probe at it —
@@ -137,10 +147,22 @@ Scenario: exhausted credit is distinguished from a bad key
     | status | body_code           | expected_verdict |
     | 402    | payment_required    | unfunded         |
     | 429    | insufficient_quota  | unfunded         |
-    | 429    | rate_limit_exceeded | unreachable      |
+    | 429    | rate_limit_exceeded | rate_limited     |
   When doctor runs with "--live-provider"
   Then each response produces its expected verdict
   And no response produces the verdict "unauthorized"
+
+Scenario: a rate limit is not a failure of the account
+  Test: test_rate_limit_reports_rate_limited_as_warn
+  Level: integration
+  Test Double: loopback `std::net::TcpListener` stub on port 0
+  Given a configured provider whose key resolves
+  And the transport returns 429 with code "rate_limit_exceeded"
+  When doctor runs with "--live-provider" without "--strict"
+  Then the provider verdict is "rate_limited"
+  And the check status is "warn"
+  And the process exit code is "0"
+  And the verdict is neither "unreachable" nor "unfunded"
 
 Scenario: model absent from the account plan is named as such
   Test: test_plan_missing_model_reports_model_unavailable
