@@ -1,7 +1,7 @@
 //! Contract tests for `octoscode outer-duty` (#38 / #38-r1) — the
 //! per-project session-lifetime OS-exclusive duty lock. Real subprocess
 //! (CARGO_BIN_EXE), temp HOME + project (locks never touch real state).
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
