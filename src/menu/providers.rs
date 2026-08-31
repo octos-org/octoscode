@@ -10215,23 +10215,24 @@ mod tests {
         let registry = core_menu_registry();
         let only_list = CapabilitySet::from_methods([APPUI_METHOD_MODEL_LIST]);
         let session_id = SessionKey("local:test".into());
+        let profile_llm_state = crate::model::ProfileLlmListResult {
+            profile_id: Some("coding".into()),
+            primary: Some(LlmConfiguredProvider {
+                family_id: Some("deepseek".into()),
+                model_id: Some("deepseek-reasoner".into()),
+                route_id: Some("official".into()),
+                has_api_key: true,
+                ..configured_provider_for_test()
+            }),
+            fallbacks: Vec::new(),
+            llm: None,
+            runtime_policy_stamp: None,
+        };
         let missing_select_ctx = MenuContext {
             availability: AvailabilityContext::protocol(&only_list),
             app: MenuAppSnapshot {
                 selected_session_id: Some(&session_id),
-                profile_llm_state: Some(&crate::model::ProfileLlmListResult {
-                    profile_id: Some("coding".into()),
-                    primary: Some(LlmConfiguredProvider {
-                        family_id: Some("deepseek".into()),
-                        model_id: Some("deepseek-reasoner".into()),
-                        route_id: Some("official".into()),
-                        has_api_key: true,
-                        ..configured_provider_for_test()
-                    }),
-                    fallbacks: Vec::new(),
-                    llm: None,
-                    runtime_policy_stamp: None,
-                }),
+                profile_llm_state: Some(&profile_llm_state),
                 ..MenuAppSnapshot::default()
             },
             terminal: TerminalSize::default(),
