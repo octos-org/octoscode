@@ -16,6 +16,11 @@
 name: Release
 permissions:
   "contents": "write"
+  "pull-requests": "write"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 # This task will run whenever you push a git tag that looks like a version
 # like "1.0.0", "v0.1.0-prerelease.1", "my-app/0.1.0", "releases/v1.0.0", etc.
@@ -60,6 +65,17 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Verify tag matches package version
+        if: github.event_name == 'push'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::release tag $TAG does not match package version v$version"
+            exit 1
+          fi
       - name: Install dist
         # we specify bash to get pipefail; it guards against the `curl` command
         # failing. otherwise `sh` won't catch that `curl` returned non-0
@@ -125,7 +141,7 @@ jobs:
         run: |
           if ! command -v cargo > /dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-            echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           fi
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
@@ -152,9 +168,11 @@ jobs:
         shell: bash
         run: |
           # Parse out what we just built and upload it to scratch storage
-          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
-          dist print-upload-files-from-manifest --manifest dist-manifest.json >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          {
+            echo "paths<<EOF"
+            dist print-upload-files-from-manifest --manifest dist-manifest.json
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
       - name: "Upload artifacts"
@@ -195,13 +213,16 @@ jobs:
       - id: cargo-dist
         shell: bash
         run: |
+          # shellcheck disable=SC2086 # cargo-dist emits an optional argument string.
           dist build ${{ needs.plan.outputs.tag-flag }} --output-format=json "--artifacts=global" > dist-manifest.json
           echo "dist ran successfully"
 
           # Parse out what we just built and upload it to scratch storage
-          echo "paths<<EOF" >> "$GITHUB_OUTPUT"
-          jq --raw-output ".upload_files[]" dist-manifest.json >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          {
+            echo "paths<<EOF"
+            jq --raw-output ".upload_files[]" dist-manifest.json
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
       - name: "Upload artifacts"
@@ -274,8 +295,9 @@ jobs:
           RELEASE_COMMIT: "${{ github.sha }}"
         run: |
           # Write and read notes from a file to avoid quoting breaking things
-          echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
+          echo "$ANNOUNCEMENT_BODY" > "$RUNNER_TEMP/notes.txt"
 
+          # shellcheck disable=SC2086 # optional flag and artifact glob are intentional.
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
   publish-npm:
@@ -329,15 +351,33 @@ jobs:
           # Boolean from the plan; becomes the string "true"/"false" in the env.
           IS_PRERELEASE: ${{ fromJson(needs.plan.outputs.val).announcement_is_prerelease }}
 
+  # Homebrew used to run independently on the tag and race the release asset
+  # upload, so a green cargo-dist release could coexist with a red formula job.
+  # Calling the reusable workflow after `host` makes formula publication part
+  # of the release result and removes the 30-minute asset polling race.
+  publish-homebrew:
+    needs:
+      - plan
+      - host
+    if: ${{ needs.plan.outputs.publishing == 'true' }}
+    uses: ./.github/workflows/publish-homebrew.yml
+    with:
+      tag: ${{ needs.plan.outputs.tag }}
+    secrets: inherit
+    permissions:
+      contents: write
+      pull-requests: write
+
   announce:
     needs:
       - plan
       - host
       - publish-npm
+      - publish-homebrew
     # use "always() && ..." to allow us to wait for all publish jobs while
     # still allowing individual publish jobs to skip themselves (for prereleases).
     # "host" however must run to completion, no skipping allowed!
-    if: ${{ always() && needs.host.result == 'success' && (needs.publish-npm.result == 'skipped' || needs.publish-npm.result == 'success') }}
+    if: ${{ always() && needs.host.result == 'success' && (needs.publish-npm.result == 'skipped' || needs.publish-npm.result == 'success') && (needs.publish-homebrew.result == 'skipped' || needs.publish-homebrew.result == 'success') }}
     runs-on: "ubuntu-22.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -346,3 +386,63 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+
+  verify-release:
+    name: Verify published release
+    needs:
+      - plan
+      - host
+      - publish-npm
+      - publish-homebrew
+      - announce
+    if: ${{ always() && needs.plan.outputs.publishing == 'true' && needs.host.result == 'success' && needs.publish-npm.result == 'success' && needs.publish-homebrew.result == 'success' && needs.announce.result == 'success' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.plan.outputs.tag }}
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Verify GitHub assets, npm package, and formula channel
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          actual=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          expected='octoscode-aarch64-apple-darwin.tar.xz
+          octoscode-aarch64-unknown-linux-gnu.tar.xz
+          octoscode-x86_64-unknown-linux-gnu.tar.xz
+          octoscode-x86_64-pc-windows-msvc.zip
+          octoscode-installer.sh
+          octoscode-installer.ps1
+          octoscode-npm-package.tar.gz
+          sha256.sum
+          dist-manifest.json'
+          while IFS= read -r asset; do
+            asset=$(echo "$asset" | xargs)
+            [ -z "$asset" ] && continue
+            echo "$actual" | grep -Fx "$asset" >/dev/null \
+              || { echo "::error::release $TAG is missing $asset"; exit 1; }
+          done <<< "$expected"
+
+          for attempt in $(seq 1 18); do
+            published=$(npm view "@octos-org/octoscode@${version}" version 2>/dev/null || true)
+            [ "$published" = "$version" ] && break
+            echo "attempt $attempt/18: waiting for npm registry visibility"
+            sleep 10
+          done
+          [ "${published:-}" = "$version" ] \
+            || { echo "::error::npm package ${version} is not visible"; exit 1; }
+
+          if [[ "$TAG" == *-* ]]; then formula=Formula/octoscode-dev.rb; else formula=Formula/octoscode.rb; fi
+          content=$(gh api "repos/$GITHUB_REPOSITORY/contents/${formula}?ref=main" --jq .content | tr -d '\n' | base64 --decode)
+          echo "$content" | grep -F "version \"${version}\"" >/dev/null \
+            || { echo "::error::${formula} does not point to ${version}"; exit 1; }
+
+          mkdir verify
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'octoscode-x86_64-unknown-linux-gnu.tar.xz' --dir verify
+          tar -tJf verify/octoscode-x86_64-unknown-linux-gnu.tar.xz >/dev/null

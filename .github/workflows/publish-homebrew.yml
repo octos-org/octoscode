@@ -2,19 +2,14 @@ name: Publish Homebrew Formula
 # The octoscode Homebrew formula lives IN THIS REPO at Formula/octoscode.rb
 # (this repo is its own tap -> `brew tap octos-org/octoscode https://github.com/octos-org/octoscode`).
 #
-# This is a STANDALONE workflow triggered by the same version tag push that
-# starts release.yml — NOT a dist custom publish job and NOT `release: published`:
+# This is a reusable workflow called by release.yml after cargo-dist has
+# created the release and uploaded its assets. It is not a dist custom job:
 #   - `release: published` would never fire, because dist creates the release
 #     with the built-in GITHUB_TOKEN and GitHub suppresses token-created events.
 #   - a dist custom publish job cannot get contents:write — dist caps custom-job
 #     permissions to id-token/packages and a reusable workflow can't elevate.
-# A tag push is human-initiated, so it fires reliably, exposes the tag as
-# `ref_name`, and lets this workflow own its `contents: write`.
-#
-# It runs in parallel with release.yml and polls the release until dist has
-# uploaded all the tarballs (Rust cross-compiles for 4 targets can take a
-# while), then renders the formula from their checksums and pushes it to main
-# (main is NOT branch-protected). GITHUB_TOKEN only.
+# The caller grants `contents: write` and `pull-requests: write`. Manual
+# dispatch remains available for a resumable repair of an existing release.
 #
 # TWO-CHANNEL scheme (mirrors dist-workspace.toml + release.yml's npm publish):
 #   - STABLE tag (no '-'): render Formula/octoscode.rb (class Octoscode) from
@@ -27,9 +22,12 @@ name: Publish Homebrew Formula
 # `brew install octos-org/octoscode/octoscode-dev` tracks the latest prerelease.
 
 on:
-  push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+*'
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Release tag to publish'
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       tag:
@@ -45,7 +43,7 @@ jobs:
   homebrew:
     runs-on: ubuntu-latest
     env:
-      TAG: ${{ inputs.tag || github.ref_name }}
+      TAG: ${{ inputs.tag }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Select formula channel (stable vs prerelease)
@@ -70,7 +68,7 @@ jobs:
             } >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: main
 
@@ -79,10 +77,9 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           triples="aarch64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu"
-          # This workflow starts at the same instant as release.yml, so the
-          # tarballs won't exist yet. Poll generously — a 4-target Rust release
-          # build commonly takes 10-20 min. 60 * 30s = 30 min.
-          for attempt in $(seq 1 60); do
+          # `host` has completed before this reusable workflow starts. Keep a
+          # short retry only for GitHub's asset-list eventual consistency.
+          for attempt in $(seq 1 12); do
             missing=0
             for triple in $triples; do
               asset="octoscode-${triple}.tar.xz"
@@ -92,8 +89,8 @@ jobs:
               [ -f "artifacts/$asset" ] || missing=1
             done
             [ "$missing" = 0 ] && break
-            echo "attempt $attempt/60: waiting for release.yml to upload all tarballs..."
-            sleep 30
+            echo "attempt $attempt/12: waiting for release assets to become visible..."
+            sleep 10
           done
           for triple in $triples; do
             test -f "artifacts/octoscode-${triple}.tar.xz" \
@@ -189,12 +186,22 @@ jobs:
           fi
 
           # No --delete-branch: the `no-push` ruleset forbids deletion, and a
-          # failure there would mask an otherwise successful merge.
-          # Mergeability is computed async — retry once after a short wait.
+          # failure there would mask an otherwise successful merge. Enable
+          # auto-merge so the formula PR waits for required CI instead of
+          # racing it, then verify that publication actually completed.
           if [ -n "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number')" ]; then
-            gh pr merge "$BRANCH" --squash \
-              || (sleep 12 && gh pr merge "$BRANCH" --squash) \
-              || { echo "::error::branch $BRANCH is pushed but could not be merged; merge it by hand"; exit 1; }
+            gh pr merge "$BRANCH" --squash --auto
+            for attempt in $(seq 1 60); do
+              state=$(gh pr view "$BRANCH" --json state --jq .state)
+              if [ "$state" = "MERGED" ]; then
+                echo "Formula PR merged."
+                exit 0
+              fi
+              echo "attempt $attempt/60: waiting for formula PR checks and merge"
+              sleep 10
+            done
+            echo "::error::formula PR did not merge within 10 minutes"
+            exit 1
           else
             echo "::error::no PR for $BRANCH — see #474. The branch is pushed; open and merge it by hand."
             exit 1
