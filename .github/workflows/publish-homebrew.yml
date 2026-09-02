@@ -10,6 +10,9 @@ name: Publish Homebrew Formula
 #     permissions to id-token/packages and a reusable workflow can't elevate.
 # The caller grants `contents: write` and `pull-requests: write`. Manual
 # dispatch remains available for a resumable repair of an existing release.
+# HOMEBREW_TAP_TOKEN is intentionally used instead of GITHUB_TOKEN: the org
+# forbids Actions itself from creating PRs, and token-created PR events would
+# otherwise be suppressed instead of running CI.
 #
 # TWO-CHANNEL scheme (mirrors dist-workspace.toml + release.yml's npm publish):
 #   - STABLE tag (no '-'): render Formula/octoscode.rb (class Octoscode) from
@@ -28,6 +31,10 @@ on:
         description: 'Release tag to publish'
         required: true
         type: string
+    secrets:
+      HOMEBREW_TAP_TOKEN:
+        description: 'Bot/PAT token that can push branches and open formula PRs'
+        required: true
   workflow_dispatch:
     inputs:
       tag:
@@ -44,7 +51,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TAG: ${{ inputs.tag }}
-      GH_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
       - name: Select formula channel (stable vs prerelease)
         id: gate
@@ -71,6 +78,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: main
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
       - name: Download release tarballs for the tag
         run: |
