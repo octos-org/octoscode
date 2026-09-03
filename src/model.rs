@@ -9770,10 +9770,17 @@ impl AppState {
 
     /// One-line "what is this session doing" summary for the Ctrl+S/Alt+S rows
     /// (tui#398): blocked reason first (it needs the user), then the live
-    /// stream's tail, then the last transcript line. Single-line, char-capped
-    /// for the menu row.
+    /// stream's tail, then the last transcript line. Single-line, capped in
+    /// display columns AND bytes for the menu row.
     pub fn session_activity_line(&self, session_id: &SessionKey) -> Option<String> {
         const ACTIVITY_CHARS: usize = 60;
+        /// Byte ceiling independent of the column budget (#489): a grapheme
+        /// padded with combining or zero-width marks is width-1 yet unbounded
+        /// in size, and was returned whole (~2 MB) to be cloned on every view
+        /// build. 2 KiB stays clear of legitimate rows — 60 columns of the
+        /// bulkiest real clusters (41-byte per-member skin-tone family emoji,
+        /// 2 columns each) need 1230 bytes.
+        const ACTIVITY_MAX_BYTES: usize = 2048;
         fn last_line_tail(text: &str, cap: usize) -> Option<String> {
             use unicode_segmentation::UnicodeSegmentation;
             use unicode_width::UnicodeWidthStr;
@@ -9784,19 +9791,51 @@ impl AppState {
             // summary render at twice its allowance (119 columns for a cap of
             // 60) and overflow the row. Walk graphemes from the END, keeping
             // one column for the leading ellipsis.
-            if line.width() <= cap {
+            // Bytes first: it is O(1) and skips the O(n) width scan entirely
+            // for a pathological paste.
+            if line.len() <= ACTIVITY_MAX_BYTES && line.width() <= cap {
                 return Some(line.to_owned());
             }
             let budget = cap.saturating_sub(1);
+            let byte_budget = ACTIVITY_MAX_BYTES - '…'.len_utf8();
+            // Bound the segmentation WORK, not just the result: only graphemes
+            // inside the last `byte_budget` bytes can be kept, so segment that
+            // window instead of the whole line. A poisoned paste is otherwise
+            // an O(line) segmentation on every view build — the freeze #489
+            // describes.
+            let mut window_start = line.len().saturating_sub(byte_budget);
+            while !line.is_char_boundary(window_start) {
+                window_start += 1;
+            }
+            let window = &line[window_start..];
+            // The window's first grapheme may be a fragment of a cluster that
+            // started before the slice (or ZWJ-merged with what follows); a
+            // fragment can measure NARROWER than it renders. Drop it — the
+            // ellipsis already signals the cut.
+            let window = if window_start > 0 {
+                let mut graphemes = window.graphemes(true);
+                graphemes.next();
+                graphemes.as_str()
+            } else {
+                window
+            };
             let mut kept = std::collections::VecDeque::new();
             let mut used = 0usize;
-            for grapheme in line.graphemes(true).rev() {
+            let mut used_bytes = 0usize;
+            for grapheme in window.graphemes(true).rev() {
                 let w = grapheme.width();
-                if used + w > budget {
+                if used + w > budget || used_bytes + grapheme.len() > byte_budget {
                     break;
                 }
                 used += w;
+                used_bytes += grapheme.len();
                 kept.push_front(grapheme);
+            }
+            if used == 0 {
+                // The window held only zero-width marks (one oversized
+                // grapheme reads as cut at the window edge): it renders as
+                // the ellipsis alone, so don't carry the dead bytes.
+                return Some('…'.to_string());
             }
             Some(format!("…{}", kept.into_iter().collect::<String>()))
         }

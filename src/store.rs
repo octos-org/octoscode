@@ -43932,4 +43932,148 @@ mod activity_line_width_tests {
             line.width()
         );
     }
+
+    /// #489: a column-only cap does not bound BYTES. `x` plus a million
+    /// combining marks is ONE grapheme of display width 1, so it sailed
+    /// through `line.width() <= cap` and was returned whole — ~2 MB cloned on
+    /// every view build. A single oversized grapheme is replaced by the
+    /// ellipsis.
+    #[test]
+    fn session_activity_line_replaces_oversized_grapheme() {
+        let session_id = SessionKey("local:b".into());
+        let paste = format!("x{}", "\u{0301}".repeat(1_000_000));
+        let session = SessionView {
+            id: session_id.clone(),
+            title: "b".into(),
+            profile_id: Some("coding".into()),
+            messages: vec![Message::assistant(paste)],
+            tasks: vec![],
+            live_reply: None,
+        };
+        let state = AppState::new(vec![session], 0, "ready".into(), None, false);
+
+        let line = state
+            .session_activity_line(&session_id)
+            .expect("activity line present");
+        assert_eq!(line, "\u{2026}");
+    }
+
+    /// #489: a line of many small-but-combining graphemes fits the COLUMN
+    /// budget (width 60) yet exceeds the byte ceiling; the tail walk must
+    /// cut it at a grapheme boundary inside the byte budget.
+    #[test]
+    fn session_activity_line_byte_cap_cuts_at_grapheme_boundary() {
+        use unicode_width::UnicodeWidthStr;
+        let session_id = SessionKey("local:b".into());
+        // One grapheme: 'e' + 20 combining marks = 1 column, 41 bytes. Sixty
+        // of them: 60 columns (fits the column budget), 2460 bytes.
+        let heavy = "e\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}\u{0301}".repeat(60);
+        let session = SessionView {
+            id: session_id.clone(),
+            title: "b".into(),
+            profile_id: Some("coding".into()),
+            messages: vec![Message::assistant(heavy)],
+            tasks: vec![],
+            live_reply: None,
+        };
+        let state = AppState::new(vec![session], 0, "ready".into(), None, false);
+
+        let line = state
+            .session_activity_line(&session_id)
+            .expect("activity line present");
+        assert!(
+            line.starts_with('\u{2026}'),
+            "cut line keeps the ellipsis: {line:?}"
+        );
+        assert!(
+            line.len() <= 2048,
+            "the byte ceiling bounds the returned line, got {} bytes",
+            line.len()
+        );
+        assert!(
+            line.len() > 41,
+            "whole graphemes still fit under the ceiling: {line:?}"
+        );
+        assert!(line.width() <= 60);
+    }
+
+    /// #489: a tail window sliced mid-cluster must not leak a grapheme
+    /// fragment after the ellipsis — a fragment can measure NARROWER than the
+    /// terminal renders it. Sixty 41-byte skin-tone family emoji: 2460 bytes
+    /// AND 120 columns, so the window starts inside a cluster.
+    #[test]
+    fn session_activity_line_window_never_emits_partial_grapheme() {
+        use unicode_segmentation::UnicodeSegmentation;
+        let session_id = SessionKey("local:b".into());
+        let cluster = "\u{1F468}\u{1F3FF}\u{200D}\u{1F469}\u{1F3FB}\u{200D}\u{1F467}\u{1F3FD}\u{200D}\u{1F466}\u{1F3FF}";
+        let session = SessionView {
+            id: session_id.clone(),
+            title: "b".into(),
+            profile_id: Some("coding".into()),
+            messages: vec![Message::assistant(cluster.repeat(60))],
+            tasks: vec![],
+            live_reply: None,
+        };
+        let state = AppState::new(vec![session], 0, "ready".into(), None, false);
+
+        let line = state
+            .session_activity_line(&session_id)
+            .expect("activity line present");
+        let tail = line.strip_prefix('\u{2026}').expect("ellipsis prefix");
+        assert!(
+            !tail.is_empty(),
+            "whole clusters fit under the ceilings: {line:?}"
+        );
+        for grapheme in tail.graphemes(true) {
+            assert_eq!(
+                grapheme, cluster,
+                "every kept grapheme is a complete cluster, got {grapheme:?}"
+            );
+        }
+    }
+
+    /// #489: a plain over-cap line truncates to the same tail the column-only
+    /// walk produced before the byte ceiling existed.
+    #[test]
+    fn session_activity_line_long_ascii_tail_unchanged() {
+        let session_id = SessionKey("local:b".into());
+        let text: String = ('a'..='z').collect::<String>().repeat(4);
+        let session = SessionView {
+            id: session_id.clone(),
+            title: "b".into(),
+            profile_id: Some("coding".into()),
+            messages: vec![Message::assistant(text.clone())],
+            tasks: vec![],
+            live_reply: None,
+        };
+        let state = AppState::new(vec![session], 0, "ready".into(), None, false);
+
+        let expected = format!("\u{2026}{}", &text[text.len() - 59..]);
+        assert_eq!(
+            state.session_activity_line(&session_id).as_deref(),
+            Some(expected.as_str())
+        );
+    }
+
+    /// #489: ordinary combining sequences (an accented word) stay under the
+    /// byte ceiling and pass through untouched.
+    #[test]
+    fn session_activity_line_keeps_modest_combining_text() {
+        let session_id = SessionKey("local:b".into());
+        let text = "cafe\u{0301} au lait";
+        let session = SessionView {
+            id: session_id.clone(),
+            title: "b".into(),
+            profile_id: Some("coding".into()),
+            messages: vec![Message::assistant(text.to_owned())],
+            tasks: vec![],
+            live_reply: None,
+        };
+        let state = AppState::new(vec![session], 0, "ready".into(), None, false);
+
+        assert_eq!(
+            state.session_activity_line(&session_id).as_deref(),
+            Some(text)
+        );
+    }
 }
