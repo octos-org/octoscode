@@ -1,0 +1,4 @@
+{"ts":"2026-08-30T01:00:00Z","kind":"escalation","data":{"goal_id":"goal_01","detail":"peer crashed"}}
+{"ts":"2026-08-30T02:00:00Z","kind":"turn_error","data":{"slug":"turn-42","detail":"provider 500"}}
+{"ts":"2026-08-30T03:00:00Z","kind":"goal_transition","goal_id":"goal_02","detail":"goal transitioned to `blocked`"}
+{"ts":"2026-08-30T04:00:00Z","kind":"goal_transition","goal_id":"goal_03","detail":"goal transitioned to `budget_limited`"}

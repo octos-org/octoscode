@@ -9325,36 +9325,29 @@ impl AppState {
 
     /// Whether an activity row with this attribution can render in the
     /// CURRENT view — the gate for scroll preservation on activity writes
-    /// (P2 tri-repo #246 fold). Mirrors the flow's filter shape
-    /// (`flow_activity_items` filters by the active turn):
+    /// (P2 tri-repo #246 fold). Mirrors the session half of the flow's
+    /// filter (`flow_activity_items`):
     ///
     /// * unattributed (`session_id == None`) → assume visible (old behavior);
     /// * the active session's own rows → visible;
-    /// * a background row tied to a TURN → renders only under its own turn's
-    ///   flow, never the active one → invisible here;
-    /// * a background TURNLESS row → renders in the active flow exactly when
-    ///   no turn is active (codex fold: skipping these lost the read
-    ///   position for rows that were on screen). May over-preserve for the
-    ///   few turnless rows `is_subagent_progress` folds away — the safe
-    ///   direction.
-    fn activity_renders_in_active_view(
-        &self,
-        session_id: Option<&SessionKey>,
-        turn_id: Option<&TurnId>,
-    ) -> bool {
+    /// * a row stamped with a DIFFERENT session → the flow drops it no
+    ///   matter what, so invisible here. Turn-less background rows used to
+    ///   slip through: this predicate predates the flow's session filter
+    ///   and gated on the active turn instead, so a stamped turn-less row
+    ///   from a background session moved the scroll of a session it never
+    ///   renders in (#487).
+    ///
+    /// Turn attribution is deliberately NOT consulted: an own-session row
+    /// the flow's turn filter hides (stale turn, `is_subagent_progress`
+    /// fold) may still over-preserve the read position — the safe
+    /// direction, since under-preserving loses it for rows that were on
+    /// screen.
+    fn activity_renders_in_active_view(&self, session_id: Option<&SessionKey>) -> bool {
         let Some(session_id) = session_id else {
             return true;
         };
-        if self
-            .active_session()
+        self.active_session()
             .is_some_and(|session| &session.id == session_id)
-        {
-            return true;
-        }
-        match turn_id {
-            Some(_) => false,
-            None => self.active_turn().is_none(),
-        }
     }
 
     /// octos#2019 — record one background event on the session that OWNS its
@@ -9423,8 +9416,7 @@ impl AppState {
         // view would drift the active transcript's read position; skipping it
         // for a row that IS visible loses the position instead — gate on the
         // render-accurate predicate (P2 tri-repo #246 fold).
-        let renders_in_active_view =
-            self.activity_renders_in_active_view(item.session_id.as_ref(), item.turn_id.as_ref());
+        let renders_in_active_view = self.activity_renders_in_active_view(item.session_id.as_ref());
         let estimated_rows = estimated_activity_rows(&item);
         self.activity.push(item);
         if renders_in_active_view {
@@ -9515,7 +9507,7 @@ impl AppState {
         // escape sequences.
         let output_preview = output_preview
             .map(|preview| crate::sanitize::strip_terminal_controls(&preview).into_owned());
-        let mut updated: Option<(Option<SessionKey>, Option<TurnId>)> = None;
+        let mut updated: Option<Option<SessionKey>> = None;
         if let Some(item) = self
             .activity
             .iter_mut()
@@ -9535,13 +9527,13 @@ impl AppState {
             if duration_ms.is_some() {
                 item.duration_ms = duration_ms;
             }
-            updated = Some((item.session_id.clone(), item.turn_id.clone()));
+            updated = Some(item.session_id.clone());
         }
         // Mirror `push_activity`: only an update to a row that can render in
         // the current view may adjust the read position (P2 tri-repo #246
         // fold).
-        if let Some((item_session, item_turn)) = updated
-            && self.activity_renders_in_active_view(item_session.as_ref(), item_turn.as_ref())
+        if let Some(item_session) = updated
+            && self.activity_renders_in_active_view(item_session.as_ref())
         {
             self.preserve_transcript_position_after_append(1);
         }

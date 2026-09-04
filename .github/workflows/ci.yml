@@ -58,3 +58,33 @@ jobs:
       # Gating, not reporting: the 5 warnings `main` carried are cleared in
       # this same PR, so the baseline is zero and any new one fails the build.
       - run: cargo clippy --all-targets -- -D warnings
+
+  # Aggregate gate for the `default-branch-protection` ruleset, whose required
+  # status context is literally "CI required" (added to the ruleset on
+  # 2026-09-03). Nothing produced that context, so every PR sat on
+  # "Expected — waiting for status". This job needs every real job and reports
+  # the required status automatically; any failure or cancellation fails it.
+  ci-required:
+    name: CI required
+    if: always()
+    needs: [fmt, test, clippy]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail if any required job failed or was cancelled
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          bad = {}
+          for name in sorted(needs):
+              result = needs[name]["result"]
+              print(name + ": " + result)
+              if result in ("failure", "cancelled"):
+                  bad[name] = result
+          if bad:
+              print("gate: FAIL -> " + json.dumps(bad))
+              sys.exit(1)
+          print("gate: all required jobs succeeded (event-gated skips are fine)")
+          PY

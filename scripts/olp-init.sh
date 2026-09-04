@@ -92,6 +92,35 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   else
     ok "黑板已在 .gitignore 中"
   fi
+  # 进化黑板(EVOLUTION.md)同样分支无关:仅在尚未被忽略时追加一行;
+  # 整目录 .octos 已忽略的项目不重复追加(git check-ignore 判定)。
+  if ! git check-ignore -q .octos/EVOLUTION.md 2>/dev/null; then
+    # 41-r5b ⑨: if the last byte of .gitignore is not a newline, the
+    # appended line would glue onto the existing last line — pad first.
+    if [ -s .gitignore ] && [ "$(tail -c 1 .gitignore | od -An -tuC | tr -d ' ')" != "10" ]; then
+      printf '\n' >> .gitignore
+    fi
+    printf '.octos/EVOLUTION.md\n' >> .gitignore
+    ok "进化黑板已加入 .gitignore"
+  else
+    ok "进化黑板已被忽略"
+  fi
+fi
+
+say ""
+say "== 外环侦听哨(~/.octos/outer/watch-board.sh) =="
+OUTER_DIR="$HOME/.octos/outer"
+SENTINEL_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/olp-watch-board.sh"
+if [ -f "$SENTINEL_SRC" ]; then
+  mkdir -p "$OUTER_DIR"
+  if [ -f "$OUTER_DIR/watch-board.sh" ]; then
+    ok "watch-board.sh 已存在,跳过(如需更新: cp $SENTINEL_SRC $OUTER_DIR/watch-board.sh)"
+  else
+    cp "$SENTINEL_SRC" "$OUTER_DIR/watch-board.sh" && chmod +x "$OUTER_DIR/watch-board.sh"
+    ok "已安装 watch-board.sh → $OUTER_DIR/"
+  fi
+else
+  say "  [--] 未找到 olp-watch-board.sh(curl 单文件运行时不装;从仓库运行 scripts/olp-init.sh 会安装)"
 fi
 
 say ""
