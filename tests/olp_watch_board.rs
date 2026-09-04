@@ -136,3 +136,188 @@ fn watch_board_rejects_bad_arguments() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2), "non-numeric interval → exit 2");
 }
+
+// --- #44a: --harvest cadence mode (five scenarios, contract v3) -------
+
+fn temp_repo(name: &str, initial: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("olp-watch-hv-{}-{}", name, std::process::id()));
+    std::fs::create_dir_all(dir.join("repo/.octos")).unwrap();
+    std::fs::create_dir_all(dir.join("state")).unwrap();
+    std::fs::write(dir.join("repo/.octos/OUTER_LOOP_REVIEW.md"), initial).unwrap();
+    dir.join("repo")
+}
+
+fn harvest_script() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/olp-evo-harvest.sh")
+}
+
+fn arm_harvest(
+    board: &PathBuf,
+    token: &str,
+    repo: &std::path::Path,
+    state_root: &std::path::Path,
+) -> Child {
+    let mut cmd = Command::new("bash");
+    let sandbox_mcp = repo.parent().unwrap().join("mcp-board.absent");
+    cmd.arg(script())
+        .arg(board)
+        .arg(token)
+        .args(["--interval", "1"])
+        .arg("--harvest")
+        .arg(repo)
+        .env("OLP_EVO_STATE", state_root)
+        .env("OLP_EVO_EVENTS", "")
+        .env("OLP_EVO_MCP_BOARD", &sandbox_mcp)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    cmd.spawn().unwrap()
+}
+
+fn still_running(child: &mut Child) -> bool {
+    child.try_wait().unwrap().is_none()
+}
+
+/// Scenario: 节拍采集在命中时落卡、推进基线且常驻
+#[test]
+fn olp_watch_board_harvest_on_hit_writes_card_and_keeps_watching() {
+    let repo = temp_repo("hit", "l1\nl2\nl3\n");
+    let board = repo.join(".octos/OUTER_LOOP_REVIEW.md");
+    let state = repo.parent().unwrap().join("state");
+    let mut child = arm_harvest(&board, "ACK(blocked", &repo, &state);
+    std::thread::sleep(Duration::from_millis(1500));
+    append(&board, "ACK(blocked): waiting for outer decision\n");
+    std::thread::sleep(Duration::from_secs(3));
+    let evo = std::fs::read_to_string(repo.join(".octos/EVOLUTION.md")).unwrap_or_default();
+    let cards = evo.lines().filter(|l| l.starts_with("### EVO-")).count();
+    assert_eq!(cards, 1, "exactly one card lands: {evo}");
+    assert!(still_running(&mut child), "--harvest keeps watching");
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+/// Scenario: 节拍与手跑并发只落一张卡
+#[test]
+fn olp_watch_board_harvest_concurrent_with_manual_is_deduped() {
+    let repo = temp_repo("dedup", "l1\nl2\nl3\n");
+    let board = repo.join(".octos/OUTER_LOOP_REVIEW.md");
+    let state = repo.parent().unwrap().join("state");
+    let mut child = arm_harvest(&board, "ACK(blocked", &repo, &state);
+    std::thread::sleep(Duration::from_millis(1500));
+    append(&board, "ACK(blocked): waiting for outer decision\n");
+    // manual double-run immediately (races the sentinel's own harvest)
+    for _ in 0..2 {
+        let _ = Command::new("bash")
+            .arg(harvest_script())
+            .arg(&repo)
+            .env("OLP_EVO_STATE", &state)
+            .env("OLP_EVO_EVENTS", "")
+            .env(
+                "OLP_EVO_MCP_BOARD",
+                repo.parent().unwrap().join("mcp-board.absent"),
+            )
+            .output()
+            .unwrap();
+    }
+    std::thread::sleep(Duration::from_secs(2));
+    let evo = std::fs::read_to_string(repo.join(".octos/EVOLUTION.md")).unwrap_or_default();
+    let cards = evo.lines().filter(|l| l.starts_with("### EVO-")).count();
+    assert_eq!(cards, 1, "identity dedup across watcher+manual: {evo}");
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+/// Scenario: 采集失败不中断监视
+#[test]
+fn olp_watch_board_harvest_failure_keeps_watching() {
+    let repo = temp_repo("fail", "l1\nl2\nl3\n");
+    let board = repo.join(".octos/OUTER_LOOP_REVIEW.md");
+    let state = repo.parent().unwrap().join("state");
+    let mut child = arm_harvest(&board, "ACK(blocked", &repo, &state);
+    std::thread::sleep(Duration::from_millis(1500));
+    // /nonexistent repo → harvest fails
+    let _ = Command::new("bash")
+        .arg(script())
+        .arg(&board)
+        .arg("ACK(blocked")
+        .args(["--interval", "1", "--harvest", "/nonexistent"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+    append(&board, "ACK(blocked): trigger\n");
+    std::thread::sleep(Duration::from_secs(3));
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+/// Scenario: 非命中新增行不触发采集
+#[test]
+fn olp_watch_board_harvest_ignores_non_hit_lines() {
+    let repo = temp_repo("nonhit", "l1\nl2\nl3\n");
+    let board = repo.join(".octos/OUTER_LOOP_REVIEW.md");
+    let state = repo.parent().unwrap().join("state");
+    let mut child = arm_harvest(&board, "ZZZNOTOKEN", &repo, &state);
+    std::thread::sleep(Duration::from_millis(1500));
+    append(&board, "plain line one\nplain line two\n");
+    std::thread::sleep(Duration::from_secs(3));
+    let evo_exists = repo.join(".octos/EVOLUTION.md").exists();
+    assert!(!evo_exists, "no evolution board without a hit");
+    assert!(still_running(&mut child));
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
+
+/// Scenario: 采集失败后下一批命中仍可处理
+#[test]
+fn olp_watch_board_harvest_recovers_after_failure() {
+    let root = std::env::temp_dir().join(format!("olp-watch-hv-rec-{}", std::process::id()));
+    let repo = root.join("repo");
+    std::fs::create_dir_all(repo.join(".octos")).unwrap();
+    let ro_state = root.join("ro-state");
+    std::fs::create_dir_all(&ro_state).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&ro_state, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let board = repo.join(".octos/OUTER_LOOP_REVIEW.md");
+    std::fs::write(&board, "l1\nl2\nl3\n").unwrap();
+
+    let mut child = Command::new("bash")
+        .arg(script())
+        .arg(&board)
+        .arg("ACK(blocked")
+        .args(["--interval", "1"])
+        .arg("--harvest")
+        .arg(&repo)
+        .env("OLP_EVO_STATE", &ro_state)
+        .env("OLP_EVO_EVENTS", "")
+        .env("OLP_EVO_MCP_BOARD", root.join("mcp-board.absent"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(1500));
+    append(&board, "ACK(blocked): first hit\n");
+    std::thread::sleep(Duration::from_secs(2));
+    // repair permissions and add a second hit
+    std::fs::set_permissions(&ro_state, std::fs::Permissions::from_mode(0o755)).unwrap();
+    append(&board, "ACK(blocked): second hit\n");
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(still_running(&mut child));
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Scenario: 不带 --harvest 仍一击退出
+#[test]
+fn olp_watch_board_without_harvest_exits_on_hit() {
+    let board = temp_board("plain", "l1\nl2\nl3\n");
+    let mut child = arm(&board, "ACK(blocked", &[]);
+    std::thread::sleep(Duration::from_millis(1200));
+    append(&board, "ACK(blocked): trigger\n");
+    let (exited, out) = wait_exit(&mut child, Duration::from_secs(5));
+    assert!(exited, "no --harvest → one-shot exit");
+    assert!(out.contains("BOARD-SIGNAL"), "{out}");
+}
