@@ -11212,15 +11212,19 @@ impl Store {
                         t!("status.activity_permission_profile_mismatch").into_owned(),
                         reason.clone(),
                     )
-                    .with_detail(t!("status.server_clamped_onboarding_choice").into_owned()),
+                    .with_detail(t!("status.server_clamped_onboarding_choice").into_owned())
+                    .with_session(session_id.clone()),
                 );
             }
         }
-        self.state.push_activity(ActivityItem::new(
-            ActivityKind::Progress,
-            t!("status.activity_runtime_status").into_owned(),
-            message.clone(),
-        ));
+        self.state.push_activity(
+            ActivityItem::new(
+                ActivityKind::Progress,
+                t!("status.activity_runtime_status").into_owned(),
+                message.clone(),
+            )
+            .with_session(session_id.clone()),
+        );
         self.state.status = message;
         self.warn_on_unhealthy_cursor(&session_id, cursor_healthy);
     }
@@ -11243,11 +11247,14 @@ impl Store {
                     return;
                 }
                 let message = t!("status.cursor_unhealthy").into_owned();
-                self.state.push_activity(ActivityItem::new(
-                    ActivityKind::Warning,
-                    t!("status.activity_cursor_unhealthy").into_owned(),
-                    message.clone(),
-                ));
+                self.state.push_activity(
+                    ActivityItem::new(
+                        ActivityKind::Warning,
+                        t!("status.activity_cursor_unhealthy").into_owned(),
+                        message.clone(),
+                    )
+                    .with_session(session_id.clone()),
+                );
                 self.state.status = message;
             }
             // Recovered, or a server that reports no cursor block at all: clear
@@ -11260,17 +11267,17 @@ impl Store {
 
     fn apply_tool_status_event(&mut self, event: ToolStatusClientEvent) {
         let result = event.result;
+        let session_id = result.session_id.clone();
         self.state.set_tool_catalog(SessionToolCatalog {
             session_id: result.session_id,
             policy_id: result.policy_id,
             coding_tool_contract: result.coding_tool_contract,
             tools: result.tools,
         });
-        self.state.push_activity(ActivityItem::new(
-            ActivityKind::Progress,
-            "tools",
-            event.message.clone(),
-        ));
+        self.state.push_activity(
+            ActivityItem::new(ActivityKind::Progress, "tools", event.message.clone())
+                .with_session(session_id),
+        );
         self.state.status = event.message;
     }
 
@@ -12021,7 +12028,8 @@ impl Store {
                         event.code.clone(),
                         event.message.clone(),
                     )
-                    .with_detail("protocol warning"),
+                    .with_detail("protocol warning")
+                    .with_session(event.session_id.clone()),
                 );
                 self.state.status = format!("Warning [{}]: {}", event.code, event.message);
                 None
@@ -12073,7 +12081,8 @@ impl Store {
                         .with_detail(format!(
                             "{} -> {} in {}ms",
                             event.from_provider, event.to_provider, event.elapsed_ms
-                        )),
+                        ))
+                        .with_session(event.session_id.clone()),
                 );
                 self.state.status = format!("Router failover to {}", event.to_provider);
                 None
@@ -12155,7 +12164,8 @@ impl Store {
                         t!("status.activity_agent_output").into_owned(),
                         format!("Agent output refreshed: {} ({bytes} bytes)", event.agent_id),
                     )
-                    .with_detail(compact_preview(&event.text)),
+                    .with_detail(compact_preview(&event.text))
+                    .with_session(event.session_id.clone()),
                 );
                 None
             }
@@ -12166,11 +12176,14 @@ impl Store {
                     &event.agent_id,
                     event.artifacts.clone(),
                 );
-                self.state.push_activity(ActivityItem::new(
-                    ActivityKind::Tool,
-                    t!("status.activity_agent_artifacts").into_owned(),
-                    format!("{count} artifact(s) refreshed for {}", event.agent_id),
-                ));
+                self.state.push_activity(
+                    ActivityItem::new(
+                        ActivityKind::Tool,
+                        t!("status.activity_agent_artifacts").into_owned(),
+                        format!("{count} artifact(s) refreshed for {}", event.agent_id),
+                    )
+                    .with_session(event.session_id.clone()),
+                );
                 None
             }
             UiNotification::PlanUpdated(event) => {
@@ -12281,11 +12294,10 @@ impl Store {
                     self.state
                         .upsert_session_loop(&event.session_id, event.loop_state.clone());
                 }
-                self.state.push_activity(ActivityItem::new(
-                    ActivityKind::Progress,
-                    loop_id,
-                    status,
-                ));
+                self.state.push_activity(
+                    ActivityItem::new(ActivityKind::Progress, loop_id, status)
+                        .with_session(event.session_id.clone()),
+                );
                 None
             }
             UiNotification::LoopFired(event) => {
@@ -12312,11 +12324,10 @@ impl Store {
                 self.state
                     .pending_loop_attribution
                     .insert(event.session_id.clone());
-                self.state.push_activity(ActivityItem::new(
-                    ActivityKind::Progress,
-                    event.loop_id,
-                    status,
-                ));
+                self.state.push_activity(
+                    ActivityItem::new(ActivityKind::Progress, event.loop_id, status)
+                        .with_session(event.session_id.clone()),
+                );
                 None
             }
             UiNotification::LoopCompleted(event) => {
@@ -12325,11 +12336,10 @@ impl Store {
                     self.state
                         .upsert_session_loop(&event.session_id, loop_state);
                 }
-                self.state.push_activity(ActivityItem::new(
-                    ActivityKind::Progress,
-                    event.loop_id,
-                    status,
-                ));
+                self.state.push_activity(
+                    ActivityItem::new(ActivityKind::Progress, event.loop_id, status)
+                        .with_session(event.session_id.clone()),
+                );
                 None
             }
             UiNotification::ContextCompactionStarted(event) => {
@@ -13338,7 +13348,8 @@ impl Store {
         }
         self.state.push_activity(
             ActivityItem::new(ActivityKind::Progress, event.task_id.clone(), "completed")
-                .with_detail(event.source),
+                .with_detail(event.source)
+                .with_session(event.session_id.clone()),
         );
         self.state.status = format!("Background completion persisted: {}", event.message_id);
         None
@@ -13363,7 +13374,8 @@ impl Store {
     ) -> Option<AppUiCommand> {
         self.state.push_activity(
             ActivityItem::new(ActivityKind::Progress, event.kind.clone(), "bridged")
-                .with_detail("legacy session event"),
+                .with_detail("legacy session event")
+                .with_session(event.session_id.clone()),
         );
         self.state.status = format!("Session event: {}", event.kind);
         None
@@ -13534,7 +13546,8 @@ impl Store {
         );
         self.state.push_activity(
             ActivityItem::new(ActivityKind::Warning, "replay_lossy", message.clone())
-                .with_detail("durable cursor diverged"),
+                .with_detail("durable cursor diverged")
+                .with_session(event.session_id.clone()),
         );
         self.state.status = message;
         None
@@ -21747,42 +21760,71 @@ now analyzing the bus module"
         );
     }
 
-    /// Codex fold 3 (P2): TURNLESS activity renders in the active flow when
-    /// no turn is active — regardless of which session it belongs to
-    /// (`flow_activity_items` filters by turn only). A background turnless
-    /// row is therefore VISIBLE and must still preserve the scrolled-up read
-    /// position; only background rows tied to a (non-active) turn render
-    /// nowhere.
+    /// #487: a row stamped with a DIFFERENT session renders nowhere in the
+    /// focused flow (`flow_activity_items` drops it since #461), so it must
+    /// never move the scroll. The earlier premise here — that the flow
+    /// filtered by turn only and a turn-less background row was therefore
+    /// VISIBLE — went stale when #461 added the session filter, leaving the
+    /// scroll predicate drifting the read position for rows the view never
+    /// shows.
     #[test]
-    fn background_turnless_activity_preserves_scroll_when_it_renders() {
+    fn background_turnless_activity_never_preserves_scroll() {
         let a = SessionKey("local:a".into());
         let mut store = store_with_two_sessions("local:a", "local:b");
         store.state.switch_selected_session(1);
         store.state.transcript_scroll = 7; // user scrolled up in idle B
 
-        // Turnless progress from background A renders in B's idle flow.
+        // Turnless progress stamped for background A is filtered out of B's
+        // idle flow — no preserve.
         store.state.push_activity(
             ActivityItem::new(ActivityKind::Progress, "bg-sweep", "running")
                 .with_session(a.clone()),
         );
-        assert!(
-            store.state.transcript_scroll > 7,
-            "a VISIBLE turnless background row must preserve the read position"
+        assert_eq!(
+            store.state.transcript_scroll, 7,
+            "a background session's stamped row never renders here and must not drift the read position"
         );
 
-        // While B has an active turn, that same background turnless row does
-        // NOT render (the flow shows B's turn items) — no preserve.
-        let scroll_before = store.state.transcript_scroll;
+        // Same while B has an active turn.
         store.state.sessions[1].live_reply = Some(LiveReply {
             turn_id: TurnId::new(),
             text: "streaming".into(),
         });
         store.state.push_activity(
-            ActivityItem::new(ActivityKind::Progress, "bg-sweep-2", "running").with_session(a),
+            ActivityItem::new(ActivityKind::Progress, "bg-sweep-2", "running")
+                .with_session(a.clone()),
         );
         assert_eq!(
-            store.state.transcript_scroll, scroll_before,
-            "an invisible turnless background row must not drift the read position"
+            store.state.transcript_scroll, 7,
+            "an invisible background row must not drift the read position"
+        );
+
+        // A stamped row UPDATE from the background session takes the same
+        // gate (`update_tool_activity`) — no drift either.
+        store.state.push_activity(
+            ActivityItem::new(ActivityKind::Tool, "bg-tool", "running")
+                .with_tool_call("bg-call-1")
+                .with_session(a.clone()),
+        );
+        assert_eq!(store.state.transcript_scroll, 7);
+        store
+            .state
+            .update_tool_activity("bg-call-1", "done", None, None, None, None);
+        assert_eq!(
+            store.state.transcript_scroll, 7,
+            "updating a row that renders nowhere here must not drift the read position"
+        );
+
+        // B's OWN row — visible with no live turn — still preserves the
+        // read position.
+        store.state.sessions[1].live_reply = None;
+        let b = SessionKey("local:b".into());
+        store.state.push_activity(
+            ActivityItem::new(ActivityKind::Progress, "my-sweep", "running").with_session(b),
+        );
+        assert!(
+            store.state.transcript_scroll > 7,
+            "the focused session's own row must still preserve the read position"
         );
     }
 
@@ -39811,6 +39853,299 @@ now analyzing the bus module"
         assert_eq!(mirror.agent_outputs.len(), 1);
         assert_eq!(mirror.agent_outputs[0].text, "hello world");
         assert_eq!(mirror.agent_outputs[0].cursor.offset, 11);
+    }
+
+    /// #487 — a session-scoped but turn-less protocol event pushed WITHOUT
+    /// its `session_id` renders in whichever session happens to be focused
+    /// (the flow filter can only route stamped rows). Every producer below
+    /// carries a session on the wire; the activity row it pushes must carry
+    /// it too.
+    #[test]
+    fn session_scoped_turnless_events_stamp_their_owning_session() {
+        use octos_core::ui_protocol::{
+            AgentArtifactUpdatedEvent, AgentOutputDeltaEvent, LoopCompletedEvent, LoopFiredEvent,
+            LoopUpdatedEvent, RouterFailoverEvent, SessionEventBridgedEvent,
+            TurnSpawnCompleteEvent, UiLoopRecord, WarningEvent,
+        };
+        let mut store = store_with_two_sessions("local:focused", "local:background");
+        let background_id = SessionKey("local:background".into());
+        let loop_record = UiLoopRecord {
+            loop_id: "loop_01".into(),
+            session_id: background_id.clone(),
+            profile_id: None,
+            prompt: "check deploy".into(),
+            mode: "self_paced".into(),
+            interval_seconds: None,
+            status: "active".into(),
+            next_run_at_ms: None,
+            last_run_at_ms: None,
+            expires_at_ms: 999,
+            created_at_ms: 1,
+            updated_at_ms: 2,
+        };
+        let events: Vec<(&str, UiNotification)> = vec![
+            (
+                "agent/output_delta",
+                UiNotification::AgentOutputDelta(AgentOutputDeltaEvent {
+                    session_id: background_id.clone(),
+                    agent_id: "ag-1".into(),
+                    cursor: OutputCursor { offset: 5 },
+                    text: "hello".into(),
+                }),
+            ),
+            (
+                "agent/artifact_updated",
+                UiNotification::AgentArtifactUpdated(AgentArtifactUpdatedEvent {
+                    session_id: background_id.clone(),
+                    agent_id: "ag-1".into(),
+                    artifacts: vec![],
+                }),
+            ),
+            (
+                "loop/updated",
+                UiNotification::LoopUpdated(LoopUpdatedEvent {
+                    session_id: background_id.clone(),
+                    profile_id: None,
+                    loop_id: Some("loop_01".into()),
+                    loop_state: loop_record.clone(),
+                    ok: Some(true),
+                    status: Some("active".into()),
+                    deleted: None,
+                }),
+            ),
+            (
+                "loop/fired",
+                UiNotification::LoopFired(LoopFiredEvent {
+                    session_id: background_id.clone(),
+                    profile_id: None,
+                    loop_id: "loop_01".into(),
+                    loop_state: None,
+                    fire: None,
+                    ok: Some(true),
+                    status: Some("fired".into()),
+                }),
+            ),
+            (
+                "loop/completed",
+                UiNotification::LoopCompleted(LoopCompletedEvent {
+                    session_id: background_id.clone(),
+                    profile_id: None,
+                    loop_id: "loop_01".into(),
+                    loop_state: None,
+                    status: Some("completed".into()),
+                    completed_at_ms: Some(3),
+                    result: None,
+                    error: None,
+                }),
+            ),
+            (
+                "turn/spawn_complete",
+                UiNotification::TurnSpawnComplete(TurnSpawnCompleteEvent {
+                    session_id: background_id.clone(),
+                    topic: None,
+                    turn_id: None,
+                    thread_id: None,
+                    task_id: "task_01".into(),
+                    tool_call_id: None,
+                    response_to_client_message_id: None,
+                    seq: 1,
+                    message_id: "msg_01".into(),
+                    source: "background".into(),
+                    cursor: UiCursor {
+                        stream: "assistant".into(),
+                        seq: 1,
+                    },
+                    persisted_at: chrono::DateTime::from_timestamp(0, 0).expect("epoch"),
+                    content: "done".into(),
+                    media: vec![],
+                }),
+            ),
+            (
+                "warning",
+                UiNotification::Warning(WarningEvent {
+                    session_id: background_id.clone(),
+                    turn_id: None,
+                    code: "degraded".into(),
+                    message: "stream unhealthy".into(),
+                }),
+            ),
+            (
+                "router/failover",
+                UiNotification::RouterFailover(RouterFailoverEvent {
+                    session_id: background_id.clone(),
+                    from_provider: "a/model".into(),
+                    to_provider: "b/model".into(),
+                    reason: "circuit_breaker_open".into(),
+                    elapsed_ms: 12,
+                }),
+            ),
+            (
+                "session/event_bridged",
+                UiNotification::SessionEventBridged(SessionEventBridgedEvent {
+                    session_id: background_id.clone(),
+                    kind: "legacy".into(),
+                    payload: serde_json::json!({}),
+                    topic: None,
+                }),
+            ),
+            (
+                "protocol/replay_lossy",
+                UiNotification::ReplayLossy(ReplayLossyEvent {
+                    session_id: background_id.clone(),
+                    dropped_count: 3,
+                    last_durable_cursor: None,
+                }),
+            ),
+        ];
+        for (name, notification) in events {
+            let before = store.state.activity.len();
+            store.apply_event(AppUiEvent::Protocol(notification));
+            let item = store
+                .state
+                .activity
+                .last()
+                .unwrap_or_else(|| panic!("{name} pushed no activity row"));
+            assert_eq!(
+                store.state.activity.len(),
+                before + 1,
+                "{name} must push exactly one new row"
+            );
+            assert_eq!(
+                item.session_id.as_ref(),
+                Some(&background_id),
+                "{name} must stamp the owning session so the row renders only there"
+            );
+        }
+
+        // The per-session `session/status/read` probe is enqueued on EVERY
+        // session's hydrate (reconnect replays background sessions too), so
+        // its rows — the runtime-status line, the permission-profile
+        // mismatch warning, the unhealthy-cursor warning — belong to the
+        // PROBED session, not the focused one.
+        use octos_core::ui_protocol::{PermissionProfileMode, PermissionProfileUpdate};
+        store.state.onboarding.staged_permission_profile = Some(PermissionProfileUpdate {
+            mode: Some(PermissionProfileMode::DangerFullAccess),
+            network: None,
+            approval_policy: Some("never".into()),
+        });
+        let mut status = session_status_result(&background_id);
+        status.cursor = Some(SessionCursorStatus {
+            cursor: None,
+            healthy: false,
+            replay_supported: true,
+            detail: None,
+        });
+        let before = store.state.activity.len();
+        store.apply_client_event(ClientEvent::SessionStatus(
+            crate::client_event::SessionStatusClientEvent {
+                result: status,
+                message: "status".into(),
+            },
+        ));
+        let rows = &store.state.activity[before..];
+        assert_eq!(
+            rows.len(),
+            3,
+            "runtime status + profile mismatch + cursor unhealthy rows: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .all(|item| item.session_id.as_ref() == Some(&background_id)),
+            "every status-probe row must stamp the probed session: {rows:?}"
+        );
+
+        // `tool/status/list` answers carry the queried session too; the row
+        // must land there even if the user switched focus mid-flight.
+        let before = store.state.activity.len();
+        store.apply_client_event(ClientEvent::ToolStatus(
+            crate::client_event::ToolStatusClientEvent {
+                result: crate::model::ToolStatusListResult {
+                    session_id: background_id.clone(),
+                    policy_id: None,
+                    coding_tool_contract: None,
+                    tools: vec![],
+                },
+                message: "tools refreshed".into(),
+            },
+        ));
+        assert_eq!(store.state.activity.len(), before + 1);
+        assert_eq!(
+            store
+                .state
+                .activity
+                .last()
+                .map(|item| item.session_id.as_ref()),
+            Some(Some(&background_id)),
+            "the tool-status row must stamp the queried session"
+        );
+    }
+
+    /// #487 end-to-end: background-session events travel the real dispatch
+    /// path (protocol notification → store → renderer). The rows must be
+    /// absent from the FOCUSED session's rendered transcript yet present in
+    /// their OWN session's — routed, not dropped.
+    #[test]
+    fn background_session_activity_renders_only_in_its_own_session() {
+        use octos_core::ui_protocol::{AgentOutputDeltaEvent, LoopUpdatedEvent, UiLoopRecord};
+        let mut store = store_with_two_sessions("local:focused", "local:background");
+        let background_id = SessionKey("local:background".into());
+        // An empty session renders the welcome hero instead of the
+        // transcript; give both sessions content so the activity flow shows.
+        for session in &mut store.state.sessions {
+            session.messages.push(Message::user("hi".to_string()));
+        }
+        store.apply_event(AppUiEvent::Protocol(UiNotification::AgentOutputDelta(
+            AgentOutputDeltaEvent {
+                session_id: background_id.clone(),
+                agent_id: "ag-e2e".into(),
+                cursor: OutputCursor { offset: 5 },
+                text: "hello".into(),
+            },
+        )));
+        store.apply_event(AppUiEvent::Protocol(UiNotification::LoopUpdated(
+            LoopUpdatedEvent {
+                session_id: background_id.clone(),
+                profile_id: None,
+                loop_id: Some("loop_e2e".into()),
+                loop_state: UiLoopRecord {
+                    loop_id: "loop_e2e".into(),
+                    session_id: background_id.clone(),
+                    profile_id: None,
+                    prompt: "check deploy".into(),
+                    mode: "self_paced".into(),
+                    interval_seconds: None,
+                    status: "active".into(),
+                    next_run_at_ms: None,
+                    last_run_at_ms: None,
+                    expires_at_ms: 999,
+                    created_at_ms: 1,
+                    updated_at_ms: 2,
+                },
+                ok: Some(true),
+                status: Some("active".into()),
+                deleted: None,
+            },
+        )));
+
+        let focused_text = crate::app::debug_render_text(&store.state);
+        assert!(
+            !focused_text.contains("ag-e2e") && !focused_text.contains("loop_e2e"),
+            "a background session's rows must not render in the focused session: {focused_text}"
+        );
+        // A bled SETTLED row renders folded as "Agent task completed (N
+        // action(s))" — the identifying strings above never reach the
+        // buffer, so the fold itself must also be absent.
+        assert!(
+            !focused_text.contains("Agent task completed"),
+            "no fold of a bled background row either: {focused_text}"
+        );
+
+        store.state.switch_selected_session(1);
+        let owner_text = crate::app::debug_render_text(&store.state);
+        assert!(
+            owner_text.contains("ag-e2e") && owner_text.contains("loop_e2e"),
+            "the rows still render in their OWN session — routed, not dropped: {owner_text}"
+        );
     }
 
     #[test]
