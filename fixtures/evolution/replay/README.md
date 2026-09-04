@@ -1,11 +1,19 @@
-# 回放夹具(replay)
+# 进化环回放夹具(阶段 2,REQ-OLP-EVO-P2-REPLAY)
 
-来源:2026-09-04 octos 活板 #45 战役(`.octos/OUTER_LOOP_REVIEW.md` 节选)、实例 events.jsonl 节选、
-`~/.octos/outer/OUTER_LOOP_MCP.md` 节选,由主审脱敏后入库(路径改 `/home/u`、`/repo/<仓库>`、
-实例 hash 改 0…;`question=`/`context=`/`tried=` 正文改 `[redacted]`;无凭据字样)。
+由主审(外环)以 **allowlist 合成**:每一行只由固定假值与真实行形拼成,不含任何来自真实战役的自由文本。
 
-历史里不存在的触发器种类(ACK(blocked)/ACK(wontdo)、escalation、turn_error、fallback_switch、
-malformed_exhausted、goal_budget_limited)以**标注 `[synthetic]`** 的行按真实形状补齐,其余为真实行。
+| 假值 | 取值 |
+|---|---|
+| session | `octos:local:tui#coding` |
+| goal / slug | `goal_01..goal_09` / `p1..p9` |
+| host / 路径 | `host-a` / `/repo/octos`、`/home/u/.octos/instances/0000000000000000` |
+| provider | `lane-a` / `lane-b` / `lane-c` |
+| ask id | `a1b2c3d4e5f6…` |
+| reason 枚举句 | `inner stuck on step 3`、`waiting for outer decision`、`quota exhausted` |
+| `question=`/`context=`/`tried=` | 一律 `[redacted]` |
 
-`expected.json` 由主审用 43-r1(1ee05ea)后的 `olp-evo-harvest.sh` + `olp-evo-retro.sh --dry-run`
-对本夹具计算得出(15 卡、13 候选);回放测试逐字段比对,任何偏差都是采集/retro 行为的变化。
+文件:`review-board.md`(活板)、`events.jsonl`(实例事件流)、`mcp-board.md`(MCP 问外环板)、
+`expected.json`(采集 + `retro --dry-run` 后的期望:cards、by_trigger、by_source、candidates、每候选 recurrence_hint)。
+
+规则:实现 commit 不得改动本目录;`expected.json` 由主审用契约完成后的脚本计算并入库。
+回放测试见 `tests/olp_evo_replay.rs`。

@@ -1,11 +1,11 @@
 {
- "cards": 15,
+ "cards": 17,
  "by_trigger": {
-  "ack_blocked": 1,
+  "ack_blocked": 2,
   "ack_wontdo": 1,
   "ask_outer_timeout": 2,
   "escalation": 1,
-  "fallback_switch": 1,
+  "fallback_switch": 2,
   "goal_blocked": 2,
   "goal_budget_limited": 1,
   "malformed_exhausted": 1,
@@ -15,24 +15,25 @@
   "turn_error": 1
  },
  "by_source": {
-  "events": 7,
+  "events": 8,
   "mcp": 4,
-  "review": 4
+  "review": 5
  },
- "candidates": 13,
+ "candidates": 14,
  "recurrence": {
-  "override|以本条为准,45c 增补回滚可注入单测。": 1,
-  "r2_record|声称 verified,复验 api::admin <num>/<num> 不符。": 1,
-  "ack_blocked|[synthetic] cargo test 通过后无法定位失败用例,等待外环指引": 1,
-  "ack_wontdo|[synthetic] 任务书要求改 protocol 版本,属 r6 人改,拒绝": 1,
+  "ack_blocked|inner stuck on step <num>, waiting for outer decision (commit <hex>)": 2,
+  "ack_wontdo|task book asks to bump protocol version, r6 is operator-only": 1,
+  "override|以本条为准,切片 a 改走契约引用型。": 1,
+  "r2_record|声称 verified,复验 lib <num>/<num> 不符。": 1,
   "ask_outer_timeout|<hex> no answer in 90s": 2,
-  "report_blocked|request_changes 要求 peer goal 文件两行（goal_01 + task_id），但本会话的 peer_handoff 工具真实 sch": 1,
-  "report_blocked|p3 实际完成(contract <num> 黑板 outer accept + 实现 <num> 评审原话 accepted)但 goal verif": 1,
+  "report_blocked|inner stuck on step <num>": 1,
+  "report_blocked|waiting for outer decision": 1,
   "goal_blocked|goal transitioned to `blocked`": 2,
-  "fallback_switch|router failover: zai -> k3 (quota, 1200ms)": 1,
-  "malformed_exhausted|attempts=<num>/<num>": 1,
-  "escalation|[synthetic] peer parked on approval: git push": 1,
-  "turn_error|[synthetic] connection closed before turn end": 1,
-  "goal_budget_limited|goal transitioned to `budget_limited`": 1
+  "goal_budget_limited|goal transitioned to `budget_limited`": 1,
+  "escalation|peer parked on approval: git push": 1,
+  "turn_error|connection closed before turn completed": 1,
+  "fallback_switch|router failover: lane-a -> lane-b (quota exhausted, 1200ms)": 1,
+  "fallback_switch|router failover: lane-b -> lane-c (quota exhausted, 900ms)": 1,
+  "malformed_exhausted|feedback_limit=<num> observed_malformed=<num>": 1
  }
 }
