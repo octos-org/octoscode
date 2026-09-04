@@ -44,3 +44,20 @@ severity、repo)并归并锚点后,才落 `FLAW-NNN.md` 并更新 `memory.md`。
 `note: diagnostic only, not a KPI` 且不含 `regress` 字样;基线用法是
 `--baseline <上一份 --json 输出>`,对每个 trigger 输出
 `increase:`/`decrease:` 增减行(相等不输出),供人判读。只读,不写文件。
+
+## kind 候选
+
+采集面只收已定式的触发器;观察到的**新摩擦类别**先在此登记为 kind 候选,
+等主审裁决是否进契约(不自行扩 harvest 触发面)。当前登记:
+
+- `iteration_cap` —— 内环单 turn 迭代上限耗尽(超限静默收工,外观像
+  "卡住";出处 2026-09-05 octos 活板 #48"48b 中断记录")。
+- `patch_failed` —— 修复片打回后未再派发即关闭(goal 以 blocked 收尾,
+  缺陷未消;同上出处)。
+
+## 索引
+
+`scripts/olp-evo-index.sh <repo>` 扫描本目录 `FLAW-*.md` 与
+`docs/OUTER_LOOP_PROTOCOL.md` 的 `> 已记录:FLAW-NNN` 行,生成
+`INDEX.md`(首行标注"生成,勿手改";末行 `retired_prose: N` 记被
+PROTOCOL 散文取代的 FLAW 数)。内容相同不写,幂等且保 mtime。
