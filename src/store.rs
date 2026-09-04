@@ -2907,8 +2907,15 @@ impl Store {
                 // Guard: rewinding mid-turn would drop turns out from under a
                 // streaming reply (same guard as `/resume`). Refuse with a
                 // status line and open no menu — covers both the picker and the
-                // `/rewind <n>` inline shortcut.
-                if self.state.active_turn().is_some() {
+                // `/rewind <n>` inline shortcut. `session_turn_live` (not
+                // `active_turn`) so the submit→`turn/started` window — no
+                // `live_reply` yet, but the optimistic prompt row already
+                // counts as checkpoint 1 — is refused too (#246).
+                if self
+                    .state
+                    .active_session()
+                    .is_some_and(|session| self.state.session_turn_live(&session.id))
+                {
                     self.state.status =
                         "Finish or stop the active turn before rewinding the conversation.".into();
                     None
@@ -3303,7 +3310,10 @@ impl Store {
     /// session) so the chosen message can be restored to the composer once the
     /// rollback result lands (rewind-and-edit). Guards, in order:
     /// - a live turn means refuse with a status line and no command (same
-    ///   guard as `/resume`);
+    ///   guard as `/resume`); "live" includes the submit→`turn/started`
+    ///   window (`session_turn_live`), where the optimistic prompt row is
+    ///   already checkpoint 1 but the server has not committed the turn, so a
+    ///   rollback would drop the wrong turns (#246);
     /// - `picked_session_id` (the session the picker rows were built from)
     ///   must still be the active session — the user may have switched
     ///   sessions while the picker was open, and a stale pick must never roll
@@ -3318,7 +3328,11 @@ impl Store {
         num_turns: u32,
         prefill: String,
     ) -> Option<AppUiCommand> {
-        if self.state.active_turn().is_some() {
+        if self
+            .state
+            .active_session()
+            .is_some_and(|session| self.state.session_turn_live(&session.id))
+        {
             self.state.status =
                 "Finish or stop the active turn before rewinding the conversation.".into();
             return None;
@@ -22243,6 +22257,146 @@ now analyzing the bus module"
         assert!(
             store.state.pending_rewind_prefill.is_none(),
             "no prefill is stashed when the rewind is refused"
+        );
+    }
+
+    /// #246: the submit→`turn/started` window has no `live_reply` yet, so the
+    /// `active_turn()` guard reads the session as idle — but the submitted
+    /// prompt is already an optimistic user row the rewind rows count as
+    /// checkpoint 1. A rollback dispatched in this window targets a turn the
+    /// server has not committed (or is just starting), dropping the wrong
+    /// turns. The fresh `pre_token_turns` marker must refuse it just like a
+    /// streaming turn does.
+    fn store_with_pre_token_submit() -> Store {
+        let mut store = store_with_user_turns(&["first question", "second question"]);
+        store
+            .state
+            .pre_token_turns
+            .insert(SessionKey("local:test".into()), std::time::Instant::now());
+        store
+    }
+
+    #[test]
+    fn rewind_picker_is_refused_during_pre_token_submit_window() {
+        let mut store = store_with_pre_token_submit();
+
+        let command = store
+            .dispatch_local_action(LocalAction::OpenRewindPicker, None)
+            .into_command();
+
+        assert!(command.is_none());
+        assert!(
+            store.state.menu_stack.active().is_none(),
+            "no picker opens while a submit is pre-first-token"
+        );
+        assert!(
+            store.state.rewind_turns.is_empty(),
+            "no rewind rows are snapshotted mid-submit"
+        );
+    }
+
+    #[test]
+    fn rewind_inline_is_refused_during_pre_token_submit_window() {
+        let mut store = store_with_pre_token_submit();
+
+        let command = store
+            .dispatch_local_action(LocalAction::OpenRewindPicker, Some("1"))
+            .into_command();
+
+        assert!(
+            command.is_none(),
+            "no rollback dispatches while a submit is pre-first-token"
+        );
+        assert!(
+            store.state.status.contains("Finish or stop"),
+            "the pre-token window reuses the mid-turn refusal: {}",
+            store.state.status
+        );
+    }
+
+    #[test]
+    fn rewind_to_turn_is_refused_during_pre_token_submit_window() {
+        let mut store = store_with_pre_token_submit();
+
+        let command = store
+            .dispatch_local_action(
+                LocalAction::RewindToTurn {
+                    session_id: "local:test".into(),
+                    num_turns: 1,
+                    prefill: "second question".into(),
+                },
+                None,
+            )
+            .into_command();
+
+        assert!(
+            command.is_none(),
+            "a picker pick must not roll back while a submit is pre-first-token"
+        );
+        assert!(store.state.pending_rewind_prefill.is_none());
+    }
+
+    /// An AGED marker is a dead submit (`PRE_TOKEN_TURN_TTL` self-heal): it
+    /// must NOT wedge `/rewind` forever — the guard ignores it and the rollback
+    /// dispatches normally.
+    #[test]
+    fn rewind_dispatches_with_a_stale_pre_token_marker() {
+        let mut store = store_with_user_turns(&["first question", "second question"]);
+        store.state.pre_token_turns.insert(
+            SessionKey("local:test".into()),
+            std::time::Instant::now()
+                .checked_sub(crate::model::PRE_TOKEN_TURN_TTL + std::time::Duration::from_secs(1))
+                .expect("instant in the past"),
+        );
+
+        let command = store
+            .dispatch_local_action(
+                LocalAction::RewindToTurn {
+                    session_id: "local:test".into(),
+                    num_turns: 1,
+                    prefill: "second question".into(),
+                },
+                None,
+            )
+            .into_command();
+
+        assert!(
+            matches!(command, Some(AppUiCommand::SessionRollback(_))),
+            "a dead submit marker must not block rewinding: {command:?}"
+        );
+    }
+
+    /// The pre-token guard is keyed to the ACTIVE session: a fresh marker on a
+    /// BACKGROUND session (e.g. a peer kickoff starting up) must not wedge
+    /// `/rewind` on the session on screen.
+    #[test]
+    fn rewind_dispatches_with_a_pre_token_marker_on_another_session() {
+        let mut store = store_with_two_sessions("local:test", "local:other");
+        store.state.sessions[0]
+            .messages
+            .push(Message::user("first question"));
+        store.state.sessions[0]
+            .messages
+            .push(Message::assistant("ok"));
+        store
+            .state
+            .pre_token_turns
+            .insert(SessionKey("local:other".into()), std::time::Instant::now());
+
+        let command = store
+            .dispatch_local_action(
+                LocalAction::RewindToTurn {
+                    session_id: "local:test".into(),
+                    num_turns: 1,
+                    prefill: "first question".into(),
+                },
+                None,
+            )
+            .into_command();
+
+        assert!(
+            matches!(command, Some(AppUiCommand::SessionRollback(_))),
+            "a background session's in-flight submit must not block rewinding the active one: {command:?}"
         );
     }
 
