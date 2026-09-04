@@ -6222,6 +6222,188 @@ mod tests {
     }
 
     #[test]
+    fn loops_menu_digit_opens_that_loops_action_submenu() {
+        // #491: loop rows advertised no shortcut, so digits were dead.
+        // Pressing '2' must select + accept the second loop's row exactly
+        // like Enter, opening its per-loop action submenu.
+        let mut store = store_with_sessions(1);
+        let session = SessionKey("local:test-0".into());
+        let record = |loop_id: &str, status: &str| octos_core::ui_protocol::UiLoopRecord {
+            loop_id: loop_id.into(),
+            session_id: session.clone(),
+            profile_id: Some("coding".into()),
+            prompt: "check the build every hour".into(),
+            mode: "interval".into(),
+            interval_seconds: Some(3600),
+            status: status.into(),
+            next_run_at_ms: None,
+            last_run_at_ms: None,
+            expires_at_ms: 1,
+            created_at_ms: 1,
+            updated_at_ms: 2,
+        };
+        store.state.set_session_loops(
+            &session,
+            vec![record("loop-aaa", "active"), record("loop-bbb", "paused")],
+        );
+        store.open_menu(crate::menu::MenuId::from(crate::menu::registry::MENU_LOOPS));
+
+        let action = handle_key(&mut store, key(KeyCode::Char('2')));
+
+        assert!(matches!(action, KeyAction::Continue));
+        assert_eq!(store.state.loop_actions_target.as_deref(), Some("loop-bbb"));
+        match store.state.active_menu.as_ref() {
+            Some(crate::menu::MenuBuildResult::Ready(spec)) => assert_eq!(
+                spec.id.as_str(),
+                crate::menu::registry::MENU_LOOP_ACTIONS,
+                "the digit opened the SECOND loop's action submenu"
+            ),
+            other => panic!("expected the loop action submenu, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn loops_menu_unassigned_digit_is_inert() {
+        // Only two loops, so '5' advertises on no row: it must not move the
+        // cursor, open anything, or corrupt state — the loops menu is not
+        // searchable, so the digit simply falls through.
+        let mut store = store_with_sessions(1);
+        let session = SessionKey("local:test-0".into());
+        store.state.set_session_loops(
+            &session,
+            vec![
+                octos_core::ui_protocol::UiLoopRecord {
+                    loop_id: "loop-aaa".into(),
+                    session_id: session.clone(),
+                    profile_id: Some("coding".into()),
+                    prompt: "check the build every hour".into(),
+                    mode: "interval".into(),
+                    interval_seconds: Some(3600),
+                    status: "active".into(),
+                    next_run_at_ms: None,
+                    last_run_at_ms: None,
+                    expires_at_ms: 1,
+                    created_at_ms: 1,
+                    updated_at_ms: 2,
+                },
+                octos_core::ui_protocol::UiLoopRecord {
+                    loop_id: "loop-bbb".into(),
+                    session_id: session.clone(),
+                    profile_id: Some("coding".into()),
+                    prompt: "nightly docs".into(),
+                    mode: "interval".into(),
+                    interval_seconds: Some(3600),
+                    status: "paused".into(),
+                    next_run_at_ms: None,
+                    last_run_at_ms: None,
+                    expires_at_ms: 1,
+                    created_at_ms: 1,
+                    updated_at_ms: 2,
+                },
+            ],
+        );
+        store.open_menu(crate::menu::MenuId::from(crate::menu::registry::MENU_LOOPS));
+
+        let action = handle_key(&mut store, key(KeyCode::Char('5')));
+
+        assert!(matches!(action, KeyAction::Continue));
+        assert_eq!(
+            store.state.loop_actions_target, None,
+            "no loop submenu armed"
+        );
+        match store.state.active_menu.as_ref() {
+            Some(crate::menu::MenuBuildResult::Ready(spec)) => assert_eq!(
+                spec.id.as_str(),
+                crate::menu::registry::MENU_LOOPS,
+                "the loops menu stays open and untouched"
+            ),
+            other => panic!("expected the loops menu to stay open, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn loop_actions_digit_dispatches_the_verb_command() {
+        // #491, one level down: in the per-loop action submenu the verb rows
+        // are numbered from '1' (the read-only detail/prompt headers stay
+        // unnumbered), so '3' fires delete for an active loop exactly like
+        // Enter on that row.
+        let session = SessionKey("local:test-0".into());
+        // Loop verbs dispatch over the wire: the store must be in protocol
+        // mode (a backend URL) for `/loop` to route, like the autonomy store
+        // fixtures in store.rs.
+        let mut store = Store {
+            state: AppState::new(
+                vec![SessionView {
+                    id: session.clone(),
+                    title: "test".into(),
+                    profile_id: Some("coding".into()),
+                    messages: vec![],
+                    tasks: vec![],
+                    live_reply: None,
+                }],
+                0,
+                "ready".into(),
+                Some("ws://example.test/ui-protocol".into()),
+                false,
+            ),
+        };
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods_and_features(
+            [
+                crate::model::APPUI_METHOD_LOOP_LIST,
+                crate::model::APPUI_METHOD_LOOP_PAUSE,
+                crate::model::APPUI_METHOD_LOOP_RESUME,
+                crate::model::APPUI_METHOD_LOOP_DELETE,
+                crate::model::APPUI_METHOD_LOOP_FIRE_NOW,
+            ],
+            [crate::model::APPUI_FEATURE_CODING_AUTONOMY_V1],
+        ));
+        store.state.set_session_loops(
+            &session,
+            vec![octos_core::ui_protocol::UiLoopRecord {
+                loop_id: "loop-aaa".into(),
+                session_id: session.clone(),
+                profile_id: Some("coding".into()),
+                prompt: "check the build every hour".into(),
+                mode: "interval".into(),
+                interval_seconds: Some(3600),
+                status: "active".into(),
+                next_run_at_ms: None,
+                last_run_at_ms: None,
+                expires_at_ms: 1,
+                created_at_ms: 1,
+                updated_at_ms: 2,
+            }],
+        );
+        store.open_menu(crate::menu::MenuId::from(crate::menu::registry::MENU_LOOPS));
+        handle_key(&mut store, key(KeyCode::Char('1')));
+        assert_eq!(
+            store.state.loop_actions_target.as_deref(),
+            Some("loop-aaa"),
+            "submenu is armed for loop-aaa"
+        );
+
+        let action = handle_key(&mut store, key(KeyCode::Char('3')));
+
+        let KeyAction::Send(command) = action else {
+            panic!("expected the verb to dispatch a command");
+        };
+        match *command {
+            AppUiCommand::DeleteLoop(params) => assert_eq!(params.loop_id, "loop-aaa"),
+            other => panic!("expected DeleteLoop, got {other:?}"),
+        }
+        // RunSlashCommand pops the submenu before firing, returning the stack
+        // to the loops list underneath.
+        match store.state.active_menu.as_ref() {
+            Some(crate::menu::MenuBuildResult::Ready(spec)) => assert_eq!(
+                spec.id.as_str(),
+                crate::menu::registry::MENU_LOOPS,
+                "the submenu closed, leaving the loops list on top"
+            ),
+            other => panic!("expected the loops list menu underneath, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn slash_popup_digit_stays_in_composer_draft() {
         // In the slash popup the composer is a command line where digits are
         // legitimate filter/argument text; the help menu's advertised numeric

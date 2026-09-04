@@ -1258,7 +1258,7 @@ fn loops_menu(ctx: &MenuContext<'_>) -> MenuBuildResult {
     }
 
     let mut items = Vec::new();
-    for record in ctx.app.loops {
+    for (idx, record) in ctx.app.loops.iter().enumerate() {
         let cadence = cadence_label(record);
         let prompt_summary = record
             .prompt
@@ -1285,17 +1285,19 @@ fn loops_menu(ctx: &MenuContext<'_>) -> MenuBuildResult {
             .flatten()
             .map(|d| format!(" · next {d}"))
             .unwrap_or_default();
-        items.push(
-            MenuItem::new(
-                format!("loops.select.{}", record.loop_id),
-                format!("{base_label}{next}  {prompt_summary}"),
-                MenuAction::Local(LocalAction::OpenLoopActions(record.loop_id.clone())),
-            )
-            .with_description(t!("menu.loops.row_hint").into_owned())
-            .with_right_action(MenuAction::Local(LocalAction::QuickLoopToggle(
-                record.loop_id.clone(),
-            ))),
-        );
+        let mut item = MenuItem::new(
+            format!("loops.select.{}", record.loop_id),
+            format!("{base_label}{next}  {prompt_summary}"),
+            MenuAction::Local(LocalAction::OpenLoopActions(record.loop_id.clone())),
+        )
+        .with_description(t!("menu.loops.row_hint").into_owned())
+        .with_right_action(MenuAction::Local(LocalAction::QuickLoopToggle(
+            record.loop_id.clone(),
+        )));
+        if let Some(shortcut) = numeric_shortcut(idx) {
+            item = item.with_shortcut(shortcut);
+        }
+        items.push(item);
     }
 
     let active = ctx
@@ -1412,15 +1414,21 @@ fn loop_actions_menu(ctx: &MenuContext<'_>) -> MenuBuildResult {
         "paused" => &["resume", "fire-now", "delete"],
         _ => &["delete"],
     };
-    for verb in verbs {
-        items.push(MenuItem::new(
+    // Digits number the actionable verb rows only; the read-only detail and
+    // prompt headers above stay unnumbered so no digit lands on a Noop row.
+    for (idx, verb) in verbs.iter().enumerate() {
+        let mut item = MenuItem::new(
             format!("loop_actions.{verb}"),
             t!(format!("menu.loop_actions.verb.{verb}")).into_owned(),
             MenuAction::Local(LocalAction::RunSlashCommand(format!(
                 "/loop {verb} {}",
                 record.loop_id
             ))),
-        ));
+        );
+        if let Some(shortcut) = numeric_shortcut(idx) {
+            item = item.with_shortcut(shortcut);
+        }
+        items.push(item);
     }
 
     MenuBuildResult::Ready(MenuSpec {
@@ -9641,6 +9649,48 @@ mod tests {
             "the row carries id and status: {}",
             loop_rows[0].label
         );
+        // Digits reach the rows: the first loop is '1', the second '2'.
+        assert_eq!(
+            loop_rows[0].shortcut,
+            Some(KeyBinding::new(KeyCode::Char('1'), KeyModifiers::empty())),
+            "first loop row claims digit '1'"
+        );
+        assert_eq!(
+            loop_rows[1].shortcut,
+            Some(KeyBinding::new(KeyCode::Char('2'), KeyModifiers::empty())),
+            "second loop row claims digit '2'"
+        );
+    }
+
+    #[test]
+    fn loops_menu_numbers_only_the_first_nine_rows() {
+        // Digits '1'..='9' exhaust at nine rows; further loops stay
+        // reachable via cursor/Enter but advertise no shortcut.
+        let loops: Vec<_> = (0..10)
+            .map(|i| loop_record(&format!("loop-{i}"), "active"))
+            .collect();
+        let ctx = MenuContext {
+            availability: AvailabilityContext::local(),
+            app: MenuAppSnapshot {
+                loops: &loops,
+                ..MenuAppSnapshot::default()
+            },
+            terminal: TerminalSize::default(),
+            theme_name: None,
+            selected_path: &[],
+        };
+        let spec = ready_spec(loops_menu(&ctx));
+        for (idx, item) in spec.items.iter().enumerate() {
+            let expected = if idx < 9 {
+                Some(KeyBinding::new(
+                    KeyCode::Char(char::from_digit(idx as u32 + 1, 10).unwrap()),
+                    KeyModifiers::empty(),
+                ))
+            } else {
+                None
+            };
+            assert_eq!(item.shortcut, expected, "row {idx} shortcut mismatch");
+        }
     }
 
     #[test]
@@ -9683,6 +9733,27 @@ mod tests {
                 >= 2,
             "detail header rows are read-only"
         );
+        // Verb rows are numbered from '1'; the read-only detail/prompt
+        // headers above them advertise no digit so none lands on a Noop row.
+        assert!(
+            spec.items
+                .iter()
+                .filter(|item| item.state.non_selectable)
+                .all(|item| item.shortcut.is_none()),
+            "read-only header rows advertise no digit"
+        );
+        for (digit, id) in [
+            ('1', "loop_actions.pause"),
+            ('2', "loop_actions.fire-now"),
+            ('3', "loop_actions.delete"),
+        ] {
+            let row = spec.items.iter().find(|item| item.id == id).expect(id);
+            assert_eq!(
+                row.shortcut,
+                Some(KeyBinding::new(KeyCode::Char(digit), KeyModifiers::empty())),
+                "{id} claims digit '{digit}'"
+            );
+        }
     }
 
     #[test]
@@ -9713,6 +9784,20 @@ mod tests {
                 .any(|item| item.id == "loop_actions.pause"),
             "a paused loop offers resume, not pause"
         );
+        // The verb set differs by status, so the digits follow the paused
+        // set here: resume='1', fire-now='2', delete='3'.
+        for (digit, id) in [
+            ('1', "loop_actions.resume"),
+            ('2', "loop_actions.fire-now"),
+            ('3', "loop_actions.delete"),
+        ] {
+            let row = spec.items.iter().find(|item| item.id == id).expect(id);
+            assert_eq!(
+                row.shortcut,
+                Some(KeyBinding::new(KeyCode::Char(digit), KeyModifiers::empty())),
+                "{id} claims digit '{digit}'"
+            );
+        }
     }
 
     #[test]
