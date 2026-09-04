@@ -101,6 +101,15 @@ fn olp_evo_skeleton_real_flaw_uses_aliases_and_todo() {
         stdout.lines().any(|l| l.contains("测试: pending_")),
         "{stdout}"
     );
+    // 44b-r1: the REAL FLAW-001 skeleton's selectors stay ≤ 56 chars
+    for l in stdout.lines().filter(|l| l.contains("测试: pending_")) {
+        let sel = l.trim().trim_start_matches("测试: ");
+        assert!(
+            sel.len() <= 56,
+            "FLAW-001 selector {sel} exceeds 56 ({}): {stdout}",
+            sel.len()
+        );
+    }
     // 结案 alias feeds decisions; 锚点 paths land in Allowed
     assert!(
         stdout.contains("crates/octos-cli/src/peers/mod.rs"),
