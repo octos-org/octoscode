@@ -1070,6 +1070,37 @@ fn olp_evo_init_pads_missing_trailing_newline() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// Scenario: 带署名的改判与 R2 记档行触发采集,既有写法不触发
+#[test]
+fn olp_evo_harvest_signed_override_and_r2_lines_trigger_only() {
+    let sb = Sandbox::new("signed-forms");
+    std::fs::write(
+        sb.repo.join(".octos/OUTER_LOOP_REVIEW.md"),
+        "### 50. 某条目(2026-09-05,外环(claude))\n\n\
+         > 外环(claude)·改判(作废 #40):以本条为准的新指令\n\
+         > 外环(codex)·R2 记档(#41):声称 verified 复验不符\n\
+         主审改判(见上)\n\
+         **R2 违例记档**:散文提及不落卡\n\
+         被证伪(R2 记档,非恶意)\n\
+         > 判词(38-r1):历史判词不触发\n\
+         > ACK(blocked): foo\n",
+    )
+    .unwrap();
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(sb.evo_count(), 2, "exactly the two signed lines fire");
+    let triggers: Vec<String> = read_lines(sb.evo_board())
+        .into_iter()
+        .filter(|l| l.starts_with("trigger:"))
+        .map(|l| l.trim_start_matches("trigger: ").to_string())
+        .collect();
+    assert_eq!(triggers, vec!["override", "r2_record"], "{triggers:?}");
+}
+
 /// Scenario: 记录目录与记录校验
 #[test]
 

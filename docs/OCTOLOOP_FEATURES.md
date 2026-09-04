@@ -36,6 +36,13 @@
   索骥。缺省:master 复验必查。体感:R2 复验命令可直接对着回执跑。
 - **写策略三档 + 逃生口**:workspace 只读/受写/host 三档 + 显式逃生
   口,越权写被拒。缺省:workspace。体感:误写仓库外文件直接报错。
+- **进化环(阶段 0/1)**:三源采集哨(`olp-evo-harvest.sh` 从活板
+  ACK、events.jsonl、MCP 审计板增量识别内环摩擦,identity 去重、
+  字节游标、崩溃一致)落症状卡,retro 脚本(`olp-evo-retro.sh`)按
+  归一化文本分组出候选简报与记录草稿,供持锁外环归档为 FLAW 记录。
+  缺省状态:手动运行。用户怎么看到:`.octos/EVOLUTION.md` 与 retro
+  简报(状态目录 `retro/` 下)。外环私有工作纸,不写入 OLP 信道矩阵,
+  不升协议版本。
 
 ## 通信与信道
 

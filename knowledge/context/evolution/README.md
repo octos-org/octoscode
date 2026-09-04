@@ -24,3 +24,13 @@ open → consolidated → filed → accepted → specified → patched → verif
 - `FLAW-template.md` — 新记录模板(frontmatter 全字段)。
 - `memory.md` — 记忆表:每条 FLAW 一行的结果速览。
 - `FLAW-001.md` / `FLAW-002.md` — 已归档记录。
+
+## retro(阶段 1)
+
+`scripts/olp-evo-retro.sh <repo>` 在采集之后运行:读取上次 retro 之后的
+卡,按"去数字/路径后的归一化文本"分组成候选,输出一份带记录草稿的
+简报(位于状态目录 `retro/<UTC>-<run>.md`)。草稿到记录的转换规则:
+简报里的 yaml 草稿标 `draft: true`、`fingerprint: TODO`,**TODO 未
+消除前不得保存为 FLAW-NNN.md**;持主审锁的外环消 TODO(fingerprint、
+severity、repo)并归并锚点后,才落 `FLAW-NNN.md` 并更新 `memory.md`。
+每次 retro 最多推进 3 条记录;判断(归层、锚定、立案)始终由人做。

@@ -117,12 +117,39 @@ harvest_board() { # realpath
             'ACK(blocked):'*|'ACK(blocked)：'*) trigger=ack_blocked; rest=$trimmed ;;
             'ACK(wontdo):'*|'ACK(wontdo)：'*) trigger=ack_wontdo; rest=$trimmed ;;
         esac
+        # #42a: SIGNED override / R2-record line forms (phase-1). A COPY of
+        # the line is stripped of leading `> ` (repeatable), `**` and
+        # whitespace, then matched against the signed line-start forms;
+        # the phase-0 ACK detection above is untouched.
+        local signed=${trimmed}
+        while :; do
+            case $signed in
+                '> '*) signed=${signed#'> '} ;;
+                '**'*) signed=${signed#'**'} ;;
+                *) break ;;
+            esac
+        done
+        signed=${signed#"${signed%%[![:space:]]*}"}
+        if [ -z "$trigger" ]; then
+            local re_override='^外环\([^)]+\)·改判\('
+            local re_r2='^外环\([^)]+\)·R2 记档\('
+            if [[ $signed =~ $re_override ]]; then
+                trigger=override
+            elif [[ $signed =~ $re_r2 ]]; then
+                trigger=r2_record
+            fi
+        fi
         if [ -n "$trigger" ]; then
             lsha=$(printf '%s' "$line" | sha256sum | cut -d' ' -f1)
             local kind=blocked
             [ "$trigger" = ack_wontdo ] && kind=wontdo
+            [ "$trigger" = override ] && kind=override
+            [ "$trigger" = r2_record ] && kind=r2
             ident="board:$rp#$entry#$kind#$lsha"
-            local symptom=${rest:0:200}
+            # signed forms report the ORIGINAL line (contract: symptom 取原行前 200 字符)
+            local symptom_base=${rest:-$trimmed}
+            case $trigger in override|r2_record) symptom_base=$trimmed ;; esac
+            local symptom=${symptom_base:0:200}
             add_candidate "$trigger" review "$rp" "$ident" "$line_no" "$line_off" "$(now_rfc3339)" "$symptom"
         fi
     done < "$BOARD"
