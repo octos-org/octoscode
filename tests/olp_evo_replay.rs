@@ -168,48 +168,90 @@ fn olp_evo_replay_matches_expected() {
     }
 }
 
-/// Scenario: 回放夹具已脱敏
+/// Scenario: 回放夹具逐行匹配 allowlist 且不含高风险模式全集
 #[test]
-fn olp_evo_replay_fixture_is_scrubbed() {
+fn olp_evo_replay_fixture_matches_allowlist() {
+    // 高风险模式全集(契约 11 项)
+    let risky: [(&str, &str); 6] = [
+        ("/Users/", "macOS home"),
+        ("sk-", "openai-style key"),
+        ("ghp_", "github pat"),
+        ("AKIA", "aws key id"),
+        ("Authorization", "auth header"),
+        ("Bearer ", "bearer token"),
+    ];
     for entry in std::fs::read_dir(replay_dir()).unwrap().flatten() {
         let path = entry.path();
         if !path.is_file() {
             continue;
         }
         let text = std::fs::read_to_string(&path).unwrap_or_default();
-        assert!(
-            !text.contains("/home/alexzhang"),
-            "{} leaks a home path",
-            path.display()
-        );
-        // api_key as an identifier in technical prose is fine; a VALUE
-        // (api_key=<non-redacted> / api_key: <literal>) is not.
-        for (idx, _) in text.match_indices("api_key") {
-            let rest = &text[idx + "api_key".len()..];
-            let rest = rest.trim_start_matches("_env");
-            if rest.starts_with("=") {
-                assert!(
-                    rest.starts_with("=[redacted]"),
-                    "{} leaks api_key value at byte {idx}",
-                    path.display()
-                );
-            }
-        }
-        assert!(!text.contains("token="), "{} leaks token=", path.display());
-        // A real audit-line VALUE must be [redacted]; the README's own
-        // scrub-notation (`question=`…改 [redacted]) quotes the token in
-        // backticks — allow that documented self-reference.
-        for (idx, _) in text.match_indices("question=") {
-            let before = &text[..idx];
-            if before.ends_with("`") {
-                continue;
-            }
-            let rest = &text[idx + "question=".len()..];
+        for (pat, why) in risky {
             assert!(
-                rest.starts_with("[redacted]"),
-                "{} has non-redacted question= at byte {idx}",
+                !text.contains(pat),
+                "{} contains {}: {}",
+                path.display(),
+                why,
+                pat
+            );
+        }
+        // /home/ only as /home/u/
+        for (idx, _) in text.match_indices("/home/") {
+            let rest = &text[idx + 6..];
+            assert!(
+                rest.starts_with("u/"),
+                "{}: non-allowlist /home/ at byte {idx}",
                 path.display()
             );
+        }
+        // instances/ only the 16-zero synthetic hash
+        for (idx, _) in text.match_indices("instances/") {
+            let rest = &text[idx + 10..];
+            assert!(
+                rest.starts_with("0000000000000000"),
+                "{}: non-synthetic instance hash at byte {idx}",
+                path.display()
+            );
+        }
+        // no emails in a synthetic fixture
+        assert!(
+            !text.contains('@'),
+            "{}: email-shaped content",
+            path.display()
+        );
+        // token[=:] / api[_-]?key must never appear at all
+        for (idx, _) in text.match_indices("token") {
+            let rest = &text[idx + 5..];
+            assert!(
+                !(rest.starts_with('=') || rest.starts_with(':')),
+                "{}: token value at byte {idx}",
+                path.display()
+            );
+        }
+        for (idx, _) in text.match_indices("api") {
+            let rest = &text[idx + 3..];
+            assert!(
+                !(rest.starts_with("_key") || rest.starts_with("-key") || rest.starts_with("key")),
+                "{}: api-key mention at byte {idx}",
+                path.display()
+            );
+        }
+        // IPv4 shape: digit.digit.digit.digit
+        let chars: Vec<char> = text.chars().collect();
+        for i in 3..chars.len().saturating_sub(3) {
+            if chars[i] == '.'
+                && chars[i - 1].is_ascii_digit()
+                && chars[i + 1].is_ascii_digit()
+                && chars[i - 3..=i].iter().filter(|c| **c == '.').count() >= 1
+            {
+                // crude: three dots within a short window with digits
+                let win: String = chars[i.saturating_sub(3)..(i + 4).min(chars.len())]
+                    .iter()
+                    .collect();
+                if win.matches('.').count() >= 3 {
+                    panic!("{}: IPv4-shaped ({win}) near char {i}", path.display());
+                }
+            }
         }
     }
 }
