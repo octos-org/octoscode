@@ -597,3 +597,83 @@ symptom: {\"detail\":\"3 retries\"}
         "malformed_exhausted → Tooling: {brief}"
     );
 }
+
+/// 43-r1 ①: override/r2_record group text strips the leading `> `/`**`/
+/// whitespace AND the signed prefix — the candidate KEY must carry only
+/// the body (no `外环(`).
+#[test]
+fn olp_evo_retro_override_key_strips_signed_prefix() {
+    let sb = Sandbox::new("signed-strip");
+    sb.write_board(
+        "### EVO-0001（t，harvest）\ntrigger: override\nsource: review /r.md\nidentity: board:/r.md#12#override#aaaa\nsymptom: > 外环(claude)·改判(作废 #40):以本条为准的新指令\n",
+    );
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let brief = sb.brief_text();
+    let key = brief
+        .lines()
+        .find(|l| l.starts_with("key: "))
+        .expect("one key");
+    assert!(
+        !key.contains("外环("),
+        "key must not carry the signed prefix: {key}"
+    );
+    assert!(
+        key.contains("以本条为准"),
+        "key carries the body text: {key}"
+    );
+}
+
+/// 43-r1 ②: `45c` (letter-suffixed number) survives normalization whole.
+#[test]
+fn olp_evo_retro_normalization_keeps_letter_suffixed_numbers() {
+    let sb = Sandbox::new("num-suffix");
+    sb.write_board(
+        "### EVO-0001（t，harvest）\ntrigger: ack_blocked\nsource: review /r.md\nidentity: board:/r.md#12#blocked#aaaa\nsymptom: ACK(blocked): slice 45a done, then 45c remains\n",
+    );
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let brief = sb.brief_text();
+    let key = brief
+        .lines()
+        .find(|l| l.starts_with("key: "))
+        .expect("one key");
+    assert!(
+        key.contains("45c"),
+        "`45c` must survive normalization intact: {key}"
+    );
+    assert!(key.contains("45a"), "`45a` too: {key}");
+}
+
+/// 43-r1 ③: fallback_switch cards take `detail` from the JSON symptom
+/// (like other events-source triggers) — the key carries the detail text.
+#[test]
+fn olp_evo_retro_fallback_switch_key_uses_detail() {
+    let sb = Sandbox::new("fs-detail");
+    sb.write_board(
+        "### EVO-0001（t，harvest）\ntrigger: fallback_switch\nsource: events /e.jsonl\nidentity: events:/e.jsonl#t#fallback_switch#s1#1111\nsymptom: {\"ts\":\"t\",\"kind\":\"fallback_switch\",\"data\":{\"detail\":\"router failover\"}}\n",
+    );
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let brief = sb.brief_text();
+    let key = brief
+        .lines()
+        .find(|l| l.starts_with("key: "))
+        .expect("one key");
+    assert!(
+        key.contains("router failover"),
+        "fallback_switch key must carry the detail, not the raw JSON: {key}"
+    );
+}

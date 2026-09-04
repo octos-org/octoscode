@@ -102,6 +102,16 @@ PREFIXES = [
 def group_text(trigger, symptom):
     if trigger in ("ack_blocked", "ack_wontdo", "override", "r2_record"):
         t = symptom
+        # 43-r1 ①: harvest stores the ORIGINAL line (leading `> `, `**`,
+        # whitespace included) — strip those first, then the signed form.
+        while True:
+            if t.startswith("> "):
+                t = t[2:]
+            elif t.startswith("**"):
+                t = t[2:]
+            else:
+                break
+        t = t.lstrip()
         for p in PREFIXES:
             if t.startswith(p):
                 t = t[len(p):]
@@ -111,7 +121,8 @@ def group_text(trigger, symptom):
         if m:
             t = t[m.end():]
         return t
-    if trigger in ("escalation", "turn_error", "goal_blocked", "goal_budget_limited"):
+    if trigger in ("escalation", "turn_error", "goal_blocked", "goal_budget_limited",
+                    "fallback_switch", "malformed_exhausted"):
         try:
             d = json.loads(symptom)
             if isinstance(d, dict):
@@ -130,8 +141,10 @@ def group_text(trigger, symptom):
 def normalize(text):
     t = text.lower()
     t = re.sub(r"(?<![\w])/[^\s]+", "<path>", t)
-    t = re.sub(r"(?<![A-Za-z])[0-9a-f]{8,}(?![A-Za-z])", "<hex>", t)
-    t = re.sub(r"(?<![A-Za-z_\d])\d+(?![A-Za-z])", "<num>", t)
+    t = re.sub(r"(?<![A-Za-z\d])[0-9a-f]{8,}(?![A-Za-z\d])", "<hex>", t)
+    # 43-r1 ②: digit boundaries on BOTH sides — `45c`/`c45` stay intact
+    # (backtracking must not split a run mid-token), same for <hex>.
+    t = re.sub(r"(?<![A-Za-z_\d])\d+(?![A-Za-z\d])", "<num>", t)
     t = re.sub(r"\s+", " ", t).strip()
     return t[:80]
 
