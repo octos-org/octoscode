@@ -1561,12 +1561,16 @@ fn shell_command(command: &str) -> Command {
     if cfg!(windows) {
         let mut process = Command::new("cmd");
         process.arg("/C").arg(command);
-        // Prepend the auto-installer's dir (`~\.octos\bin`) to the CHILD's PATH
-        // so a bare `octos` in `command` resolves to the exe `backend_ensure`
-        // dropped there — WITHOUT embedding a path in the command string, which
-        // `cmd /C` + Rust arg-quoting mangle (that was the exit-1 launch bug).
-        // Setting the child's env is not `unsafe` and never touches our own PATH.
-        if let Some(bin) = crate::backend_ensure::install_bin_dir() {
+        // Prepend the dir `backend_ensure` selected (the auto-installer's
+        // `~\.octos\bin` when its copy is the backend) to the CHILD's PATH so
+        // a bare `octos` in `command` resolves to that exe — WITHOUT embedding
+        // a path in the command string, which `cmd /C` + Rust arg-quoting
+        // mangle (that was the exit-1 launch bug). When the resolver picked an
+        // on-PATH octos instead, there is NO prepend: an unconditional one
+        // would let a stale `~\.octos\bin\octos.exe` shadow the newer copy the
+        // resolver deliberately chose (#501). Setting the child's env is not
+        // `unsafe` and never touches our own PATH.
+        if let Some(bin) = crate::backend_ensure::launch_path_prepend_dir() {
             let mut path = bin.into_os_string();
             if let Some(existing) = std::env::var_os("PATH") {
                 path.push(";"); // Windows PATH separator (this branch is Windows-only at runtime)
