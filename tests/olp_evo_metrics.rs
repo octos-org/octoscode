@@ -300,3 +300,120 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
     }
     out
 }
+
+// --- #44c: stall + fake_verified diagnostics (four scenarios) ----------
+
+fn stall_fixture() -> PathBuf {
+    repo_root().join("fixtures/evolution/stall/review-board.md")
+}
+
+fn write_r2_board(repo: &Path) {
+    std::fs::create_dir_all(repo.join(".octos")).unwrap();
+    let mut t = String::new();
+    let rows = [
+        (
+            "r2_record",
+            "review /r",
+            "外环(codex)·R2 记档(#41):声称 verified 复验不符",
+        ),
+        ("ack_blocked", "review /r", "ACK(blocked): a"),
+        ("ack_blocked", "review /r", "ACK(blocked): b"),
+    ];
+    for (i, (trig, src, sym)) in rows.iter().enumerate() {
+        let id_hash = format!("{:016x}", i + 1);
+        t.push_str(&format!(
+            "### EVO-{:04}（t，harvest）\ntrigger: {trig}\nsource: {src}\nidentity: board:/r.md#{}#{trig}#{id_hash}\nsymptom: {sym}\n\n",
+            i + 1,
+            i,
+        ));
+    }
+    std::fs::write(repo.join(".octos/EVOLUTION.md"), t).unwrap();
+}
+
+/// Scenario: 停摆诊断按活板定式
+#[test]
+fn olp_evo_metrics_stall_matches_board_grammar() {
+    let root = std::env::temp_dir().join(format!("m-stall-{}", std::process::id()));
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let out = Command::new("bash")
+        .arg(metrics_script())
+        .arg(&repo)
+        .args(["--stall", &stall_fixture().to_string_lossy()])
+        .args(["--stall-threshold", "30", "--now", "2026-09-05T00:45:00"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("stall: 43c-2 45"), "{stdout}");
+    assert!(stdout.contains("stalls: 1"), "{stdout}");
+    assert!(!stdout.contains("stall: 43-r1"), "{stdout}");
+    assert!(!stdout.contains("stall: 37"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Scenario: 反序派单与状态词前缀
+#[test]
+fn olp_evo_metrics_stall_accepts_reverse_order_and_status_words() {
+    let root = std::env::temp_dir().join(format!("m-rev-{}", std::process::id()));
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let out = Command::new("bash")
+        .arg(metrics_script())
+        .arg(&repo)
+        .args(["--stall", &stall_fixture().to_string_lossy()])
+        .args(["--now", "2026-09-05T00:45:00"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("stall: 27e"), "{stdout}");
+    assert!(!stdout.contains("stall: 27c"), "{stdout}");
+    assert!(!stdout.contains("stall: 27d"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Scenario: 阈值内的派单不报停摆
+#[test]
+fn olp_evo_metrics_stall_respects_threshold() {
+    let root = std::env::temp_dir().join(format!("m-th-{}", std::process::id()));
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let out = Command::new("bash")
+        .arg(metrics_script())
+        .arg(&repo)
+        .args(["--stall", &stall_fixture().to_string_lossy()])
+        .args(["--stall-threshold", "60", "--now", "2026-09-05T00:45:00"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("stalls: 0"), "{stdout}");
+    assert!(!stdout.contains("stall: 43c-2"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Scenario: 伪 verified 计数与 JSON
+#[test]
+fn olp_evo_metrics_fake_verified_counts_r2_records() {
+    let root = std::env::temp_dir().join(format!("m-fv-{}", std::process::id()));
+    let repo = root.join("repo");
+    write_r2_board(&repo);
+    let out = Command::new("bash")
+        .arg(metrics_script())
+        .arg(&repo)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("fake_verified: 1"), "{text}");
+    assert!(!text.contains("regress"), "{text}");
+    let out2 = Command::new("bash")
+        .arg(metrics_script())
+        .arg(&repo)
+        .arg("--json")
+        .output()
+        .unwrap();
+    let js = String::from_utf8_lossy(&out2.stdout);
+    let v: serde_json::Value = serde_json::from_str(&js).expect("json");
+    assert_eq!(v["fake_verified"].as_u64().unwrap(), 1, "{js}");
+    assert!(!js.contains("regress"), "{js}");
+    let _ = std::fs::remove_dir_all(&root);
+}
