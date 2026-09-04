@@ -677,3 +677,28 @@ fn olp_evo_retro_fallback_switch_key_uses_detail() {
         "fallback_switch key must carry the detail, not the raw JSON: {key}"
     );
 }
+
+/// 43c-1: fallback_switch anchors carry the LANES (`session|from->to`),
+/// not the plain session segment.
+#[test]
+fn olp_evo_retro_fallback_anchor_includes_lanes() {
+    let sb = Sandbox::new("fs-lanes");
+    sb.write_board(
+        "### EVO-0001（t，harvest）\ntrigger: fallback_switch\nsource: events /e.jsonl\nidentity: events:/e.jsonl#t#fallback_switch#octos:local:tui#coding#1111\nsymptom: {\"detail\":\"router failover: lane-a -> lane-b (quota)\"}\n",
+    );
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let brief = sb.brief_text();
+    let anchors = brief
+        .lines()
+        .find(|l| l.starts_with("anchors: "))
+        .expect("anchors line");
+    assert!(
+        anchors.contains("coding|lane-a->lane-b"),
+        "anchor must be session|from->to: {anchors}"
+    );
+}
