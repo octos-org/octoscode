@@ -71,7 +71,10 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
+          # B1 fix (#604 review): tomllib needs python 3.11+, but the plan job
+          # runs on ubuntu-22.04 (python 3.10). Parse Cargo.toml with awk —
+          # no python version dependency.
+          version=$(awk '/^\[package\]/{f=1} f && /^version = /{print $3; exit}' Cargo.toml | tr -d '"')
           if [ "$TAG" != "v$version" ]; then
             echo "::error::release tag $TAG does not match package version v$version"
             exit 1
