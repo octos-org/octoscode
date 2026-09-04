@@ -193,7 +193,7 @@ for i, line in enumerate(lines):
         continue
     kind = d.get("kind", "")
     trigger = None
-    if kind in ("escalation", "turn_error"):
+    if kind in ("escalation", "turn_error", "fallback_switch", "malformed_exhausted"):
         trigger = kind
     elif kind == "goal_transition":
         detail = d.get("detail", "")

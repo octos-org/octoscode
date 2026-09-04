@@ -90,7 +90,8 @@ LAYER = {
     "goal_blocked": "Lifecycle", "goal_budget_limited": "Lifecycle",
     "escalation": "Lifecycle",
     "report_blocked": "Tooling", "ask_outer_timeout": "Tooling",
-    "turn_error": "Execution",
+    "turn_error": "Execution", "fallback_switch": "Execution",
+    "malformed_exhausted": "Tooling",
     "override": "Governance", "r2_record": "Verification",
 }
 

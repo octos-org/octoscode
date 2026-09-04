@@ -563,3 +563,37 @@ fn olp_evo_retro_issue_template_and_features_in_place() {
     let features = std::fs::read_to_string(repo_root().join("docs/OCTOLOOP_FEATURES.md")).unwrap();
     assert!(features.contains("外环私有工作纸"));
 }
+
+/// Scenario: retro 层表覆盖新 kind
+#[test]
+fn olp_evo_retro_layer_for_new_kinds() {
+    let sb = Sandbox::new("new-kind-layers");
+    sb.write_board(
+        "### EVO-0001（t，harvest）
+trigger: fallback_switch
+source: events /e.jsonl
+identity: events:/e.jsonl#t#fallback_switch#s1#1111
+symptom: {\"detail\":\"zai to k3\"}
+### EVO-0002（t，harvest）
+trigger: malformed_exhausted
+source: events /e.jsonl
+identity: events:/e.jsonl#t#malformed_exhausted#s2#2222
+symptom: {\"detail\":\"3 retries\"}
+",
+    );
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let brief = sb.brief_text();
+    assert!(
+        brief.contains("layer=Execution"),
+        "fallback_switch → Execution: {brief}"
+    );
+    assert!(
+        brief.contains("layer=Tooling"),
+        "malformed_exhausted → Tooling: {brief}"
+    );
+}
