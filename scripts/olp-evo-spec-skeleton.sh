@@ -70,7 +70,21 @@ forbiddens = list_items(forbidden_sec)
 def slugify(text, n):
     parts = re.findall(r"[A-Za-z0-9_]+", text)
     slug = "_".join(p.lower() for p in parts)
-    return slug if slug else f"pending_item_{n}"
+    if not slug:
+        return f"pending_item_{n}"
+    # 44b-r1: cap the slug at 48 chars, cutting only at segment
+    # boundaries; if the first segment alone exceeds it, hard-cut.
+    if len(slug) > 48:
+        out = ""
+        for seg in slug.split("_"):
+            cand = f"{out}_{seg}" if out else seg
+            if len(cand) > 48:
+                break
+            out = cand
+        slug = out or slug[:48]
+        if not slug:
+            return f"pending_item_{n}"
+    return slug
 
 lines = []
 lines.append(f"spec: task")
