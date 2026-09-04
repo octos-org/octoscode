@@ -38,14 +38,24 @@ fn olp_evo_skeleton_from_template_flaw_parses_and_maps_sections() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("satisfies: [REQ-OLP-EVO]"), "{stdout}");
-    let pendings = stdout
+    let pending_lines: Vec<&str> = stdout
         .lines()
         .filter(|l| l.contains("测试: pending_"))
-        .count();
+        .collect();
     assert_eq!(
-        pendings, 3,
+        pending_lines.len(),
+        3,
         "three 修复 decisions → three scenarios: {stdout}"
     );
+    // 44b-r1: selectors stay short (pending_ + ≤48-char slug = ≤56)
+    for l in &pending_lines {
+        let sel = l.trim().trim_start_matches("测试: ");
+        assert!(
+            sel.len() <= 56,
+            "selector {sel} exceeds 56 chars ({}): {stdout}",
+            sel.len()
+        );
+    }
     // 预防 items land under Forbidden
     let forbid_pos = stdout.find("### Forbidden").expect("Forbidden section");
     let after = &stdout[forbid_pos..];
