@@ -34,3 +34,11 @@ open → consolidated → filed → accepted → specified → patched → verif
 消除前不得保存为 FLAW-NNN.md**;持主审锁的外环消 TODO(fingerprint、
 severity、repo)并归并锚点后,才落 `FLAW-NNN.md` 并更新 `memory.md`。
 每次 retro 最多推进 3 条记录;判断(归层、锚定、立案)始终由人做。
+
+## 指标(阶段 2)
+
+`scripts/olp-evo-metrics.sh <repo> [--since EVO-NNNN] [--json]
+[--baseline <json>]`:把进化黑板与最近 retro 简报数成一条命令的
+§1 成功指标(cards/by_trigger/by_source/recurring_candidates),
+`--baseline` 对上一份 `--json` 输出比对并只对增长项打 `regress:` 标注;
+只读,不创建不修改任何文件。
