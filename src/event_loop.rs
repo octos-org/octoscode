@@ -477,6 +477,13 @@ pub fn run(cli: Cli) -> Result<()> {
             dirty = true;
         }
 
+        // #526: an interrupted turn whose server terminal never arrives
+        // (wedged turn task) is settled locally on this same tick cadence, so
+        // its frozen live reply stops jamming the staged queue.
+        if store.reconcile_wedged_interrupted_turn() {
+            dirty = true;
+        }
+
         // Terminal sub-agent chips age out of the strip on this same tick
         // cadence (the loop already wakes every UI_EVENT_POLL_INTERVAL, so no
         // dedicated timer): finished/failed agents linger long enough to

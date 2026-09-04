@@ -4943,8 +4943,11 @@ pub struct AppState {
     /// pressed instead of after a full client→server→terminal round trip (the
     /// server interrupt is cooperative and can lag seconds). Keyed by session;
     /// the value is the interrupted turn id, so a LATER turn on the same
-    /// session is never gated. Cleared on the turn's terminal.
-    pub interrupted_turns: std::collections::HashMap<SessionKey, TurnId>,
+    /// session is never gated, plus the LOCAL time the interrupt was marked —
+    /// the tick watchdog (`Store::reconcile_wedged_interrupted_turn`) settles
+    /// the turn locally when its terminal never lands. Cleared on the turn's
+    /// terminal.
+    pub interrupted_turns: std::collections::HashMap<SessionKey, (TurnId, std::time::Instant)>,
     /// Sessions whose last `session/status/read` reported `cursor.healthy:
     /// false`. A latch, not a log: `session/status/read` is polled, so the
     /// warning fires when a session ENTERS the state and again only after it
@@ -9574,26 +9577,44 @@ impl AppState {
     /// (Esc/Ctrl+C) and the server terminal has not yet reconciled it. Used to
     /// freeze the live reply and keep the run-state idle.
     pub fn turn_locally_interrupted(&self, session_id: &SessionKey, turn_id: &TurnId) -> bool {
-        self.interrupted_turns.get(session_id) == Some(turn_id)
+        self.interrupted_turns
+            .get(session_id)
+            .is_some_and(|(marked_turn_id, _)| marked_turn_id == turn_id)
     }
 
     /// True when the ACTIVE session's live turn is one the user just
     /// interrupted — the signal that keeps the run-state optimistically idle
     /// (spinner off) until the terminal lands.
     pub fn active_live_turn_interrupted(&self) -> bool {
-        let Some(session) = self.active_session() else {
-            return false;
-        };
-        match session.live_reply.as_ref() {
-            Some(live) => self.interrupted_turns.get(&session.id) == Some(&live.turn_id),
-            None => false,
+        self.wedged_interrupted_live_turn(std::time::Duration::ZERO)
+            .is_some()
+    }
+
+    /// The ACTIVE session's interrupted live turn once it has waited at least
+    /// `ttl` for a server terminal that never landed (`Duration::ZERO` → any
+    /// interrupted live turn). A healthy interrupt reconciles in a round trip;
+    /// past the TTL the turn task is wedged and
+    /// `Store::reconcile_wedged_interrupted_turn` settles it locally. Turn-
+    /// matched against the live reply: a stale marker for an OLDER turn must
+    /// never name a newer live turn wedged.
+    pub fn wedged_interrupted_live_turn(
+        &self,
+        ttl: std::time::Duration,
+    ) -> Option<(SessionKey, TurnId)> {
+        let session = self.active_session()?;
+        let live = session.live_reply.as_ref()?;
+        let (turn_id, marked_at) = self.interrupted_turns.get(&session.id)?;
+        if *turn_id != live.turn_id || marked_at.elapsed() < ttl {
+            return None;
         }
+        Some((session.id.clone(), turn_id.clone()))
     }
 
     /// Record a user interrupt so the turn stops on screen immediately. Cleared
     /// on the turn's terminal (`commit_live_reply` / `fail_live_reply`).
     pub fn mark_turn_interrupted(&mut self, session_id: SessionKey, turn_id: TurnId) {
-        self.interrupted_turns.insert(session_id, turn_id);
+        self.interrupted_turns
+            .insert(session_id, (turn_id, Instant::now()));
     }
 
     /// Clear a turn's interrupt marker once its terminal lands — but ONLY when
@@ -9602,7 +9623,11 @@ impl AppState {
     /// turn's marker on the same session (that would resurrect the killed turn:
     /// its trailing deltas un-freeze and the spinner re-arms). (review P2)
     pub fn clear_interrupted_turn(&mut self, session_id: &SessionKey, turn_id: &TurnId) {
-        if self.interrupted_turns.get(session_id) == Some(turn_id) {
+        if self
+            .interrupted_turns
+            .get(session_id)
+            .is_some_and(|(marked_turn_id, _)| marked_turn_id == turn_id)
+        {
             self.interrupted_turns.remove(session_id);
         }
     }
