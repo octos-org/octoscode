@@ -84,6 +84,19 @@ pub(crate) const STAGED_SUBMIT_GATE_TTL: std::time::Duration = std::time::Durati
 /// alone never resets the state (see the spec's Forbidden list).
 pub(crate) const PHANTOM_RUN_STATE_PROBE_SECS: u64 = 10;
 
+/// #526: how long a locally-interrupted turn (Esc/Ctrl+C, optimistic idle)
+/// may wait for its server terminal before the tick watchdog settles it
+/// LOCALLY. A cooperative interrupt acks within the server's own 5s ack
+/// timeout and its `TurnError(interrupted)` lands right after; when the turn
+/// task never observes the interrupt (wedged mid-fan-out), no terminal is
+/// ever emitted — without this settle the frozen `live_reply` keeps
+/// `active_turn()` occupied forever, so the staged queue jams and every later
+/// prompt queues behind it until the client is restarted. 15s leaves generous
+/// wind-down slack past the server's ack timeout while still unjamming
+/// promptly.
+pub(crate) const INTERRUPTED_TURN_SETTLE_TTL: std::time::Duration =
+    std::time::Duration::from_secs(15);
+
 #[derive(Default)]
 struct TurnActivitySummary {
     action_count: usize,
@@ -14670,6 +14683,42 @@ impl Store {
             return true;
         }
         false
+    }
+
+    /// #526 tick watchdog: a turn the user interrupted (Esc/Ctrl+C) whose
+    /// server terminal never lands would otherwise wedge the session FOREVER —
+    /// the freeze keeps `live_reply` bound, so `active_turn()` stays `Some`,
+    /// the staged queue never drains, and every later prompt just queues
+    /// behind it until the client is restarted. Past
+    /// [`INTERRUPTED_TURN_SETTLE_TTL`] (the server's own ack timeout is 5s), settle
+    /// the turn locally by feeding the shared error finalizer a synthetic
+    /// `interrupted` terminal: it commits the frozen partial with the
+    /// interrupted note, applies the deferred composer restore, releases the
+    /// staged gate, marks the turn completed (a late REAL terminal then hits
+    /// the duplicate guard, and late deltas are dropped), and drains the
+    /// queue. If the server session is still occupied by the wedged turn, the
+    /// drained submit is rejected and re-staged by the gate-TTL self-heal —
+    /// the latch is cleared either way, which is what the user asked for.
+    ///
+    /// Returns true when it settled anything.
+    pub fn reconcile_wedged_interrupted_turn(&mut self) -> bool {
+        let Some((session_id, turn_id)) = self
+            .state
+            .wedged_interrupted_live_turn(INTERRUPTED_TURN_SETTLE_TTL)
+        else {
+            return false;
+        };
+        let command = self.fail_live_reply(TurnErrorEvent {
+            session_id,
+            topic: None,
+            turn_id,
+            code: "interrupted".into(),
+            message: "server terminal never arrived after interrupt; settled locally".into(),
+        });
+        if let Some(command) = command {
+            self.state.enqueue_autonomy_hydration(command);
+        }
+        true
     }
 
     pub fn drain_staged_backstop(&mut self) -> bool {
@@ -34883,6 +34932,241 @@ now analyzing the bus module"
         assert!(
             store.state.turn_locally_interrupted(&session_id, &turn_id),
             "the freeze marker still applies to a blocked interrupted turn"
+        );
+    }
+
+    /// #526: Esc a turn whose server terminal NEVER arrives (wedged turn task)
+    /// and the session jammed permanently — the frozen `live_reply` kept
+    /// `active_turn()` occupied, so the staged queue never drained and every
+    /// later prompt queued behind it until the client was restarted. The tick
+    /// watchdog must settle the turn locally past the TTL and drain the queue.
+    #[test]
+    fn wedged_interrupted_turn_settles_locally_and_drains_the_queue() {
+        let turn_id = TurnId::new();
+        let mut store = store_with_live_reply(turn_id.clone(), "partial answer");
+        let session_id = store.state.sessions[0].id.clone();
+        store.interrupt_command().expect("interrupt");
+        store.state.pending_messages.push("queued follow-up".into());
+        // The terminal never lands; age the marker past the settle TTL.
+        store.state.interrupted_turns.insert(
+            session_id.clone(),
+            (
+                turn_id.clone(),
+                std::time::Instant::now() - INTERRUPTED_TURN_SETTLE_TTL,
+            ),
+        );
+
+        assert!(store.reconcile_wedged_interrupted_turn());
+
+        assert!(
+            store.state.sessions[0].live_reply.is_none(),
+            "the frozen live reply must be committed, not held forever"
+        );
+        assert!(
+            !store.state.turn_locally_interrupted(&session_id, &turn_id),
+            "the settle clears the interrupt marker"
+        );
+        let committed = &store.state.sessions[0].messages;
+        assert!(
+            committed
+                .iter()
+                .any(|message| message.content.contains("partial answer")),
+            "the frozen partial is kept as the turn's (interrupted) reply"
+        );
+        assert!(
+            store.state.is_turn_completed(&session_id, &turn_id),
+            "the turn is marked terminal so late deltas/terminals reconcile"
+        );
+        assert!(
+            store.state.pending_messages.is_empty(),
+            "the queued prompt must drain out of the jammed queue"
+        );
+        let drained =
+            store
+                .state
+                .pending_autonomy_hydration
+                .iter()
+                .find_map(|command| match command {
+                    AppUiCommand::SubmitPrompt(params) => {
+                        params.input.iter().find_map(|item| match item {
+                            octos_core::ui_protocol::InputItem::Text { text } => Some(text.clone()),
+                            _ => None,
+                        })
+                    }
+                    _ => None,
+                });
+        assert_eq!(
+            drained.as_deref(),
+            Some("queued follow-up"),
+            "the queued prompt is submitted as the next turn"
+        );
+    }
+
+    /// A healthy interrupt reconciles in a round trip — the watchdog must not
+    /// fire inside the TTL, or it would race the real terminal.
+    #[test]
+    fn fresh_interrupted_turn_is_not_settled_by_the_watchdog() {
+        let turn_id = TurnId::new();
+        let mut store = store_with_live_reply(turn_id.clone(), "streaming");
+        let session_id = store.state.sessions[0].id.clone();
+        store.interrupt_command().expect("interrupt");
+        store.state.pending_messages.push("queued follow-up".into());
+
+        assert!(!store.reconcile_wedged_interrupted_turn());
+        assert!(store.state.sessions[0].live_reply.is_some());
+        assert!(store.state.turn_locally_interrupted(&session_id, &turn_id));
+        assert_eq!(store.state.pending_messages, vec!["queued follow-up"]);
+    }
+
+    /// The watchdog keys off the LIVE turn: a stale marker left behind for an
+    /// older turn id must never settle (or call wedged) a newer live turn.
+    #[test]
+    fn stale_interrupt_marker_does_not_settle_a_newer_live_turn() {
+        let old_turn = TurnId::new();
+        let live_turn = TurnId::new();
+        let mut store = store_with_live_reply(live_turn.clone(), "still streaming");
+        let session_id = store.state.sessions[0].id.clone();
+        store.state.interrupted_turns.insert(
+            session_id.clone(),
+            (
+                old_turn,
+                std::time::Instant::now() - INTERRUPTED_TURN_SETTLE_TTL,
+            ),
+        );
+
+        assert!(!store.reconcile_wedged_interrupted_turn());
+        assert!(
+            store.state.sessions[0]
+                .live_reply
+                .as_ref()
+                .is_some_and(|live| live.turn_id == live_turn),
+            "the newer live turn is untouched"
+        );
+    }
+
+    /// The local settle races a wedged server that eventually emits the REAL
+    /// terminal: the duplicate guard must absorb it — no second card, no
+    /// second drain.
+    #[test]
+    fn late_terminal_after_local_settle_is_absorbed() {
+        let turn_id = TurnId::new();
+        let mut store = store_with_live_reply(turn_id.clone(), "partial answer");
+        let session_id = store.state.sessions[0].id.clone();
+        store.interrupt_command().expect("interrupt");
+        store.state.pending_messages.push("queued follow-up".into());
+        store.state.interrupted_turns.insert(
+            session_id.clone(),
+            (
+                turn_id.clone(),
+                std::time::Instant::now() - INTERRUPTED_TURN_SETTLE_TTL,
+            ),
+        );
+        assert!(store.reconcile_wedged_interrupted_turn());
+        let messages_after_settle = store.state.sessions[0].messages.len();
+        let submits_after_settle = store
+            .state
+            .pending_autonomy_hydration
+            .iter()
+            .filter(|command| matches!(command, AppUiCommand::SubmitPrompt(_)))
+            .count();
+        assert_eq!(submits_after_settle, 1, "the settle drains exactly once");
+
+        store.apply_event(AppUiEvent::Protocol(UiNotification::TurnError(
+            TurnErrorEvent {
+                session_id: session_id.clone(),
+                topic: None,
+                turn_id: turn_id.clone(),
+                code: "interrupted".into(),
+                message: "late real terminal".into(),
+            },
+        )));
+
+        assert_eq!(
+            store.state.sessions[0].messages.len(),
+            messages_after_settle,
+            "a late terminal for the locally-settled turn must not push a second card"
+        );
+        let submits_after_late_terminal = store
+            .state
+            .pending_autonomy_hydration
+            .iter()
+            .filter(|command| matches!(command, AppUiCommand::SubmitPrompt(_)))
+            .count();
+        assert_eq!(
+            submits_after_late_terminal, submits_after_settle,
+            "the late terminal must not drain the queue a second time"
+        );
+    }
+
+    /// Same race through the OTHER terminal handler: the wedged server's late
+    /// `TurnCompleted` (the interrupt never took effect server-side) hits the
+    /// duplicate guard in `commit_live_reply` — no fallback card, no re-commit.
+    #[test]
+    fn late_completion_after_local_settle_is_absorbed() {
+        let turn_id = TurnId::new();
+        let mut store = store_with_live_reply(turn_id.clone(), "partial answer");
+        let session_id = store.state.sessions[0].id.clone();
+        store.interrupt_command().expect("interrupt");
+        store.state.interrupted_turns.insert(
+            session_id.clone(),
+            (
+                turn_id.clone(),
+                std::time::Instant::now() - INTERRUPTED_TURN_SETTLE_TTL,
+            ),
+        );
+        assert!(store.reconcile_wedged_interrupted_turn());
+        let messages_after_settle = store.state.sessions[0].messages.len();
+
+        store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
+            TurnCompletedEvent {
+                session_id: session_id.clone(),
+                topic: None,
+                turn_id: turn_id.clone(),
+                cursor: None,
+                tokens_in: None,
+                tokens_out: None,
+                session_result: None,
+            },
+        )));
+
+        assert_eq!(
+            store.state.sessions[0].messages.len(),
+            messages_after_settle,
+            "a late completion for the locally-settled turn must not push a fallback card"
+        );
+    }
+
+    /// A turn parked on an approval (Blocked) that ALSO has a live reply is
+    /// wedged just the same when its terminal never lands: the settle must
+    /// drop the Blocked state so the drained queue's own Blocked guard
+    /// releases and the staged prompt can run.
+    #[test]
+    fn wedged_blocked_turn_settles_and_releases_the_drain() {
+        let turn_id = TurnId::new();
+        let mut store = store_with_live_reply(turn_id.clone(), "streamed, then parked");
+        store.state.set_run_state_blocked("approval");
+        store.interrupt_command().expect("interrupt");
+        store.state.pending_messages.push("queued follow-up".into());
+        store.state.interrupted_turns.insert(
+            store.state.sessions[0].id.clone(),
+            (
+                turn_id.clone(),
+                std::time::Instant::now() - INTERRUPTED_TURN_SETTLE_TTL,
+            ),
+        );
+
+        assert!(store.reconcile_wedged_interrupted_turn());
+        assert!(
+            !matches!(store.state.run_state, SessionRunState::Blocked { .. }),
+            "the settle must not leave the chip parked on the dead turn"
+        );
+        assert!(
+            store
+                .state
+                .pending_autonomy_hydration
+                .iter()
+                .any(|command| matches!(command, AppUiCommand::SubmitPrompt(_))),
+            "the queued prompt drains once the wedged Blocked turn settles"
         );
     }
 
