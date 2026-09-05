@@ -11,7 +11,7 @@ estimate: 2d
 ②FLAW 记录直出任务契约骨架,主审只补测试选择器与场景细节;③FLAW 索引把 `docs/OUTER_LOOP_PROTOCOL.md`
 的散文沉淀标成"已记录",原文不删;④指标脚本补"派单无 ACK"与"伪 verified"两项跨源诊断(仍是诊断,
 不是判据)。另把 `iteration_cap`/`patch_failed` 登记为 kind 候选(发射点属 octos 侧)。不改运行时代码、
-协议与 MCP 工具面;骨架不自动入库 `specs/`。契约 v4 已并入 grok/codex 对抗复审与 codex gpt-6 PR 复审(#619)。
+协议与 MCP 工具面;骨架不自动入库 `specs/`。契约 v4.2 已并入 grok/codex 对抗复审与 codex gpt-6 两轮 PR 复审(#619/#620)。
 
 ## 已定决策
 
@@ -19,14 +19,15 @@ estimate: 2d
   并存):命中 token 时先运行采集脚本(定位顺序 `<repo-root>/scripts/olp-evo-harvest.sh` → `$(dirname "$0")/olp-evo-harvest.sh`,都缺则 stderr `harvest: script not found` 并按失败处理;安装版 `~/.octos/outer/watch-board.sh` 因此可直接用 `--harvest`),再打印 `BOARD-SIGNAL: <token>`
   与命中行(既有格式),然后 `base=$cur` 并 `continue`;不带 `--harvest` 时保持既有一击 `exit 0`。采集非零退出只在
   stderr 打 `harvest: failed (exit N)`,仍打印命中并 `base=$cur`(不重试、不重复打印);非命中的新增行不触发采集;
-  监视器不 `export`/不改 `OLP_EVO_STATE`,与手跑共用 `harvest.lock`。
+  监视器不 `export`/不改 `OLP_EVO_STATE`,与手跑共用 `harvest.lock`。 常驻模式下打印命中行不得经 `printf | head` 管道(`pipefail` 下 SIGPIPE 会以 141 杀死监视器):用 `head -n 3 <<<"$hits"` 或 awk 限量,一次追加数百条命中后监视器必须存活并能处理下一批。
 - `scripts/olp-evo-lib.py` **新增** `parse_flaw(text)`:返回 `{id, req, status, layers, issue, pr, sections{段名: 正文},
   paths[]}`;frontmatter 用简单 `key: value` 解析(不引入 yaml);`paths` = 责任步 + 锚点两段中含 `/` 的反引号内容,
-  去掉 ` L123`、` L123–L140`、`:123`、`:123-140` 行号后缀并去重(`src/worker.rs:123` → `src/worker.rs`)。
+  去掉 ` L123`、` L123–L140`、`:123`、`:123-140`、`:123–140` 行号后缀(正则 `(\s*L\d+([–-]L?\d+)?|:\d+([–-]\d+)?)$`)并去重(`src/worker.rs:123` → `src/worker.rs`)。
 - 所有 python 入口(skeleton、index、metrics、retro)以 `python3 -B` 运行或在 import 前设 `sys.dont_write_bytecode`;
   `scripts/` 下不得出现 `__pycache__`。
 - `scripts/olp-evo-spec-skeleton.sh <FLAW-NNN.md> [--out <file>]`(bash + python3,import lib):输出中文段头契约
   (`## 意图`/`## 已定决策`/`## 边界`/`## 排除范围`/`## 完成条件`/`## 问题`);段别名:决策来源段 = `修复` 否则 `结案`,
+  `## 意图` = 症状段 + 根因段原文(**任一缺则在其位置输出 `<!-- TODO: 症状 -->` / `<!-- TODO: 根因 -->`**);
   Forbidden 来源段 = `预防` 否则 `保护门`;来源段的 `- ` 列表项各成一项,无列表则整段一项;每项一条场景
   `场景: <项前 40 字>` / `测试: pending_<slug>`(slug = 项文本中 `[A-Za-z0-9_]+` 片段以 `_` 连接、小写,为空则
   `pending_item_<n>`,slug 按片段边界截到 48 字符,禁止 `pending_pending_`)/ 假设·当·那么三行占位;缺段 `<!-- TODO: <段名> -->`;`satisfies: [<req>]` 或 `[]` + `## 问题`
@@ -35,15 +36,15 @@ estimate: 2d
 - `scripts/olp-evo-index.sh <repo-root>`(bash + python3,import lib 的 `parse_flaw`):扫描 `knowledge/context/evolution/FLAW-*.md`
   与 `docs/OUTER_LOOP_PROTOCOL.md` 的 `> 已记录:FLAW-NNN` 行(取其上方最近的 `#` 标题为"取代散文"),生成
   `INDEX.md`:首行 `# FLAW 索引(生成,勿手改)`,表头 `| FLAW | 状态 | 层 | issue / PR | 取代散文 |`,按 id 排序,
-  末行 `retired_prose: N`(N = 被引用的不同 FLAW 数);写前比对,内容相同不写。
+  issue/PR 列同时存在时输出 `<issue> / <pr>`,只有一个时输出该项,都无则 `—`;末行 `retired_prose: N`(N = 被引用的不同 FLAW 数);写前比对,内容相同不写。
 - `docs/OUTER_LOOP_PROTOCOL.md`:只在"迭代预算是任务切分的硬约束"条目下加一行
   `> 已登记:kind 候选 iteration_cap(见 knowledge/context/evolution/README.md)`;不为 FLAW-001/002 加引用。
 - `scripts/olp-evo-metrics.sh` 新增 `--stall <review-board>`、`--stall-threshold <minutes>`(缺省 0)、`--now <ISO8601>`
   (缺省当前时间):片号原子 `S = [0-9]+[a-z]?(?:-[0-9a-z]+)*`;派单行先剥 `^(> )?`、`\*\*`、`外环(...)·`/`外环·` 署名,
   再匹配 `(?:^|\s)(?:派单\s+(?P<a>S)|(?P<b>S)\s+派单)(?![0-9a-z])`(两种词序:`派单 43c-2` 与 `27c 派单`);
-  `不派单`、`立案并派单`、`立案+派单` 因前一字符非空白/非行首或后无片号而不匹配;两分支各自独立加边界:正序 `派单\s+(S)(?![0-9a-z])`、反序 `(?<![0-9a-z])(S)\s+派单`(`派单 99xyz`、`abc27c 派单` 都不匹配);ACK 行匹配
+  `不派单`、`立案并派单`、`立案+派单` 因前一字符非空白/非行首或后无片号而不匹配;**唯一定式**(本段为准,前文示意作废):正序 `(?:^|\s)派单\s+(S)(?![0-9a-z])`、反序 `(?:^|\s)(S)\s+派单(?![0-9a-z])`——`派单` 前必须是行首或空白,故 `不派单 44a`/`立案并派单 44b`/`立案+派单 44c` 均不匹配(`派单 99xyz`、`abc27c 派单` 都不匹配);ACK 行匹配
   `^(?:> )?ACK\((?P<s>S)\s+(?:done|blocked|wontdo)\b`,同片号取最长;派单时间 = 行内 `\((\d{4}-\d\d-\d\d) (\d\d:\d\d)`
-  或 `\[(\d{4}-\d\d-\d\d)T(\d\d:\d\d)`,缺则所属 `### N.` 标题的 `\((\d{4}-\d\d-\d\d)` 按 00:00(每遇新 `### N.` 标题先清空条目日期再提取,无日期标题下的派单为未知),仍缺为未知;
+  或 `\[(\d{4}-\d\d-\d\d)T(\d\d:\d\d)`,缺则所属 `### N.` 标题的 `\((\d{4}-\d\d-\d\d)` 按 00:00(每遇新 `### N.` 标题先清空条目日期再提取,无日期标题下的派单为未知),仍缺为未知;**日期解析失败(如 2026-02-30)按未知处理**,任何单行解析异常不得中断诊断,退出码仍为 0;
   无 ACK 且(未知或 `now - t` ≥ 阈值)输出 `stall: <片号> <整数分钟|open>`,汇总 `stalls: N`;`fake_verified: N` =
   窗口内 `r2_record` 卡数;`--json` 增 `stalls`(对象列表 `{slice, minutes|null}`)与 `fake_verified`;既有行不改,
   `note:` 行不变,退出码恒 0,零写入,输出不含 `regress`。
@@ -53,7 +54,7 @@ estimate: 2d
   `fixtures/evolution/index/`(两条 FLAW + 带引用的 PROTOCOL 片段)、`fixtures/evolution/stall/review-board.md`
   (含 `派单 43c-2`、`派单 43-r1`+`ACK(43-r1 done)`、`27c 派单`+`ACK(27c done)`、`不派单`、标题日期)。
 - 测试隔离:每条测试用含测试名的独立临时目录,只清理自己的目录;全套以 `cargo test --all-targets` 默认并行通过。
-  skeleton 解析断言分别检查 `agent-spec parse` 退出码为 0 与输出中的场景计数行,不得用 `contains("3")` 兜底。
+  skeleton 解析断言分别检查 `agent-spec parse` 退出码为 0 与精确的计数行(正则 `Acceptance Criteria: (\d+) scenarios` 取数比较,`contains("3 scenarios")` 会命中 13)。
 - CI:`.github/workflows/ci.yml` 的 test job 安装固定版本 `agent-spec 1.4.0`(`cargo install agent-spec --version 1.4.0
   --locked`,缓存 `~/.cargo/bin`),缺命令时测试失败而非跳过。
 - skill:`## 自主性纪律`/`## 模式 init`/`## 模式 inner`/description 为阶段 1 golden 保护,逐字不动;`--harvest` 用法只写在 `## 模式 outer`。
@@ -81,6 +82,8 @@ estimate: 2d
 - fixtures/evolution/stall/**
 - .github/workflows/ci.yml
 - .claude/skills/octoloop/SKILL.md
+- docs/OLP_OUTER_BOOT.md(主审追认:§7 进化环工具面段)
+- docs/OCTOLOOP_FEATURES.md(主审追认:进化环条目)
 - knowledge/context/evolution/README.md
 - knowledge/context/evolution/INDEX.md
 - docs/OUTER_LOOP_PROTOCOL.md
@@ -143,6 +146,12 @@ estimate: 2d
   当 活板追加一行命中行
   那么 stderr 不含 harvest: failed 且进化黑板恰一张卡
 
+场景: 大批命中后监视器存活
+  测试: olp_watch_board_harvest_survives_burst_hits
+  假设 监视器以 --harvest 启动且采集脚本为立即成功的桩
+  当 活板一次追加 400 行命中行,再追加一行命中行
+  那么 监视器进程仍在运行、退出码未出现 141,stdout 含两次 BOARD-SIGNAL
+
 场景: 不带 --harvest 仍一击退出
   测试: olp_watch_board_without_harvest_exits_on_hit
   假设 监视器不带 --harvest 启动
@@ -171,6 +180,12 @@ estimate: 2d
   那么 stdout 的 ## 意图 含根因段文本、### Allowed Changes 含一行 `- src/worker.rs` 且不含 `:123`
   并且 含一行 `测试: pending_item_1` 且不含 pending_pending_
 
+场景: 行号范围与缺根因占位
+  测试: olp_evo_skeleton_strips_line_ranges_and_emits_root_cause_todo
+  假设 一份 FLAW 只有症状与修复段,锚点含 `src/range.rs:123-140`
+  当 运行 olp-evo-spec-skeleton.sh
+  那么 stdout 含 `<!-- TODO: 根因 -->`、含一行 `- src/range.rs` 且不含 `123-140`
+
 场景: 骨架拒绝写入 specs 根
   测试: olp_evo_skeleton_refuses_out_into_specs_root
   假设 --out 指向 <仓库>/specs/task-x.spec.md
@@ -184,6 +199,12 @@ estimate: 2d
   假设 临时仓库含 fixtures/evolution/index/ 的两条 FLAW 与 PROTOCOL 片段(一行 `> 已记录:FLAW-001`)
   当 运行 olp-evo-index.sh 该仓库
   那么 INDEX.md 含两行以 | FLAW-00 开头、FLAW-001 行的取代散文列非 —、FLAW-002 行为 —、末行 retired_prose: 1
+
+场景: 索引同时列出 issue 与 PR
+  测试: olp_evo_index_lists_issue_and_pr_together
+  假设 一条 FLAW 的 frontmatter 同时有 issue 与 pr
+  当 运行 olp-evo-index.sh
+  那么 该行的 issue / PR 列含两者并以 ` / ` 分隔
 
 场景: 索引幂等不改 mtime
   测试: olp_evo_index_is_idempotent
@@ -203,6 +224,18 @@ estimate: 2d
   假设 夹具含 `派单 99xyz`、`abc27c 派单`,以及日期为 2026-09-01 的条目之后一条无日期的 `### 44.` 标题下的 `派单 44a` 无 ACK
   当 以 --stall <板> --now 2026-09-05T00:45:00 运行
   那么 stdout 不含 stall: 99x、不含 stall: 27c,含 stall: 44a open
+
+场景: 否定与复合短语不计派单
+  测试: olp_evo_metrics_stall_ignores_negated_and_compound_phrases
+  假设 夹具在日期标题下含 `不派单 44a`、`立案并派单 44b`、`立案+派单 44c` 三行且无 ACK
+  当 以 --stall <板> --now 2026-09-05T00:45:00 --json 运行
+  那么 stalls 为空列表且 stalls: 0
+
+场景: 无效日期不中断诊断
+  测试: olp_evo_metrics_stall_invalid_date_is_unknown
+  假设 夹具含标题 `### 45. z(2026-02-30,` 下的 `派单 45a` 无 ACK
+  当 以 --stall <板> 运行
+  那么 退出码等于 0 且 stdout 含 cards: 与 stall: 45a open
 
 场景: 反序派单与状态词前缀
   测试: olp_evo_metrics_stall_accepts_reverse_order_and_status_words
