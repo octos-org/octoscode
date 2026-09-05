@@ -386,9 +386,29 @@ fn olp_evo_metrics_stall_respects_threshold() {
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    // plain-text mode: within threshold → zero stalls
-    assert!(stdout.contains("stalls: 0"), "{stdout}");
+    // Threshold only gates DATED dispatches: a dated-within-threshold
+    // slice must NOT be reported. Dateless/invalid-date entries (open)
+    // are threshold-independent, so `stalls: N` depends on whether the
+    // fixture carries any open entry — count them from the output.
     assert!(!stdout.contains("stall: 43c-2"), "{stdout}");
+    let opens = stdout
+        .lines()
+        .filter(|l| l.starts_with("stall: ") && l.ends_with(" open"))
+        .count();
+    let reported = stdout
+        .lines()
+        .find(|l| l.starts_with("stalls: "))
+        .and_then(|l| {
+            l.trim_start_matches("stalls: ")
+                .trim()
+                .parse::<usize>()
+                .ok()
+        })
+        .expect("stalls: N line");
+    assert_eq!(
+        reported, opens,
+        "stalls count must equal open entries (no dated stalls): {stdout}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -513,5 +533,38 @@ fn olp_evo_metrics_stall_ignores_negated_and_compound_phrases() {
     for neg in ["44a", "44b", "44c"] {
         assert!(!stdout.contains(neg), "negated phrase matched: {stdout}");
     }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 44-r2: open entries are threshold-INDEPENDENT — a dateless dispatch
+/// still reports as a stall even with a large threshold (separate
+/// fixture so the threshold test stays fixture-shape-agnostic).
+#[test]
+fn olp_evo_metrics_stall_open_ignores_threshold() {
+    let root = std::env::temp_dir().join(format!("m-openth-{}", std::process::id()));
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let board = root.join("open.md");
+    std::fs::write(
+        &board,
+        "# 板\n\n### 43. 阶段 2(2026-09-05,外环)\n\n> 外环·**派单 43c-2**(2026-09-05 00:00):指标。\n\n### 44. 无日期条目\n\n派单 44a\n",
+    )
+    .unwrap();
+    let out = Command::new("bash")
+        .arg(metrics_script())
+        .arg(&repo)
+        .arg("--stall")
+        .arg(&board)
+        .args(["--stall-threshold", "100000"])
+        .arg("--now")
+        .arg("2026-09-05T00:45:00")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("stall: 44a open"), "{stdout}");
+    // dated 43c-2 stays under the huge threshold
+    assert!(!stdout.contains("stall: 43c-2"), "{stdout}");
+    assert!(stdout.contains("stalls: 1"), "{stdout}");
     let _ = std::fs::remove_dir_all(&root);
 }
