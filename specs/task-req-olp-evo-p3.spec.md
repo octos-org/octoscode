@@ -67,8 +67,7 @@ estimate: 2d
 
 ### Allowed Changes
 - scripts/olp-watch-board.sh
-- scripts/olp-evo-harvest.sh
-- specs/task-req-olp-evo-p3.spec.md
+- scripts/olp-evo-harvest.sh(主审追认 44-r1:仅限 olp-board-append.sh 的定位回退,不改采集判定)
 - scripts/olp-evo-lib.py
 - scripts/olp-evo-spec-skeleton.sh
 - scripts/olp-evo-index.sh
