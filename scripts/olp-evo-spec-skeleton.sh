@@ -18,23 +18,25 @@ while [ $# -gt 0 ]; do
 done
 [ -f "$SRC" ] || { echo "error: not a file: $SRC" >&2; exit 2; }
 
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-
+# 44-r1: --out protection must NOT depend on the caller's cwd — derive
+# the target's owning repo from the TARGET's directory, not from cwd.
 if [ -n "$OUT" ]; then
     OUT_REAL="$(realpath -m "$OUT")"
-    if [ -n "$REPO_ROOT" ]; then
+    OUT_DIR="$(dirname "$OUT_REAL")"
+    mkdir -p "$OUT_DIR"
+    TARGET_REPO="$(git -C "$OUT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+    if [ -n "$TARGET_REPO" ]; then
         case "$OUT_REAL" in
-            "$REPO_ROOT"/specs/drafts/*) : ;;
-            "$REPO_ROOT"/*)
+            "$TARGET_REPO"/specs/drafts/*) : ;;
+            "$TARGET_REPO"/specs/*)
                 echo "refusing to write outside specs/drafts/" >&2
                 exit 2
                 ;;
         esac
     fi
-    mkdir -p "$(dirname "$OUT_REAL")"
 fi
 
-python3 - "$SRC" "$OUT" "$(dirname "$0")" <<'PY'
+python3 -B - "$SRC" "$OUT" "$(dirname "$0")" <<'PY'
 import importlib.util, os, re, sys
 
 src, out, script_dir = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -71,7 +73,7 @@ def slugify(text, n):
     parts = re.findall(r"[A-Za-z0-9_]+", text)
     slug = "_".join(p.lower() for p in parts)
     if not slug:
-        return f"pending_item_{n}"
+        return f"item_{n}"
     # 44b-r1: cap the slug at 48 chars, cutting only at segment
     # boundaries; if the first segment alone exceeds it, hard-cut.
     if len(slug) > 48:
@@ -96,7 +98,11 @@ lines.append("---")
 lines.append("")
 lines.append("## 意图")
 lines.append("")
-lines.append(sections.get("症状", "").strip() or "<!-- TODO: 症状 -->")
+intent = sections.get("症状", "").strip() or "<!-- TODO: 症状 -->"
+root_cause = sections.get("根因", "").strip()
+if root_cause:
+    intent = f"{intent}\n\n根因:{root_cause}"
+lines.append(intent)
 lines.append("")
 lines.append("## 已定决策")
 lines.append("")

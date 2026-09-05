@@ -102,7 +102,8 @@ for k in sorted(set(by_trigger) | set(base_trig)):
 stalls = []
 if stall_board and os.path.isfile(stall_board):
     SLICE = r"[0-9]+[a-z]?(?:-[0-9a-z]+)*"
-    re_dispatch_a = re.compile(rf"(?:^|\s)(?:派单\s+(?P<a>{SLICE}))|(?P<b>{SLICE})\s+派单(?![0-9a-z])")
+    re_fwd = re.compile(rf"派单\s+(?P<a>{SLICE})(?![0-9a-z])")
+    re_rev = re.compile(rf"(?<![0-9a-z])(?P<b>{SLICE})\s+派单")
     re_ack = re.compile(rf"^(?:> )?ACK\((?P<s>{SLICE})\s+(?:done|blocked|wontdo)\b")
     re_date_inline = re.compile(r"\((\d{4}-\d\d-\d\d) (\d\d:\d\d)")
     re_date_bracket = re.compile(r"\[(\d{4}-\d\d-\d\d)T(\d\d:\d\d)")
@@ -119,6 +120,10 @@ if stall_board and os.path.isfile(stall_board):
     heading_date = None
     for raw in open(stall_board, encoding="utf-8"):
         line = raw.rstrip("\n")
+        # 44-r1: EVERY new ### entry resets the entry date first — a
+        # dateless heading must not inherit the previous entry's date.
+        if line.startswith("### "):
+            heading_date = None
         m = re_heading_date.match(line)
         if m:
             heading_date = m.group(1)
@@ -127,9 +132,15 @@ if stall_board and os.path.isfile(stall_board):
         t = re.sub(r"^(?:>\s+)?", "", t)
         t = t.replace("**", "")
         t = re.sub(r"^外环(?:\([^)]*\))?·?", "", t)
-        md = re_dispatch_a.search(t)
-        if md:
-            sl = md.group("a") or md.group("b")
+        sl = None
+        mf = re_fwd.search(t)
+        if mf:
+            sl = mf.group("a")
+        else:
+            mr = re_rev.search(t)
+            if mr:
+                sl = mr.group("b")
+        if sl:
             if sl and sl not in dispatched:
                 tm = None
                 mi = re_date_inline.search(line) or re_date_bracket.search(line)

@@ -283,7 +283,7 @@ def parse_flaw(text: str) -> dict:
     paths: list[str] = []
     seen: set[str] = set()
     _re_span = re.compile(r"`([^`]*?/[^`]*?)`")
-    _re_lineno = re.compile(r"\s+L\d+(?:[–-]L?\d+)?$")
+    _re_lineno = re.compile(r"(?:\s+L\d+(?:[–-]L?\d+)?|:\d+)$")
     for sec in ("责任步", "锚点"):
         body = sections.get(sec, "")
         for m in _re_span.finditer(body):

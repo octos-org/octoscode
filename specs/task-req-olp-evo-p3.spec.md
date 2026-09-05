@@ -67,6 +67,8 @@ estimate: 2d
 
 ### Allowed Changes
 - scripts/olp-watch-board.sh
+- scripts/olp-evo-harvest.sh
+- specs/task-req-olp-evo-p3.spec.md
 - scripts/olp-evo-lib.py
 - scripts/olp-evo-spec-skeleton.sh
 - scripts/olp-evo-index.sh

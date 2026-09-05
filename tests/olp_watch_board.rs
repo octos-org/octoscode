@@ -321,3 +321,49 @@ fn olp_watch_board_without_harvest_exits_on_hit() {
     assert!(exited, "no --harvest → one-shot exit");
     assert!(out.contains("BOARD-SIGNAL"), "{out}");
 }
+
+/// 44-r1: an INSTALLED copy (outside the repo) harvests via the
+/// repo-root's scripts/ directory.
+#[test]
+fn olp_watch_board_harvest_works_from_installed_copy() {
+    let root = std::env::temp_dir().join(format!("olp-inst-{}", std::process::id()));
+    let repo = root.join("repo");
+    std::fs::create_dir_all(repo.join(".octos")).unwrap();
+    std::fs::create_dir_all(repo.join("scripts")).unwrap();
+    let state = root.join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    // installed copy of the watcher in an unrelated dir
+    let installed = root.join("watch-board.sh");
+    std::fs::copy(script(), &installed).unwrap();
+    // repo carries the harvest script (repo-root-first lookup)
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/olp-evo-harvest.sh"),
+        repo.join("scripts/olp-evo-harvest.sh"),
+    )
+    .unwrap();
+    let board = repo.join(".octos/OUTER_LOOP_REVIEW.md");
+    std::fs::write(&board, "l1\nl2\nl3\n").unwrap();
+    let mut child = Command::new("bash")
+        .arg(&installed)
+        .arg(&board)
+        .arg("ACK(blocked")
+        .args(["--interval", "1"])
+        .arg("--harvest")
+        .arg(&repo)
+        .env("OLP_EVO_STATE", &state)
+        .env("OLP_EVO_EVENTS", "")
+        .env("OLP_EVO_MCP_BOARD", root.join("mcp.absent"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(1500));
+    append(&board, "ACK(blocked): installed copy trigger\n");
+    std::thread::sleep(Duration::from_secs(3));
+    let _ = child.kill();
+    let _ = child.wait();
+    let evo = std::fs::read_to_string(repo.join(".octos/EVOLUTION.md")).unwrap_or_default();
+    let cards = evo.lines().filter(|l| l.starts_with("### EVO-")).count();
+    assert_eq!(cards, 1, "installed copy harvests via repo scripts/: {evo}");
+    let _ = std::fs::remove_dir_all(&root);
+}

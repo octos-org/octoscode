@@ -13,7 +13,12 @@ fn index_script() -> PathBuf {
 
 fn fixture_repo() -> PathBuf {
     // copy fixtures/evolution/index → temp so INDEX.md writes stay sandboxed
-    let dst = std::env::temp_dir().join(format!("olp-evo-index-{}", std::process::id()));
+    // 44-r1: per-TEST temp dir (parallel-safe), cleaned by the caller
+    let dst = std::env::temp_dir().join(format!(
+        "olp-evo-index-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("t")
+    ));
     let _ = std::fs::remove_dir_all(&dst);
     copy_dir(&repo_root().join("fixtures/evolution/index"), &dst);
     dst

@@ -81,10 +81,21 @@ fn olp_evo_skeleton_from_template_flaw_parses_and_maps_sections() {
             c.wait_with_output()
         })
         .unwrap();
-    let ptext = String::from_utf8_lossy(&parse.stdout) + String::from_utf8_lossy(&parse.stderr);
+    // 44-r1: STRICT — exit 0 AND the scenario-count line says 3.
     assert!(
-        ptext.contains("3") || parse.status.success(),
-        "agent-spec parse accepts skeleton: {ptext}"
+        parse.status.success(),
+        "agent-spec parse must exit 0: {}{}",
+        String::from_utf8_lossy(&parse.stdout),
+        String::from_utf8_lossy(&parse.stderr)
+    );
+    let ptext = format!(
+        "{}{}",
+        String::from_utf8_lossy(&parse.stdout),
+        String::from_utf8_lossy(&parse.stderr)
+    );
+    assert!(
+        ptext.contains("3 scenarios"),
+        "parse must report exactly 3 scenarios: {ptext}"
     );
 }
 
@@ -129,18 +140,19 @@ fn olp_evo_skeleton_real_flaw_uses_aliases_and_todo() {
         })
         .unwrap();
     assert!(
-        parse.status.success() || String::from_utf8_lossy(&parse.stderr).contains("scenario"),
-        "parse output: {}{}",
+        parse.status.success(),
+        "agent-spec parse must exit 0: {}{}",
         String::from_utf8_lossy(&parse.stdout),
         String::from_utf8_lossy(&parse.stderr)
     );
 }
 
-/// Scenario: 骨架拒绝写入 specs 根
+/// Scenario: 骨架拒绝写入 specs 根(仓库内外两种 cwd)
 #[test]
 fn olp_evo_skeleton_refuses_out_into_specs_root() {
     let flaw = repo_root().join("knowledge/context/evolution/FLAW-001.md");
     let bad_out = repo_root().join("specs/task-x.spec.md");
+    // from INSIDE the repo (current_dir = repo root)
     let out = run(
         &skeleton(),
         &[&flaw.to_string_lossy(), "--out", &bad_out.to_string_lossy()],
@@ -152,6 +164,30 @@ fn olp_evo_skeleton_refuses_out_into_specs_root() {
         "{stderr}"
     );
     assert!(!bad_out.exists());
+    // from OUTSIDE the repo: cwd = temp dir, absolute script + args
+    let outside = std::env::temp_dir().join(format!("skel-out-{}", std::process::id()));
+    std::fs::create_dir_all(&outside).unwrap();
+    let out2 = Command::new("bash")
+        .arg(skeleton().canonicalize().unwrap())
+        .arg(flaw.canonicalize().unwrap())
+        .arg("--out")
+        .arg(&bad_out)
+        .current_dir(&outside)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out2.status.code(),
+        Some(2),
+        "outside-cwd run: {}",
+        String::from_utf8_lossy(&out2.stderr)
+    );
+    let stderr2 = String::from_utf8_lossy(&out2.stderr);
+    assert!(
+        stderr2.contains("refusing to write outside specs/drafts/"),
+        "{stderr2}"
+    );
+    assert!(!bad_out.exists());
+    let _ = std::fs::remove_dir_all(&outside);
 }
 
 /// README kind 候选 section in place.
@@ -171,4 +207,46 @@ fn olp_evo_readme_lists_kind_candidates() {
         protocol.contains("> 已登记:kind 候选 iteration_cap"),
         "{protocol}"
     );
+}
+
+/// Scenario: 骨架字段精确映射(44-r1)
+#[test]
+fn olp_evo_skeleton_maps_root_cause_paths_and_item_slug_exactly() {
+    let root = std::env::temp_dir().join(format!(
+        "olp-skel-map-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("t")
+    ));
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let flaw = root.join("FLAW-map.md");
+    std::fs::write(
+        &flaw,
+        "# FLAW-000\n\n## 症状\n症状是重试后超时\n\n## 根因\n根因文本甲乙丙\n\n## 责任步\n- `src/worker.rs:123` 执行\n\n## 修复\n- 纯中文修复项\n",
+    )
+    .unwrap();
+    let out = Command::new("bash")
+        .arg(skeleton())
+        .arg(&flaw)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let intent = stdout
+        .split("## 意图")
+        .nth(1)
+        .and_then(|t| t.split("## 已定决策").next())
+        .unwrap_or_default();
+    assert!(intent.contains("根因文本甲乙丙"), "{stdout}");
+    assert!(
+        stdout.lines().any(|l| l.trim() == "- src/worker.rs"),
+        "path line without lineno: {stdout}"
+    );
+    assert!(!stdout.contains("src/worker.rs:123"), "{stdout}");
+    assert!(
+        stdout.lines().any(|l| l.trim() == "测试: pending_item_1"),
+        "pure-CJK item → pending_item_1: {stdout}"
+    );
+    assert!(!stdout.contains("pending_pending_"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&root);
 }

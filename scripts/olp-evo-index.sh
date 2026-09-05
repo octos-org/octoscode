@@ -10,7 +10,7 @@ set -euo pipefail
 REPO="${1:?usage: olp-evo-index.sh <repo-root>}"
 [ -d "$REPO" ] || { echo "error: repo-root not found: $REPO" >&2; exit 2; }
 
-python3 - "$REPO" "$(dirname "$0")" <<'PY'
+python3 -B - "$REPO" "$(dirname "$0")" <<'PY'
 import importlib.util, os, re, sys
 
 repo, script_dir = sys.argv[1], sys.argv[2]

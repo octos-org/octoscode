@@ -51,9 +51,24 @@ while :; do
     hits=$(tail -n +"$((base + 1))" "$board" | filter_skips | grep -F -- "$token" || true)
     if [ -n "$hits" ]; then
       if [ -n "$harvest_repo" ]; then
-        # 44a 节拍采集:命中即采集,失败仅记 stderr 并继续。
+        # 44-r1: locate the harvest script by repo-root FIRST (installed
+        # copies like ~/.octos/outer/watch-board.sh work directly), then
+        # fall back to the script's own directory.
+        harvest_sh=""
+        if [ -x "$harvest_repo/scripts/olp-evo-harvest.sh" ]; then
+          harvest_sh="$harvest_repo/scripts/olp-evo-harvest.sh"
+        elif [ -x "$(dirname "$0")/olp-evo-harvest.sh" ]; then
+          harvest_sh="$(dirname "$0")/olp-evo-harvest.sh"
+        else
+          echo "harvest: script not found" >&2
+          harvest_sh=""
+        fi
         rc=0
-        bash "$(dirname "$0")/olp-evo-harvest.sh" "$harvest_repo" || rc=$?
+        if [ -n "$harvest_sh" ]; then
+          bash "$harvest_sh" "$harvest_repo" || rc=$?
+        else
+          rc=127
+        fi
         if [ "$rc" -ne 0 ]; then
           echo "harvest: failed (exit $rc)" >&2
         fi

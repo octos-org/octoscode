@@ -417,3 +417,35 @@ fn olp_evo_metrics_fake_verified_counts_r2_records() {
     assert!(!js.contains("regress"), "{js}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// 44-r1: slice-atom boundaries (99xyz / abc27c don't match) and a
+/// dateless entry yields `stall: 44a open`.
+#[test]
+fn olp_evo_metrics_stall_slice_boundaries_and_dateless_entry() {
+    let root = std::env::temp_dir().join(format!("m-bnd-{}", std::process::id()));
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let board = root.join("boundary.md");
+    std::fs::write(
+        &board,
+        "### 43. x(2026-09-01,外环)\n派单 43-old 无 ACK\n\n### 44. 无日期标题\n派单 44a\n派单 99xyz\nabc27c 派单\n",
+    )
+    .unwrap();
+    let out = Command::new("bash")
+        .arg(metrics_script())
+        .arg(&repo)
+        .arg("--stall")
+        .arg(&board)
+        .arg("--now")
+        .arg("2026-09-05T00:45:00")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("stall: 99x"), "{stdout}");
+    assert!(!stdout.contains("stall: 27c"), "{stdout}");
+    assert!(
+        stdout.contains("stall: 44a open"),
+        "dateless entry → open: {stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
