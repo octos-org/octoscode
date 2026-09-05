@@ -29,8 +29,11 @@
 //! When it's usable only in that dir (not on `PATH`): on Unix we rewrite the
 //! stdio command to the full path; on Windows we leave the command bare and the
 //! stdio transport prepends `~/.octos/bin` to the *child's* PATH (a quoted path
-//! in the command string is mangled by `cmd /C`). Either way we never mutate
-//! our own process PATH (octoscode forbids `unsafe`).
+//! in the command string is mangled by `cmd /C`). The prepend happens ONLY when
+//! the install-dir copy is the selected backend — prepending it unconditionally
+//! would let a stale exe there shadow a newer on-`PATH` octos the resolver
+//! deliberately picked (#501). Either way we never mutate our own process PATH
+//! (octoscode forbids `unsafe`).
 //!
 //! Scope — it acts on a `Mode::Protocol` launch whose `--stdio-command`'s
 //! **leading program** is a bare `octos` (PATH-resolved). Trailing args may
@@ -127,7 +130,10 @@ pub fn ensure_octos_backend(cli: &mut Cli) -> Result<()> {
 
     match resolve_backend(&program)? {
         // Already on PATH — the bare `octos serve` command works as-is.
-        Resolved::OnPath => Ok(()),
+        Resolved::OnPath => {
+            record_launch_path_prepend(None);
+            Ok(())
+        }
         // Usable only in the install dir — rewrite the command to launch it
         // directly, since its dir isn't on this process's PATH.
         Resolved::AtPath(octos) => {
@@ -136,12 +142,12 @@ pub fn ensure_octos_backend(cli: &mut Cli) -> Result<()> {
             // in that string — quoted or not — gets mangled by Rust's arg quoting
             // plus cmd's own quirky quote parsing (the child then dies with exit
             // 1). Instead the transport prepends this install dir to the child's
-            // PATH (see `install_bin_dir` / `shell_command`), so the bare `octos`
-            // in the command resolves to the exe the auto-installer dropped into
-            // `~\.octos\bin`. Nothing to rewrite here — `octos` is bound only for
-            // the non-Windows path below.
+            // PATH (see `launch_path_prepend_dir` / `shell_command`), so the bare
+            // `octos` in the command resolves to the exe the auto-installer
+            // dropped into `~\.octos\bin`. Nothing to rewrite here — `octos` is
+            // bound only for the non-Windows path below.
             if cfg!(windows) {
-                let _ = &octos;
+                record_launch_path_prepend(octos.parent().map(Path::to_path_buf));
                 return Ok(());
             }
             let rewritten = rewrite_program(&command, &octos).ok_or_else(|| {
@@ -170,6 +176,7 @@ enum Resolved {
 }
 
 /// Outcome of probing one candidate octos.
+#[derive(Debug, PartialEq, Eq)]
 enum Probe {
     /// Runs and is at least [`MIN_OCTOS_VERSION`].
     Ready,
@@ -230,29 +237,57 @@ fn opt_out_from(current: Option<std::ffi::OsString>, legacy: Option<std::ffi::Os
 /// (always `octos` today) — threaded so the probe targets exactly what the
 /// command names rather than a hardcoded string. Tries `PATH` first and, only
 /// when that isn't `Ready`, the legacy `~/.octos/bin` — so a stale install-dir
-/// binary can't block a working launch. An `Outdated`-only situation asks the
-/// user to update; a fully-`Missing` one installs (unless opted out) and
-/// re-resolves.
+/// binary can't block a working launch.
+///
+/// `PATH` is evaluated hit by hit, in the order the real launch resolves them.
+/// The first hit is what a bare launch runs, so when it is `Ready` nothing
+/// further is probed — a stale or hanging second copy must not slow or block
+/// an otherwise-working launch. When the first hit is NOT usable but a later
+/// one is (#501: a forgotten `~/.octos/bin/octos.exe` shadowing a newer npm
+/// `octos.cmd`), the newer copy wins — on Unix by rewriting the launch command
+/// to it; on Windows, where `cmd /C` can't take an embedded path, with a
+/// precise error naming both copies instead of the stock "update octos" advice
+/// that loops (it tells the user to install what they already have). An
+/// `Outdated`-only situation asks the user to update; a fully-`Missing` one
+/// installs (unless opted out) and re-resolves.
 fn resolve_backend(program: &str) -> Result<Resolved> {
-    let on_path = probe(Path::new(program));
-    // Fast path: a Ready octos on PATH needs no rewrite — and we must NOT probe
-    // the legacy dir here. Doing so eagerly runs `~/.octos/bin/octos --version`
-    // on every otherwise-working launch, so a stale binary (or one whose
-    // `--version` hangs) would block or execute for nothing (codex).
-    if matches!(on_path, Probe::Ready) {
+    let on_path = resolve_on_path(program);
+    // Fast path: a Ready first PATH hit needs no rewrite — and we must NOT
+    // probe the legacy dir here. Doing so eagerly runs
+    // `~/.octos/bin/octos --version` on every otherwise-working launch, so a
+    // stale binary (or one whose `--version` hangs) would block or execute for
+    // nothing (codex).
+    if matches!(on_path, PathResolution::FirstReady) {
         return Ok(Resolved::OnPath);
     }
 
-    // PATH octos isn't usable — now it's worth probing the legacy install dir.
+    // PATH's first hit isn't usable — now it's worth probing the legacy
+    // install dir.
     let dir_octos = install_dir_octos();
     let in_dir = dir_octos.as_ref().map(|p| probe(p));
     if let (Some(dir), Some(Probe::Ready)) = (&dir_octos, &in_dir) {
         return Ok(Resolved::AtPath(dir.clone()));
     }
 
+    // A usable octos further down PATH beats an unusable first hit.
+    if let PathResolution::Shadowed {
+        ready,
+        shadow,
+        shadow_version,
+    } = &on_path
+    {
+        if cfg!(windows) {
+            return Err(shadow_error(shadow, shadow_version.as_deref(), ready));
+        }
+        return Ok(Resolved::AtPath(ready.clone()));
+    }
+
     // No Ready backend. If either candidate exists but is too old, guide an
     // update — we won't guess which package manager owns an unknown octos.
-    if let Probe::Outdated(found) = &on_path {
+    if let PathResolution::NotReady {
+        outdated: Some(found),
+    } = &on_path
+    {
         return Err(outdated_error(found));
     }
     if let Some(Probe::Outdated(found)) = &in_dir {
@@ -263,10 +298,12 @@ fn resolve_backend(program: &str) -> Result<Resolved> {
     if opted_out() {
         return Err(eyre!(
             "octos backend not found and auto-install is disabled ({OPT_OUT_ENV} is set). \
-             Install the octos server: `brew install {}` or `npm install -g {}`, or point \
-             --endpoint at a running server.",
-            brew_formula(),
-            npm_package()
+             Install the octos server ({}), or point --endpoint at a running server.",
+            package_manager_advice(
+                cfg!(windows),
+                &format!("`brew install {}`", brew_formula()),
+                &format!("`npm install -g {}`", npm_package()),
+            )
         ));
     }
     run_installer()?;
@@ -294,36 +331,210 @@ fn resolve_backend(program: &str) -> Result<Resolved> {
 fn outdated_error(found: &str) -> eyre::Report {
     eyre!(
         "octos {found} is older than the {MIN_OCTOS_VERSION} this octoscode needs. \
-         Update the octos server (`brew upgrade {}` or `npm install -g {}@latest`), \
-         then relaunch.",
-        brew_formula(),
-        npm_package()
+         Update the octos server ({}), then relaunch.",
+        package_manager_advice(
+            cfg!(windows),
+            &format!("`brew upgrade {}`", brew_formula()),
+            &format!("`npm install -g {}@latest`", npm_package()),
+        )
     )
+}
+
+/// The #501 deadlock message: an unusable octos shadows a perfectly good one
+/// later on PATH, and the stock "update octos" advice loops — it tells the
+/// user to install what they already have (on Windows, `npm install -g`
+/// reinstalls the very `.cmd` shim that is already present but shadowed).
+/// Name BOTH copies and the way out instead. Windows-only in practice: on
+/// Unix the launch command is rewritten to the newer copy, so the shadow case
+/// never reaches an error.
+fn shadow_error(shadow: &Path, shadow_version: Option<&str>, ready: &Path) -> eyre::Report {
+    let shadow_desc = match shadow_version {
+        Some(version) => format!("octos {version}"),
+        None => "an octos that doesn't run".to_owned(),
+    };
+    let ready_dir = ready
+        .parent()
+        .map(|d| d.display().to_string())
+        .unwrap_or_else(|| ready.display().to_string());
+    eyre!(
+        "{shadow_desc} at {} shadows a newer, working octos at {} — the first `octos` on \
+         PATH wins, so octoscode would launch the old one. Remove the stale copy or move \
+         {ready_dir} earlier on PATH, then relaunch.",
+        shadow.display(),
+        ready.display(),
+    )
+}
+
+/// Join package-manager commands into install/update advice, dropping brew on
+/// Windows where Homebrew doesn't exist (#501: the old message offered `brew
+/// upgrade` to Windows users). `windows` is a parameter — not `cfg!(windows)`
+/// read inside — so both branches are testable from any host.
+fn package_manager_advice(windows: bool, brew_cmd: &str, npm_cmd: &str) -> String {
+    if windows {
+        npm_cmd.to_owned()
+    } else {
+        format!("{brew_cmd} or {npm_cmd}")
+    }
+}
+
+/// What the on-`PATH` copies of the bare program amount to. Only a FIRST-hit
+/// failure opens the rest — the first hit is the one a bare launch resolves to.
+#[derive(Debug, PartialEq, Eq)]
+enum PathResolution {
+    /// The first PATH hit is usable — the bare command works as-is.
+    FirstReady,
+    /// The first hit is unusable but a later one is `Ready` — the #501 shadow
+    /// (e.g. a stale `~/.octos/bin/octos.exe` ahead of a newer npm `octos.cmd`
+    /// on Windows). Carries the Ready path plus the shadowing copy and its
+    /// version, when it reported one.
+    Shadowed {
+        ready: PathBuf,
+        shadow: PathBuf,
+        shadow_version: Option<String>,
+    },
+    /// Nothing on PATH is usable; carries the first outdated version found, if
+    /// any, for the update message.
+    NotReady { outdated: Option<String> },
+}
+
+/// Probe the on-`PATH` copies of `program`. The first hit alone decides the
+/// fast path; later hits are probed ONLY when it isn't `Ready`, so a stale or
+/// hanging second copy can't slow or block an otherwise-working launch (the
+/// same reason the legacy install-dir probe is deferred).
+fn resolve_on_path(program: &str) -> PathResolution {
+    let mut candidates = path_candidates(program).into_iter();
+    let Some(shadow) = candidates.next() else {
+        return PathResolution::NotReady { outdated: None };
+    };
+    let first = probe(&shadow);
+    if matches!(first, Probe::Ready) {
+        return PathResolution::FirstReady;
+    }
+    // Probe later hits only until the first Ready one: the decision below
+    // never looks past it, and a hanging copy after a usable one must not
+    // stall the launch either.
+    let mut rest = Vec::new();
+    for candidate in candidates {
+        let probe = probe(&candidate);
+        let stop = matches!(probe, Probe::Ready);
+        rest.push((candidate, probe));
+        if stop {
+            break;
+        }
+    }
+    resolve_shadowed(shadow, first, rest)
+}
+
+/// Pure decision behind [`resolve_on_path`]: the first PATH hit did not probe
+/// `Ready` — does a later one? Split out so the shadow/prefer-newer logic is
+/// testable without touching the filesystem.
+fn resolve_shadowed(shadow: PathBuf, first: Probe, rest: Vec<(PathBuf, Probe)>) -> PathResolution {
+    if let Some((ready, _)) = rest.iter().find(|(_, probe)| matches!(probe, Probe::Ready)) {
+        return PathResolution::Shadowed {
+            ready: ready.clone(),
+            shadow,
+            shadow_version: match first {
+                Probe::Outdated(version) => Some(version),
+                _ => None,
+            },
+        };
+    }
+    let outdated = std::iter::once(&first)
+        .chain(rest.iter().map(|(_, probe)| probe))
+        .find_map(|probe| match probe {
+            Probe::Outdated(version) => Some(version.clone()),
+            _ => None,
+        });
+    PathResolution::NotReady { outdated }
+}
+
+/// Every on-`PATH` copy of the bare `program`, in the order the real launch
+/// resolves them: PATHEXT-aware `where` on Windows (mirroring the stdio
+/// transport's `cmd /C`), a PATH scan on Unix (mirroring execvp, which skips
+/// non-executable entries). The FIRST entry is what a bare launch runs; later
+/// entries matter only when it isn't usable (#501).
+fn path_candidates(program: &str) -> Vec<PathBuf> {
+    if cfg!(windows) {
+        where_all(program)
+    } else {
+        let dirs = std::env::var_os("PATH")
+            .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+            .unwrap_or_default();
+        path_candidates_in(program, dirs)
+    }
+}
+
+/// Pure Unix half of [`path_candidates`]: the launchable `<dir>/<program>`
+/// files under `dirs`, in order, deduplicated and absolutized (a relative or
+/// empty PATH entry would otherwise yield a relative candidate that only
+/// resolves while the child's cwd matches ours). Takes the dirs explicitly so
+/// tests don't touch the process PATH (`std::env::set_var` is `unsafe` under
+/// edition 2024 + `unsafe_code = deny`).
+fn path_candidates_in<I>(program: &str, dirs: I) -> Vec<PathBuf>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    let mut seen = std::collections::HashSet::new();
+    dirs.into_iter()
+        .map(|dir| dir.join(program))
+        .map(|path| std::path::absolute(&path).unwrap_or(path))
+        .filter(|path| seen.insert(path.clone()) && is_launchable_file(path))
+        .collect()
+}
+
+/// Whether `path` is a regular file the current user could execute. The Unix
+/// check mirrors execvp, which skips non-executable PATH entries; elsewhere
+/// (`where` already filtered) existence is enough.
+fn is_launchable_file(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::metadata(path)
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
 }
 
 /// Run `<candidate> --version` and classify it. `octos` (bare) resolves through
 /// PATH; a full path probes that file. A present-but-unparseable/erroring
 /// binary counts as Ready — don't fight a backend the user clearly has.
 ///
-/// On Windows a bare name may be a `PATHEXT` shim (`.cmd`/`.ps1`, as an npm
-/// install ships `octos`) that a direct spawn — which finds only `.exe` —
-/// misses, while the stdio transport's `cmd /C` resolves it. We mirror that
-/// resolution via `where` so probing classifies the *same* binary the real
-/// launch will run, including when an older octos shadows a newer one (codex).
+/// On Windows a candidate may be a `PATHEXT` shim (`.cmd`, as an npm install
+/// ships `octos`) that a direct spawn — which finds only `.exe` — can't run,
+/// while the stdio transport's `cmd /C` resolves it. We mirror that resolution
+/// by probing shims through `cmd /C` there, so probing classifies the *same*
+/// binary the real launch will run (codex).
 fn probe(candidate: &Path) -> Probe {
     let is_bare = {
         let s = candidate.to_string_lossy();
         !s.contains('/') && !s.contains('\\')
     };
-    let output = if cfg!(windows) && is_bare {
-        match where_first(candidate) {
-            Some(shim) => Command::new("cmd")
-                .arg("/C")
-                .arg(&shim)
-                .arg("--version")
-                .output(),
-            None => return Probe::Missing,
+    if is_bare {
+        // First PATH hit, in the launch's own resolution order — or Missing.
+        match path_candidates(&candidate.to_string_lossy()).first() {
+            Some(first) => probe_resolved(first),
+            None => Probe::Missing,
         }
+    } else {
+        probe_resolved(candidate)
+    }
+}
+
+/// Probe a concrete file (a PATH hit or an explicit path). On Windows only a
+/// non-`.exe` candidate (a `.cmd`/`.bat` PATHEXT shim, which a direct spawn
+/// can't run) goes through `cmd /C`; a real `.exe` is spawned directly —
+/// the reliable form, and what the base code did for explicit paths.
+fn probe_resolved(candidate: &Path) -> Probe {
+    let output = if spawn_via_cmd(cfg!(windows), candidate) {
+        Command::new("cmd")
+            .arg("/C")
+            .arg(candidate)
+            .arg("--version")
+            .output()
     } else {
         Command::new(candidate).arg("--version").output()
     };
@@ -342,19 +553,37 @@ fn probe(candidate: &Path) -> Probe {
     }
 }
 
-/// The first path `where <name>` resolves on Windows — the same PATH+PATHEXT
-/// order `cmd /C` (the stdio transport) uses — or `None` when it isn't found.
-/// Windows-only; on other platforms `probe`/`have` never call it.
-fn where_first(name: &Path) -> Option<PathBuf> {
-    let out = Command::new("where").arg(name).output().ok()?;
+/// Whether probing `candidate` must go through `cmd /C`: only on Windows, and
+/// only for PATHEXT shims — a `.cmd`/`.bat` has no direct-spawn form, while a
+/// real `.exe` spawns directly (embedding even an argv-separated path in a
+/// `cmd /C` line risks cmd's quote parsing, so `.exe`s avoid it). `windows`
+/// is a parameter so both branches are testable from any host.
+fn spawn_via_cmd(windows: bool, candidate: &Path) -> bool {
+    windows
+        && !candidate
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+}
+
+/// All paths `where <name>` resolves on Windows — the same PATH+PATHEXT order
+/// `cmd /C` (the stdio transport) uses across directories (within one
+/// directory holding both `octos.exe` and `octos.cmd`, `where`'s intra-dir
+/// order isn't documented to match cmd's PATHEXT priority — an accepted
+/// approximation). Windows-only at runtime; on other platforms
+/// `path_candidates` never calls it.
+fn where_all(name: &str) -> Vec<PathBuf> {
+    let Ok(out) = Command::new("where").arg(name).output() else {
+        return Vec::new();
+    };
     if !out.status.success() {
-        return None;
+        return Vec::new();
     }
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .map(str::trim)
-        .find(|l| !l.is_empty())
+        .filter(|l| !l.is_empty())
         .map(PathBuf::from)
+        .collect()
 }
 
 /// The octos binary the legacy `install.sh` writes: `$OCTOS_PREFIX/octos` or
@@ -369,12 +598,38 @@ fn install_dir_octos() -> Option<PathBuf> {
 }
 
 /// The directory the auto-installer drops `octos` into (`$OCTOS_PREFIX` or
-/// `~/.octos/bin`). The stdio transport prepends this to the child's PATH so a
-/// bare `octos` in the launch command resolves to the auto-installed exe —
-/// without embedding a path in the command string, which `cmd /C` mangles on
-/// Windows. `None` if no home dir.
+/// `~/.octos/bin`).
 pub(crate) fn install_bin_dir() -> Option<PathBuf> {
     install_dir_octos().and_then(|exe| exe.parent().map(Path::to_path_buf))
+}
+
+/// What [`ensure_octos_backend`] decided the Windows child-PATH prepend should
+/// be: `Some(dir)` when resolution chose the install-dir copy (the prepend
+/// makes a bare `octos` in the launch command resolve to it), `None` when
+/// PATH's own resolution won. Set at most once per process, before the TUI
+/// starts.
+static LAUNCH_PATH_PREPEND: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+
+fn record_launch_path_prepend(dir: Option<PathBuf>) {
+    // `ensure_octos_backend` runs exactly once per process (from `main`,
+    // before the TUI starts), so a second `set` can only come from a future
+    // caller — discard it rather than fail a launch over bookkeeping.
+    let _ = LAUNCH_PATH_PREPEND.set(dir);
+}
+
+/// The directory the stdio transport prepends to the CHILD's PATH on Windows
+/// so a bare `octos` in the launch command resolves to the backend the
+/// resolver actually selected. Prepending `~/.octos/bin` UNCONDITIONALLY
+/// would let a stale exe there shadow a newer npm shim the resolver
+/// deliberately picked (#501) — so the prepend happens only when the
+/// install-dir copy IS the selection. When `ensure_octos_backend` never ran
+/// (a launch shape it doesn't manage, e.g. an explicit `--stdio-command`
+/// path), fall back to the historical behavior.
+pub(crate) fn launch_path_prepend_dir() -> Option<PathBuf> {
+    LAUNCH_PATH_PREPEND
+        .get()
+        .cloned()
+        .unwrap_or_else(install_bin_dir)
 }
 
 /// Home directory, treating an empty `HOME` as absent so the Windows
@@ -925,6 +1180,137 @@ fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_shadowed_prefers_a_later_ready_hit() {
+        // #501: the first PATH hit is unusable, a later one is Ready — the
+        // later one must win, carrying the shadow's identity for the message.
+        let shadow = PathBuf::from("/home/u/.octos/bin/octos");
+        let newer = PathBuf::from("/home/u/.npm-global/bin/octos");
+        let resolution = resolve_shadowed(
+            shadow.clone(),
+            Probe::Outdated("0.1.1".to_owned()),
+            vec![
+                (PathBuf::from("/usr/bin/octos"), Probe::Missing),
+                (newer.clone(), Probe::Ready),
+            ],
+        );
+        assert_eq!(
+            resolution,
+            PathResolution::Shadowed {
+                ready: newer,
+                shadow,
+                shadow_version: Some("0.1.1".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_shadowed_reports_outdated_only_when_nothing_is_ready() {
+        // No Ready hit anywhere → the update path, with the first outdated
+        // version found (the shadow's own version wins for the message).
+        let resolution = resolve_shadowed(
+            PathBuf::from("/a/octos"),
+            Probe::Outdated("0.1.1".to_owned()),
+            vec![(
+                PathBuf::from("/b/octos"),
+                Probe::Outdated("0.9.0".to_owned()),
+            )],
+        );
+        assert_eq!(
+            resolution,
+            PathResolution::NotReady {
+                outdated: Some("0.1.1".to_owned()),
+            }
+        );
+        // A first hit that didn't report a version still finds a later one.
+        let resolution = resolve_shadowed(
+            PathBuf::from("/a/octos"),
+            Probe::Missing,
+            vec![(
+                PathBuf::from("/b/octos"),
+                Probe::Outdated("0.9.0".to_owned()),
+            )],
+        );
+        assert_eq!(
+            resolution,
+            PathResolution::NotReady {
+                outdated: Some("0.9.0".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn path_candidates_in_keeps_order_dedupes_and_requires_launchable() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let older = dir_a.path().join("octos");
+        let newer = dir_b.path().join("octos");
+        std::fs::write(&older, b"old").unwrap();
+        std::fs::write(&newer, b"new").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            // The first hit is present but NOT executable — execvp would skip
+            // it, so the candidates list must too.
+            std::fs::set_permissions(&older, std::fs::Permissions::from_mode(0o644)).unwrap();
+            std::fs::set_permissions(&newer, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let candidates = path_candidates_in(
+            "octos",
+            vec![
+                dir_a.path().to_path_buf(),
+                dir_b.path().to_path_buf(),
+                dir_b.path().to_path_buf(), // duplicate PATH entry → one hit
+                dir_a.path().join("missing-dir"),
+            ],
+        );
+        #[cfg(unix)]
+        assert_eq!(candidates, vec![newer]);
+        #[cfg(not(unix))]
+        assert_eq!(candidates, vec![older, newer]);
+    }
+
+    #[test]
+    fn package_manager_advice_drops_brew_on_windows() {
+        // #501: Homebrew doesn't exist on Windows — offering `brew upgrade`
+        // there is a dead end.
+        assert_eq!(
+            package_manager_advice(true, "`brew upgrade x/y`", "`npm install -g z@latest`"),
+            "`npm install -g z@latest`"
+        );
+        assert_eq!(
+            package_manager_advice(false, "`brew upgrade x/y`", "`npm install -g z@latest`"),
+            "`brew upgrade x/y` or `npm install -g z@latest`"
+        );
+    }
+
+    #[test]
+    fn shadow_error_names_both_copies_without_install_advice() {
+        let err = shadow_error(
+            Path::new(r"C:\Users\admin\.octos\bin\octos.exe"),
+            Some("0.1.1"),
+            Path::new(r"C:\Users\admin\AppData\Roaming\npm\octos.cmd"),
+        );
+        let message = format!("{err}");
+        assert!(message.contains(r"C:\Users\admin\.octos\bin\octos.exe"));
+        assert!(message.contains(r"C:\Users\admin\AppData\Roaming\npm\octos.cmd"));
+        assert!(message.contains("0.1.1"));
+        // The looping advice must be gone: the working copy is already there.
+        assert!(!message.contains("npm install"));
+        assert!(!message.contains("brew"));
+    }
+
+    #[test]
+    fn spawn_via_cmd_only_for_windows_shims_never_for_exes() {
+        // A real `.exe` spawns directly even on Windows — `cmd /C` is reserved
+        // for PATHEXT shims a direct spawn can't run.
+        assert!(spawn_via_cmd(true, Path::new(r"C:\npm\octos.cmd")));
+        assert!(spawn_via_cmd(true, Path::new(r"C:\tools\octos.bat")));
+        assert!(!spawn_via_cmd(true, Path::new(r"C:\bin\octos.exe")));
+        assert!(!spawn_via_cmd(true, Path::new(r"C:\bin\octos.EXE")));
+        assert!(!spawn_via_cmd(false, Path::new("/usr/bin/octos")));
+    }
 
     #[test]
     fn bundle_urls_point_at_the_pinned_release() {
