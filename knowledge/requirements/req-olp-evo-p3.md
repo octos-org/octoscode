@@ -13,13 +13,13 @@ tags: [olp, evolution, harness, automation]
 
 ## Requirements
 
-[REQ-OLP-EVO-P3-CADENCE] `scripts/olp-watch-board.sh` MUST 提供 `--harvest <repo-root>` 选项:命中 token 时先调用同目录 `olp-evo-harvest.sh <repo-root>`,再打印 `BOARD-SIGNAL` 与命中行,然后把基线推进到当前行数并继续监视(不退出);不带该选项时保持既有一击退出语义。采集非零退出 MUST NOT 中断监视,MUST 在 stderr 打印 `harvest: failed (exit N)` 一行。
+[REQ-OLP-EVO-P3-CADENCE] `scripts/olp-watch-board.sh` MUST 提供 `--harvest <repo-root>` 选项:命中 token 时先调用采集脚本(依次查 `<repo-root>/scripts/olp-evo-harvest.sh`、脚本同目录;都缺按失败处理,安装版监视器因此可用),再打印 `BOARD-SIGNAL` 与命中行,然后把基线推进到当前行数并继续监视(不退出);不带该选项时保持既有一击退出语义。采集非零退出 MUST NOT 中断监视,MUST 在 stderr 打印 `harvest: failed (exit N)` 一行。
 
 [REQ-OLP-EVO-P3-CADENCE-IDEMPOTENT] 节拍采集 MUST 与主审手跑采集共用同一状态根(`OLP_EVO_STATE` 或缺省)与同一 `harvest.lock`,同一触发行在节拍与手跑并发时 MUST 只落一张卡;监视器 MUST NOT 改写 `OLP_EVO_STATE`。
 
 [REQ-OLP-EVO-P3-SKELETON] `scripts/olp-evo-spec-skeleton.sh <FLAW-NNN.md> [--out <file>]` MUST 从 FLAW 记录生成一份 `agent-spec parse` 可解析的任务契约骨架,段映射:`## 意图` ← 症状 + 根因;`## 已定决策` ← `## 修复`,缺则 `## 结案`;`### Forbidden` ← `## 预防`,缺则 `## 保护门`;`### Allowed Changes` ← 责任步与锚点两段中含 `/` 的反引号路径(去重、去行号后缀);`## 完成条件` ← 决策来源段的每个列表项一条场景(无列表则整段一项),测试选择器 `pending_<ASCII slug>`,slug 无 ASCII 字符时为 `pending_item_<n>`;缺段以 `<!-- TODO: <段名> -->` 占位而非失败;frontmatter `satisfies` 取 FLAW frontmatter 的 `req` 字段,缺则 `[]` 并在 `## 问题` 段列出"未绑定需求"。
 
-[REQ-OLP-EVO-P3-SKELETON-NOAUTH] 骨架 MUST NOT 被自动写入 `specs/`;缺省输出到 stdout,`--out` 只接受仓库外路径或 `specs/drafts/` 下路径(目录不存在则创建),其它路径退出 2。
+[REQ-OLP-EVO-P3-SKELETON-NOAUTH] 骨架 MUST NOT 被自动写入 `specs/`;缺省输出到 stdout,`--out` 只接受仓库外路径或 `specs/drafts/` 下路径(目录不存在则创建),其它路径退出 2;判定以目标路径 realpath 所属仓库为准,MUST NOT 依赖调用时的 cwd。
 
 [REQ-OLP-EVO-P3-INDEX] `scripts/olp-evo-index.sh <repo-root>` MUST 由 `knowledge/context/evolution/FLAW-*.md` 生成 `knowledge/context/evolution/INDEX.md`:每条 FLAW 一行(id、status、layers、issue/pr、被其取代的散文——由 `docs/OUTER_LOOP_PROTOCOL.md` 中 `> 已记录:FLAW-NNN` 引用行所在的最近上级标题给出,无则 `—`),末尾 `retired_prose: N`;内容相同时 MUST NOT 重写文件(mtime 不变)。
 
@@ -75,6 +75,7 @@ Scenario: 停摆与伪 verified 诊断
 - REQ-OLP-EVO-P2 Open Questions:"无 ACK 停摆"与"伪 verified"跨源指标留阶段 3
 - 实测 2026-09-05:octos 内环 48b 在 50 次迭代上限停机、python 就地补丁失败留下编译错(octos 活板 #48"48b 中断记录")
 - 实测 2026-09-04/05:FLAW-001/002 → octos 契约均为手写;两记录段名为 症状/责任步/根因/锚点/复发史/保护门/异议/结案,无 req 字段
+- PR 复审 codex gpt-6 2026-09-05(#619):CI 未装 agent-spec、--out 保护依赖 cwd、安装版找不到采集脚本、片号子串与日期串带、字段映射偏差、索引测试共享临时目录、docs 提交破坏阶段 1 golden
 - 对抗复审 codex 2026-09-05(`~/.octos/outer/evo/reviews/p3-codex.md`):one-shot 哨需显式兼容模式与 base 推进;真实 FLAW schema 无五段;派单两种词序(`27c 派单`)、ACK 状态词前缀;Allowed 取锚点段
 - 对抗复审 grok 2026-09-05(`~/.octos/outer/evo/reviews/p3-grok.md`):watch 一击退出与常驻冲突、FLAW 段名别名、派单/ACK 定式抽样、stall 奖励空 ACK、PROTOCOL 无 FLAW-001/002 散文
 

@@ -98,7 +98,7 @@ operator 点破的教训。上岗即遵守,不要重蹈:
    哨死(超时被回收)会收到失败通知,收到即重挂。
 2. **侦听哨唯一合法配方:基线+子串,禁止手搓格式匹配**。板面哨一律
    发行版 `scripts/olp-watch-board.sh`(`olp-init.sh` 安装为
-   `~/.octos/outer/watch-board.sh`)`<板> <token> [--skip-signature <署名>] [--harvest <repo>]`(基线行数裁剪
+   `~/.octos/outer/watch-board.sh`)`<板> <token> [--skip-signature <署名>]`(基线行数裁剪
    判定域,只看挂哨后新增行;域内 `grep -F` 宽松匹配,任何前缀格式一视同仁;
    外环自己的批注若引用 token 会误报——先落板后挂哨,或用 `--skip-signature` 排除本署名)。
    实案四起同一病灶——谓词作用于全文件+猜格式:三次误报(任务书自述/
