@@ -59,6 +59,16 @@ QUICKSTART 的发现命令为准。
    不写记录;⑤采集哨只认带署名的行首定式
    `> 外环(<署名>)·改判(作废 #N):` /
    `> 外环(<署名>)·R2 记档(#N):`,纪律里的散文"R2 记档"不落卡。
+   ⑥阶段 2/3 工具面(全部只读或只写自家状态目录):监视器
+   `scripts/olp-watch-board.sh <板> <token> --harvest <repo>` 命中即采集并常驻
+   (不带 `--harvest` 仍一击退出);`scripts/olp-evo-metrics.sh <repo>
+   [--since EVO-NNNN] [--json] [--baseline <json>] [--stall <板>
+   --stall-threshold <分钟> [--now <ISO>]]` 窗口化诊断(非 KPI:含
+   `increase:/decrease:`、`stall:`、`fake_verified:`,不作红线);
+   `scripts/olp-evo-spec-skeleton.sh <FLAW-NNN.md>` 从记录直出契约骨架到
+   stdout(仓内只许写 `specs/drafts/`,主审补选择器后才入 `specs/`);
+   `scripts/olp-evo-index.sh <repo>` 生成 `knowledge/context/evolution/INDEX.md`;
+   回放基线 `fixtures/evolution/replay/`(合成夹具,实现 commit 不得改)。
 
 ## 模式 inner — 内环形态选型(执行侧)
 

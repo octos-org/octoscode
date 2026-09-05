@@ -300,3 +300,271 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
     }
     out
 }
+
+// --- #44c: stall + fake_verified diagnostics (four scenarios) ----------
+
+fn stall_fixture() -> PathBuf {
+    repo_root().join("fixtures/evolution/stall/review-board.md")
+}
+
+fn write_r2_board(repo: &Path) {
+    std::fs::create_dir_all(repo.join(".octos")).unwrap();
+    let mut t = String::new();
+    let rows = [
+        (
+            "r2_record",
+            "review /r",
+            "外环(codex)·R2 记档(#41):声称 verified 复验不符",
+        ),
+        ("ack_blocked", "review /r", "ACK(blocked): a"),
+        ("ack_blocked", "review /r", "ACK(blocked): b"),
+    ];
+    for (i, (trig, src, sym)) in rows.iter().enumerate() {
+        let id_hash = format!("{:016x}", i + 1);
+        t.push_str(&format!(
+            "### EVO-{:04}（t，harvest）\ntrigger: {trig}\nsource: {src}\nidentity: board:/r.md#{}#{trig}#{id_hash}\nsymptom: {sym}\n\n",
+            i + 1,
+            i,
+        ));
+    }
+    std::fs::write(repo.join(".octos/EVOLUTION.md"), t).unwrap();
+}
+
+/// Scenario: 停摆诊断按活板定式
+#[test]
+fn olp_evo_metrics_stall_matches_board_grammar() {
+    let root = std::env::temp_dir().join(format!("m-stall-{}", std::process::id()));
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let out = Command::new("bash")
+        .arg(metrics_script())
+        .arg(&repo)
+        .args(["--stall", &stall_fixture().to_string_lossy()])
+        .args(["--stall-threshold", "30", "--now", "2026-09-05T00:45:00"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("stall: 43c-2 45"), "{stdout}");
+    assert!(stdout.contains("stalls: 1"), "{stdout}");
+    assert!(!stdout.contains("stall: 43-r1"), "{stdout}");
+    assert!(!stdout.contains("stall: 37"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Scenario: 反序派单与状态词前缀
+#[test]
+fn olp_evo_metrics_stall_accepts_reverse_order_and_status_words() {
+    let root = std::env::temp_dir().join(format!("m-rev-{}", std::process::id()));
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let out = Command::new("bash")
+        .arg(metrics_script())
+        .arg(&repo)
+        .args(["--stall", &stall_fixture().to_string_lossy()])
+        .args(["--now", "2026-09-05T00:45:00"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("stall: 27e"), "{stdout}");
+    assert!(!stdout.contains("stall: 27c"), "{stdout}");
+    assert!(!stdout.contains("stall: 27d"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Scenario: 阈值内的派单不报停摆
+#[test]
+fn olp_evo_metrics_stall_respects_threshold() {
+    let root = std::env::temp_dir().join(format!("m-th-{}", std::process::id()));
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let out = Command::new("bash")
+        .arg(metrics_script())
+        .arg(&repo)
+        .args(["--stall", &stall_fixture().to_string_lossy()])
+        .args(["--stall-threshold", "60", "--now", "2026-09-05T00:45:00"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Threshold only gates DATED dispatches: a dated-within-threshold
+    // slice must NOT be reported. Dateless/invalid-date entries (open)
+    // are threshold-independent, so `stalls: N` depends on whether the
+    // fixture carries any open entry — count them from the output.
+    assert!(!stdout.contains("stall: 43c-2"), "{stdout}");
+    let opens = stdout
+        .lines()
+        .filter(|l| l.starts_with("stall: ") && l.ends_with(" open"))
+        .count();
+    let reported = stdout
+        .lines()
+        .find(|l| l.starts_with("stalls: "))
+        .and_then(|l| {
+            l.trim_start_matches("stalls: ")
+                .trim()
+                .parse::<usize>()
+                .ok()
+        })
+        .expect("stalls: N line");
+    assert_eq!(
+        reported, opens,
+        "stalls count must equal open entries (no dated stalls): {stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Scenario: 伪 verified 计数与 JSON
+#[test]
+fn olp_evo_metrics_fake_verified_counts_r2_records() {
+    let root = std::env::temp_dir().join(format!("m-fv-{}", std::process::id()));
+    let repo = root.join("repo");
+    write_r2_board(&repo);
+    let out = Command::new("bash")
+        .arg(metrics_script())
+        .arg(&repo)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("fake_verified: 1"), "{text}");
+    assert!(!text.contains("regress"), "{text}");
+    let out2 = Command::new("bash")
+        .arg(metrics_script())
+        .arg(&repo)
+        .arg("--json")
+        .output()
+        .unwrap();
+    let js = String::from_utf8_lossy(&out2.stdout);
+    let v: serde_json::Value = serde_json::from_str(&js).expect("json");
+    assert_eq!(v["fake_verified"].as_u64().unwrap(), 1, "{js}");
+    assert!(!js.contains("regress"), "{js}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 44-r1: slice-atom boundaries (99xyz / abc27c don't match) and a
+/// dateless entry yields `stall: 44a open`.
+#[test]
+fn olp_evo_metrics_stall_slice_boundaries_and_dateless_entry() {
+    let root = std::env::temp_dir().join(format!("m-bnd-{}", std::process::id()));
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let board = root.join("boundary.md");
+    std::fs::write(
+        &board,
+        "### 43. x(2026-09-01,外环)\n派单 43-old 无 ACK\n\n### 44. 无日期标题\n派单 44a\n派单 99xyz\nabc27c 派单\n",
+    )
+    .unwrap();
+    let out = Command::new("bash")
+        .arg(metrics_script())
+        .arg(&repo)
+        .arg("--stall")
+        .arg(&board)
+        .arg("--now")
+        .arg("2026-09-05T00:45:00")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("stall: 99x"), "{stdout}");
+    assert!(!stdout.contains("stall: 27c"), "{stdout}");
+    assert!(
+        stdout.contains("stall: 44a open"),
+        "dateless entry → open: {stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 44-r2 (N3): invalid dates (2026-02-30) are UNKNOWN → `open`, exit 0.
+#[test]
+fn olp_evo_metrics_stall_invalid_date_is_unknown() {
+    let root = std::env::temp_dir().join(format!("m-invld-{}", std::process::id()));
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let board = root.join("b.md");
+    std::fs::write(
+        &board,
+        "### 44. x(2026-02-30,外环)\n派单 44a\n不派单 44b\n立案并派单 44c\n立案+派单 44d\n",
+    )
+    .unwrap();
+    let out = Command::new("bash")
+        .arg(metrics_script())
+        .arg(&repo)
+        .arg("--stall")
+        .arg(&board)
+        .arg("--now")
+        .arg("2026-09-05T00:45:00")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("stall: 44a open"), "{stdout}");
+    for neg in ["stall: 44b", "stall: 44c", "stall: 44d"] {
+        assert!(
+            !stdout.contains(neg),
+            "negated word must not match: {stdout}"
+        );
+    }
+    assert!(stdout.contains("stalls: 1"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 44-r2 (N1): negated/compound dispatch phrases never match.
+#[test]
+fn olp_evo_metrics_stall_ignores_negated_and_compound_phrases() {
+    let root = std::env::temp_dir().join(format!("m-neg-{}", std::process::id()));
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let board = root.join("b.md");
+    std::fs::write(
+        &board,
+        "### 44. x(2026-09-01,外环)\n不派单 44a\n立案并派单 44b\n立案+派单 44c\n",
+    )
+    .unwrap();
+    let out = Command::new("bash")
+        .arg(metrics_script())
+        .arg(&repo)
+        .arg("--stall")
+        .arg(&board)
+        .arg("--now")
+        .arg("2026-09-05T00:45:00")
+        .arg("--json")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("\"stalls\": []"), "{stdout}");
+    for neg in ["44a", "44b", "44c"] {
+        assert!(!stdout.contains(neg), "negated phrase matched: {stdout}");
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 44-r2: open entries are threshold-INDEPENDENT — a dateless dispatch
+/// still reports as a stall even with a large threshold (separate
+/// fixture so the threshold test stays fixture-shape-agnostic).
+#[test]
+fn olp_evo_metrics_stall_open_ignores_threshold() {
+    let root = std::env::temp_dir().join(format!("m-openth-{}", std::process::id()));
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let board = root.join("open.md");
+    std::fs::write(
+        &board,
+        "# 板\n\n### 43. 阶段 2(2026-09-05,外环)\n\n> 外环·**派单 43c-2**(2026-09-05 00:00):指标。\n\n### 44. 无日期条目\n\n派单 44a\n",
+    )
+    .unwrap();
+    let out = Command::new("bash")
+        .arg(metrics_script())
+        .arg(&repo)
+        .arg("--stall")
+        .arg(&board)
+        .args(["--stall-threshold", "100000"])
+        .arg("--now")
+        .arg("2026-09-05T00:45:00")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("stall: 44a open"), "{stdout}");
+    // dated 43c-2 stays under the huge threshold
+    assert!(!stdout.contains("stall: 43c-2"), "{stdout}");
+    assert!(stdout.contains("stalls: 1"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&root);
+}
