@@ -19,7 +19,7 @@ tags: [olp, evolution, harness, metrics, replay]
 
 [REQ-OLP-EVO-P2-LAYER] retro 层提示表 MUST 增加 `fallback_switch` → `Execution`、`malformed_exhausted` → `Tooling`。
 
-[REQ-OLP-EVO-P2-ANCHOR] `fallback_switch` 卡的锚点 MUST 为 `<session>|<from_provider>-><to_provider>`(from/to 取自 detail),使同一会话内不同车道切换各计一次。
+[REQ-OLP-EVO-P2-ANCHOR] `fallback_switch` 卡的锚点 MUST 为 `<session>|<from_provider>-><to_provider>`(session 取 symptom JSON 的 `session` 字段全文,from/to 取自 detail),同一会话内不同车道切换 MUST 归入同一候选并各计一次复发(分组文本中车道名与耗时归一化),不同会话 MUST NOT 因后缀相同而合并。
 
 [REQ-OLP-EVO-P2-LIB] 归一化、锚点与卡片解析 MUST 抽成单一 python 模块 `scripts/olp-evo-lib.py`,由 retro 与指标脚本共同调用,MUST NOT 各自复制实现。
 
@@ -31,7 +31,7 @@ tags: [olp, evolution, harness, metrics, replay]
 
 [REQ-OLP-EVO-P2-METRICS-BASELINE] `--baseline <json>` MUST 以基线的 `through_evo` 作为本次窗口起点,对**所有** trigger 输出 `increase: <trigger> <base>-><now>` 或 `decrease:` 诊断行,MUST 打印固定说明行 `note: diagnostic only, not a KPI; rising counts may mean better detection`,MUST NOT 输出 `regress:` 字样,退出码恒为 0。
 
-[REQ-OLP-EVO-P2-NOWRITE] 回放测试与指标脚本 MUST NOT 修改仓库内任何文件,也 MUST NOT 向真实 `~/.octos/outer/evo` 写入。
+[REQ-OLP-EVO-P2-NOWRITE] 回放测试与指标脚本 MUST NOT 修改仓库内任何文件(含 `scripts/` 下的 python 字节码缓存),也 MUST NOT 向真实 `~/.octos/outer/evo` 写入。
 
 ## Scenarios
 
@@ -66,6 +66,7 @@ Scenario: 指标窗口与基线诊断
 - proposal:LEP-003 §10 阶段 2
 - operator 2026-09-05 直令"按阶段完成这个目标"
 - octos 侧发射点契约:octos 仓库 `specs/task-olp-obs-p2-producers.spec.md`(分支 feat/olp-obs-p2-producers)
+- 契约 v3 经 codex(gpt-6)PR 复审(2026-09-05):同会话双车道场景与按 detail 分组冲突、anchor 截 session、metrics 产生 pyc
 - 契约 v2 经 codex/grok 对抗复审(2026-09-05):累计计数当回归会奖励少报;黑名单脱敏不可证明;since 窗口与最近简报混用;新 kind 需进 events 类分组;fallback 锚点需含车道
 - 实测:阶段 0 影子采集 7 卡、阶段 1 干跑 4 候选,尚无可重复的期望基线
 

@@ -19,11 +19,14 @@ codex 与 grok 对抗复审。
 - 共享模块 `scripts/olp-evo-lib.py`(python3 标准库,无 CLI 入口):导出 `parse_cards(text)`(返回
   卡片列表:id、trigger、source、identity、envelope、symptom、raw)、`group_text(card)`(按 trigger
   取分组文本:活板类剥定式前缀;events 类含 `escalation`、`turn_error`、`goal_blocked`、
-  `goal_budget_limited`、`fallback_switch`、`malformed_exhausted` 取 JSON `detail`;MCP 类取
+  `goal_budget_limited`、`fallback_switch`、`malformed_exhausted` 取 JSON `detail`,其中 `fallback_switch`
+  的分组文本再把 `(\S+) -> (\S+)` 归一为 `<lane> -> <lane>` 并删去 `, \d+ms`(同会话不同车道的切换同组、
+  靠锚点区分复发);MCP 类取
   `reason=` 之后)、`normalize(text)`(阶段 1 规则:lower → `<path>` → `<hex>` → `<num>`,数字规则
   `(?<![A-Za-z_\d])\d+(?![A-Za-z\d])` → 空白折叠 → 80 code point)、`anchor(card)`(rsplit 规则;
-  `fallback_switch` 返回 `<session>|<from>-><to>`,from/to 用正则 `router failover: (\S+) -> (\S+)`
-  从 detail 取,取不到退回 session;锚点 `-` 或空退回 `EVO-NNNN`)、`layer(trigger)`(阶段 1 表 +
+  `fallback_switch` 返回 `<session>|<from>-><to>`,**session 取 symptom JSON 的 `session` 字段全文**(可含
+  `#`,如 `octos:local:tui#coding`),JSON 缺 session 时才退回 identity 解析;from/to 用正则
+  `router failover: (\S+) -> (\S+)` 从 detail 取,取不到退回 session;锚点 `-` 或空退回 `EVO-NNNN`)、`layer(trigger)`(阶段 1 表 +
   两新行)、`group(cards)`(返回候选列表:key、trigger、layer、anchors、recurrence_hint、cards)。
   `scripts/olp-evo-retro.sh` 的内嵌 python 改为 `import` 该模块(通过 `sys.path.insert(0, 脚本目录)`),
   行为与阶段 1 契约一致;不得在 retro 与 metrics 各自复制实现。
@@ -51,6 +54,10 @@ codex 与 grok 对抗复审。
   行(`<trigger> <base>-><now>`,相等不输出);`--json` 输出同内容对象(键 `note`、`through_evo`、
   `cards`、`by_trigger`、`by_source`、`recurring_candidates`、`recurring`、`deltas`)。退出码恒 0。
 - README(`knowledge/context/evolution/README.md`)加"指标"一段:窗口语义、诊断非 KPI、基线用法。
+- 零写入包含脚本目录:所有调用 python 的入口(retro、metrics)用 `python3 -B` 或在 import 前设
+  `sys.dont_write_bytecode = True`,不得在 `scripts/` 下产生 `__pycache__`;零写入测试对**脚本目录副本**与
+  仓库夹具目录、状态目录三处前后比对文件集合与 sha256。
+- 契约 v3(2026-09-05,codex 复审后):以上三条为修订;`expected.json` 由主审在实现落地后重算入库。
 - 测试:`tests/olp_evo_metrics.rs`;新 kind 锚点测试加在 `tests/olp_evo_retro.rs`;不新增 Cargo
   依赖;脚本只依赖 bash、coreutils、python3。
 
@@ -107,12 +114,25 @@ codex 与 grok 对抗复审。
   当 运行 olp-evo-retro.sh
   那么 简报中两候选行分别含 layer=Execution 与 layer=Tooling
 
-场景: 同会话不同车道切换各计一次
+场景: 同会话不同车道切换各计一次(critical)
+  标签: critical
   测试: olp_evo_retro_fallback_anchor_includes_lanes
-  假设 进化黑板含两张 fallback_switch 卡,session 相同,detail 分别为 router failover: lane-a -> lane-b 与 router failover: lane-b -> lane-c
-  当 运行 olp-evo-retro.sh
+  假设 进化黑板含两张 fallback_switch 卡,symptom JSON 的 session 均为 octos:local:tui#coding,detail 分别为 router failover: lane-a -> lane-b (quota exhausted, 1200ms) 与 router failover: lane-b -> lane-c (quota exhausted, 900ms)
+  当 运行 olp-evo-retro.sh --dry-run
   那么 简报含 candidates: 1
-  并且 该候选行含 recurrence_hint=2
+  并且 该候选行含 recurrence_hint=2 且 anchors 行含 octos:local:tui#coding|lane-a->lane-b 与 octos:local:tui#coding|lane-b->lane-c
+
+场景: 不同会话同后缀不合并
+  测试: olp_evo_retro_fallback_anchor_uses_full_session
+  假设 两张 fallback_switch 卡 detail 相同,session 分别为 tenant-a:local:tui#coding 与 tenant-b:local:tui#coding
+  当 运行 olp-evo-retro.sh --dry-run
+  那么 简报含 candidates: 1 且该候选行含 recurrence_hint=2
+
+场景: 缺 session 的 fallback 卡退回 EVO 编号
+  测试: olp_evo_retro_fallback_anchor_falls_back_to_evo_id
+  假设 一张 fallback_switch 卡的 symptom JSON 无 session 字段且 identity 的会话段为 -
+  当 运行 olp-evo-retro.sh --dry-run
+  那么 该候选的 anchors 行含 EVO-0001
 
 场景: retro 与指标共用 lib 且结果一致
   测试: olp_evo_lib_shared_by_retro_and_metrics
@@ -156,11 +176,17 @@ codex 与 grok 对抗复审。
   并且 stdout 不含 regress
   并且 退出码等于 0
 
-场景: 指标脚本零写入
+场景: 指标脚本零写入(含脚本目录)
   测试: olp_evo_metrics_writes_nothing
-  假设 任意进化黑板与状态目录
-  当 运行 olp-evo-metrics.sh 前后分别记录仓库夹具目录与状态目录全部文件的 sha256
-  那么 两次记录逐文件相等且文件集合相同
+  假设 scripts/ 复制到无 __pycache__ 的临时目录,任意进化黑板与状态目录
+  当 用该副本运行 olp-evo-metrics.sh 前后分别记录脚本副本目录、仓库夹具目录与状态目录全部文件的 sha256
+  那么 三处记录逐文件相等且文件集合相同
+
+场景: retro 不产生字节码缓存
+  测试: olp_evo_retro_writes_no_pycache
+  假设 scripts/ 复制到无 __pycache__ 的临时目录
+  当 用该副本运行 olp-evo-retro.sh --dry-run
+  那么 副本目录下不存在 __pycache__
 
 场景: 无卡时指标仍可输出
   测试: olp_evo_metrics_empty_board
