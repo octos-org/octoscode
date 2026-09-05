@@ -186,7 +186,13 @@ fn olp_evo_metrics_writes_nothing() {
     let root = std::env::temp_dir().join(format!("m-zero-{}", std::process::id()));
     let repo = root.join("repo");
     std::fs::create_dir_all(repo.join(".octos")).unwrap();
+    let state = root.join("state");
+    std::fs::create_dir_all(&state).unwrap();
     write_board(&repo, &[("ack_blocked", "review /r", "ACK(blocked): a")]);
+    // 43-r2: compare a COPY of scripts/ (imports happen there), the repo
+    // tree, and the state root — three surfaces, unchanged.
+    let scripts_copy = root.join("scripts-copy");
+    copy_dir(&repo_root().join("scripts"), &scripts_copy);
     let digest = |p: &Path| -> Vec<(PathBuf, String)> {
         let mut out = Vec::new();
         for e in walk(p) {
@@ -201,15 +207,37 @@ fn olp_evo_metrics_writes_nothing() {
         out.sort();
         out
     };
-    let before = digest(&repo);
+    let before_repo = digest(&repo);
+    let before_scripts = digest(&scripts_copy);
+    let before_state = digest(&state);
     let out = Command::new("bash")
         .arg(metrics_script())
         .arg(&repo)
+        .env("OLP_EVO_STATE", &state)
         .output()
         .unwrap();
     assert!(out.status.success());
-    assert_eq!(digest(&repo), before);
+    assert_eq!(digest(&repo), before_repo, "repo unchanged");
+    assert_eq!(
+        digest(&scripts_copy),
+        before_scripts,
+        "scripts copy unchanged (no __pycache__)"
+    );
+    assert_eq!(digest(&state), before_state, "state root unchanged");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+fn copy_dir(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for e in std::fs::read_dir(src).unwrap().flatten() {
+        let p = e.path();
+        let t = dst.join(e.file_name());
+        if p.is_dir() {
+            copy_dir(&p, &t);
+        } else {
+            std::fs::copy(&p, &t).unwrap();
+        }
+    }
 }
 
 /// Scenario: 空黑板仍可输出

@@ -8,6 +8,11 @@ hints live in exactly one place.
 
 from __future__ import annotations
 
+import sys
+
+# 43-r2: never leave __pycache__ behind, whoever imports this module.
+sys.dont_write_bytecode = True
+
 import json
 import re
 
@@ -106,7 +111,14 @@ def group_text(card: dict) -> str:
             if isinstance(d, dict):
                 det = d.get("data", {}).get("detail") or d.get("detail")
                 if det is not None:
-                    return str(det)
+                    det = str(det)
+                    if trigger == "fallback_switch":
+                        # 43-r2: same session + different lanes group
+                        # together — normalize the lane names and drop
+                        # the latency tail.
+                        det = re.sub(r"(\S+) -> (\S+)", r"<lane> -> <lane>", det)
+                        det = re.sub(r",\s*\d+ms", "", det)
+                    return det
         except Exception:
             pass
         return symptom
@@ -134,9 +146,21 @@ def anchor(card: dict) -> str:
     fallback = card.get("id") or "EVO-0000"
 
     if trigger == "fallback_switch":
-        detail = group_text(card)
-        m = _RE_FAILOVER.search(detail)
+        # lanes come from the RAW detail — group_text normalizes lanes for
+        # grouping, but the anchor must distinguish a->b from b->c.
+        raw_detail = ""
+        try:
+            d = json.loads(card.get("symptom") or "")
+            if isinstance(d, dict):
+                raw_detail = str(d.get("data", {}).get("detail") or d.get("detail") or "")
+        except Exception:
+            pass
+        if not raw_detail:
+            raw_detail = card.get("symptom") or ""
+        m = _RE_FAILOVER.search(raw_detail)
         session = _events_session(identity, card)
+        if session is None:
+            return fallback
         if m:
             return f"{session}|{m.group(1)}->{m.group(2)}"
         return session
@@ -158,23 +182,23 @@ def anchor(card: dict) -> str:
     return seg
 
 
-def _events_session(identity: str, card: dict) -> str:
-    # session is the events anchor segment (倒数第 2); fall back to the
-    # JSON symptom's session field, else "-".
+def _events_session(identity: str, card: dict) -> str | None:
+    # 43-r2: the JSON symptom's `session` is the AUTHORITATIVE full text
+    # (it may contain `#`); the identity segment is only the fallback.
+    try:
+        d = json.loads(card.get("symptom") or "")
+        if isinstance(d, dict):
+            sess = d.get("session")
+            if sess:
+                return str(sess)
+    except Exception:
+        pass
     body = identity[len("events:") :] if identity.startswith("events:") else identity
     parts = body.rsplit("#")
     seg = parts[-2] if len(parts) >= 2 else "-"
     if seg not in ("-", ""):
         return seg
-    try:
-        d = json.loads(card.get("symptom") or "")
-        if isinstance(d, dict):
-            s = d.get("session")
-            if s:
-                return str(s)
-    except Exception:
-        pass
-    return "-"
+    return None
 
 
 # --- layer --------------------------------------------------------------

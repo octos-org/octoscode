@@ -678,13 +678,13 @@ fn olp_evo_retro_fallback_switch_key_uses_detail() {
     );
 }
 
-/// 43c-1: fallback_switch anchors carry the LANES (`session|from->to`),
-/// not the plain session segment.
+/// 43-r2: two real fallback cards (same session, different lanes) → one
+/// candidate with hint=2 and BOTH lane anchors.
 #[test]
 fn olp_evo_retro_fallback_anchor_includes_lanes() {
     let sb = Sandbox::new("fs-lanes");
     sb.write_board(
-        "### EVO-0001（t，harvest）\ntrigger: fallback_switch\nsource: events /e.jsonl\nidentity: events:/e.jsonl#t#fallback_switch#octos:local:tui#coding#1111\nsymptom: {\"detail\":\"router failover: lane-a -> lane-b (quota)\"}\n",
+        "### EVO-0001（t，harvest）\ntrigger: fallback_switch\nsource: events /e.jsonl\nidentity: events:/e.jsonl#t#fallback_switch#x#1111\nsymptom: {\"session\":\"octos:local:tui#coding\",\"detail\":\"router failover: lane-a -> lane-b (quota, 1200ms)\"}\n### EVO-0002（t，harvest）\ntrigger: fallback_switch\nsource: events /e.jsonl\nidentity: events:/e.jsonl#t#fallback_switch#y#2222\nsymptom: {\"session\":\"octos:local:tui#coding\",\"detail\":\"router failover: lane-b -> lane-c (quota, 900ms)\"}\n",
     );
     let out = sb.run(false);
     assert!(
@@ -693,12 +693,87 @@ fn olp_evo_retro_fallback_anchor_includes_lanes() {
         String::from_utf8_lossy(&out.stderr)
     );
     let brief = sb.brief_text();
-    let anchors = brief
-        .lines()
-        .find(|l| l.starts_with("anchors: "))
-        .expect("anchors line");
+    assert!(brief.contains("candidates: 1"), "{brief}");
     assert!(
-        anchors.contains("coding|lane-a->lane-b"),
-        "anchor must be session|from->to: {anchors}"
+        brief.contains("recurrence_hint=2"),
+        "two distinct lane anchors: {brief}"
+    );
+    assert!(
+        brief.contains("octos:local:tui#coding|lane-a->lane-b"),
+        "{brief}"
+    );
+    assert!(
+        brief.contains("octos:local:tui#coding|lane-b->lane-c"),
+        "{brief}"
+    );
+}
+
+/// 43-r2: the session in the anchor is the FULL JSON `session` (with `#`).
+#[test]
+fn olp_evo_retro_fallback_anchor_uses_full_session() {
+    let sb = Sandbox::new("fs-fullsess");
+    sb.write_board(
+        "### EVO-0001（t，harvest）\ntrigger: fallback_switch\nsource: events /e.jsonl\nidentity: events:/e.jsonl#t#fallback_switch#seg-only#1111\nsymptom: {\"session\":\"octos:local:tui#coding\",\"detail\":\"router failover: lane-a -> lane-b\"}\n",
+    );
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let brief = sb.brief_text();
+    assert!(
+        brief.contains("octos:local:tui#coding|lane-a->lane-b"),
+        "JSON session full text wins over the identity segment: {brief}"
+    );
+}
+
+/// 43-r2: no JSON session AND no identity segment → fall back to EVO id.
+#[test]
+fn olp_evo_retro_fallback_anchor_falls_back_to_evo_id() {
+    let sb = Sandbox::new("fs-evoid");
+    sb.write_board(
+        "### EVO-0007（t，harvest）\ntrigger: fallback_switch\nsource: events /e.jsonl\nidentity: events:/e.jsonl#t#fallback_switch#-#9999\nsymptom: {\"detail\":\"router failover: lane-a -> lane-b\"}\n",
+    );
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let brief = sb.brief_text();
+    assert!(
+        brief.contains("anchors: EVO-0007"),
+        "no session anywhere → EVO id: {brief}"
+    );
+}
+
+/// 43-r2: running retro must not leave scripts/__pycache__ behind.
+#[test]
+fn olp_evo_retro_writes_no_pycache() {
+    let sb = Sandbox::new("no-pycache");
+    sb.write_board(
+        "### EVO-0001（t，harvest）\ntrigger: ack_blocked\nsource: review /r.md\nidentity: board:/r.md#1#blocked#aaaa\nsymptom: ACK(blocked): x\n",
+    );
+    let before: Vec<std::path::PathBuf> = std::fs::read_dir(repo_root().join("scripts"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after: Vec<std::path::PathBuf> = std::fs::read_dir(repo_root().join("scripts"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(before, after, "scripts/ contents unchanged");
+    assert!(
+        !repo_root().join("scripts/__pycache__").exists(),
+        "no __pycache__ may appear"
     );
 }

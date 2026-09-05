@@ -81,7 +81,7 @@ compute_brief() { # board last_id repo_root flaw_start
     # 43c-1: all parsing/grouping/normalization/anchor/layer logic lives
     # in the shared scripts/olp-evo-lib.py (dash filename → load via
     # importlib file-location, not a plain import).
-    python3 - "$1" "$2" "$3" "$4" "$(dirname "$0")" <<'PY'
+    python3 -B - "$1" "$2" "$3" "$4" "$(dirname "$0")" <<'PY'
 import importlib.util, json, os, sys
 
 board_path, last_id, repo_root, flaw_start, script_dir = (
@@ -208,7 +208,7 @@ if [ "${OLP_EVO_TEST:-0}" = "1" ] && [ "${OLP_EVO_FAULT:-}" = "after-brief" ]; t
 fi
 
 # append run + rewrite retro.json atomically
-python3 - "$RETRO_JSON" "$MAX_ID" "$RETRO_TS" "$RUN" "$NEW_CARDS" "$CANDIDATES" "$BRIEF_PATH" <<'PY'
+python3 -B - "$RETRO_JSON" "$MAX_ID" "$RETRO_TS" "$RUN" "$NEW_CARDS" "$CANDIDATES" "$BRIEF_PATH" <<'PY'
 import json, os, sys, tempfile
 
 path, max_id, ts, run, cards, candidates, brief = sys.argv[1:8]

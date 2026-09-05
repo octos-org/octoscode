@@ -29,7 +29,7 @@ fi
 
 EVO_BOARD="${OLP_EVO_BOARD:-$REPO_ROOT/.octos/EVOLUTION.md}"
 
-python3 - "$EVO_BOARD" "$SINCE" "$JSON" "$BASELINE" "$(dirname "$0")" <<'PY'
+python3 -B - "$EVO_BOARD" "$SINCE" "$JSON" "$BASELINE" "$(dirname "$0")" <<'PY'
 import importlib.util, json, os, re, sys
 
 board, since, as_json, baseline, script_dir = sys.argv[1:6]
