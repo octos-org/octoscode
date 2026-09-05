@@ -451,13 +451,24 @@ fi
 
 # Fault injection (tests only): after appending all cards, before state.
 if [ "${OLP_EVO_TEST:-0}" = "1" ] && [ "${OLP_EVO_FAULT:-}" = "after-append" ] && [ -n "$APPEND_TEXT" ]; then
-    printf '%s' "$APPEND_TEXT" | "$(dirname "$0")/olp-board-append.sh" "$EVO_BOARD" >/dev/null 2>&1 || true
+    # 44-r1: harvest may be invoked from an installed watcher in an
+    # unrelated dir — locate the append helper next to the HARVEST script
+    # (i.e. the repo's scripts/) when the copy isn't beside us.
+    _append_sh="$(dirname "$0")/olp-board-append.sh"
+    if [ ! -f "$_append_sh" ]; then
+        _append_sh="$(pwd)/scripts/olp-board-append.sh"
+    fi
+    printf '%s' "$APPEND_TEXT" | "$_append_sh" "$EVO_BOARD" >/dev/null 2>&1 || true
     echo "fault-injected: after-append" >&2
     exit 70
 fi
 
 if [ -n "$APPEND_TEXT" ]; then
-    printf '%s' "$APPEND_TEXT" | "$(dirname "$0")/olp-board-append.sh" "$EVO_BOARD"
+    _append_sh="$(dirname "$0")/olp-board-append.sh"
+    if [ ! -f "$_append_sh" ]; then
+        _append_sh="$(pwd)/scripts/olp-board-append.sh"
+    fi
+    printf '%s' "$APPEND_TEXT" | "$_append_sh" "$EVO_BOARD"
 fi
 export OLP_EVO_BOARD="$EVO_BOARD"
 

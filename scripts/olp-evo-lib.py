@@ -177,7 +177,8 @@ def anchor(card: dict) -> str:
         seg = parts[-3] if len(parts) >= 3 else "-"
     else:
         seg = parts[-2] if len(parts) >= 2 else "-"
-    if seg in ("-", ""):
+    if seg in ("-", "", "-1"):
+        # "-1" = harvest's no-heading sentinel; contract: 无标题则回退 EVO id
         return fallback
     return seg
 
@@ -242,3 +243,65 @@ def group(cards: list[dict]) -> list[dict]:
     for k in order:
         groups[k]["recurrence_hint"] = len(groups[k]["anchors"])
     return [groups[k] for k in order]
+
+
+# --- FLAW record parsing (phase 3, 44a) ---------------------------------
+def parse_flaw(text: str) -> dict:
+    """Parse a FLAW-*.md record: frontmatter (simple key: value lines),
+    sections by `## <name>` headers, and code-path anchors.
+
+    Returns {"frontmatter": {k: v}, "sections": {name: body}, "paths": [...]}.
+    Paths come from the 责任步 (responsibility) section plus the 锚点
+    (anchors) section: backtick spans containing `/`, with trailing
+    line-number annotations (` L123–L456`, ` L12`) stripped.
+    """
+    frontmatter: dict[str, str] = {}
+    sections: dict[str, str] = {}
+    order: list[str] = []
+
+    lines = text.split("\n")
+    i = 0
+    # frontmatter between leading --- fences
+    if lines and lines[0].strip() == "---":
+        i = 1
+        while i < len(lines) and lines[i].strip() != "---":
+            line = lines[i]
+            if ":" in line:
+                k, _, v = line.partition(":")
+                frontmatter[k.strip()] = v.strip()
+            i += 1
+        i += 1  # past the closing ---
+
+    cur_name = ""
+    buf: list[str] = []
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("## "):
+            if cur_name:
+                sections[cur_name] = "\n".join(buf).strip()
+                order.append(cur_name)
+            cur_name = line[3:].strip()
+            buf = []
+        elif cur_name:
+            buf.append(line)
+        i += 1
+    if cur_name:
+        sections[cur_name] = "\n".join(buf).strip()
+        order.append(cur_name)
+
+    # paths: backtick spans with '/' from 责任步 + 锚点 sections
+    paths: list[str] = []
+    seen: set[str] = set()
+    _re_span = re.compile(r"`([^`]*?/[^`]*?)`")
+    # 44-r2 (#10): full line-range suffixes — L123, L123–L140, L123-L140,
+    # :123, :123-140, :123–140.
+    _re_lineno = re.compile(r"(?:\s*L\d+(?:[–-]L?\d+)?|:\d+(?:[–-]\d+)?)$")
+    for sec in ("责任步", "锚点"):
+        body = sections.get(sec, "")
+        for m in _re_span.finditer(body):
+            p = _re_lineno.sub("", m.group(1)).strip()
+            if p and p not in seen:
+                seen.add(p)
+                paths.append(p)
+
+    return {"frontmatter": frontmatter, "sections": sections, "paths": paths}

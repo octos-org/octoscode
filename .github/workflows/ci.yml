@@ -39,6 +39,14 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # 44-r1: pin agent-spec (evo skeleton tests parse real specs); cache
+      # the binary so reruns are fast. A missing binary FAILS the tests
+      # rather than skipping.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/agent-spec
+          key: agent-spec-1.4.0
+      - run: command -v agent-spec >/dev/null 2>&1 || cargo install agent-spec --version 1.4.0 --locked
       # --all-targets covers lib, bins, tests and benches, and compiles
       # everything clippy would — so a separate `cargo check` job would only
       # repeat this work.
