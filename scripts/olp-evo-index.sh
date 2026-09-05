@@ -31,12 +31,15 @@ for name in sorted(os.listdir(flaw_dir)):
     path = os.path.join(flaw_dir, name)
     flaw = lib.parse_flaw(open(path, encoding="utf-8").read())
     fm = flaw["frontmatter"]
+    # 44-r2: both present → "<issue> / <pr>"; one → that one.
+    _i = (fm.get("issue", "") or "").strip()
+    _p = (fm.get("pr", "") or "").strip()
     rows.append(
         (
             fm.get("id", name[:-3]),
             fm.get("status", "unknown"),
             (fm.get("layers", "") or "").strip("[]"),
-            fm.get("issue", "") or fm.get("pr", "") or "—",
+            f"{_i} / {_p}" if _i and _p else (_i or _p or "—"),
         )
     )
 

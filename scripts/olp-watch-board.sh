@@ -73,11 +73,13 @@ while :; do
           echo "harvest: failed (exit $rc)" >&2
         fi
         echo "BOARD-SIGNAL: $token"
-        printf '%s\n' "$hits" | head -3
+        # 44-r2: no pipe — `printf | head` dies on SIGPIPE (141) under
+        # pipefail when hits exceed head's window; here-string instead.
+        head -3 <<<"$hits"
         base=$cur
       else
         echo "BOARD-SIGNAL: $token"
-        printf '%s\n' "$hits" | head -3
+        head -3 <<<"$hits"
         exit 0
       fi
     fi

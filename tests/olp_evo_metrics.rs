@@ -386,6 +386,7 @@ fn olp_evo_metrics_stall_respects_threshold() {
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
+    // plain-text mode: within threshold → zero stalls
     assert!(stdout.contains("stalls: 0"), "{stdout}");
     assert!(!stdout.contains("stall: 43c-2"), "{stdout}");
     let _ = std::fs::remove_dir_all(&root);
@@ -447,5 +448,70 @@ fn olp_evo_metrics_stall_slice_boundaries_and_dateless_entry() {
         stdout.contains("stall: 44a open"),
         "dateless entry → open: {stdout}"
     );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 44-r2 (N3): invalid dates (2026-02-30) are UNKNOWN → `open`, exit 0.
+#[test]
+fn olp_evo_metrics_stall_invalid_date_is_unknown() {
+    let root = std::env::temp_dir().join(format!("m-invld-{}", std::process::id()));
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let board = root.join("b.md");
+    std::fs::write(
+        &board,
+        "### 44. x(2026-02-30,外环)\n派单 44a\n不派单 44b\n立案并派单 44c\n立案+派单 44d\n",
+    )
+    .unwrap();
+    let out = Command::new("bash")
+        .arg(metrics_script())
+        .arg(&repo)
+        .arg("--stall")
+        .arg(&board)
+        .arg("--now")
+        .arg("2026-09-05T00:45:00")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("stall: 44a open"), "{stdout}");
+    for neg in ["stall: 44b", "stall: 44c", "stall: 44d"] {
+        assert!(
+            !stdout.contains(neg),
+            "negated word must not match: {stdout}"
+        );
+    }
+    assert!(stdout.contains("stalls: 1"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 44-r2 (N1): negated/compound dispatch phrases never match.
+#[test]
+fn olp_evo_metrics_stall_ignores_negated_and_compound_phrases() {
+    let root = std::env::temp_dir().join(format!("m-neg-{}", std::process::id()));
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let board = root.join("b.md");
+    std::fs::write(
+        &board,
+        "### 44. x(2026-09-01,外环)\n不派单 44a\n立案并派单 44b\n立案+派单 44c\n",
+    )
+    .unwrap();
+    let out = Command::new("bash")
+        .arg(metrics_script())
+        .arg(&repo)
+        .arg("--stall")
+        .arg(&board)
+        .arg("--now")
+        .arg("2026-09-05T00:45:00")
+        .arg("--json")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("\"stalls\": []"), "{stdout}");
+    for neg in ["44a", "44b", "44c"] {
+        assert!(!stdout.contains(neg), "negated phrase matched: {stdout}");
+    }
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -98,11 +98,11 @@ lines.append("---")
 lines.append("")
 lines.append("## 意图")
 lines.append("")
+# 44-r2 (#10): EITHER missing section keeps its own positional TODO
+# placeholder — 症状 first, then 根因.
 intent = sections.get("症状", "").strip() or "<!-- TODO: 症状 -->"
-root_cause = sections.get("根因", "").strip()
-if root_cause:
-    intent = f"{intent}\n\n根因:{root_cause}"
-lines.append(intent)
+root_cause = sections.get("根因", "").strip() or "<!-- TODO: 根因 -->"
+lines.append(f"{intent}\n\n根因:{root_cause}")
 lines.append("")
 lines.append("## 已定决策")
 lines.append("")

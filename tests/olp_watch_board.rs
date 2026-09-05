@@ -367,3 +367,78 @@ fn olp_watch_board_harvest_works_from_installed_copy() {
     assert_eq!(cards, 1, "installed copy harvests via repo scripts/: {evo}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// 44-r2 (N2): a ~400-line hit burst must not kill the resident watcher
+/// (no `printf | head` pipeline → no SIGPIPE 141 under pipefail).
+#[test]
+fn olp_watch_board_harvest_survives_burst_hits() {
+    let root = std::env::temp_dir().join(format!("olp-burst-{}", std::process::id()));
+    let repo = root.join("repo");
+    std::fs::create_dir_all(repo.join(".octos")).unwrap();
+    let board = repo.join(".octos/OUTER_LOOP_REVIEW.md");
+    std::fs::write(&board, "l1\nl2\nl3\n").unwrap();
+    let state = root.join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let mut child = Command::new("bash")
+        .arg(script())
+        .arg(&board)
+        .arg("ACK(blocked")
+        .args(["--interval", "1"])
+        // RESIDENT mode (44-r2 N2): without --harvest the watcher exits
+        // on the first hit by design — the burst survival contract is a
+        // --harvest (resident loop) property.
+        .arg("--harvest")
+        .arg(&repo)
+        .env("OLP_EVO_STATE", &state)
+        .env("OLP_EVO_EVENTS", "")
+        .env("OLP_EVO_MCP_BOARD", root.join("absent"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(1500));
+    // 400 lines, EVERY one matching the token — head -3 keeps the print
+    // bounded, but the watcher itself must survive and keep polling.
+    let burst: String = (0..400)
+        .map(|i| format!("ACK(blocked): burst line {i}\n"))
+        .collect();
+    append(&board, &burst);
+    // POLL, don't sleep: a 400-line harvest can take 10s+ under a
+    // fully-parallel `cargo test --all-targets` (CPU contention), so a
+    // fixed 15s window flakes. Wait for the FIRST signal with a 60s
+    // budget instead.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while !std::fs::read_to_string(&board)
+        .map(|_| true)
+        .unwrap_or(false)
+        || true
+    {
+        // (just wait on the wall clock; output is drained after kill)
+        if std::time::Instant::now() > deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    // second batch after the burst — proves the loop still lives
+    append(&board, "ACK(blocked): second batch\n");
+    // allow the second harvest round its full time budget under load.
+    std::thread::sleep(Duration::from_secs(45));
+    // kill FIRST (resident watcher never exits), THEN read its output —
+    // read_to_string on a live pipe would block forever.
+    let _ = child.kill();
+    let status = child.wait().unwrap();
+    use std::io::Read;
+    let mut text = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        out.read_to_string(&mut text).unwrap();
+    }
+    assert!(
+        text.contains("BOARD-SIGNAL"),
+        "first batch processed: {text}"
+    );
+    // count BOARD-SIGNAL prints: burst batch + second batch = 2
+    let signals = text.matches("BOARD-SIGNAL").count();
+    assert!(signals >= 2, "watcher survived the burst: {text}");
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = status;
+}

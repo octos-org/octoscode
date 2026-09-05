@@ -81,7 +81,8 @@ fn olp_evo_skeleton_from_template_flaw_parses_and_maps_sections() {
             c.wait_with_output()
         })
         .unwrap();
-    // 44-r1: STRICT — exit 0 AND the scenario-count line says 3.
+    // 44-r2: exact count — regex the Acceptance Criteria count line and
+    // compare NUMERICALLY (contains("3 scenarios") would match 13).
     assert!(
         parse.status.success(),
         "agent-spec parse must exit 0: {}{}",
@@ -93,10 +94,15 @@ fn olp_evo_skeleton_from_template_flaw_parses_and_maps_sections() {
         String::from_utf8_lossy(&parse.stdout),
         String::from_utf8_lossy(&parse.stderr)
     );
-    assert!(
-        ptext.contains("3 scenarios"),
-        "parse must report exactly 3 scenarios: {ptext}"
-    );
+    let n = ptext
+        .lines()
+        .find_map(|l| {
+            let t = l.trim().trim_start_matches('-').trim();
+            t.strip_prefix("Acceptance Criteria: ")
+        })
+        .and_then(|v| v.split_whitespace().next())
+        .and_then(|v| v.parse::<u32>().ok());
+    assert_eq!(n, Some(3), "exact scenario count: {ptext}");
 }
 
 /// Scenario: 真实 FLAW-001 走别名段且缺段占位
@@ -248,5 +254,36 @@ fn olp_evo_skeleton_maps_root_cause_paths_and_item_slug_exactly() {
         "pure-CJK item → pending_item_1: {stdout}"
     );
     assert!(!stdout.contains("pending_pending_"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 44-r2 (#10): line-range suffix stripped; missing 根因 gets its own TODO.
+#[test]
+fn olp_evo_skeleton_strips_line_ranges_and_emits_root_cause_todo() {
+    let root = std::env::temp_dir().join(format!(
+        "olp-skel-range-{}-{}",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("t")
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let flaw = root.join("FLAW-range.md");
+    std::fs::write(
+        &flaw,
+        "# FLAW-000\n\n## 症状\n只有症状\n\n## 责任步\n- `src/range.rs:123-140` 执行\n\n## 修复\n- 修一项\n",
+    )
+    .unwrap();
+    let out = Command::new("bash")
+        .arg(skeleton())
+        .arg(&flaw)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("<!-- TODO: 根因 -->"), "{stdout}");
+    assert!(
+        stdout.lines().any(|l| l.trim() == "- src/range.rs"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("123-140"), "{stdout}");
     let _ = std::fs::remove_dir_all(&root);
 }

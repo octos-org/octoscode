@@ -102,8 +102,11 @@ for k in sorted(set(by_trigger) | set(base_trig)):
 stalls = []
 if stall_board and os.path.isfile(stall_board):
     SLICE = r"[0-9]+[a-z]?(?:-[0-9a-z]+)*"
-    re_fwd = re.compile(rf"派单\s+(?P<a>{SLICE})(?![0-9a-z])")
-    re_rev = re.compile(rf"(?<![0-9a-z])(?P<b>{SLICE})\s+派单")
+    # 44-r2 (N1): single canonical grammar — `派单` must be preceded by
+    # line start or whitespace; `不派单 44a` / `立案并派单 44b` /
+    # `立案+派单 44c` therefore never match.
+    re_fwd = re.compile(rf"(?:^|\s)派单\s+(?P<a>{SLICE})(?![0-9a-z])")
+    re_rev = re.compile(rf"(?:^|\s)(?P<b>{SLICE})\s+派单(?![0-9a-z])")
     re_ack = re.compile(rf"^(?:> )?ACK\((?P<s>{SLICE})\s+(?:done|blocked|wontdo)\b")
     re_date_inline = re.compile(r"\((\d{4}-\d\d-\d\d) (\d\d:\d\d)")
     re_date_bracket = re.compile(r"\[(\d{4}-\d\d-\d\d)T(\d\d:\d\d)")
@@ -145,11 +148,22 @@ if stall_board and os.path.isfile(stall_board):
                 tm = None
                 mi = re_date_inline.search(line) or re_date_bracket.search(line)
                 if mi:
-                    tm = datetime.datetime.fromisoformat(
-                        f"{mi.group(1)}T{mi.group(2)}:00+00:00"
-                    )
+                    try:
+                        # 44-r2 (N3): invalid dates (2026-02-30) are
+                        # UNKNOWN, not a crash.
+                        tm = datetime.datetime.fromisoformat(
+                            f"{mi.group(1)}T{mi.group(2)}:00+00:00"
+                        )
+                    except ValueError:
+                        tm = None
                 elif heading_date:
-                    tm = datetime.datetime.fromisoformat(f"{heading_date}T00:00:00+00:00")
+                    try:
+                        # 44-r2 (N3): heading dates can be invalid too.
+                        tm = datetime.datetime.fromisoformat(
+                            f"{heading_date}T00:00:00+00:00"
+                        )
+                    except ValueError:
+                        tm = None
                 dispatched[sl] = (tm, sl)
         ma = re_ack.match(line)
         if ma:
