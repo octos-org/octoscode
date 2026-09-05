@@ -1419,9 +1419,16 @@ pub(crate) fn handle_key(store: &mut Store, key: KeyEvent) -> KeyAction {
     // trigger `@`, composer back to its pre-`@` text") relies on the composer
     // being frozen while the picker is up, so a Ctrl+W leaking through here
     // would silently mutate the hidden draft and break the restore (#363).
+    // Vim Normal mode (#215) gates them off too: the readline edit shortcuts
+    // (Ctrl+W / Ctrl+K / Ctrl+J, Alt+D, …) are Insert-mode affordances, and
+    // this arm runs BEFORE `handle_composer_vim_key`, so without the gate they
+    // mutated the buffer without entering Insert. Normal mode gets the keys
+    // back via the vim handler (plain/Shift) or the global arms below.
     if store.state.focus == FocusPane::Composer
         && !modal_owns_keyboard(store)
         && store.state.file_picker.is_none()
+        && !(store.state.vim_mode
+            && store.state.composer_mode == crate::model::ComposerMode::Normal)
         && handle_composer_modified_key(store, key)
     {
         return KeyAction::Continue;
@@ -2441,8 +2448,11 @@ fn handle_composer_vim_key(store: &mut Store, key: &KeyEvent) -> Option<KeyActio
         return None;
     }
     // Non-character keys (arrows, etc.) fall through so they keep moving the
-    // cursor via the normal composer arms.
+    // cursor via the normal composer arms — and disarm any pending operator
+    // (#215): `d` then Down is a cursor move, so a later `w` must not resolve
+    // into a delayed `dw`. (Enter and Esc above clear it on their own paths.)
     let KeyCode::Char(c) = key.code else {
+        store.state.composer_vim_pending = None;
         return None;
     };
 
@@ -7529,6 +7539,92 @@ mod tests {
         assert!(
             store.state.active_turn().is_some(),
             "Esc with a pending operator only clears it; the turn keeps running"
+        );
+    }
+
+    /// Issue #215 item 1: in Normal mode the buffer must not mutate without
+    /// entering Insert — the readline edit shortcuts (Ctrl+W / Ctrl+K / Ctrl+J,
+    /// Alt+D, …) are Insert-mode affordances and stay blocked while Normal.
+    #[test]
+    fn vim_normal_mode_blocks_modified_edit_shortcuts() {
+        let mut store = store_with_sessions(1);
+        store.state.vim_mode = true;
+        store.state.composer_mode = crate::model::ComposerMode::Normal;
+        store.state.focus = FocusPane::Composer;
+        store.state.set_composer_text("hello world");
+
+        for edit_key in [
+            modified_key(KeyCode::Char('w'), KeyModifiers::CONTROL),
+            modified_key(KeyCode::Char('k'), KeyModifiers::CONTROL),
+            modified_key(KeyCode::Char('j'), KeyModifiers::CONTROL),
+            modified_key(KeyCode::Char('h'), KeyModifiers::CONTROL),
+            modified_key(KeyCode::Char('d'), KeyModifiers::ALT),
+        ] {
+            handle_key(&mut store, edit_key);
+            assert_eq!(
+                store.state.composer, "hello world",
+                "{edit_key:?} must not edit the buffer in Normal mode"
+            );
+            assert_eq!(
+                store.state.composer_mode,
+                crate::model::ComposerMode::Normal
+            );
+        }
+    }
+
+    /// Issue #215 item 2: a non-character fall-through key (arrows, Tab,
+    /// Backspace) must disarm a pending operator — `d` then Down then `w` is a
+    /// cursor move, not a delayed `dw`.
+    #[test]
+    fn vim_normal_pending_operator_cleared_by_non_char_key() {
+        let mut store = store_with_sessions(1);
+        store.state.vim_mode = true;
+        store.state.composer_mode = crate::model::ComposerMode::Normal;
+        store.state.focus = FocusPane::Composer;
+        store.state.set_composer_text("hello world");
+
+        handle_key(&mut store, key(KeyCode::Char('d')));
+        assert_eq!(store.state.composer_vim_pending, Some('d'));
+
+        handle_key(&mut store, key(KeyCode::Down));
+        assert_eq!(
+            store.state.composer_vim_pending, None,
+            "a non-character key must disarm the pending operator"
+        );
+
+        handle_key(&mut store, key(KeyCode::Char('w')));
+        assert_eq!(
+            store.state.composer, "hello world",
+            "`w` after the disarmed `d` moves the cursor instead of deleting"
+        );
+
+        // Same for Tab, the other fall-through key the issue names.
+        handle_key(&mut store, key(KeyCode::Char('d')));
+        assert_eq!(store.state.composer_vim_pending, Some('d'));
+        handle_key(&mut store, key(KeyCode::Tab));
+        assert_eq!(store.state.composer_vim_pending, None);
+    }
+
+    /// Shift+Enter in Normal mode submits, exactly like plain Enter: the
+    /// readline newline shortcuts are Insert-mode affordances (#215), and
+    /// Normal-mode Enter has always submitted. Pins the intent so the gate
+    /// can't silently flip it back.
+    #[test]
+    fn vim_normal_shift_enter_submits_like_plain_enter() {
+        let mut store = store_with_sessions(1);
+        store.state.vim_mode = true;
+        store.state.composer_mode = crate::model::ComposerMode::Normal;
+        store.state.focus = FocusPane::Composer;
+        store.state.set_composer_text("hello world");
+
+        let action = handle_key(
+            &mut store,
+            modified_key(KeyCode::Enter, KeyModifiers::SHIFT),
+        );
+
+        assert!(
+            matches!(action, KeyAction::Send(_)),
+            "Shift+Enter in Normal mode submits, it does not insert a newline"
         );
     }
 
