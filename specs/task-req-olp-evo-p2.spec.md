@@ -25,7 +25,7 @@ codex 与 grok 对抗复审。
   `reason=` 之后)、`normalize(text)`(阶段 1 规则:lower → `<path>` → `<hex>` → `<num>`,数字规则
   `(?<![A-Za-z_\d])\d+(?![A-Za-z\d])` → 空白折叠 → 80 code point)、`anchor(card)`(rsplit 规则;
   `fallback_switch` 返回 `<session>|<from>-><to>`,**session 取 symptom JSON 的 `session` 字段全文**(可含
-  `#`,如 `octos:local:tui#coding`),JSON 缺 session 时才退回 identity 解析;from/to 用正则
+  `#`,如 `octos:local:tui#coding`),JSON 缺 session 时才退回 identity 解析——identity 形如 `events:<path>#<ts>#<kind>#<ref>#<sha>`,path/ts/kind/sha 均不含 `#`,故 **ref = 第 3 个 `#` 之后到最后一个 `#` 之前的全部文本**(可含 `#`,如 `tenant-a:local:tui#coding`),不得用 `rsplit("#")[-2]`;from/to 用正则
   `router failover: (\S+) -> (\S+)` 从 detail 取,取不到退回 session;锚点 `-` 或空退回 `EVO-NNNN`)、`layer(trigger)`(阶段 1 表 +
   两新行)、`group(cards)`(返回候选列表:key、trigger、layer、anchors、recurrence_hint、cards)。
   `scripts/olp-evo-retro.sh` 的内嵌 python 改为 `import` 该模块(通过 `sys.path.insert(0, 脚本目录)`),
@@ -57,7 +57,7 @@ codex 与 grok 对抗复审。
 - 零写入包含脚本目录:所有调用 python 的入口(retro、metrics)用 `python3 -B` 或在 import 前设
   `sys.dont_write_bytecode = True`,不得在 `scripts/` 下产生 `__pycache__`;零写入测试对**脚本目录副本**与
   仓库夹具目录、状态目录三处前后比对文件集合与 sha256。
-- 契约 v3(2026-09-05,codex 复审后):以上三条为修订;`expected.json` 由主审在实现落地后重算入库。
+- 契约 v3.1(2026-09-05,codex 第二轮复审):identity 回退按位置解析 ref 段。契约 v3(2026-09-05,codex 复审后):以上三条为修订;`expected.json` 由主审在实现落地后重算入库。
 - 测试:`tests/olp_evo_metrics.rs`;新 kind 锚点测试加在 `tests/olp_evo_retro.rs`;不新增 Cargo
   依赖;脚本只依赖 bash、coreutils、python3。
 
@@ -124,9 +124,15 @@ codex 与 grok 对抗复审。
 
 场景: 不同会话同后缀不合并
   测试: olp_evo_retro_fallback_anchor_uses_full_session
-  假设 两张 fallback_switch 卡 detail 相同,session 分别为 tenant-a:local:tui#coding 与 tenant-b:local:tui#coding
+  假设 两张 fallback_switch 卡 detail 相同,symptom JSON 的 session 分别为 tenant-a:local:tui#coding 与 tenant-b:local:tui#coding
   当 运行 olp-evo-retro.sh --dry-run
   那么 简报含 candidates: 1 且该候选行含 recurrence_hint=2
+
+场景: identity 回退也保留完整会话
+  测试: olp_evo_retro_fallback_anchor_identity_fallback_keeps_full_session
+  假设 两张 fallback_switch 卡 detail 相同,symptom JSON 均无 session 字段,identity 的 ref 段分别为 tenant-a:local:tui#coding 与 tenant-b:local:tui#coding
+  当 运行 olp-evo-retro.sh --dry-run
+  那么 简报含 candidates: 1 且该候选行含 recurrence_hint=2 且 anchors 行含 tenant-a:local:tui#coding|
 
 场景: 缺 session 的 fallback 卡退回 EVO 编号
   测试: olp_evo_retro_fallback_anchor_falls_back_to_evo_id

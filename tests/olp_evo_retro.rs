@@ -708,12 +708,14 @@ fn olp_evo_retro_fallback_anchor_includes_lanes() {
     );
 }
 
-/// 43-r2: the session in the anchor is the FULL JSON `session` (with `#`).
+/// 43-r3: FULL JSON session wins, shown with TWO REAL cards — different
+/// JSON sessions, same detail → one candidate, recurrence_hint=2, both
+/// full-session anchors distinct.
 #[test]
 fn olp_evo_retro_fallback_anchor_uses_full_session() {
     let sb = Sandbox::new("fs-fullsess");
     sb.write_board(
-        "### EVO-0001（t，harvest）\ntrigger: fallback_switch\nsource: events /e.jsonl\nidentity: events:/e.jsonl#t#fallback_switch#seg-only#1111\nsymptom: {\"session\":\"octos:local:tui#coding\",\"detail\":\"router failover: lane-a -> lane-b\"}\n",
+        "### EVO-0001（t，harvest）\ntrigger: fallback_switch\nsource: events /e.jsonl\nidentity: events:/e.jsonl#t#fallback_switch#seg-a#1111\nsymptom: {\"session\":\"octos:local:tui#coding\",\"detail\":\"router failover: lane-a -> lane-b\"}\n### EVO-0002（t，harvest）\ntrigger: fallback_switch\nsource: events /e.jsonl\nidentity: events:/e.jsonl#t#fallback_switch#seg-b#2222\nsymptom: {\"session\":\"tenant-b:local:tui#planning\",\"detail\":\"router failover: lane-a -> lane-b\"}\n",
     );
     let out = sb.run(false);
     assert!(
@@ -722,9 +724,45 @@ fn olp_evo_retro_fallback_anchor_uses_full_session() {
         String::from_utf8_lossy(&out.stderr)
     );
     let brief = sb.brief_text();
+    assert!(brief.contains("candidates: 1"), "{brief}");
+    assert!(
+        brief.contains("recurrence_hint=2"),
+        "two full-session anchors: {brief}"
+    );
     assert!(
         brief.contains("octos:local:tui#coding|lane-a->lane-b"),
         "JSON session full text wins over the identity segment: {brief}"
+    );
+    assert!(
+        brief.contains("tenant-b:local:tui#planning|lane-a->lane-b"),
+        "{brief}"
+    );
+}
+
+/// 43-r3: identity FALLBACK parses the ref segment POSITIONALLY — a ref
+/// that itself contains `#` survives intact (rsplit would truncate it).
+#[test]
+fn olp_evo_retro_fallback_anchor_identity_fallback_keeps_full_session() {
+    let sb = Sandbox::new("fs-idref");
+    sb.write_board(
+        "### EVO-0001（t，harvest）\ntrigger: fallback_switch\nsource: events /e.jsonl\nidentity: events:/e.jsonl#t#fallback_switch#tenant-a:local:tui#coding#1111\nsymptom: {\"detail\":\"router failover: lane-a -> lane-b\"}\n### EVO-0002（t，harvest）\ntrigger: fallback_switch\nsource: events /e.jsonl\nidentity: events:/e.jsonl#t#fallback_switch#tenant-b:local:tui#planning#2222\nsymptom: {\"detail\":\"router failover: lane-a -> lane-b\"}\n",
+    );
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let brief = sb.brief_text();
+    assert!(brief.contains("candidates: 1"), "{brief}");
+    assert!(brief.contains("recurrence_hint=2"), "{brief}");
+    assert!(
+        brief.contains("tenant-a:local:tui#coding|lane-a->lane-b"),
+        "positional ref parse keeps inner #: {brief}"
+    );
+    assert!(
+        brief.contains("tenant-b:local:tui#planning|lane-a->lane-b"),
+        "{brief}"
     );
 }
 
