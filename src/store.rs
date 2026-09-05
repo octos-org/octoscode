@@ -56,6 +56,11 @@ use crate::{
 const TASK_OUTPUT_TAIL_BYTES: usize = 600;
 const TASK_OUTPUT_READ_LIMIT_BYTES: u64 = 4096;
 const TASK_ARTIFACT_READ_LIMIT_BYTES: u64 = 4096;
+/// Refusal status when the user tries to submit a prompt (typed or via
+/// `/agents spawn`) while a peer session is focused: peers are read-only
+/// watch surfaces (#453).
+const PEER_READ_ONLY_STATUS: &str =
+    "Peer sessions are read-only — steer peers from the master with peer_send_input.";
 /// How long a finished/failed sub-agent chip lingers in the agent strip
 /// before the tick sweep removes it (the next submit removes it sooner).
 /// Long enough to read the outcome; short enough not to clutter idle
@@ -526,9 +531,7 @@ impl Store {
         // switches back to the master to send it. Slash/bang were handled above,
         // so client-local commands (`/resume`, `!ls`, …) still work on a peer.
         if self.state.focused_session_is_peer() {
-            self.state.status =
-                "Peer sessions are read-only — steer peers from the master with peer_send_input."
-                    .into();
+            self.state.status = PEER_READ_ONLY_STATUS.into();
             return None;
         }
 
@@ -2258,6 +2261,14 @@ impl Store {
                 }))
             }
             AgentsCommand::Spawn { count, prompt } => {
+                // Slash dispatch runs BEFORE the plain-prompt gates in
+                // `compose_command`, so the peer read-only guard (#453) must
+                // be applied here too — a focused peer is a watch surface and
+                // a spawn turn must never be submitted into it (#488).
+                if self.state.focused_session_is_peer() {
+                    self.state.status = PEER_READ_ONLY_STATUS.into();
+                    return None;
+                }
                 if self.state.active_turn().is_some() {
                     self.state.status = t!("status.cannot_spawn_active_turn").into_owned();
                     return None;
@@ -38189,6 +38200,51 @@ now analyzing the bus module"
     }
 
     #[test]
+    fn spawn_rejected_on_peer_focused_session() {
+        // #488: `/agents spawn` dispatches through the slash path, which runs
+        // BEFORE the plain-prompt peer read-only gate in `compose_command` —
+        // the spawn arm must apply the guard itself instead of emitting
+        // SubmitPrompt for a read-only watch surface.
+        let peer = SessionKey("local:main#peer-refactor".into());
+        let make = |id: &str| SessionView {
+            id: SessionKey(id.into()),
+            title: id.into(),
+            profile_id: Some("coding".into()),
+            messages: vec![],
+            tasks: vec![],
+            live_reply: None,
+        };
+        let mut store = Store {
+            state: AppState::new(
+                vec![make("local:a"), make("local:main#peer-refactor")],
+                1,
+                "ready".into(),
+                Some("ws://example.test/ui-protocol".into()),
+                false,
+            ),
+        };
+        store.state.opened_peer_sessions.insert(peer);
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods_and_features(
+            [crate::model::APPUI_METHOD_AGENT_LIST],
+            [crate::model::APPUI_FEATURE_CODING_AUTONOMY_V1],
+        ));
+        assert!(store.state.focused_session_is_peer());
+        store
+            .state
+            .set_composer_text("/agents spawn 1 inspect logs");
+        let command = store.compose_command();
+        assert!(
+            command.is_none(),
+            "no spawn turn starts on a read-only peer, got {command:?}"
+        );
+        assert!(
+            store.state.status.contains("read-only"),
+            "the status explains the peer is read-only: {}",
+            store.state.status
+        );
+    }
+
+    #[test]
     fn agents_list_subcommand_also_dispatches() {
         let mut store = protocol_store_with_autonomy();
         store.state.composer = "/agents list".into();
@@ -39825,6 +39881,77 @@ now analyzing the bus module"
         );
     }
 
+    /// #488 follow-through: `closed` is protocol-terminal (set by
+    /// `agent/close`), so a stuck running task whose agent record lands as
+    /// `closed` must flip off "Orchestrating…" too — the same reconcile the
+    /// `failed` variant above pins, through the shared predicate.
+    #[test]
+    fn closed_agent_update_reconciles_stuck_running_task() {
+        use octos_core::ui_protocol::{AgentUpdatedEvent, TaskRuntimeState, UiAgentRecord};
+        let mut store = protocol_store_with_autonomy();
+        let session_id = SessionKey("local:test".into());
+        let task_id: TaskId = "01900000-0000-7000-8000-0000000000fd"
+            .parse()
+            .expect("valid task id");
+
+        if let Some(session) = store.find_session_mut(&session_id) {
+            session.tasks.push(TaskView {
+                id: task_id.clone(),
+                title: "octos-code-review-retry".into(),
+                state: TaskRuntimeState::Running,
+                runtime_detail: None,
+                output_tail: String::new(),
+                turn_id: None,
+            });
+        }
+
+        let agent = UiAgentRecord {
+            agent_id: "task-01900000-0000-7000-8000-0000000000fd".into(),
+            parent_agent_id: Some("master".into()),
+            session_id: session_id.clone(),
+            task_id: Some(task_id.to_string()),
+            path: "master/task-fd".into(),
+            role: "background_task".into(),
+            nickname: "spawn".into(),
+            title: None,
+            backend_kind: "task_supervisor:spawn".into(),
+            status: "closed".into(),
+            last_task: None,
+            summary: None,
+            output_tail: None,
+            cwd: None,
+            profile_id: "coding".into(),
+            runtime_policy_stamp: None,
+            artifact_count: 0,
+            artifacts: vec![],
+            created_at_ms: 1,
+            updated_at_ms: 2,
+        };
+        store.apply_event(AppUiEvent::Protocol(UiNotification::AgentUpdated(
+            AgentUpdatedEvent {
+                session_id: session_id.clone(),
+                agent,
+            },
+        )));
+
+        let session = store
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .expect("session present");
+        let task = session
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .expect("seeded task present");
+        assert_eq!(
+            task.state,
+            TaskRuntimeState::Cancelled,
+            "a closed agent can never emit again — the stuck running task must reconcile to a terminal state",
+        );
+    }
+
     #[test]
     fn agent_output_delta_appends_to_session_mirror() {
         use octos_core::ui_protocol::AgentOutputDeltaEvent;
@@ -40680,6 +40807,54 @@ now analyzing the bus module"
         assert!(
             store.state.status.contains("3 active agent"),
             "ready/cleared/active are non-terminal; only completed is terminal, got: {}",
+            store.state.status
+        );
+    }
+
+    /// Regression (#488): `closed` is the protocol-terminal status set by
+    /// `agent/close`. The server retains the closed record in `agent/list`,
+    /// so it must NOT count as active — `/agents close ag-1` followed by
+    /// `/agents list` reports 0 active agents, not 1.
+    #[test]
+    fn agent_list_count_excludes_closed_agents() {
+        use crate::client_event::{AutonomyClientEvent, AutonomyResult, ClientEvent};
+        use octos_core::ui_protocol::UiAgentRecord;
+        let mut store = protocol_store_with_autonomy();
+        let session_id = SessionKey("local:test".into());
+
+        let make_agent = |id: &str, status: &str| UiAgentRecord {
+            agent_id: id.into(),
+            parent_agent_id: None,
+            session_id: session_id.clone(),
+            task_id: None,
+            path: "/root".into(),
+            role: "worker".into(),
+            nickname: id.into(),
+            title: None,
+            backend_kind: "native".into(),
+            status: status.into(),
+            last_task: None,
+            summary: None,
+            output_tail: None,
+            cwd: None,
+            profile_id: "coding".into(),
+            runtime_policy_stamp: None,
+            artifact_count: 0,
+            artifacts: vec![],
+            created_at_ms: 1,
+            updated_at_ms: 2,
+        };
+
+        store.apply_client_event(ClientEvent::Autonomy(AutonomyClientEvent {
+            result: AutonomyResult::AgentList(crate::model::AgentListResult {
+                session_id: session_id.clone(),
+                agents: vec![make_agent("ag-1", "closed"), make_agent("ag-2", "running")],
+            }),
+        }));
+
+        assert!(
+            store.state.status.contains("1 active agent"),
+            "a closed agent must not count as active, got: {}",
             store.state.status
         );
     }

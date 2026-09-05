@@ -11060,14 +11060,21 @@ pub fn activity_status_is_running(status: &str) -> bool {
 ///
 /// The server's `background_task_agent_status` emits `running` / `completed` /
 /// `failed` / `interrupted` (the last is the wire form of a cancelled task).
+/// `closed` (set by `agent/close`) is likewise protocol-terminal: the server
+/// retains the closed record in `agent/list`, so it must map here too —
+/// otherwise closed agents keep counting as active (#488).
 /// Used by the stuck-chip reconcile so a task whose terminal `task/updated`
 /// never arrived (per-turn channel torn down) still flips off "Orchestrating…"
 /// once the durable terminal agent record lands.
+///
+/// Case-insensitive like the sibling [`agent_status_is_terminal`] — the wire
+/// emits lowercase today, but a cased variant must not silently count a
+/// terminal agent as active.
 pub fn terminal_task_state_from_agent_status(status: &str) -> Option<TaskRuntimeState> {
-    match status {
+    match status.to_ascii_lowercase().as_str() {
         "completed" => Some(TaskRuntimeState::Completed),
         "failed" => Some(TaskRuntimeState::Failed),
-        "interrupted" | "cancelled" => Some(TaskRuntimeState::Cancelled),
+        "interrupted" | "cancelled" | "closed" => Some(TaskRuntimeState::Cancelled),
         _ => None,
     }
 }
@@ -11094,6 +11101,32 @@ fn preview_id_from_text(text: &str) -> Option<PreviewId> {
 mod tests {
     use super::*;
     use octos_core::Message;
+
+    #[test]
+    fn terminal_task_state_maps_protocol_statuses_case_insensitively() {
+        assert_eq!(
+            terminal_task_state_from_agent_status("completed"),
+            Some(TaskRuntimeState::Completed)
+        );
+        assert_eq!(
+            terminal_task_state_from_agent_status("failed"),
+            Some(TaskRuntimeState::Failed)
+        );
+        // `closed` (set by `agent/close`) is protocol-terminal (#488), and a
+        // cased wire variant must not silently count as active.
+        for status in ["interrupted", "cancelled", "closed", "Closed", "CLOSED"] {
+            assert_eq!(
+                terminal_task_state_from_agent_status(status),
+                Some(TaskRuntimeState::Cancelled),
+                "{status} must map to a terminal state"
+            );
+        }
+        // Non-terminal statuses the server does emit stay unmapped (pinned by
+        // the store-level count test for ready/cleared/active).
+        for status in ["running", "ready", "cleared", "active"] {
+            assert_eq!(terminal_task_state_from_agent_status(status), None);
+        }
+    }
 
     fn catalog(json: serde_json::Value) -> ProfileLlmCatalogResult {
         serde_json::from_value(json).expect("catalog fixture deserializes")

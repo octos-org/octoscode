@@ -194,6 +194,8 @@ pub enum AutonomyParseError {
     InvalidInterval(String),
     /// `/agents spawn` where the count token is missing, non-numeric, or zero.
     InvalidSpawnCount(String),
+    /// `/agents spawn <N>` where N exceeds the `MAX_AGENTS_PER_SPAWN` cap.
+    SpawnCountTooLarge(u32),
     /// `/agents spawn <N>` with no prompt text after the count.
     EmptySpawnPrompt,
 }
@@ -230,6 +232,12 @@ impl std::fmt::Display for AutonomyParseError {
             }
             Self::InvalidSpawnCount(raw) => {
                 write!(f, "spawn count must be a positive integer, got `{raw}`")
+            }
+            Self::SpawnCountTooLarge(count) => {
+                write!(
+                    f,
+                    "spawn count must be at most {MAX_AGENTS_PER_SPAWN}, got `{count}`"
+                )
             }
             Self::EmptySpawnPrompt => {
                 f.write_str("/agents spawn requires a prompt after the count")
@@ -307,6 +315,14 @@ fn parse_agents(tail: &str) -> Result<AgentsCommand, AutonomyParseError> {
     }
 }
 
+/// Maximum agent count accepted by `/agents spawn <N>` (#488). Mirrors the
+/// backend's own safety cap of 200: a count above it is only rejected
+/// server-side AFTER the first 200 children already launched, and that late
+/// rejection force-fails the whole batch — so the TUI refuses over-cap
+/// counts at parse time, before any child starts. There is no capability
+/// channel to negotiate the limit, so it is hardcoded here.
+const MAX_AGENTS_PER_SPAWN: u32 = 200;
+
 fn parse_agents_spawn(args: &str) -> Result<AgentsCommand, AutonomyParseError> {
     let (count_token, prompt_rest) = split_head(args);
     if count_token.is_empty() {
@@ -319,6 +335,9 @@ fn parse_agents_spawn(args: &str) -> Result<AgentsCommand, AutonomyParseError> {
         return Err(AutonomyParseError::InvalidSpawnCount(
             count_token.to_string(),
         ));
+    }
+    if count > MAX_AGENTS_PER_SPAWN {
+        return Err(AutonomyParseError::SpawnCountTooLarge(count));
     }
     let prompt = prompt_rest.to_string();
     if prompt.is_empty() {
@@ -1187,6 +1206,46 @@ mod tests {
         assert_eq!(
             parse_autonomy_slash("/agents spawn 4294967296 prompt").unwrap_err(),
             AutonomyParseError::InvalidSpawnCount("4294967296".into())
+        );
+    }
+
+    #[test]
+    fn agents_spawn_count_at_cap_is_valid() {
+        assert_eq!(
+            parse_autonomy_slash(&format!(
+                "/agents spawn {MAX_AGENTS_PER_SPAWN} hold the line"
+            ))
+            .unwrap(),
+            Some(AutonomyCommand::Agents(AgentsCommand::Spawn {
+                count: MAX_AGENTS_PER_SPAWN,
+                prompt: "hold the line".into(),
+            }))
+        );
+    }
+
+    #[test]
+    fn agents_spawn_count_above_cap_is_rejected() {
+        // The backend's own safety cap is 200; asking for more launches 200
+        // children and then poisons them all when the over-cap one is
+        // rejected — so the TUI must refuse before any child starts (#488).
+        assert_eq!(
+            parse_autonomy_slash(&format!(
+                "/agents spawn {} keep each worker busy",
+                MAX_AGENTS_PER_SPAWN + 1
+            ))
+            .unwrap_err(),
+            AutonomyParseError::SpawnCountTooLarge(MAX_AGENTS_PER_SPAWN + 1)
+        );
+    }
+
+    #[test]
+    fn agents_spawn_over_cap_without_prompt_reports_the_cap() {
+        // The count is the first token, so an over-cap count is reported as
+        // such even when the prompt is also missing — pin the precedence.
+        assert_eq!(
+            parse_autonomy_slash(&format!("/agents spawn {}", MAX_AGENTS_PER_SPAWN + 1))
+                .unwrap_err(),
+            AutonomyParseError::SpawnCountTooLarge(MAX_AGENTS_PER_SPAWN + 1)
         );
     }
 }
