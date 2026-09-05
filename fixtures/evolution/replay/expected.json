@@ -19,7 +19,7 @@
   "mcp": 4,
   "review": 5
  },
- "candidates": 14,
+ "candidates": 13,
  "recurrence": {
   "ack_blocked|inner stuck on step <num>, waiting for outer decision (commit <hex>)": 2,
   "ack_wontdo|task book asks to bump protocol version, r6 is operator-only": 1,
@@ -32,8 +32,7 @@
   "goal_budget_limited|goal transitioned to `budget_limited`": 1,
   "escalation|peer parked on approval: git push": 1,
   "turn_error|connection closed before turn completed": 1,
-  "fallback_switch|router failover: lane-a -> lane-b (quota exhausted, 1200ms)": 1,
-  "fallback_switch|router failover: lane-b -> lane-c (quota exhausted, 900ms)": 1,
+  "fallback_switch|router failover: <lane> -> <lane> (quota exhausted)": 2,
   "malformed_exhausted|feedback_limit=<num> observed_malformed=<num>": 1
  }
 }
