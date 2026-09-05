@@ -1,0 +1,160 @@
+name: Nightly Regression
+
+on:
+  schedule:
+    - cron: "30 10 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/nightly.yml"
+      - "scripts/run-m18-stdio-live-tmux-soak.sh"
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  RUST_BACKTRACE: 1
+  RUST_VERSION: "1.97.1"
+
+jobs:
+  cross-platform:
+    name: Tests (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ubuntu-22.04, macos-14, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-${{ matrix.platform }}
+          save-if: false
+      - run: cargo test --all-targets --locked
+      - run: cargo test --doc --locked
+
+  stdio-tmux-soak:
+    name: Real stdio tmux soak (10x)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      # Keep the two repositories as siblings. The client dependency and the
+      # backend binary are then built from exactly the same pinned Octos commit.
+      - uses: actions/checkout@v6
+        with:
+          path: octoscode
+      - name: Resolve the pinned Octos revision
+        id: octos-rev
+        working-directory: octoscode
+        shell: bash
+        run: |
+          rev=$(sed -n 's/.*octos-core.*rev = "\([0-9a-f]\{40\}\)".*/\1/p' Cargo.toml)
+          test -n "$rev"
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v6
+        with:
+          repository: octos-org/octos
+          ref: ${{ steps.octos-rev.outputs.rev }}
+          path: octos
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            octoscode
+            octos
+          shared-key: nightly-stdio-pair
+          save-if: false
+      - name: Install tmux
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tmux
+      - name: Build the matched backend and client
+        run: |
+          cp octoscode/.cargo/config.toml.example octoscode/.cargo/config.toml
+          (cd octos && cargo build -p octos-cli --features api --locked)
+          (cd octoscode && cargo build --bin octoscode --locked)
+      - name: Validate soak accounting
+        working-directory: octoscode
+        run: |
+          scripts/run-m18-stdio-live-tmux-soak.sh self-test
+          scripts/run-onboarding-tmux-soak.sh self-test
+      - name: Soak the real stdio transport
+        working-directory: octoscode
+        env:
+          OCTOS_REPO: ${{ github.workspace }}/octos
+          OCTOS_BIN: ${{ github.workspace }}/octos/target/debug/octos
+          OCTOSCODE_BIN: ${{ github.workspace }}/octoscode/target/debug/octoscode
+          OCTOSCODE_M18_STDIO_REPEAT_COUNT: "10"
+          OCTOSCODE_M18_STDIO_FAILURE_BUDGET: "0"
+          OCTOSCODE_M18_STDIO_ARTIFACT_ROOT: ${{ github.workspace }}/evidence/m18-stdio
+          OCTOS_M9_PROTOCOL_FIXTURES: "1"
+          OCTOSCODE_M18_STDIO_PROMPT: "M19_STDIO_HAPPY_PATH_FINAL_LINE"
+        run: scripts/run-m18-stdio-live-tmux-soak.sh repeat
+      - name: Upload tmux evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-stdio-tmux-evidence
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 14
+
+  regression-issue:
+    name: Reconcile nightly regression issue
+    needs: [cross-platform, stdio-tmux-soak]
+    if: always() && github.event_name == 'schedule'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RESULTS: ${{ toJSON(needs) }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      ISSUE_TITLE: "[nightly] Regression detected"
+    steps:
+      - name: Open, refresh, or close the regression issue
+        run: |
+          set -euo pipefail
+          # jq interpolation belongs to jq, not bash.
+          # shellcheck disable=SC2016
+          failed=$(echo "$RESULTS" | jq -r \
+            'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | "- `\(.key)`: **\(.value.result)**"')
+          gh label create nightly-regression \
+            --repo "$GITHUB_REPOSITORY" --color B60205 \
+            --description "Failure in the scheduled regression suite" --force
+          issue=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --label nightly-regression --search '"[nightly] Regression detected" in:title' \
+            --json number --jq '.[0].number // empty')
+
+          if [ -n "$failed" ]; then
+            body=$(printf 'Scheduled nightly regression failed.\n\n%s\n\n[Open the run](%s)\n\nThe tmux lane uploads pane captures, server logs, and its repeat report.' "$failed" "$RUN_URL")
+            if [ -n "$issue" ]; then
+              gh issue comment "$issue" --repo "$GITHUB_REPOSITORY" --body "$body"
+            else
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$ISSUE_TITLE" \
+                --label nightly-regression --body "$body"
+            fi
+          elif [ -n "$issue" ]; then
+            gh issue close "$issue" --repo "$GITHUB_REPOSITORY" \
+              --comment "The scheduled nightly is green again: $RUN_URL"
+          else
+            echo "Nightly is green; no open regression issue."
+          fi

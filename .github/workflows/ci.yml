@@ -17,28 +17,40 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  RUST_VERSION: "1.97.1"
 
 jobs:
   fmt:
     name: fmt
     runs-on: ubuntu-22.04
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ env.RUST_VERSION }}
           components: rustfmt
       - run: cargo fmt --all --check
 
   test:
     name: test
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # --all-targets covers lib, bins, tests and benches, and compiles
       # everything clippy would — so a separate `cargo check` job would only
       # repeat this work.
@@ -49,42 +61,37 @@ jobs:
   clippy:
     name: clippy
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: ${{ env.RUST_VERSION }}
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: workspace
+          save-if: false
       # Gating, not reporting: the 5 warnings `main` carried are cleared in
       # this same PR, so the baseline is zero and any new one fails the build.
       - run: cargo clippy --all-targets -- -D warnings
 
-  # Aggregate gate for the `default-branch-protection` ruleset, whose required
-  # status context is literally "CI required" (added to the ruleset on
-  # 2026-09-03). Nothing produced that context, so every PR sat on
-  # "Expected — waiting for status". This job needs every real job and reports
-  # the required status automatically; any failure or cancellation fails it.
   ci-required:
     name: CI required
     if: always()
     needs: [fmt, test, clippy]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    env:
+      RESULTS: ${{ toJSON(needs) }}
     steps:
-      - name: Fail if any required job failed or was cancelled
-        env:
-          NEEDS_JSON: ${{ toJSON(needs) }}
+      - name: Require every CI job
         run: |
-          python3 - <<'PY'
-          import json, os, sys
-          needs = json.loads(os.environ["NEEDS_JSON"])
-          bad = {}
-          for name in sorted(needs):
-              result = needs[name]["result"]
-              print(name + ": " + result)
-              if result in ("failure", "cancelled"):
-                  bad[name] = result
-          if bad:
-              print("gate: FAIL -> " + json.dumps(bad))
-              sys.exit(1)
-          print("gate: all required jobs succeeded (event-gated skips are fine)")
-          PY
+          set -euo pipefail
+          echo "$RESULTS" | jq .
+          failed=$(echo "$RESULTS" | jq -r \
+            'to_entries[] | select(.value.result != "success") | "\(.key)=\(.value.result)"')
+          if [ -n "$failed" ]; then
+            echo "::error::required CI jobs did not pass: $failed"
+            exit 1
+          fi
