@@ -34,3 +34,13 @@ open → consolidated → filed → accepted → specified → patched → verif
 消除前不得保存为 FLAW-NNN.md**;持主审锁的外环消 TODO(fingerprint、
 severity、repo)并归并锚点后,才落 `FLAW-NNN.md` 并更新 `memory.md`。
 每次 retro 最多推进 3 条记录;判断(归层、锚定、立案)始终由人做。
+
+## 指标(阶段 2)
+
+`scripts/olp-evo-metrics.sh <repo> [--since EVO-NNNN] [--json]
+[--baseline <json>]`:窗口化诊断——窗口 = 编号大于 since 的卡(缺省全部;
+给了基线时 since 取基线的 `through_evo`),用共享 lib 重新分组。
+**诊断非 KPI**:计数上升可能是检测变好,不是回归,输出固定带
+`note: diagnostic only, not a KPI` 且不含 `regress` 字样;基线用法是
+`--baseline <上一份 --json 输出>`,对每个 trigger 输出
+`increase:`/`decrease:` 增减行(相等不输出),供人判读。只读,不写文件。

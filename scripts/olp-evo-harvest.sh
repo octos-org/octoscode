@@ -65,7 +65,7 @@ prefix_sha() { # path offset
 }
 
 json_get() { # json key -> value via python3 stdlib
-    python3 - "$1" "$2" <<'PY'
+    python3 -B - "$1" "$2" <<'PY'
 import json, sys
 try:
     d = json.loads(sys.argv[1])
@@ -161,7 +161,7 @@ harvest_events() { # realpath
     local rp=$1
     [ -z "$EVENTS" ] && return 0
     [ -f "$EVENTS" ] || { skip "$EVENTS"; return 0; }
-    OLP_EVO_HARVEST_TS="$HARVEST_TS" OLP_EVO_EVENTS_OUT="/tmp/.olp_evo_events_out.$$" python3 - "$EVENTS" "$rp" <<'PY' || true
+    OLP_EVO_HARVEST_TS="$HARVEST_TS" OLP_EVO_EVENTS_OUT="/tmp/.olp_evo_events_out.$$" python3 -B - "$EVENTS" "$rp" <<'PY' || true
 import hashlib, json, sys, datetime
 
 path, rp = sys.argv[1], sys.argv[2]
@@ -193,7 +193,7 @@ for i, line in enumerate(lines):
         continue
     kind = d.get("kind", "")
     trigger = None
-    if kind in ("escalation", "turn_error"):
+    if kind in ("escalation", "turn_error", "fallback_switch", "malformed_exhausted"):
         trigger = kind
     elif kind == "goal_transition":
         detail = d.get("detail", "")
@@ -264,7 +264,7 @@ print((r[: m.start()] if m else r)[:80])
 # this helper treated it as a path — the bare except swallowed the error,
 # so prev/dev/ino/prefix were never read and every rerun printed reset:).
 source_state() { # state_file source_key
-    python3 - "$1" "$2" <<'PY'
+    python3 -B - "$1" "$2" <<'PY'
 import json, sys
 try:
     with open(sys.argv[1]) as f:
@@ -484,7 +484,7 @@ effective_size() { # path
     echo "$size"
 }
 
-python3 - "$STATE_FILE" "$NEXT_ID" "$BOARD" "$BOARD_SIZE" "$EVENTS" "$EVENTS_SIZE" "$MCP_BOARD" "$MCP_SIZE" <<'PY'
+python3 -B - "$STATE_FILE" "$NEXT_ID" "$BOARD" "$BOARD_SIZE" "$EVENTS" "$EVENTS_SIZE" "$MCP_BOARD" "$MCP_SIZE" <<'PY'
 import hashlib, json, os, sys, tempfile
 
 state_path, next_id = sys.argv[1], int(sys.argv[2])

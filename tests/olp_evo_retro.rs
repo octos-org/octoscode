@@ -563,3 +563,255 @@ fn olp_evo_retro_issue_template_and_features_in_place() {
     let features = std::fs::read_to_string(repo_root().join("docs/OCTOLOOP_FEATURES.md")).unwrap();
     assert!(features.contains("外环私有工作纸"));
 }
+
+/// Scenario: retro 层表覆盖新 kind
+#[test]
+fn olp_evo_retro_layer_for_new_kinds() {
+    let sb = Sandbox::new("new-kind-layers");
+    sb.write_board(
+        "### EVO-0001（t，harvest）
+trigger: fallback_switch
+source: events /e.jsonl
+identity: events:/e.jsonl#t#fallback_switch#s1#1111
+symptom: {\"detail\":\"zai to k3\"}
+### EVO-0002（t，harvest）
+trigger: malformed_exhausted
+source: events /e.jsonl
+identity: events:/e.jsonl#t#malformed_exhausted#s2#2222
+symptom: {\"detail\":\"3 retries\"}
+",
+    );
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let brief = sb.brief_text();
+    assert!(
+        brief.contains("layer=Execution"),
+        "fallback_switch → Execution: {brief}"
+    );
+    assert!(
+        brief.contains("layer=Tooling"),
+        "malformed_exhausted → Tooling: {brief}"
+    );
+}
+
+/// 43-r1 ①: override/r2_record group text strips the leading `> `/`**`/
+/// whitespace AND the signed prefix — the candidate KEY must carry only
+/// the body (no `外环(`).
+#[test]
+fn olp_evo_retro_override_key_strips_signed_prefix() {
+    let sb = Sandbox::new("signed-strip");
+    sb.write_board(
+        "### EVO-0001（t，harvest）\ntrigger: override\nsource: review /r.md\nidentity: board:/r.md#12#override#aaaa\nsymptom: > 外环(claude)·改判(作废 #40):以本条为准的新指令\n",
+    );
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let brief = sb.brief_text();
+    let key = brief
+        .lines()
+        .find(|l| l.starts_with("key: "))
+        .expect("one key");
+    assert!(
+        !key.contains("外环("),
+        "key must not carry the signed prefix: {key}"
+    );
+    assert!(
+        key.contains("以本条为准"),
+        "key carries the body text: {key}"
+    );
+}
+
+/// 43-r1 ②: `45c` (letter-suffixed number) survives normalization whole.
+#[test]
+fn olp_evo_retro_normalization_keeps_letter_suffixed_numbers() {
+    let sb = Sandbox::new("num-suffix");
+    sb.write_board(
+        "### EVO-0001（t，harvest）\ntrigger: ack_blocked\nsource: review /r.md\nidentity: board:/r.md#12#blocked#aaaa\nsymptom: ACK(blocked): slice 45a done, then 45c remains\n",
+    );
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let brief = sb.brief_text();
+    let key = brief
+        .lines()
+        .find(|l| l.starts_with("key: "))
+        .expect("one key");
+    assert!(
+        key.contains("45c"),
+        "`45c` must survive normalization intact: {key}"
+    );
+    assert!(key.contains("45a"), "`45a` too: {key}");
+}
+
+/// 43-r1 ③: fallback_switch cards take `detail` from the JSON symptom
+/// (like other events-source triggers) — the key carries the detail text.
+#[test]
+fn olp_evo_retro_fallback_switch_key_uses_detail() {
+    let sb = Sandbox::new("fs-detail");
+    sb.write_board(
+        "### EVO-0001（t，harvest）\ntrigger: fallback_switch\nsource: events /e.jsonl\nidentity: events:/e.jsonl#t#fallback_switch#s1#1111\nsymptom: {\"ts\":\"t\",\"kind\":\"fallback_switch\",\"data\":{\"detail\":\"router failover\"}}\n",
+    );
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let brief = sb.brief_text();
+    let key = brief
+        .lines()
+        .find(|l| l.starts_with("key: "))
+        .expect("one key");
+    assert!(
+        key.contains("router failover"),
+        "fallback_switch key must carry the detail, not the raw JSON: {key}"
+    );
+}
+
+/// 43-r2: two real fallback cards (same session, different lanes) → one
+/// candidate with hint=2 and BOTH lane anchors.
+#[test]
+fn olp_evo_retro_fallback_anchor_includes_lanes() {
+    let sb = Sandbox::new("fs-lanes");
+    sb.write_board(
+        "### EVO-0001（t，harvest）\ntrigger: fallback_switch\nsource: events /e.jsonl\nidentity: events:/e.jsonl#t#fallback_switch#x#1111\nsymptom: {\"session\":\"octos:local:tui#coding\",\"detail\":\"router failover: lane-a -> lane-b (quota, 1200ms)\"}\n### EVO-0002（t，harvest）\ntrigger: fallback_switch\nsource: events /e.jsonl\nidentity: events:/e.jsonl#t#fallback_switch#y#2222\nsymptom: {\"session\":\"octos:local:tui#coding\",\"detail\":\"router failover: lane-b -> lane-c (quota, 900ms)\"}\n",
+    );
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let brief = sb.brief_text();
+    assert!(brief.contains("candidates: 1"), "{brief}");
+    assert!(
+        brief.contains("recurrence_hint=2"),
+        "two distinct lane anchors: {brief}"
+    );
+    assert!(
+        brief.contains("octos:local:tui#coding|lane-a->lane-b"),
+        "{brief}"
+    );
+    assert!(
+        brief.contains("octos:local:tui#coding|lane-b->lane-c"),
+        "{brief}"
+    );
+}
+
+/// 43-r3: FULL JSON session wins, shown with TWO REAL cards — different
+/// JSON sessions, same detail → one candidate, recurrence_hint=2, both
+/// full-session anchors distinct.
+#[test]
+fn olp_evo_retro_fallback_anchor_uses_full_session() {
+    let sb = Sandbox::new("fs-fullsess");
+    sb.write_board(
+        "### EVO-0001（t，harvest）\ntrigger: fallback_switch\nsource: events /e.jsonl\nidentity: events:/e.jsonl#t#fallback_switch#seg-a#1111\nsymptom: {\"session\":\"octos:local:tui#coding\",\"detail\":\"router failover: lane-a -> lane-b\"}\n### EVO-0002（t，harvest）\ntrigger: fallback_switch\nsource: events /e.jsonl\nidentity: events:/e.jsonl#t#fallback_switch#seg-b#2222\nsymptom: {\"session\":\"tenant-b:local:tui#planning\",\"detail\":\"router failover: lane-a -> lane-b\"}\n",
+    );
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let brief = sb.brief_text();
+    assert!(brief.contains("candidates: 1"), "{brief}");
+    assert!(
+        brief.contains("recurrence_hint=2"),
+        "two full-session anchors: {brief}"
+    );
+    assert!(
+        brief.contains("octos:local:tui#coding|lane-a->lane-b"),
+        "JSON session full text wins over the identity segment: {brief}"
+    );
+    assert!(
+        brief.contains("tenant-b:local:tui#planning|lane-a->lane-b"),
+        "{brief}"
+    );
+}
+
+/// 43-r3: identity FALLBACK parses the ref segment POSITIONALLY — a ref
+/// that itself contains `#` survives intact (rsplit would truncate it).
+#[test]
+fn olp_evo_retro_fallback_anchor_identity_fallback_keeps_full_session() {
+    let sb = Sandbox::new("fs-idref");
+    sb.write_board(
+        "### EVO-0001（t，harvest）\ntrigger: fallback_switch\nsource: events /e.jsonl\nidentity: events:/e.jsonl#t#fallback_switch#tenant-a:local:tui#coding#1111\nsymptom: {\"detail\":\"router failover: lane-a -> lane-b\"}\n### EVO-0002（t，harvest）\ntrigger: fallback_switch\nsource: events /e.jsonl\nidentity: events:/e.jsonl#t#fallback_switch#tenant-b:local:tui#planning#2222\nsymptom: {\"detail\":\"router failover: lane-a -> lane-b\"}\n",
+    );
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let brief = sb.brief_text();
+    assert!(brief.contains("candidates: 1"), "{brief}");
+    assert!(brief.contains("recurrence_hint=2"), "{brief}");
+    assert!(
+        brief.contains("tenant-a:local:tui#coding|lane-a->lane-b"),
+        "positional ref parse keeps inner #: {brief}"
+    );
+    assert!(
+        brief.contains("tenant-b:local:tui#planning|lane-a->lane-b"),
+        "{brief}"
+    );
+}
+
+/// 43-r2: no JSON session AND no identity segment → fall back to EVO id.
+#[test]
+fn olp_evo_retro_fallback_anchor_falls_back_to_evo_id() {
+    let sb = Sandbox::new("fs-evoid");
+    sb.write_board(
+        "### EVO-0007（t，harvest）\ntrigger: fallback_switch\nsource: events /e.jsonl\nidentity: events:/e.jsonl#t#fallback_switch#-#9999\nsymptom: {\"detail\":\"router failover: lane-a -> lane-b\"}\n",
+    );
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let brief = sb.brief_text();
+    assert!(
+        brief.contains("anchors: EVO-0007"),
+        "no session anywhere → EVO id: {brief}"
+    );
+}
+
+/// 43-r2: running retro must not leave scripts/__pycache__ behind.
+#[test]
+fn olp_evo_retro_writes_no_pycache() {
+    let sb = Sandbox::new("no-pycache");
+    sb.write_board(
+        "### EVO-0001（t，harvest）\ntrigger: ack_blocked\nsource: review /r.md\nidentity: board:/r.md#1#blocked#aaaa\nsymptom: ACK(blocked): x\n",
+    );
+    let before: Vec<std::path::PathBuf> = std::fs::read_dir(repo_root().join("scripts"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after: Vec<std::path::PathBuf> = std::fs::read_dir(repo_root().join("scripts"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+    assert_eq!(before, after, "scripts/ contents unchanged");
+    assert!(
+        !repo_root().join("scripts/__pycache__").exists(),
+        "no __pycache__ may appear"
+    );
+}
