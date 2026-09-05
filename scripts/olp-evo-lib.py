@@ -193,11 +193,21 @@ def _events_session(identity: str, card: dict) -> str | None:
                 return str(sess)
     except Exception:
         pass
+    # 43-r3: POSITIONAL parse — the ref segment spans from after the 3rd
+    # `#` up to (not including) the LAST `#`, so a ref may itself contain
+    # `#` (e.g. tenant-a:local:tui#coding). rsplit()[-2] would truncate
+    # at an inner `#`.
     body = identity[len("events:") :] if identity.startswith("events:") else identity
-    parts = body.rsplit("#")
-    seg = parts[-2] if len(parts) >= 2 else "-"
-    if seg not in ("-", ""):
-        return seg
+    c3 = -1
+    for _ in range(3):
+        c3 = body.find("#", c3 + 1)
+        if c3 < 0:
+            break
+    last = body.rfind("#")
+    if c3 >= 0 and last > c3 + 1:
+        seg = body[c3 + 1 : last]
+        if seg not in ("-", ""):
+            return seg
     return None
 
 
