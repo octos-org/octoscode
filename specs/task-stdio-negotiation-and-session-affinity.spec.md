@@ -17,6 +17,25 @@
   an unbounded FIFO behind an uncleared barrier.
 - A local tab switch queues `session/open(B)` before any B status probe or
   restored staged `turn/start`, and updates the transport's reconnect target.
+- A connection that has not produced a capability set re-asks
+  `config/capabilities/list` on the SAME connection. One unanswered request —
+  e.g. one flushed into a stdio child that was still booting when the startup
+  grace expired — must not leave the session capability-blind until it
+  reconnects, hiding `/onboard`, `/login` and the permission menu behind
+  "Octos UI capabilities are not available". The retry is clocked from the
+  wire (not from `bootstrap`, since the request is routinely deferred behind
+  `client_hello`), is suppressed while the child is still booting or the hello
+  barrier is armed, and is bounded by a fixed attempt budget so a server that
+  withholds the method is asked a few times and then left alone.
+
+## Scenarios
+
+- `unanswered_capabilities_request_is_reasked_on_the_same_connection` — a stdio
+  child that rejects `client_hello` and swallows the first
+  `config/capabilities/list` is asked a second time, and that answer reaches the
+  store as a `Capabilities` event.
+- `capabilities_retry_stops_after_the_attempt_budget` — a probe that has spent
+  its budget starts no further attempt.
 
 ## Compatibility
 

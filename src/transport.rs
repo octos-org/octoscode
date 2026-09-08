@@ -98,6 +98,19 @@ const CLIENT_HELLO_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Once any frame arrives the barrier clocks restart with the normal
 /// deadlines, so a wedged server is still bounded.
 const STDIO_CHILD_STARTUP_GRACE: Duration = Duration::from_secs(90);
+/// `config/capabilities/list` is the authoritative capability set, and on a
+/// connection whose `client_hello` fell back to legacy defaults it is the ONLY
+/// source of one. It used to be asked exactly once per connection (`bootstrap`,
+/// plus `refresh_capabilities_after_reconnect` on the NEXT connection), so a
+/// request the server never answered left the session capability-blind for the
+/// life of the child: `/onboard`, `/login` and the permission menu all reported
+/// "Octos UI capabilities are not available" until a reconnect. Re-ask on this
+/// cadence instead, bounded by `CAPABILITIES_MAX_ATTEMPTS`.
+const CAPABILITIES_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Total `config/capabilities/list` attempts per connection, including the
+/// first. Bounded so a server that deliberately withholds the method is asked a
+/// few times and then left alone rather than polled forever.
+const CAPABILITIES_MAX_ATTEMPTS: u32 = 4;
 
 // ---------------------------------------------------------------------------
 // Pre-send error message contract (blackboard #28a)
@@ -407,6 +420,10 @@ pub struct ProtocolAppUiBackend {
     backend_relaunch_reconcile_pending: bool,
     client_hello_barrier: Option<RequestBarrier>,
     refresh_capabilities_on_reconnect: bool,
+    /// An outstanding `config/capabilities/list` on the CURRENT connection.
+    /// `None` once a capability set has landed (from either the negotiated
+    /// `client_hello` or the explicit request) or the attempt budget is spent.
+    capabilities_probe: Option<CapabilitiesProbe>,
     /// The current stdio child has written at least one frame, i.e. its
     /// bootstrap is over and the steady-state barrier deadlines apply.
     stdio_child_served_frame: bool,
@@ -424,6 +441,20 @@ enum ProtocolConnectionState {
 struct RequestBarrier {
     request_id: String,
     started_at: Instant,
+}
+
+/// Tracks the in-flight `config/capabilities/list` so an unanswered request can
+/// be re-asked without a reconnect. Unlike [`RequestBarrier`] this deliberately
+/// does NOT gate other commands — a capability-blind client still works, it just
+/// hides the capability-gated menu entries — so it only carries a clock and the
+/// attempt count.
+#[derive(Debug, Clone)]
+struct CapabilitiesProbe {
+    /// When the most recent attempt reached the wire, not when it was queued:
+    /// a request deferred behind the `client_hello` barrier must not burn its
+    /// retry budget while it is still waiting to be sent.
+    sent_at: Instant,
+    attempts: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -1718,6 +1749,7 @@ impl ProtocolAppUiBackend {
             client_hello_barrier: None,
             stdio_child_served_frame: false,
             refresh_capabilities_on_reconnect: false,
+            capabilities_probe: None,
             queue: VecDeque::new(),
             protocol: ProtocolExchange::default(),
         }
@@ -1939,6 +1971,9 @@ impl ProtocolAppUiBackend {
         // reconnect schedule forward.
         self.reconnect.record_disconnect(Instant::now());
         self.refresh_capabilities_on_reconnect = true;
+        // The probe is per-connection: the replacement child gets a fresh
+        // attempt budget from `refresh_capabilities_after_reconnect`.
+        self.capabilities_probe = None;
         self.client_hello_barrier = None;
         self.reconnect_open_barrier = None;
         self.reconnect_session_scopes.clear();
@@ -2475,6 +2510,51 @@ impl ProtocolAppUiBackend {
             now.saturating_duration_since(barrier.request.started_at) >= open_deadline
         }) {
             self.fail_session_open_barrier("session/open response timed out".into());
+        }
+        self.retry_capabilities_if_unanswered(now, startup_pending);
+    }
+
+    /// Re-ask `config/capabilities/list` while the connection has yet to
+    /// produce a capability set. Without this a single unanswered request —
+    /// e.g. one flushed into a stdio child that was still booting when the
+    /// startup grace expired — left the session capability-blind until it
+    /// reconnected, hiding `/onboard`, `/login` and the permission menu behind
+    /// "Octos UI capabilities are not available".
+    fn retry_capabilities_if_unanswered(&mut self, now: Instant, startup_pending: bool) {
+        // A still-booting child has not refused anything yet, and a pending
+        // `client_hello` may still answer with the negotiated set; in both
+        // cases the request is deferred rather than ignored.
+        if startup_pending || self.client_hello_barrier.is_some() {
+            return;
+        }
+        let due = self.capabilities_probe.as_ref().is_some_and(|probe| {
+            probe.attempts < CAPABILITIES_MAX_ATTEMPTS
+                && now.saturating_duration_since(probe.sent_at) >= CAPABILITIES_RESPONSE_TIMEOUT
+        });
+        if !due {
+            return;
+        }
+        // The unanswered attempt's pending entry would otherwise linger until
+        // the connection drops and be cancelled then, surfacing a spurious
+        // `request_cancelled` for a request the retry already superseded.
+        self.protocol.pending_requests.retain(|_, pending| {
+            pending.method != crate::model::APPUI_METHOD_CONFIG_CAPABILITIES_LIST
+        });
+        // `send` re-enters this check, so stop the retry being due a second
+        // time before the new attempt reaches the wire. Only the clock moves —
+        // `send` owns the attempt count once the frame is actually written.
+        if let Some(probe) = self.capabilities_probe.as_mut() {
+            probe.sent_at = now;
+        }
+        if let Err(err) = self.send_capabilities_request() {
+            // Leave the probe armed: the send failure already marked the
+            // transport disconnected, and the reconnect path re-asks.
+            self.queue.push_back(
+                AppUiEvent::Status(AppUiStatus {
+                    message: format!("Octos UI capability refresh could not be re-sent: {err:#}"),
+                })
+                .into(),
+            );
         }
     }
 
@@ -3032,6 +3112,18 @@ impl AppUiBackend for ProtocolAppUiBackend {
                 .into(),
             };
             self.queue.push_back(event);
+        } else if method.as_str() == crate::model::APPUI_METHOD_CONFIG_CAPABILITIES_LIST {
+            // Clock the retry from the wire, not from `bootstrap`: this request
+            // is routinely deferred behind the stdio `client_hello` barrier and
+            // must not spend its budget while it is still queued.
+            let attempts = self
+                .capabilities_probe
+                .as_ref()
+                .map_or(0, |probe| probe.attempts);
+            self.capabilities_probe = Some(CapabilitiesProbe {
+                sent_at: Instant::now(),
+                attempts: attempts + 1,
+            });
         }
 
         Ok(())
@@ -3059,6 +3151,12 @@ impl AppUiBackend for ProtocolAppUiBackend {
         // but a subsequent reconnect still needs the resolve re-issued.)
         if matches!(event, Some(ClientEvent::LaunchResolve(_))) {
             self.pending_launch_resolve = None;
+        }
+        // A capability set reached the store, from either the negotiated
+        // `client_hello` or an explicit `config/capabilities/list`. Either way
+        // the connection is no longer capability-blind: stop probing.
+        if matches!(event, Some(ClientEvent::Capabilities(_))) {
+            self.capabilities_probe = None;
         }
         Ok(event)
     }
@@ -13805,6 +13903,106 @@ done
         assert!(backend.reconnect_open_barrier.is_none());
         assert!(backend.deferred_until_reconnect_open.is_empty());
         assert!(!backend.stdio_child_startup_pending());
+    }
+
+    /// `config/capabilities/list` used to be asked exactly once per
+    /// connection: `bootstrap` sent it, and the only re-send was
+    /// `refresh_capabilities_after_reconnect`. A child that stays connected
+    /// but never answers that one request therefore left the session
+    /// capability-blind for its whole life — every `required_methods_any`
+    /// command (`/onboard`, `/login`, the permission menu) reported "Octos UI
+    /// capabilities are not available", and nothing short of a reconnect
+    /// could clear it. The request must be re-asked on the SAME connection.
+    #[cfg(unix)]
+    #[test]
+    fn unanswered_capabilities_request_is_reasked_on_the_same_connection() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("caps.log");
+        let fixture = temp.path().join("stdio-swallows-first-caps.sh");
+        std::fs::write(
+            &fixture,
+            r#"#!/bin/sh
+marker="$1"
+: > "$marker"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"method":"client_hello"'*)
+      # No stdio feature negotiation: the capability set can only come from
+      # config/capabilities/list.
+      printf '{"jsonrpc":"2.0","id":"%s","error":{"code":-32601,"message":"method not found"}}\n' "$id"
+      ;;
+    *'"method":"config/capabilities/list"'*)
+      printf 'CAPS\n' >> "$marker"
+      if [ "$(grep -c CAPS "$marker")" -ge 2 ]; then
+        printf '{"jsonrpc":"2.0","id":"%s","result":{"capabilities":{"version":{"protocol":"octos-ui/v1alpha1","schema_version":1,"jsonrpc":"2.0"},"capabilities_schema_version":2,"supported_methods":["profile/llm/catalog"],"supported_notifications":[],"supported_features":[]}}}\n' "$id"
+      fi
+      ;;
+  esac
+done
+"#,
+        )
+        .expect("write fixture");
+
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch {
+            endpoint: Some(AppUiEndpoint::stdio(format!(
+                "sh {} {}",
+                fixture.display(),
+                marker.display()
+            ))),
+            ..AppUiLaunch::default()
+        });
+        backend.bootstrap().expect("bootstrap sends capabilities");
+
+        let mut saw_capabilities = false;
+        let deadline = Instant::now() + CAPABILITIES_RESPONSE_TIMEOUT * 3;
+        while Instant::now() < deadline {
+            match backend.next_event().expect("poll stdio fixture") {
+                Some(ClientEvent::Capabilities(_)) => {
+                    saw_capabilities = true;
+                    break;
+                }
+                Some(_) => {}
+                None => thread::sleep(Duration::from_millis(10)),
+            }
+        }
+
+        let log = std::fs::read_to_string(&marker).unwrap_or_default();
+        assert_eq!(
+            log.matches("CAPS").count(),
+            2,
+            "the unanswered capabilities request must be re-asked exactly once more; log={log}"
+        );
+        assert!(
+            saw_capabilities,
+            "the retry's answer must reach the store as a Capabilities event"
+        );
+    }
+
+    /// The retry budget is bounded. A server that simply never answers
+    /// `config/capabilities/list` is asked `CAPABILITIES_MAX_ATTEMPTS` times
+    /// and then left alone, rather than being polled for the life of the
+    /// connection.
+    #[test]
+    fn capabilities_retry_stops_after_the_attempt_budget() {
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch::default());
+        let spent_at = Instant::now() - CAPABILITIES_RESPONSE_TIMEOUT - Duration::from_millis(1);
+        backend.capabilities_probe = Some(CapabilitiesProbe {
+            sent_at: spent_at,
+            attempts: CAPABILITIES_MAX_ATTEMPTS,
+        });
+
+        backend.check_protocol_barrier_timeouts();
+
+        let probe = backend
+            .capabilities_probe
+            .as_ref()
+            .expect("the probe is retained, not rearmed");
+        assert_eq!(probe.attempts, CAPABILITIES_MAX_ATTEMPTS);
+        assert_eq!(
+            probe.sent_at, spent_at,
+            "a spent budget must not start another attempt"
+        );
     }
 
     /// A child that dies while commands are deferred behind its barriers
