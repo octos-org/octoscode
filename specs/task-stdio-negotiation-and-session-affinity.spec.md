@@ -27,6 +27,11 @@
   `client_hello`), is suppressed while the child is still booting or the hello
   barrier is armed, and is bounded by a fixed attempt budget so a server that
   withholds the method is asked a few times and then left alone.
+- The booting-child suppression is bounded by the startup-grace DEADLINE, not
+  by the arrival of a first frame. `stdio_child_served_frame` stays false until
+  the child serves something, which for a wedged or selectively-silent child
+  may be never; keying the suppression on it alone would silence the retry in
+  exactly the slow-boot case the retry exists for.
 
 ## Scenarios
 
@@ -36,6 +41,10 @@
   store as a `Capabilities` event.
 - `capabilities_retry_stops_after_the_attempt_budget` — a probe that has spent
   its budget starts no further attempt.
+- `expired_startup_grace_releases_capabilities_retries_without_a_first_frame` —
+  a stdio child that answers neither `client_hello` nor the capabilities
+  request flushed at grace expiry is still re-asked once the grace deadline has
+  passed, even though it has never served a frame.
 
 ## Compatibility
 

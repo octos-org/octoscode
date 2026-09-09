@@ -427,6 +427,11 @@ pub struct ProtocolAppUiBackend {
     /// The current stdio child has written at least one frame, i.e. its
     /// bootstrap is over and the steady-state barrier deadlines apply.
     stdio_child_served_frame: bool,
+    /// When the current connection was established. `stdio_child_served_frame`
+    /// alone cannot bound the startup grace: it stays false until a frame
+    /// arrives, which for a wedged or selectively-silent child may be never.
+    /// This gives the grace an absolute deadline.
+    connected_at: Option<Instant>,
     queue: VecDeque<ClientEvent>,
     protocol: ProtocolExchange,
 }
@@ -1748,6 +1753,7 @@ impl ProtocolAppUiBackend {
             backend_relaunch_reconcile_pending: false,
             client_hello_barrier: None,
             stdio_child_served_frame: false,
+            connected_at: None,
             refresh_capabilities_on_reconnect: false,
             capabilities_probe: None,
             queue: VecDeque::new(),
@@ -1826,6 +1832,7 @@ impl ProtocolAppUiBackend {
         let reconnected_stdio_child = driver.is_stdio_child();
         // A new child (or socket) has not served anything yet.
         self.stdio_child_served_frame = false;
+        self.connected_at = Some(now);
         self.reconnect.record_success(now);
         let endpoint = driver.label().to_string();
         self.mark_connected(&endpoint);
@@ -2524,7 +2531,18 @@ impl ProtocolAppUiBackend {
         // A still-booting child has not refused anything yet, and a pending
         // `client_hello` may still answer with the negotiated set; in both
         // cases the request is deferred rather than ignored.
-        if startup_pending || self.client_hello_barrier.is_some() {
+        //
+        // `startup_pending` is bounded by the grace DEADLINE, not by the
+        // arrival of a frame. It stays true until the child serves its first
+        // frame, so a child that answers neither `client_hello` nor the
+        // capabilities request flushed at grace expiry would otherwise
+        // suppress every retry forever — silencing the retry in exactly the
+        // slow-boot case it exists for.
+        let within_startup_grace = startup_pending
+            && self
+                .connected_at
+                .is_some_and(|at| now.saturating_duration_since(at) < STDIO_CHILD_STARTUP_GRACE);
+        if within_startup_grace || self.client_hello_barrier.is_some() {
             return;
         }
         let due = self.capabilities_probe.as_ref().is_some_and(|probe| {
@@ -14002,6 +14020,80 @@ done
         assert_eq!(
             probe.sent_at, spent_at,
             "a spent budget must not start another attempt"
+        );
+    }
+
+    /// `stdio_child_startup_pending` stays true until the child serves its
+    /// FIRST frame — expiry of `STDIO_CHILD_STARTUP_GRACE` does not clear it.
+    /// So a child that answers neither `client_hello` nor the capabilities
+    /// request it was flushed at grace expiry would suppress every subsequent
+    /// retry indefinitely, leaving exactly the startup case this retry exists
+    /// for capability-blind. The startup suppression must be bounded by the
+    /// grace deadline, not by the arrival of a frame.
+    #[cfg(unix)]
+    #[test]
+    fn expired_startup_grace_releases_capabilities_retries_without_a_first_frame() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let fixture = temp.path().join("stdio-silent.sh");
+        std::fs::write(
+            &fixture,
+            r#"#!/bin/sh
+# Consume every request and answer nothing: no frame ever reaches the client,
+# so `stdio_child_served_frame` stays false for the life of the connection.
+while IFS= read -r line; do :; done
+"#,
+        )
+        .expect("write fixture");
+
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch {
+            endpoint: Some(AppUiEndpoint::stdio(format!("sh {}", fixture.display()))),
+            ..AppUiLaunch::default()
+        });
+        backend
+            .bootstrap()
+            .expect("bootstrap arms the hello barrier");
+        assert!(backend.stdio_child_startup_pending());
+        assert!(
+            backend.capabilities_probe.is_none(),
+            "capabilities is deferred behind the hello barrier, not yet on the wire"
+        );
+
+        // The grace expires with nothing served: the hello barrier is released
+        // and the deferred capabilities request reaches the wire. The
+        // connection clock and the barrier clock age together — the grace
+        // elapsing IS the passage of time since connect.
+        let elapsed_grace = Instant::now() - STDIO_CHILD_STARTUP_GRACE - Duration::from_millis(1);
+        backend
+            .client_hello_barrier
+            .as_mut()
+            .expect("hello barrier")
+            .started_at = elapsed_grace;
+        backend.connected_at = Some(elapsed_grace);
+        backend.check_protocol_barrier_timeouts();
+        assert!(backend.client_hello_barrier.is_none());
+        assert_eq!(
+            backend
+                .capabilities_probe
+                .as_ref()
+                .expect("probe armed by the flush")
+                .attempts,
+            1
+        );
+        assert!(
+            backend.stdio_child_startup_pending(),
+            "the child still has not served a frame"
+        );
+
+        // That first request goes unanswered too. The grace is long spent, so
+        // the retry must fire even though no frame has ever arrived.
+        backend.capabilities_probe.as_mut().expect("probe").sent_at =
+            Instant::now() - CAPABILITIES_RESPONSE_TIMEOUT - Duration::from_millis(1);
+        backend.check_protocol_barrier_timeouts();
+
+        assert_eq!(
+            backend.capabilities_probe.as_ref().expect("probe").attempts,
+            2,
+            "an expired startup grace must not suppress the retry forever"
         );
     }
 
