@@ -2552,12 +2552,17 @@ impl ProtocolAppUiBackend {
         if !due {
             return;
         }
-        // The unanswered attempt's pending entry would otherwise linger until
-        // the connection drops and be cancelled then, surfacing a spurious
-        // `request_cancelled` for a request the retry already superseded.
-        self.protocol.pending_requests.retain(|_, pending| {
-            pending.method != crate::model::APPUI_METHOD_CONFIG_CAPABILITIES_LIST
-        });
+        // The superseded attempt's pending entry is deliberately LEFT in place.
+        // `next_event` checks these timeouts before polling the driver, so a
+        // valid response may already be buffered when the retry fires; dropping
+        // its id here would leave that response uncorrelated and discard it.
+        // Orphans are bounded (at most `CAPABILITIES_MAX_ATTEMPTS - 1` per
+        // connection) and cannot outlive the connection epoch, because
+        // `cancel_pending_requests` drains the map on disconnect — where
+        // capabilities cancellations are already filtered out of the queue by
+        // `CancelledRequest::is_capabilities_probe`, so a lingering entry
+        // surfaces no spurious `request_cancelled`.
+        //
         // `send` re-enters this check, so stop the retry being due a second
         // time before the new attempt reaches the wire. Only the clock moves —
         // `send` owns the attempt count once the frame is actually written.
@@ -14094,6 +14099,116 @@ while IFS= read -r line; do :; done
             backend.capabilities_probe.as_ref().expect("probe").attempts,
             2,
             "an expired startup grace must not suppress the retry forever"
+        );
+    }
+
+    /// `next_event` checks barrier timeouts BEFORE polling the driver, so a
+    /// capabilities success can already be buffered when the probe deadline
+    /// expires. Dropping the in-flight request id at that moment leaves the
+    /// buffered response uncorrelated and it is discarded — losing a perfectly
+    /// valid result from the current connection. A late answer must still
+    /// reach the store.
+    #[cfg(unix)]
+    #[test]
+    fn capabilities_response_buffered_at_the_retry_deadline_still_correlates() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("answered.log");
+        let fixture = temp.path().join("stdio-slow-caps.sh");
+        std::fs::write(
+            &fixture,
+            r#"#!/bin/sh
+marker="$1"
+: > "$marker"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"method":"client_hello"'*)
+      printf '{"jsonrpc":"2.0","id":"%s","error":{"code":-32601,"message":"method not found"}}\n' "$id"
+      ;;
+    *'"method":"config/capabilities/list"'*)
+      # Answer the FIRST probe only, after a delay long enough that the test
+      # stops polling first — the response lands in the driver buffer while
+      # the probe deadline expires. Later probes are ignored, so the buffered
+      # first answer is the only capability set that can ever arrive.
+      if [ ! -s "$marker" ]; then
+        sleep 1
+        printf '{"jsonrpc":"2.0","id":"%s","result":{"capabilities":{"version":{"protocol":"octos-ui/v1alpha1","schema_version":1,"jsonrpc":"2.0"},"capabilities_schema_version":2,"supported_methods":["profile/llm/catalog"],"supported_notifications":[],"supported_features":[]}}}\n' "$id"
+        printf 'ANSWERED\n' >> "$marker"
+      fi
+      ;;
+  esac
+done
+"#,
+        )
+        .expect("write fixture");
+
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch {
+            endpoint: Some(AppUiEndpoint::stdio(format!(
+                "sh {} {}",
+                fixture.display(),
+                marker.display()
+            ))),
+            ..AppUiLaunch::default()
+        });
+        backend.bootstrap().expect("bootstrap");
+
+        // Poll only until the hello rejection has flushed the deferred
+        // capabilities request onto the wire, then STOP polling.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if backend.capabilities_probe.is_some() {
+                break;
+            }
+            let _ = backend.next_event().expect("poll fixture");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            backend
+                .capabilities_probe
+                .as_ref()
+                .expect("probe armed")
+                .attempts,
+            1
+        );
+
+        // The child answers while nobody is polling: the success sits in the
+        // driver buffer, undecoded.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if std::fs::read_to_string(&marker)
+                .unwrap_or_default()
+                .contains("ANSWERED")
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            std::fs::read_to_string(&marker)
+                .unwrap_or_default()
+                .contains("ANSWERED"),
+            "fixture answered the first probe"
+        );
+
+        // The probe deadline expires with that valid answer already buffered.
+        backend.capabilities_probe.as_mut().expect("probe").sent_at =
+            Instant::now() - CAPABILITIES_RESPONSE_TIMEOUT - Duration::from_millis(1);
+
+        let mut saw_capabilities = false;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            match backend.next_event().expect("poll fixture") {
+                Some(ClientEvent::Capabilities(_)) => {
+                    saw_capabilities = true;
+                    break;
+                }
+                Some(_) => {}
+                None => thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        assert!(
+            saw_capabilities,
+            "a valid response buffered when the retry fired must still correlate"
         );
     }
 

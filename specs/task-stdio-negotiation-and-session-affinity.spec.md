@@ -32,6 +32,11 @@
   the child serves something, which for a wedged or selectively-silent child
   may be never; keying the suppression on it alone would silence the retry in
   exactly the slow-boot case the retry exists for.
+- A retry never invalidates the superseded request id. Barrier timeouts are
+  checked before the driver is polled, so a valid response may already be
+  buffered when the retry fires; it must still correlate and reach the store.
+  Orphaned ids stay bounded per connection and cannot cross a reconnect,
+  because the pending map is drained on disconnect.
 
 ## Scenarios
 
@@ -45,6 +50,9 @@
   a stdio child that answers neither `client_hello` nor the capabilities
   request flushed at grace expiry is still re-asked once the grace deadline has
   passed, even though it has never served a frame.
+- `capabilities_response_buffered_at_the_retry_deadline_still_correlates` — a
+  success that arrived while nobody was polling still reaches the store as a
+  `Capabilities` event when the retry fires on the same tick.
 
 ## Compatibility
 
