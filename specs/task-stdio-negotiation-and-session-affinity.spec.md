@@ -43,9 +43,14 @@
 - `unanswered_capabilities_request_is_reasked_on_the_same_connection` — a stdio
   child that rejects `client_hello` and swallows the first
   `config/capabilities/list` is asked a second time, and that answer reaches the
-  store as a `Capabilities` event.
+  store as a `Capabilities` event; continued polling beyond the next retry
+  deadline sends no further capabilities request.
 - `capabilities_retry_stops_after_the_attempt_budget` — a probe that has spent
   its budget starts no further attempt.
+- `capabilities_full_retry_budget_resets_on_reconnect` — a real stdio child
+  receives all four attempts and no fifth attempt on that connection. A
+  replacement connection starts at attempt one with none of the old request
+  ids retained.
 - `expired_startup_grace_releases_capabilities_retries_without_a_first_frame` —
   a stdio child that answers neither `client_hello` nor the capabilities
   request flushed at grace expiry is still re-asked once the grace deadline has

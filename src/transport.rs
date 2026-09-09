@@ -14000,6 +14000,27 @@ done
             saw_capabilities,
             "the retry's answer must reach the store as a Capabilities event"
         );
+
+        // Keep the real driver polling beyond another retry deadline. Stopping
+        // at the first success would miss a probe that was accidentally left
+        // armed and starts sending again five seconds later.
+        let after_success =
+            Instant::now() + CAPABILITIES_RESPONSE_TIMEOUT + Duration::from_millis(100);
+        while Instant::now() < after_success {
+            let _ = backend
+                .next_event()
+                .expect("poll after successful negotiation");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(backend.capabilities_probe.is_none());
+        assert_eq!(
+            std::fs::read_to_string(&marker)
+                .expect("probe log")
+                .matches("CAPS")
+                .count(),
+            2,
+            "continued polling after success must not issue another capabilities request"
+        );
     }
 
     /// The retry budget is bounded. A server that simply never answers
@@ -14026,6 +14047,152 @@ done
             probe.sent_at, spent_at,
             "a spent budget must not start another attempt"
         );
+    }
+
+    /// Exercise every attempt on a real connection, then reconnect after the
+    /// budget is spent. Merely constructing attempts=4 misses accounting and
+    /// connection-reset regressions.
+    #[cfg(unix)]
+    #[test]
+    fn capabilities_full_retry_budget_resets_on_reconnect() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("caps.log");
+        let fixture = temp.path().join("stdio-never-answers-caps.sh");
+        std::fs::write(
+            &fixture,
+            r#"#!/bin/sh
+marker="$1"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"method":"client_hello"'*)
+      printf '{"jsonrpc":"2.0","id":"%s","error":{"code":-32601,"message":"method not found"}}\n' "$id"
+      ;;
+    *'"method":"config/capabilities/list"'*)
+      printf '%s\n' "$id" >> "$marker"
+      ;;
+  esac
+done
+"#,
+        )
+        .expect("write fixture");
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch {
+            endpoint: Some(AppUiEndpoint::stdio(format!(
+                "sh {} {}",
+                fixture.display(),
+                marker.display()
+            ))),
+            ..AppUiLaunch::default()
+        });
+        backend.bootstrap().expect("bootstrap");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while backend.capabilities_probe.is_none() && Instant::now() < deadline {
+            let _ = backend.next_event().expect("poll first connection");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            backend
+                .capabilities_probe
+                .as_ref()
+                .expect("first probe")
+                .attempts,
+            1
+        );
+
+        for attempt in 2..=CAPABILITIES_MAX_ATTEMPTS {
+            backend.capabilities_probe.as_mut().expect("probe").sent_at =
+                Instant::now() - CAPABILITIES_RESPONSE_TIMEOUT - Duration::from_millis(1);
+            backend.check_protocol_barrier_timeouts();
+            assert_eq!(
+                backend.capabilities_probe.as_ref().expect("probe").attempts,
+                attempt
+            );
+        }
+        let old_ids: std::collections::HashSet<_> = backend
+            .protocol
+            .pending_requests
+            .iter()
+            .filter(|(_, request)| {
+                request.method == crate::model::APPUI_METHOD_CONFIG_CAPABILITIES_LIST
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        assert_eq!(old_ids.len(), CAPABILITIES_MAX_ATTEMPTS as usize);
+
+        // Expire the final deadline repeatedly while polling, so neither the
+        // timeout path nor delivery of queued events may exceed the budget.
+        let deadline = Instant::now() + Duration::from_millis(250);
+        while Instant::now() < deadline {
+            backend
+                .capabilities_probe
+                .as_mut()
+                .expect("spent probe")
+                .sent_at =
+                Instant::now() - CAPABILITIES_RESPONSE_TIMEOUT - Duration::from_millis(1);
+            let _ = backend.next_event().expect("poll exhausted connection");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            backend
+                .capabilities_probe
+                .as_ref()
+                .expect("spent probe")
+                .attempts,
+            CAPABILITIES_MAX_ATTEMPTS
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let sent = std::fs::read_to_string(&marker).unwrap_or_default();
+            if sent.lines().count() >= CAPABILITIES_MAX_ATTEMPTS as usize {
+                assert_eq!(sent.lines().count(), CAPABILITIES_MAX_ATTEMPTS as usize);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "fixture did not receive the complete retry budget: {sent}"
+            );
+            let _ = backend.next_event().expect("drain exhausted connection");
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        backend.mark_disconnected("retry budget reset fixture");
+        assert!(backend.capabilities_probe.is_none());
+        assert!(
+            old_ids
+                .iter()
+                .all(|id| !backend.protocol.pending_requests.contains_key(id))
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while backend.capabilities_probe.is_none() && Instant::now() < deadline {
+            let _ = backend.next_event().expect("poll replacement connection");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            backend
+                .capabilities_probe
+                .as_ref()
+                .expect("replacement probe")
+                .attempts,
+            1
+        );
+        assert!(
+            old_ids
+                .iter()
+                .all(|id| !backend.protocol.pending_requests.contains_key(id))
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let sent = std::fs::read_to_string(&marker).expect("replacement probe log");
+            if sent.lines().count() == CAPABILITIES_MAX_ATTEMPTS as usize + 1 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "replacement connection did not send a fresh first probe: {sent}"
+            );
+            let _ = backend.next_event().expect("poll replacement probe");
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// `stdio_child_startup_pending` stays true until the child serves its
