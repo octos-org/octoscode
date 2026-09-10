@@ -29,6 +29,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -115,6 +116,55 @@ def git_status_porcelain(repo: Path) -> str | None:
     except (OSError, subprocess.TimeoutExpired):
         return None
     return out.stdout if out.returncode == 0 else None
+
+
+def tracked_modified_lines(porcelain: str | None) -> list[str]:
+    """porcelain 输出中的 tracked 修改行(排除 untracked '??')。
+
+    ROOT-1 #5 采纳 K3 设计: untracked(注入 probe/artifact/target)允许;
+    tracked 生产源被改(staged/unstaged/renamed/deleted)→ 拒 —— 绑定
+    "编译的 tracked 源 == HEAD 树"。probe 源本身由 test_target_sha256
+    hash 锚,两门互补。
+    """
+    if not porcelain:
+        return []
+    out = []
+    for line in porcelain.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith("??"):
+            continue
+        out.append(line)
+    return out
+
+
+def fail_if_tracked_modified(repo: Path, phase: str) -> int:
+    """执行前后同门: tracked 修改 → 拒;git status 查询失败 ≠ clean → 拒。
+
+    统一错误码 tracked-source-modified(ROOT-2: 合并一套,两种失败共用;
+    查询失败不得放行为"无改动"——那等于绕过 tracked 绑定门)。
+    返回 0=通过 / 1=已 emit 结构化错误(调用方 return)。
+    """
+    porcelain = git_status_porcelain(repo)
+    if porcelain is None:
+        emit_json({"error": {
+            "code": "tracked-source-modified",
+            "message": f"{phase}: git status 查询失败(不得当作 clean)",
+        }})
+        return 1
+    lines = tracked_modified_lines(porcelain)
+    if lines:
+        emit_json({
+            "error": {
+                "code": "tracked-source-modified",
+                "message": (
+                    f"{phase}: repo 存在 tracked 修改(untracked 探针/工件"
+                    f"允许,tracked 生产源须等于 HEAD): {lines[:8]}"
+                ),
+            }
+        })
+        return 1
+    return 0
 
 
 def infer_test_target(repo: Path, selector: str) -> str | None:
@@ -225,8 +275,9 @@ def main(argv: list[str] | None = None) -> int:
     head_before = git_head(repo)
     if head_before is None:
         return fail("head-unresolvable", f"无法解析 repo 真实 HEAD: {repo}")
+    if fail_if_tracked_modified(repo, "执行前"):
+        return 1
     status_before = git_status_porcelain(repo)
-
     if args.lib:
         target = "--lib"
         unit_source = infer_lib_unit_target(repo, args.selector)
@@ -287,6 +338,8 @@ def main(argv: list[str] | None = None) -> int:
 
     head_after = git_head(repo)
     status_after = git_status_porcelain(repo)
+    if fail_if_tracked_modified(repo, "执行后"):
+        return 1
     stdout_full = proc.stdout or ""
     stderr_full = proc.stderr or ""
     combined = stdout_full + "\n" + stderr_full
@@ -342,9 +395,22 @@ def main(argv: list[str] | None = None) -> int:
     artifacts: dict[str, str] = {}
     if artifact_dir is not None:
         artifact_dir.mkdir(parents=True, exist_ok=True)
-        stamp = f"{qualified.replace('::', '_')}"
-        out_p = artifact_dir / f"{stamp}.stdout.log"
-        err_p = artifact_dir / f"{stamp}.stderr.log"
+        # 审计尾项: 同 selector 多轮重跑不得覆盖 stdout/stderr。文件名用
+        # mkstemp 唯一创建(内核保证唯一,同进程同秒重跑/多进程并发同
+        # artifact-dir 均不碰撞;秒+pid 不够)。旧 receipt 的 hash 与文件
+        # 仍可验证(旧文件不再被覆盖);receipt 引用工件绝对路径,重跑
+        # 产生新文件而非改写。
+        base = qualified.replace("::", "_")
+        out_fd, out_name = tempfile.mkstemp(
+            prefix=f"{base}.stdout.", suffix=".log", dir=str(artifact_dir)
+        )
+        err_fd, err_name = tempfile.mkstemp(
+            prefix=f"{base}.stderr.", suffix=".log", dir=str(artifact_dir)
+        )
+        os.close(out_fd)
+        os.close(err_fd)
+        out_p = Path(out_name)
+        err_p = Path(err_name)
         out_p.write_text(stdout_full, encoding="utf-8")
         err_p.write_text(stderr_full, encoding="utf-8")
         artifacts = {"stdout": str(out_p), "stderr": str(err_p)}

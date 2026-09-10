@@ -183,6 +183,10 @@ def _json_block(path: Path) -> dict | None:
     return obj if isinstance(obj, dict) else None
 
 
+# 初审 claim verdict 白名单(与 cross_claims 的 accept/refute/pending 区分)
+FIRST_REVIEW_VERDICTS = {"approve", "request-changes", "comment"}
+
+
 def parse_claims(path: Path) -> list[dict]:
     """解析初审报告的显式 JSON claims 块: {"claims": [{"id","verdict","evidence"}]}.
 
@@ -197,6 +201,16 @@ def parse_claims(path: Path) -> list[dict]:
     for c in claims:
         if not isinstance(c, dict) or not isinstance(c.get("id"), str) or not c["id"]:
             raise fail("claims-block-invalid", f"{path.name} claim 缺合法 id")
+        # 审计尾项: 初审 verdict 白名单(真实报告语义: approve/request-
+        # changes/comment)。**不**生搬 cross 的 accept/refute 词表 ——
+        # 初审与交叉互审是不同合约层。非法/空/非 str → 结构化错误。
+        v = c.get("verdict")
+        if not isinstance(v, str) or v not in FIRST_REVIEW_VERDICTS:
+            raise fail(
+                "claims-verdict-invalid",
+                f"{path.name} claim[{c['id']}] verdict={v!r} 非法"
+                f"(合法: {sorted(FIRST_REVIEW_VERDICTS)})",
+            )
     return claims
 
 
@@ -813,7 +827,7 @@ def apply_live_verdict(state: dict, claim: str, live: dict) -> str:
 def cmd_init(args: argparse.Namespace) -> None:
     review_dir = Path(args.review_dir)
     with review_lock(review_dir):
-        state = load_state(review_dir)
+        state = _validated_state_or_fail(load_state(review_dir), review_dir)
         if state:
             raise fail("already-initialized", f"{review_dir} 已初始化")
         # HEAD 真实解析 fail-closed;--head 仅作显式锚定交叉校验。
@@ -871,7 +885,7 @@ def _check_report_identity(fm: dict, label: str, state: dict) -> None:
 def cmd_freeze(args: argparse.Namespace) -> None:
     review_dir = Path(args.review_dir)
     with review_lock(review_dir):
-        state = load_state(review_dir)
+        state = _validated_state_or_fail(load_state(review_dir), review_dir)
         if not state:
             raise fail("not-initialized", "先 init")
         if state.get("frozen"):
@@ -983,9 +997,133 @@ def require_frozen(state: dict) -> None:
         raise fail("not-frozen", "初审未冻结")
 
 
+def _validated_state_or_fail(state: object, rd: Path) -> dict:
+    """共用 state 形状校验(合法 JSON 但结构损坏 → 结构化 JSON 错误)。
+
+    只验实际 schema(state dict/frozen bool/reviews dict+嵌套 path/sha256
+    字符串/challenges dict),fail-closed;**不**用笼统 except 吞编程 bug
+    —— 形状分支以外的异常照常抛出。classify 的受信上下文加载保留其
+    专用错误码(classify-context-*),本函数用于其余入口的统一前置。
+    """
+    if not isinstance(state, dict):
+        raise fail("state-shape-invalid", f"state 顶层非对象: {rd}")
+    if "frozen" in state and not isinstance(state.get("frozen"), bool):
+        raise fail("state-shape-invalid", f"state.frozen 非布尔: {rd}")
+    if state.get("frozen") is True:
+        # 冻结态必有 reviews(freeze 事务写入)与 head;声称冻结却缺是
+        # 结构损坏(审计 RED: {"frozen":true} 曾在 status 通过)。
+        if "reviews" not in state:
+            raise fail(
+                "state-shape-invalid",
+                f"state.frozen=true 但缺 reviews(结构损坏): {rd}",
+            )
+        reviews = state.get("reviews")
+        if isinstance(reviews, dict):
+            for lane in ("glm", "k3"):
+                if lane not in reviews:
+                    raise fail(
+                        "state-shape-invalid",
+                        f"state.frozen=true 但 reviews 缺 {lane}(双初审不完整): {rd}",
+                    )
+        if "head" not in state or not isinstance(state.get("head"), str) or not state["head"]:
+            raise fail(
+                "state-shape-invalid",
+                f"state.frozen=true 但缺合法 head(结构损坏): {rd}",
+            )
+    if "reviews" in state:
+        reviews = state.get("reviews")
+        if not isinstance(reviews, dict):
+            raise fail("state-shape-invalid", f"state.reviews 非对象: {rd}")
+        for label, rec in reviews.items():
+            if not isinstance(label, str) or not isinstance(rec, dict):
+                raise fail(
+                    "state-shape-invalid",
+                    f"state.reviews[{label!r}] 形状非法(须对象): {rd}",
+                )
+            if not isinstance(rec.get("path"), str) or not rec.get("path"):
+                raise fail(
+                    "state-shape-invalid",
+                    f"state.reviews[{label}].path 缺失/非字符串: {rd}",
+                )
+            if not isinstance(rec.get("sha256"), str) or not rec.get("sha256"):
+                raise fail(
+                    "state-shape-invalid",
+                    f"state.reviews[{label}].sha256 缺失/非字符串: {rd}",
+                )
+    if "challenges" in state:
+        challenges = state.get("challenges")
+        if not isinstance(challenges, dict):
+            raise fail("state-shape-invalid", f"state.challenges 非对象: {rd}")
+        for claim, entry in challenges.items():
+            if not isinstance(claim, str) or not claim or not isinstance(entry, dict):
+                raise fail(
+                    "state-shape-invalid",
+                    f"state.challenges[{claim!r}] 形状非法(须对象): {rd}",
+                )
+            latest = entry.get("latest")
+            if latest is not None and not isinstance(latest, dict):
+                raise fail(
+                    "state-shape-invalid",
+                    f"state.challenges[{claim}].latest 非对象: {rd}",
+                )
+            history = entry.get("history")
+            if history is not None:
+                if not isinstance(history, list):
+                    raise fail(
+                        "state-shape-invalid",
+                        f"state.challenges[{claim}].history 非数组: {rd}",
+                    )
+                for rec in history:
+                    if not isinstance(rec, dict):
+                        raise fail(
+                            "state-shape-invalid",
+                            f"state.challenges[{claim}].history 元素非对象: {rd}",
+                        )
+                    if "accepted" in rec and not isinstance(rec.get("accepted"), bool):
+                        raise fail(
+                            "state-shape-invalid",
+                            f"state.challenges[{claim}] accepted 非布尔: {rd}",
+                        )
+                    ex = rec.get("executed")
+                    if ex is not None and not isinstance(ex, dict):
+                        raise fail(
+                            "state-shape-invalid",
+                            f"state.challenges[{claim}] executed 非对象: {rd}",
+                        )
+                    if isinstance(ex, dict):
+                        art = ex.get("artifacts")
+                        if art is not None and not isinstance(art, dict):
+                            raise fail(
+                                "state-shape-invalid",
+                                f"state.challenges[{claim}] executed.artifacts 非对象: {rd}",
+                            )
+    if "verdicts" in state:
+        verdicts = state.get("verdicts")
+        if not isinstance(verdicts, dict):
+            raise fail("state-shape-invalid", f"state.verdicts 非对象: {rd}")
+        for cid, v in verdicts.items():
+            if not isinstance(cid, str) or not cid or not isinstance(v, dict):
+                raise fail(
+                    "state-shape-invalid",
+                    f"state.verdicts[{cid!r}] 形状非法(须对象): {rd}",
+                )
+    if "cross" in state:
+        cross = state.get("cross")
+        if not isinstance(cross, list):
+            raise fail("state-shape-invalid", f"state.cross 非数组: {rd}")
+        for c in cross:
+            if not isinstance(c, dict):
+                raise fail(
+                    "state-shape-invalid",
+                    f"state.cross 元素非对象: {rd}",
+                )
+    return state
+
+
 def verify_no_tamper(state: dict) -> None:
+    reviews = state.get("reviews") or {}
     for label in REVIEWER_LANES:
-        rec = state["reviews"].get(label)
+        rec = reviews.get(label)
         if not rec:
             continue
         p = Path(rec["path"])
@@ -1000,12 +1138,162 @@ def verify_no_tamper(state: dict) -> None:
                 "first-review-tampered",
                 f"{label} 初审在冻结后被修改(SHA256 不匹配),不予采信",
             )
+    # accepted live 记录全生命周期校验(审计尾项): receipt 本体与输出
+    # 工件改写/删除/缺声明/缺 hash → 拒;legacy 快照(缺 executed 内部
+    # 字段)由 hash 验证过的 receipt 原件**补齐后再验**(不做"缺字段即
+    # 跳过工件校验")—— 事实源是完整 receipt,快照缺项不降低校验强度。
+    _verify_live_receipts_untampered(state)
+
+
+def _verify_live_receipts_untampered(state: dict) -> None:
+    """accepted=True history/latest 记录无条件 fail-closed(ROOT-2 裁决)。
+
+    apply_live_verdict 是 accepted=True 的唯一 writer(恒带真实 cargo
+    receipt 路径+sha256;imported 记录 accepted=False;operator-refute 改
+    verdict/cross 不动 accepted history)。因此:
+    - 每条 accepted=True 记录必须 receipt 路径+receipt_sha256 均在且为
+      str(删除任一键/字段 → 拒);文件删除/改写 → live-receipt-tampered。
+    - 事实源 = hash 验证过的 receipt 原件;快照 executed 缺失字段从
+      receipt 重建(legacy 兼容仅限快照内部缺字段),两侧都在且不一致
+      → 拒;类型敏感比较(False != 0)。
+    - 工件(stdout/stderr): receipt 声明的路径+hash 一律校验;删除或
+      改写工件/hash → 拒;两侧(快照与 receipt)声明都在而不一致 → 拒;
+      两侧都无工件声明 → 拒(真实 cargo receipt 恒带)。
+    - latest 与 history 逐条同验。
+    """
+    challenges = state.get("challenges") or {}
+    if not isinstance(challenges, dict):
+        return
+
+    def _check_accepted_rec(claim: str, rec: object, where: str) -> None:
+        if not isinstance(rec, dict) or rec.get("accepted") is not True:
+            return
+        rp_s = rec.get("receipt")
+        sha = rec.get("receipt_sha256")
+        if not isinstance(rp_s, str) or not rp_s:
+            raise fail(
+                "live-receipt-tampered",
+                f"{claim} {where} accepted 记录缺 receipt 路径(fail-closed)",
+            )
+        if not isinstance(sha, str) or not sha:
+            raise fail(
+                "live-receipt-tampered",
+                f"{claim} {where} accepted 记录缺 receipt_sha256(fail-closed)",
+            )
+        rp = Path(rp_s)
+        if not rp.is_file():
+            raise fail(
+                "live-receipt-tampered",
+                f"{claim} {where} accepted receipt 被删除(文件缺失): {rp_s}",
+            )
+        if sha256_file(rp) != sha:
+            raise fail(
+                "live-receipt-tampered",
+                f"{claim} {where} accepted receipt 被改写(SHA256 不匹配): {rp_s}",
+            )
+        try:
+            rc_obj = json.loads(rp.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raise fail(
+                "live-receipt-tampered",
+                f"{claim} {where} accepted receipt 不可解析: {rp_s}",
+            )
+        if not isinstance(rc_obj, dict):
+            raise fail(
+                "live-receipt-tampered",
+                f"{claim} {where} accepted receipt 顶层非对象: {rp_s}",
+            )
+        if rc_obj.get("receipt_kind") != "cargo-test-execution":
+            raise fail(
+                "live-receipt-tampered",
+                f"{claim} {where} receipt_kind 非 cargo-test-execution: {rp_s}",
+            )
+        ex = rec.get("executed") if isinstance(rec.get("executed"), dict) else {}
+        # 核心字段类型敏感一致(快照 vs receipt;False != 0)
+        for f in (
+            "observed", "exit_code", "selector", "selector_qualified",
+            "test_target_sha256", "stdout_sha256", "stderr_sha256",
+            "head_before", "head_after",
+        ):
+            rc_v = rc_obj.get(f)
+            ex_v = ex.get(f)
+            if rc_v is not None and ex_v is not None:
+                # 类型敏感比较: bool 是 int 子类,False 不得冒充 0。
+                same_type = (
+                    type(rc_v) is type(ex_v)
+                    or (isinstance(rc_v, (int, float)) and isinstance(ex_v, (int, float))
+                        and not isinstance(rc_v, bool) and not isinstance(ex_v, bool))
+                )
+                if not same_type or rc_v != ex_v:
+                    raise fail(
+                        "live-receipt-tampered",
+                        f"{claim} {where} 核心字段 {f} 快照与 receipt 不一致"
+                        f"(类型/值不匹配: {ex_v!r} vs {rc_v!r})",
+                    )
+            if rc_v is None and ex_v is None and f in (
+                "observed", "exit_code", "head_before", "head_after",
+            ):
+                raise fail(
+                    "live-receipt-tampered",
+                    f"{claim} {where} 核心字段 {f} 双侧缺失(fail-closed)",
+                )
+        # 工件: receipt 声明一律校验(真实 cargo receipt 恒带)
+        rc_artifacts = rc_obj.get("artifacts")
+        ex_artifacts = ex.get("artifacts")
+        rc_art = rc_artifacts if isinstance(rc_artifacts, dict) else {}
+        ex_art = ex_artifacts if isinstance(ex_artifacts, dict) else {}
+        for key in ("stdout", "stderr"):
+            art_rc = rc_art.get(key)
+            art_ex = ex_art.get(key)
+            if (
+                isinstance(art_rc, str) and art_rc
+                and isinstance(art_ex, str) and art_ex
+                and art_rc != art_ex
+            ):
+                raise fail(
+                    "live-receipt-tampered",
+                    f"{claim} {where} 执行工件 {key} 快照与 receipt 不一致",
+                )
+            art = art_rc if isinstance(art_rc, str) and art_rc else art_ex
+            if not (isinstance(art, str) and art):
+                raise fail(
+                    "live-receipt-tampered",
+                    f"{claim} {where} receipt 缺执行工件 {key}(fail-closed)",
+                )
+            declared = rc_obj.get(f"{key}_sha256") or ex.get(f"{key}_sha256")
+            if not (isinstance(declared, str) and declared):
+                raise fail(
+                    "live-receipt-tampered",
+                    f"{claim} {where} 缺执行工件 {key} hash(fail-closed)",
+                )
+            ap = Path(art)
+            if not ap.is_file():
+                raise fail(
+                    "live-receipt-tampered",
+                    f"{claim} {where} 执行工件 {key} 被删除(文件缺失): {art}",
+                )
+            if sha256_file(ap) != declared:
+                raise fail(
+                    "live-receipt-tampered",
+                    f"{claim} {where} 执行工件 {key} 被改写(SHA256 不匹配): {art}",
+                )
+
+    for claim, entry in challenges.items():
+        if not isinstance(entry, dict):
+            continue
+        latest = entry.get("latest")
+        if latest is not None:
+            _check_accepted_rec(claim, latest, "latest")
+        history = entry.get("history")
+        if isinstance(history, list):
+            for i, rec in enumerate(history):
+                _check_accepted_rec(claim, rec, f"history[{i}]")
 
 
 def cmd_challenge(args: argparse.Namespace) -> None:
     review_dir = Path(args.review_dir)
     with review_lock(review_dir):
-        state = load_state(review_dir)
+        state = _validated_state_or_fail(load_state(review_dir), review_dir)
         if not state:
             raise fail("not-initialized", "先 init")
         require_frozen(state)
@@ -1157,7 +1445,7 @@ def cmd_challenge(args: argparse.Namespace) -> None:
 def cmd_cross(args: argparse.Namespace) -> None:
     review_dir = Path(args.review_dir)
     with review_lock(review_dir):
-        state = load_state(review_dir)
+        state = _validated_state_or_fail(load_state(review_dir), review_dir)
         if not state:
             raise fail("not-initialized", "先 init")
         require_frozen(state)
@@ -2266,11 +2554,15 @@ def build_status(state: dict) -> dict:
 
 def cmd_status(args: argparse.Namespace) -> None:
     review_dir = Path(args.review_dir)
-    state = load_state(review_dir)
-    if not state:
-        raise fail("not-initialized", "先 init")
-    verify_no_tamper(state)
-    emit_json(build_status(state))
+    # 与 freeze/challenge/cross 同一 flock 读取临界区(单次持锁;不与
+    # classify 的 ExitStack 外层重复嵌套同一锁),保证 verify 与渲染基于
+    # 一致快照。
+    with review_lock(review_dir):
+        state = _validated_state_or_fail(load_state(review_dir), review_dir)
+        if not state:
+            raise fail("not-initialized", "先 init")
+        verify_no_tamper(state)
+        emit_json(build_status(state))
 
 
 # ---------------------------------------------------------------------------

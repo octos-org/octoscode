@@ -2211,3 +2211,147 @@ fn olp_review_monitor_valid_lifetime_cross_goal_not_promoted() {
         "跨 goal 有效 lifetime 不得晋升 idle: {peers}"
     );
 }
+
+/// 修复轮 2026-09-10 T5: closed 跨仓 parity(#2272 约定对齐)——
+/// closed 在同一可信 lifetime 且归属一致时保留身份字段(task_id/
+/// generation/turn/master_session_id),execution 恒 closed;foreign goal
+/// → closed 但身份 null;旧失败(无 lifetime)不改判。
+#[test]
+fn olp_review_monitor_closed_keeps_identity_on_trusted_lifetime() {
+    let t = TmpDir::new("closedid");
+    let d = t.path().to_path_buf();
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(
+        d.join("review-state.json"),
+        r#"{"runtime":"/tmp/rt-cid","session":"master-sess-1","goal":"goal_01"}"#,
+    )
+    .unwrap();
+    let profile = "octosfix";
+    let peers_root = d
+        .join("runtime")
+        .join("profiles")
+        .join(profile)
+        .join("data")
+        .join("peers");
+    let mk = |slug: &str, goal: &str, with_lifetime: bool| {
+        let dir = peers_root.join(slug);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("originator"), "master-sess-1\n").unwrap();
+        std::fs::write(dir.join("goal"), format!("{goal}\n")).unwrap();
+        std::fs::write(dir.join("closed"), "").unwrap();
+        if with_lifetime {
+            write_json(
+                &dir.join("lifetime.json"),
+                serde_json::json!({
+                    "version": 1, "task_id": "task-77",
+                    "registry_key": format!("{profile}:peer:{slug}"),
+                    "master": "master-sess-1", "generation": 5,
+                    "phase": "running", "turn_id": "turn-3"
+                }),
+            );
+        }
+    };
+    mk("c-ident", "goal_01", true);
+    mk("c-foreign", "goal_99", true);
+    mk("c-nolife", "goal_01", false);
+    // malformed lifetime(trusted 形状损坏): closed 不变,身份 null
+    let mdir = peers_root.join("c-malformed");
+    std::fs::create_dir_all(&mdir).unwrap();
+    std::fs::write(mdir.join("originator"), "master-sess-1\n").unwrap();
+    std::fs::write(mdir.join("goal"), "goal_01\n").unwrap();
+    std::fs::write(mdir.join("closed"), "").unwrap();
+    std::fs::write(mdir.join("lifetime.json"), "{not json").unwrap();
+    // 旧失败形态(FAILED lifetime + closed): closed 优先,身份按
+    // trusted-lifetime 判定(FAILED 形状若过 trusted 则保留字段——见下断言)
+    let fdir = peers_root.join("c-failed");
+    std::fs::create_dir_all(&fdir).unwrap();
+    std::fs::write(fdir.join("originator"), "master-sess-1\n").unwrap();
+    std::fs::write(fdir.join("goal"), "goal_01\n").unwrap();
+    std::fs::write(fdir.join("closed"), "").unwrap();
+    write_json(
+        &fdir.join("lifetime.json"),
+        serde_json::json!({
+            "version": 1, "task_id": "task-fail",
+            "registry_key": format!("{profile}:peer:c-failed"),
+            "master": "master-sess-1", "generation": 9,
+            "phase": "failed", "turn_id": "turn-5"
+        }),
+    );
+    let out = Command::new("python3")
+        .arg("-B")
+        .arg(script())
+        .arg(&d)
+        .arg("--runtime-dir")
+        .arg(d.join("runtime"))
+        .arg("--profile")
+        .arg(profile)
+        .arg("--session")
+        .arg("master-sess-1")
+        .arg("--format")
+        .arg("json")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "render failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout)).unwrap();
+    let peers = &v["current-turn"]["peers"];
+    // closed + 可信 lifetime + ident_ok: 保留身份
+    assert_eq!(
+        peers["c-ident"]["execution"].as_str().unwrap_or("?"),
+        "closed",
+        "execution 恒 closed: {peers}"
+    );
+    assert_eq!(
+        peers["c-ident"]["task_id"].as_str().unwrap_or("?"),
+        "task-77"
+    );
+    assert_eq!(peers["c-ident"]["generation"].as_i64(), Some(5));
+    assert_eq!(
+        peers["c-ident"]["turn_id"].as_str().unwrap_or("?"),
+        "turn-3"
+    );
+    assert_eq!(
+        peers["c-ident"]["master_session_id"]
+            .as_str()
+            .unwrap_or("?"),
+        "master-sess-1"
+    );
+    // closed + foreign goal: execution closed 但身份 null
+    assert_eq!(
+        peers["c-foreign"]["execution"].as_str().unwrap_or("?"),
+        "closed"
+    );
+    assert!(
+        peers["c-foreign"]["task_id"].is_null(),
+        "foreign 身份须 null"
+    );
+    assert!(peers["c-foreign"]["generation"].is_null());
+    // closed + 无 lifetime: 旧语义不变
+    assert_eq!(
+        peers["c-nolife"]["execution"].as_str().unwrap_or("?"),
+        "closed"
+    );
+    assert!(peers["c-nolife"]["task_id"].is_null());
+    // closed + malformed lifetime: closed,身份 null(不采信)
+    assert_eq!(
+        peers["c-malformed"]["execution"].as_str().unwrap_or("?"),
+        "closed"
+    );
+    assert!(
+        peers["c-malformed"]["task_id"].is_null(),
+        "malformed 身份须 null"
+    );
+    // closed + 可信 FAILED lifetime(旧失败保留): closed,身份保留(同 ident_ok)
+    assert_eq!(
+        peers["c-failed"]["execution"].as_str().unwrap_or("?"),
+        "closed",
+        "closed 恒定,不因 phase=failed 变 failed: {peers}"
+    );
+    assert_eq!(
+        peers["c-failed"]["task_id"].as_str().unwrap_or("?"),
+        "task-fail"
+    );
+}

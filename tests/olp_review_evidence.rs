@@ -1909,16 +1909,20 @@ fn olp_review_k3_cargo_adapter_rejects_fake_and_no_tests() {
 /// 验证;此处以本仓 src/app 内真实 lib 测试验证入口机制本身。
 #[test]
 fn olp_review_k3_cargo_adapter_lib_entry_full_artifacts() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let t = TmpDir::new("k3-libentry");
+    // tracked-source-modified 门(2026-09-10 修复)要求被测 repo 的 tracked
+    // 源 == HEAD —— 主仓在开发树上恒有未提交修改,会被正确拒绝。改用
+    // 独立 tiny fixture lib repo(真实编译/断言语义不变): src/lib.rs
+    // 定义真实单测,git 提交后 HEAD 干净。
+    let (ft, repo, _h) = make_cargo_lib_fixture("k3-libentry");
+    let t = TmpDir::new("k3-libentry-out");
     let receipt = t.path().join("lib-receipt.json");
-    // 真实 lib 测试(由外层 smoke 验证存在): src/app/markdown_highlight.rs
+    // 真实 lib 测试: fixture src/lib.rs(libtest::probe_pass)
     let (ok, so) = run_adapter(
         &repo,
         &[
             "--lib",
             "--selector",
-            "app::markdown_highlight::tests::blockquote_lines_render_muted_italic_without_inline_parsing",
+            "libtest::probe_pass",
             "--expect",
             "pass",
             "--receipt",
@@ -1934,23 +1938,19 @@ fn olp_review_k3_cargo_adapter_lib_entry_full_artifacts() {
         serde_json::from_str(&std::fs::read_to_string(&receipt).unwrap()).unwrap();
     assert_eq!(rc["observed"], "pass");
     assert_eq!(rc["test_target"], "--lib");
+    let _keep = &ft; // fixture repo 保活(receipt artifacts/test_source 引用)
     // 绑定: 全限定名经 cargo --list 定位;定义源文件 SHA256 在场
     assert!(
         rc["selector_qualified"]
             .as_str()
             .unwrap()
-            .ends_with("blockquote_lines_render_muted_italic_without_inline_parsing")
+            .ends_with("probe_pass")
     );
     assert!(
         rc["test_target_sha256"].is_string(),
         "lib 源文件 sha 绑定缺失"
     );
-    assert!(
-        rc["test_source"]
-            .as_str()
-            .unwrap()
-            .ends_with("markdown_highlight.rs")
-    );
+    assert!(rc["test_source"].as_str().unwrap().ends_with("lib.rs"));
     // 完整 stdout/stderr 工件留存(非仅尾部)
     let art = rc["artifacts"].as_object().unwrap();
     let stdout_log = std::fs::read_to_string(art["stdout"].as_str().unwrap()).unwrap();
@@ -4756,4 +4756,379 @@ fn copy_dir_tree(src: &Path, dst: &Path) {
             std::fs::copy(e.path(), &to).unwrap();
         }
     }
+}
+
+/// 修复轮 2026-09-10 T1: 合法 JSON 但结构损坏的 state({"frozen":true} 缺
+/// reviews)在 status/challenge/cross/freeze/classify 五入口一致结构化 JSON
+/// 错误(state-shape-invalid / classify-context-invalid),不再 KeyError
+/// traceback(审计 RED: status 曾 exit=1 stdout 空 + KeyError: reviews)。
+#[test]
+fn olp_review_malformed_state_all_entries_structured() {
+    let t = TmpDir::new("shape-state");
+    let d = t.path().to_path_buf();
+    std::fs::write(d.join("review-state.json"), r#"{"frozen": true}"#).unwrap();
+    let cases: Vec<(&str, Vec<&str>)> = vec![
+        ("status", vec!["status", d.to_str().unwrap()]),
+        (
+            "challenge",
+            vec![
+                "challenge",
+                d.to_str().unwrap(),
+                "--live-cargo",
+                "--claim",
+                "X",
+                "--selector",
+                "s",
+                "--expect",
+                "fail",
+            ],
+        ),
+        (
+            "cross",
+            vec![
+                "cross",
+                d.to_str().unwrap(),
+                "--cross-report",
+                "x.md",
+                "--cross-slug",
+                "k3",
+            ],
+        ),
+        (
+            "freeze",
+            vec![
+                "freeze",
+                d.to_str().unwrap(),
+                "--glm-review",
+                "a.md",
+                "--k3-review",
+                "b.md",
+                "--glm-slug",
+                "glm",
+                "--k3-slug",
+                "k3",
+            ],
+        ),
+    ];
+    for (name, args) in cases {
+        let argv: Vec<&str> = args.to_vec();
+        let (ok, so, _se) = run(&argv);
+        assert!(!ok, "{name} 畸形 state 不得成功");
+        let v: serde_json::Value = serde_json::from_str(so.trim())
+            .unwrap_or_else(|_| panic!("{name} 应输出可解析 JSON,实际: {so}"));
+        assert_eq!(
+            v["error"]["code"].as_str().unwrap_or("?"),
+            "state-shape-invalid",
+            "{name} 错误码: {v}"
+        );
+    }
+}
+
+/// 修复轮 2026-09-10 T2: accepted receipt 与执行工件全生命周期校验 ——
+/// 真实 live challenge 注册后,status 采信;篡改 receipt 字节 / 删除 /
+/// 篡改 stdout 工件 → live-receipt-tampered 结构化拒绝;legacy history
+/// (缺 executed.artifacts)不拒。
+#[test]
+fn olp_review_live_receipt_lifecycle_tamper_rejected() {
+    let (ft, repo, _h) = make_cargo_fixture("lcycle", FIXTURE_FAIL_TEST);
+    let d = ft.path().join("rev");
+    std::fs::create_dir_all(&d).unwrap();
+    init_review_at(&d, &repo);
+    write_authority(&d, "glm", "1", "completed");
+    write_authority(&d, "k3", "1", "completed");
+    let glm = write_review(&d, "glm.md", "completed", "1", Some(&state_head_of(&repo)));
+    let k3 = write_review(&d, "k3.md", "completed", "1", Some(&state_head_of(&repo)));
+    let (okf, sof, sef) = run(&[
+        "freeze",
+        d.to_str().unwrap(),
+        "--glm-review",
+        glm.to_str().unwrap(),
+        "--k3-review",
+        k3.to_str().unwrap(),
+        "--glm-slug",
+        "glm",
+        "--k3-slug",
+        "k3",
+        "--native-root",
+        d.join("native").to_str().unwrap(),
+        "--head",
+        &state_head_of(&repo),
+    ]);
+    assert!(okf, "freeze failed: {sof} {sef}");
+    let (okc, soc, sec) = live_challenge(
+        &d,
+        &repo,
+        "X",
+        "fixture_probe_fails",
+        "fail",
+        &ft.path().join("target"),
+    );
+    assert!(okc, "live challenge failed: {soc} {sec}");
+    // 基线: status 采信
+    let (oks, sos, _) = run(&["status", d.to_str().unwrap()]);
+    assert!(oks, "注册后 status 应成功: {sos}");
+    // 取注册 receipt 与 stdout 工件路径
+    let st: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(d.join("review-state.json")).unwrap())
+            .unwrap();
+    let last = st["challenges"]["X"]["history"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap();
+    let rp = std::path::PathBuf::from(last["receipt"].as_str().unwrap());
+    let stdout_p =
+        std::path::PathBuf::from(last["executed"]["artifacts"]["stdout"].as_str().unwrap());
+    let orig_receipt = std::fs::read(&rp).unwrap();
+    let orig_stdout = std::fs::read(&stdout_p).unwrap();
+    // (a) 篡改 receipt 字节
+    std::fs::write(&rp, b"tampered").unwrap();
+    let (ok1, so1, _) = run(&["status", d.to_str().unwrap()]);
+    assert!(!ok1, "篡改 receipt 后 status 必须拒绝");
+    let v1: serde_json::Value = serde_json::from_str(so1.trim()).unwrap();
+    assert_eq!(
+        v1["error"]["code"].as_str().unwrap_or("?"),
+        "live-receipt-tampered"
+    );
+    std::fs::write(&rp, &orig_receipt).unwrap();
+    // (b) 删除 receipt
+    std::fs::remove_file(&rp).unwrap();
+    let (ok2, so2, _) = run(&["status", d.to_str().unwrap()]);
+    assert!(!ok2, "删除 receipt 后 status 必须拒绝");
+    let v2: serde_json::Value = serde_json::from_str(so2.trim()).unwrap();
+    assert_eq!(
+        v2["error"]["code"].as_str().unwrap_or("?"),
+        "live-receipt-tampered"
+    );
+    std::fs::write(&rp, &orig_receipt).unwrap();
+    // (c) 篡改 stdout 工件
+    std::fs::write(&stdout_p, b"tampered output").unwrap();
+    let (ok3, so3, _) = run(&["status", d.to_str().unwrap()]);
+    assert!(!ok3, "篡改 stdout 工件后 status 必须拒绝");
+    let v3: serde_json::Value = serde_json::from_str(so3.trim()).unwrap();
+    assert_eq!(
+        v3["error"]["code"].as_str().unwrap_or("?"),
+        "live-receipt-tampered"
+    );
+    std::fs::write(&stdout_p, &orig_stdout).unwrap();
+    // (d) 删除 stdout 工件
+    std::fs::remove_file(&stdout_p).unwrap();
+    let (ok4, _so4, _) = run(&["status", d.to_str().unwrap()]);
+    assert!(!ok4, "删除 stdout 工件后 status 必须拒绝");
+    std::fs::write(&stdout_p, &orig_stdout).unwrap();
+    // 恢复后 status 复绿
+    let (ok5, _so5, _) = run(&["status", d.to_str().unwrap()]);
+    assert!(ok5, "恢复原件后 status 应复绿");
+}
+
+/// 修复轮 2026-09-10 T3: 同 selector 两轮真实执行,stdout/stderr 不覆盖
+/// —— 两套工件都在场、hash 与各自 receipt 一致、内容互不干扰。
+#[test]
+fn olp_review_adapter_same_selector_two_runs_no_overwrite() {
+    let (ft, repo, _h) = make_cargo_fixture("tworuns", FIXTURE_FAIL_TEST);
+    let ev = ft.path().join("ev");
+    std::fs::create_dir_all(&ev).unwrap();
+    let r1 = ev.join("r1.receipt.json");
+    let r2 = ev.join("r2.receipt.json");
+    for (label, rc_path) in [("run1", &r1), ("run2", &r2)] {
+        let (ok, so) = run_adapter(
+            &repo,
+            &[
+                "--selector",
+                "fixture_probe_fails",
+                "--expect",
+                "fail",
+                "--receipt",
+                rc_path.to_str().unwrap(),
+                "--artifact-dir",
+                ev.to_str().unwrap(),
+            ],
+            None,
+            300,
+        );
+        assert!(ok, "{label} 执行失败: {so}");
+    }
+    let v1: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&r1).unwrap()).unwrap();
+    let v2: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&r2).unwrap()).unwrap();
+    let s1 = std::path::PathBuf::from(v1["artifacts"]["stdout"].as_str().unwrap());
+    let s2 = std::path::PathBuf::from(v2["artifacts"]["stdout"].as_str().unwrap());
+    assert_ne!(s1, s2, "两轮 stdout 工件路径必须不同(不覆盖)");
+    assert!(s1.is_file() && s2.is_file(), "两轮工件都须在场");
+    let h = |p: &std::path::Path| sha256_hex(p);
+    assert_eq!(
+        v1["stdout_sha256"].as_str().unwrap(),
+        h(&s1),
+        "run1 hash 一致"
+    );
+    assert_eq!(
+        v2["stdout_sha256"].as_str().unwrap(),
+        h(&s2),
+        "run2 hash 一致"
+    );
+}
+
+/// 修复轮 2026-09-10 T4: 初审 verdict 白名单 —— 非法/空/非 str →
+/// claims-verdict-invalid;cross 词表(accept)在初审被拒;合法三词
+/// (approve/request-changes/comment)通过 freeze。
+#[test]
+fn olp_review_first_review_verdict_whitelist() {
+    let (ft, repo, _h) = make_cargo_fixture("verdicts", FIXTURE_FAIL_TEST);
+    let d = ft.path().join("rev");
+    std::fs::create_dir_all(&d).unwrap();
+    init_review_at(&d, &repo);
+    write_authority(&d, "glm", "1", "completed");
+    write_authority(&d, "k3", "1", "completed");
+    let head = state_head_of(&repo);
+    let st0: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(d.join("review-state.json")).unwrap())
+            .unwrap();
+    let sess0 = st0["session"].as_str().unwrap().to_string();
+    let goal0 = st0["goal"].as_str().unwrap().to_string();
+    let rt0 = st0["runtime"].as_str().unwrap().to_string();
+    for bad in [
+        "\"unrecognized-verdict\"",
+        "\"\"",
+        "null",
+        "\"accept\"",
+        "\"refute\"",
+    ] {
+        let glm = d.join("glm-bad.md");
+        std::fs::write(
+            &glm,
+            format!("---\nslug: glm\noutcome: completed\nturn: 1\nHEAD: {head}\nsession: {sess0}\ngoal: {goal0}\nruntime: {rt0}\n---\n\nb\n\n```json\n{{\"claims\": [{{\"id\": \"X\", \"verdict\": {bad}, \"evidence\": []}}]}}\n```\n"),
+        ).unwrap();
+        let k3 = write_review(&d, "k3-ok.md", "completed", "1", Some(&head));
+        let (ok, so, _se) = run(&[
+            "freeze",
+            d.to_str().unwrap(),
+            "--glm-review",
+            glm.to_str().unwrap(),
+            "--k3-review",
+            k3.to_str().unwrap(),
+            "--glm-slug",
+            "glm",
+            "--k3-slug",
+            "k3",
+            "--native-root",
+            d.join("native").to_str().unwrap(),
+            "--head",
+            &head,
+        ]);
+        assert!(!ok, "verdict={bad} 不得通过 freeze");
+        let v: serde_json::Value = serde_json::from_str(so.trim()).unwrap();
+        assert_eq!(
+            v["error"]["code"].as_str().unwrap_or("?"),
+            "claims-verdict-invalid",
+            "verdict={bad}: {v}"
+        );
+    }
+    // 合法三词通过(每 case 独立未污染 state)
+    for (rev_i, v) in ["approve", "request-changes", "comment"].iter().enumerate() {
+        let d2 = ft.path().join(format!("rev-ok-{rev_i}"));
+        std::fs::create_dir_all(&d2).unwrap();
+        init_review_at(&d2, &repo);
+        write_authority(&d2, "glm", "1", "completed");
+        write_authority(&d2, "k3", "1", "completed");
+        let glm = d2.join(format!("glm-{rev_i}.md"));
+        std::fs::write(
+            &glm,
+            format!("---\nslug: glm\noutcome: completed\nturn: 1\nHEAD: {head}\nsession: {sess0}\ngoal: {goal0}\nruntime: {rt0}\n---\n\nb\n\n```json\n{{\"claims\": [{{\"id\": \"X\", \"verdict\": \"{v}\", \"evidence\": []}}]}}\n```\n"),
+        ).unwrap();
+        let k3 = write_review(
+            &d2,
+            format!("k3-{rev_i}.md").as_str(),
+            "completed",
+            "1",
+            Some(&head),
+        );
+        let (ok, so, _se) = run(&[
+            "freeze",
+            d2.to_str().unwrap(),
+            "--glm-review",
+            glm.to_str().unwrap(),
+            "--k3-review",
+            k3.to_str().unwrap(),
+            "--glm-slug",
+            "glm",
+            "--k3-slug",
+            "k3",
+            "--native-root",
+            d2.join("native").to_str().unwrap(),
+            "--head",
+            &head,
+        ]);
+        assert!(ok, "合法 verdict={v} 应通过: {so}");
+    }
+}
+
+/// --lib 入口专用 tiny fixture: src/lib.rs 带真实单测(libtest::probe_pass),
+/// 独立 git repo(tracked 干净,满足 tracked-source-modified 门)。
+fn make_cargo_lib_fixture(tag: &str) -> (TmpDir, PathBuf, String) {
+    let t = TmpDir::new(&format!("fixture-lib-{tag}"));
+    let repo = t.path().join("fixture-repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"olp-min-fixture-lib\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("src").join("lib.rs"),
+        "pub fn truthy() -> bool { true }\n\npub mod libtest {\n    #[test]\n    fn probe_pass() { assert!(super::truthy()); }\n}\n",
+    )
+    .unwrap();
+    {
+        let out = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    for cfg in [
+        ("user.name", "olp-fixture"),
+        ("user.email", "olp-fixture@example.invalid"),
+    ] {
+        let out = Command::new("git")
+            .args(["config", "--local", cfg.0, cfg.1])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git config failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    for args in [
+        vec!["add", "Cargo.toml", "src/lib.rs"],
+        vec!["commit", "--quiet", "-m", "lib fixture"],
+    ] {
+        let out = Command::new("git")
+            .args(&args)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    let head = {
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    (t, repo, head)
 }

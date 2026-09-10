@@ -472,6 +472,73 @@ Rule: review-monitor — Herdr 监控:区块分离与身份防混
 
 Rule: review-regression — 前轮八反例回归数据集
 
+场景: state 形状校验全入口结构化(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_malformed_state_all_entries_structured
+  假设 合法 JSON 但结构损坏的 state(顶层非对象/frozen 缺 reviews/head/
+    嵌套 reviews/challenges/history/latest/verdicts/cross 形状非法)
+  当 任一 init/freeze/challenge/cross/status/classify 入口读取
+  那么 一致结构化 JSON 错误(state-shape-invalid / classify-context-*),
+    不出现 KeyError traceback;git status 查询失败不得当作 clean
+
+场景: accepted live 记录全生命周期 fail-closed(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_live_receipt_lifecycle_tamper_rejected
+  假设 apply_live_verdict 产出的 accepted history/latest 记录(唯一
+    writer,恒带 cargo receipt);篡改 receipt 字节/删除/篡改或删除
+    stdout 工件/删 receipt 键/快照核心字段与 receipt 不一致(类型敏感,
+    False≠0)/快照缺字段由 hash 验证过的 receipt 补齐
+  当 verify_no_tamper 校验(status/cross/challenge/classify 共用)
+  那么 篡改/删除/不一致/缺失 → live-receipt-tampered 拒;真实旧快照
+    缺字段从完整 receipt 重建后通过;legacy 正例保持可验
+
+场景: adapter --lib 入口全工件绑定与 tracked 干净门(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_k3_cargo_adapter_lib_entry_full_artifacts
+  假设 独立 tiny lib fixture(src/lib.rs 真实单测,git 提交后 tracked
+    干净)经生产 adapter --lib 执行
+  当 adapter 运行
+  那么 observed=pass、test_target=--lib、selector_qualified 经
+    cargo --list 全限定定位、源文件 SHA256 绑定、stdout/stderr 工件
+    mkstemp 唯一;tracked 源修改(执行前后同门)拒绝且 git status 查询
+    失败不得当作 clean —— 主仓开发树因未提交 tracked 修改被正确拒绝,
+    被测 repo 须 tracked == HEAD
+
+场景: adapter 同 selector 多轮工件不覆盖(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_adapter_same_selector_two_runs_no_overwrite
+  假设 同一 selector 于同一 artifact-dir 多次真实执行(含并发)
+  当 adapter 落盘 stdout/stderr
+  Then 每次独立唯一文件(mkstemp,同进程同秒/多进程均不碰撞),旧
+    receipt 的 hash 与文件仍可验证;tracked 源修改(执行前后同门)拒绝,
+    untracked 探针/工件接受,git status 失败拒绝
+  那么 两套工件都在场且 hash 与各自 receipt 一致
+
+场景: 初审 claim verdict 白名单(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_first_review_verdict_whitelist
+  假设 初审报告 claims 块 verdict 非 {approve, request-changes,
+    comment}(当前合约初审初始态词表;空/非 str/cross 词表 accept/
+    refute/执行后状态均非法)
+  当 freeze 解析初审
+  那么 claims-verdict-invalid 结构化拒绝;合法词表通过,未污染 state
+    的 freeze 全流程正常
+
+场景: monitor closed 身份保留跨仓 parity(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_monitor_closed_keeps_identity_on_trusted_lifetime
+  假设 peer closed 标记 + 可信 lifetime(originator/goal 归属一致)
+  当 渲染监控
+  那么 execution 恒 closed,身份字段(task_id/generation/turn/
+    master_session_id)保留;foreign goal → closed 且身份 null;
+    malformed lifetime → 身份 null;无 lifetime/旧失败语义不变
+
 场景: classify 受信来源门(伪造链拒绝)(critical)
   测试:
     包: octoscode
