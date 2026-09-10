@@ -2486,6 +2486,19 @@ impl Store {
             .and_then(|session| session.profile_id.clone())
     }
 
+    /// Profile to stamp on a freshly created [`SessionView`] for `session_id`
+    /// when no server-supplied `active_profile_id` is available (the resume /
+    /// hydrate paths). A profiled key (`{profile}:{channel}:{chat}`) carries
+    /// its own immutable profile dimension — that IS the session's profile,
+    /// regardless of which session is currently active; only profile-less
+    /// keys fall back to the active session's profile.
+    fn profile_stamp_for_session_key(&self, session_id: &SessionKey) -> Option<String> {
+        session_id
+            .profile_id()
+            .map(str::to_owned)
+            .or_else(|| self.active_session_profile_id())
+    }
+
     /// Returns the cached goal record IFF the goal is in a state the
     /// TUI is allowed to transition. Per UPCR-2026-021 the model owns
     /// the `complete` transition — the TUI must not reactivate a
@@ -3228,7 +3241,7 @@ impl Store {
         {
             self.state.switch_selected_session(index);
         } else {
-            let profile_id = self.active_session_profile_id();
+            let profile_id = self.profile_stamp_for_session_key(&session_id);
             self.state.sessions.push(SessionView {
                 id: session_id.clone(),
                 title: session_id.0.clone(),
@@ -10587,7 +10600,7 @@ impl Store {
                     self.state.sessions.push(SessionView {
                         id: session_id.clone(),
                         title: session_id.0.clone(),
-                        profile_id: self.active_session_profile_id(),
+                        profile_id: self.profile_stamp_for_session_key(&session_id),
                         messages,
                         tasks: Vec::new(),
                         live_reply: None,
@@ -21337,6 +21350,176 @@ now analyzing the bus module"
                 .map(|session| session.id.0.as_str()),
             Some("coding:api:other"),
             "focus moved to the resumed session"
+        );
+    }
+
+    /// `/resume` into a session created under a DIFFERENT profile must not
+    /// inherit the outgoing session's profile: a profiled session key
+    /// (`{profile}:{channel}:{chat}`) carries its own immutable profile
+    /// dimension, so the placeholder SessionView is stamped from the key —
+    /// not from the active session being switched away from.
+    #[test]
+    fn resume_stamps_the_resumed_sessions_own_profile() {
+        let mut store = store_with_empty_session(); // active profile: "coding"
+
+        let command = store
+            .dispatch_local_action(
+                LocalAction::ResumeSession("glm:local:tui#research".into()),
+                None,
+            )
+            .into_command();
+
+        assert!(
+            matches!(command, Some(AppUiCommand::HydrateSession(_))),
+            "resume dispatches a hydrate"
+        );
+        let resumed = store
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == SessionKey("glm:local:tui#research".into()))
+            .expect("placeholder session was created");
+        assert_eq!(
+            resumed.profile_id.as_deref(),
+            Some("glm"),
+            "a profiled key stamps its OWN profile, not the outgoing session's"
+        );
+    }
+
+    /// A profile-LESS resumed key (`{channel}:{chat}`) has no profile dimension
+    /// to stamp from — the placeholder keeps the historical fallback: the
+    /// active session's profile.
+    #[test]
+    fn resume_profile_less_key_falls_back_to_active_profile() {
+        let mut store = store_with_empty_session(); // active profile: "coding"
+
+        store.dispatch_local_action(LocalAction::ResumeSession("local:other".into()), None);
+
+        let resumed = store
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == SessionKey("local:other".into()))
+            .expect("placeholder session was created");
+        assert_eq!(resumed.profile_id.as_deref(), Some("coding"));
+    }
+
+    /// The hydrate find-or-create branch (a hydrate result for a session with
+    /// no local SessionView) stamps the same key-derived profile as the
+    /// `/resume` placeholder — both are resume-side creations without a
+    /// server `active_profile_id`.
+    #[test]
+    fn hydrate_find_or_create_stamps_profile_from_the_key() {
+        use crate::client_event::ClientEvent;
+        let mut store = store_with_empty_session(); // active profile: "coding"
+        let session_id = SessionKey("glm:local:tui#research".into());
+
+        store.apply_client_event(ClientEvent::SessionHydrate(SessionHydrateResult {
+            session_id: session_id.clone(),
+            cursor: octos_core::ui_protocol::UiCursor {
+                stream: session_id.0.clone(),
+                seq: 1,
+            },
+            context: None,
+            context_state: None,
+            messages: Some(vec![]),
+            threads: None,
+            turns: None,
+            pending_approvals: None,
+            pending_questions: None,
+            replayed_envelopes: None,
+            replayed_tool_envelopes: None,
+        }));
+
+        let created = store
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .expect("hydrate find-or-created the session");
+        assert_eq!(created.profile_id.as_deref(), Some("glm"));
+    }
+
+    /// Wire-level end-to-end of the issue scenario: `/resume` into a session
+    /// created under a DIFFERENT profile, the server answers with a
+    /// `session/hydrate` result (parsed from its raw JSON wire shape — the
+    /// resume path never gets a `session/opened` with `active_profile_id`),
+    /// and the effective profile resolver must then report the RESUMED
+    /// session's own profile, not the launch profile.
+    #[test]
+    fn resume_end_to_end_effective_profile_follows_the_resumed_session() {
+        use crate::client_event::ClientEvent;
+        let mut store = store_with_empty_session(); // launch profile: "coding"
+
+        let command = store
+            .dispatch_local_action(
+                LocalAction::ResumeSession("glm:local:tui#research".into()),
+                None,
+            )
+            .into_command();
+        let Some(AppUiCommand::HydrateSession(params)) = command else {
+            panic!("resume dispatches a hydrate");
+        };
+
+        // The server's wire answer carries no profile field — only the key.
+        let hydrate: SessionHydrateResult = serde_json::from_value(serde_json::json!({
+            "session_id": params.session_id,
+            "cursor": { "stream": params.session_id.0, "seq": 1 },
+            "messages": [],
+        }))
+        .expect("wire-shaped hydrate parses");
+        store.apply_client_event(ClientEvent::SessionHydrate(hydrate));
+
+        assert_eq!(
+            store
+                .state
+                .active_session()
+                .map(|session| session.id.0.as_str()),
+            Some("glm:local:tui#research"),
+            "focus is on the resumed session"
+        );
+        assert_eq!(
+            store.active_profile_id().as_deref(),
+            Some("glm"),
+            "the effective profile follows the RESUMED session's own profile"
+        );
+    }
+
+    /// The key-derived stamp rides `SessionKey`'s profile/channel parse, so
+    /// pin the tricky shapes at THIS integration point (core has its own
+    /// parser tests, but a parser drift there must fail here, not silently
+    /// mislabel a resumed session): colon chat ids (Matrix rooms) with and
+    /// without a profile dimension, and the synthetic `_main` profile prefix.
+    #[test]
+    fn resume_profile_stamp_handles_colon_chat_ids_and_main_prefix() {
+        // Each resume switches focus (and with it the active-profile
+        // fallback), so every case gets its own store.
+        let stamp_after_resume = |id: &str| {
+            let mut store = store_with_empty_session(); // active profile: "coding"
+            store.dispatch_local_action(LocalAction::ResumeSession(id.into()), None);
+            store
+                .state
+                .sessions
+                .iter()
+                .find(|session| session.id == SessionKey(id.into()))
+                .unwrap_or_else(|| panic!("placeholder exists for {id}"))
+                .profile_id
+                .clone()
+        };
+        assert_eq!(
+            stamp_after_resume("weather:matrix:!room:localhost").as_deref(),
+            Some("weather"),
+            "profiled colon-chat key stamps its own profile"
+        );
+        assert_eq!(
+            stamp_after_resume("matrix:!room:elsewhere").as_deref(),
+            Some("coding"),
+            "unprofiled colon-chat key keeps the active-profile fallback"
+        );
+        assert_eq!(
+            stamp_after_resume("_main:local:tui").as_deref(),
+            Some("_main"),
+            "the synthetic main-profile prefix stamps `_main`, like session/opened does"
         );
     }
 
