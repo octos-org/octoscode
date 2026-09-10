@@ -606,3 +606,60 @@ Rule: review-regression — 前轮八反例回归数据集
   当 分别以 --format json 与默认 human 运行两个入口
   那么 JSON 可被 json.loads 解析且含同判词集合,human 含四区块可读视图;
     错误输出亦为可解析 JSON
+
+
+场景: frozen state 必需键全入口结构化校验(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_frozen_missing_keys_structured_status_and_live_cargo
+  假设 合法 freeze 后的 review-state.json 被注入缺键/坏类型
+    (verdicts/challenges 缺失或非 dict;repo 缺失/空串/纯空格/非 str)
+  当 status 或 challenge --live-cargo 读取
+  那么 一律 state-shape-invalid 结构化 JSON 拒绝(非零退出),
+    不再出现 KeyError: verdicts / KeyError: repo traceback
+
+场景: latest/history accepted 必须 bool(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_latest_accepted_must_be_bool
+  假设 accepted 值被注入 1/0/"1"/[]/{}/显式 null(truthy 或 falsy
+    非 bool);或 history 记录同类注入;或缺键(缺省)
+  当 状态被 cross/status 消费
+  那么 非 bool 一律 state-shape-invalid;缺键=缺省豁免;
+    accepted:false + imported:true 合法兼容仍可通过;
+    全部读点以 is True 判真(truthiness 不再作为依据)
+
+场景: 快照核心 int 0 与 bool False 类型敏感(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_snapshot_core_false_vs_zero_rejected
+  假设 真实 PASS selector 注册(exit_code=int 0,先断言基线为 int),
+    快照 latest 或 history 的 exit_code 被改为 bool false
+    (Python 宽松比较 0==False 为真的反例)
+  当 verify_no_tamper 校验
+  那么 live-receipt-tampered 类型敏感拒绝;恢复原件复绿
+
+场景: latest/history 记录形状同门与 legacy 兼容(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_latest_executed_shape_gates
+  假设 latest.executed="bad" 或 executed.artifacts=[](非 dict);
+    或所有 accepted 记录(latest 与全部 history)整段删 executed
+    (legacy 形态,receipt 原件完整且 hash 一致)
+  当 status 校验
+  那么 形状注入 → state-shape-invalid;legacy 缺快照由 receipt 单侧
+    重建允许,但删除/篡改真实 stdout 工件仍 live-receipt-tampered
+    (工件门不可绕),legacy 状态恢复工件复绿
+
+场景: adapter tracked 门三面与 git status fail-closed(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_adapter_tracked_modified_before_and_after
+  假设 fixture probe 测试运行中真实改写已 tracked 的 src/lib.rs
+    (执行前 clean,本次 cargo test 运行后 dirty);untracked 探针
+    文件;非 git 工作树
+  当 生产 adapter 执行(前置/末尾同门)或门函数直调
+  那么 同次执行后 tracked 修改 → tracked-source-modified(执行后
+    phase,drift 标记证明测试确已运行);untracked 不触发;CLI 早拒
+    非 git 工作树;git status 查询失败经门函数真实 I/O 返回
+    rc=1 + tracked-source-modified(查询失败),不得当作 clean

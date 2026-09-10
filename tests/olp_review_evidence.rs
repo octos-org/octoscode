@@ -4911,10 +4911,16 @@ fn olp_review_live_receipt_lifecycle_tamper_rejected() {
         "live-receipt-tampered"
     );
     std::fs::write(&stdout_p, &orig_stdout).unwrap();
-    // (d) 删除 stdout 工件
+    // (d) 删除 stdout 工件(修复轮补错误码断言: 不得只断言失败)
     std::fs::remove_file(&stdout_p).unwrap();
-    let (ok4, _so4, _) = run(&["status", d.to_str().unwrap()]);
+    let (ok4, so4, _) = run(&["status", d.to_str().unwrap()]);
     assert!(!ok4, "删除 stdout 工件后 status 必须拒绝");
+    let v4: serde_json::Value = serde_json::from_str(so4.trim()).unwrap();
+    assert_eq!(
+        v4["error"]["code"].as_str().unwrap_or("?"),
+        "live-receipt-tampered",
+        "删除 stdout 工件的错误码: {so4}"
+    );
     std::fs::write(&stdout_p, &orig_stdout).unwrap();
     // 恢复后 status 复绿
     let (ok5, _so5, _) = run(&["status", d.to_str().unwrap()]);
@@ -5131,4 +5137,600 @@ fn make_cargo_lib_fixture(tag: &str) -> (TmpDir, PathBuf, String) {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     };
     (t, repo, head)
+}
+
+/// 后发 review 修复轮 2026-09-10 晚(PR#636 BH3GEI 三组尾项)R1:
+/// frozen state 必需 verdicts(dict)/challenges(dict)/repo(非空 str)——
+/// 缺失时 cross/live-cargo 曾 KeyError traceback(636-probes.json
+/// missing-verdicts-cross / missing-repo-live-challenge),必须结构化
+/// state-shape-invalid JSON 拒绝。
+/// 复用 T1 五入口模式: 畸形注入后逐入口断言非零 + 错误码。
+#[test]
+fn olp_review_frozen_missing_keys_structured_status_and_live_cargo() {
+    let t = TmpDir::new("shape-frozen-keys");
+    let d = t.path().to_path_buf();
+    // 合法完整 frozen state 基线(真实 freeze 产物键集)
+    init_review(&d, &head());
+    write_authority(&d, "glm", "1", "completed");
+    write_authority(&d, "k3", "1", "completed");
+    let glm = write_review(&d, "glm.md", "completed", "1", Some(&head()));
+    let k3 = write_review(&d, "k3.md", "completed", "1", Some(&head()));
+    let (okf, sof, sef) = run(&[
+        "freeze",
+        d.to_str().unwrap(),
+        "--glm-review",
+        glm.to_str().unwrap(),
+        "--k3-review",
+        k3.to_str().unwrap(),
+        "--native-root",
+        native_root(&d).to_str().unwrap(),
+        "--head",
+        &head(),
+    ]);
+    assert!(okf, "freeze failed: {sof} {sef}");
+    let base_state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(d.join("review-state.json")).unwrap())
+            .unwrap();
+
+    for (case, patch) in [
+        (
+            "missing-verdicts",
+            serde_json::json!({ "remove": ["verdicts"] }),
+        ),
+        (
+            "missing-challenges",
+            serde_json::json!({ "remove": ["challenges"] }),
+        ),
+        ("missing-repo", serde_json::json!({ "remove": ["repo"] })),
+        (
+            "repo-empty-str",
+            serde_json::json!({ "set": { "repo": "" } }),
+        ),
+        ("repo-non-str", serde_json::json!({ "set": { "repo": 42 } })),
+        (
+            "verdicts-non-dict",
+            serde_json::json!({ "set": { "verdicts": [] } }),
+        ),
+        (
+            "challenges-non-dict",
+            serde_json::json!({ "set": { "challenges": [] } }),
+        ),
+    ] {
+        let mut st = base_state.clone();
+        if let Some(keys) = patch.get("remove").and_then(|v| v.as_array()) {
+            for k in keys {
+                st.as_object_mut().unwrap().remove(k.as_str().unwrap());
+            }
+        }
+        if let Some(sets) = patch.get("set").and_then(|v| v.as_object()) {
+            for (k, v) in sets {
+                st.as_object_mut().unwrap().insert(k.clone(), v.clone());
+            }
+        }
+        std::fs::write(
+            d.join("review-state.json"),
+            serde_json::to_string(&st).unwrap(),
+        )
+        .unwrap();
+        // status 入口(统一前置校验,与 cross/live-cargo 同一形状门)
+        let (ok, so, _) = run(&["status", d.to_str().unwrap()]);
+        assert!(!ok, "{case} status 不得成功: {so}");
+        let v: serde_json::Value = serde_json::from_str(so.trim())
+            .unwrap_or_else(|_| panic!("{case} status 应输出 JSON: {so}"));
+        assert_eq!(
+            v["error"]["code"].as_str().unwrap_or("?"),
+            "state-shape-invalid",
+            "{case} status 错误码: {so}"
+        );
+    }
+    // live-cargo 消费点(曾 KeyError: repo): 缺 repo/空 repo/非 str → 结构化拒绝
+    for (case, patch) in [
+        ("missing-repo", serde_json::json!({ "remove": ["repo"] })),
+        (
+            "repo-empty-str",
+            serde_json::json!({ "set": { "repo": "" } }),
+        ),
+        ("repo-non-str", serde_json::json!({ "set": { "repo": 42 } })),
+    ] {
+        let mut st = base_state.clone();
+        if let Some(keys) = patch.get("remove").and_then(|v| v.as_array()) {
+            for k in keys {
+                st.as_object_mut().unwrap().remove(k.as_str().unwrap());
+            }
+        }
+        if let Some(sets) = patch.get("set").and_then(|v| v.as_object()) {
+            for (k, v) in sets {
+                st.as_object_mut().unwrap().insert(k.clone(), v.clone());
+            }
+        }
+        std::fs::write(
+            d.join("review-state.json"),
+            serde_json::to_string(&st).unwrap(),
+        )
+        .unwrap();
+        let (okc, soc, _sec) = run(&[
+            "challenge",
+            d.to_str().unwrap(),
+            "--live-cargo",
+            "--claim",
+            "X",
+            "--selector",
+            "s",
+            "--expect",
+            "fail",
+        ]);
+        assert!(!okc, "{case} live-cargo 不得成功: {soc}");
+        let vc: serde_json::Value = serde_json::from_str(soc.trim())
+            .unwrap_or_else(|_| panic!("{case} live-cargo 应输出 JSON: {soc}"));
+        assert_eq!(
+            vc["error"]["code"].as_str().unwrap_or("?"),
+            "state-shape-invalid",
+            "{case} live-cargo 错误码: {soc}"
+        );
+    }
+}
+
+/// R2: latest/history accepted 在场必须 bool —— 显式 null 与 1/"1"/[]
+/// 一律 state-shape-invalid;缺键才视为缺省。合法 accepted:false +
+/// imported 兼容保持。
+#[test]
+fn olp_review_latest_accepted_must_be_bool() {
+    let (t, _glm) = challenged_dir("acc-bool");
+    let d = t.path().to_path_buf();
+    let base_state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(d.join("review-state.json")).unwrap())
+            .unwrap();
+    // (a) truthy 非 bool → cross 拒绝且结构化
+    for bad in [
+        serde_json::json!(1),
+        serde_json::json!(0),
+        serde_json::json!("1"),
+        serde_json::json!([]),
+        serde_json::json!({}),
+        serde_json::Value::Null, // 显式 null 非缺省豁免,同样非 bool → 拒
+    ] {
+        let mut st = base_state.clone();
+        st["challenges"]["X"]["latest"] = serde_json::json!({ "accepted": bad });
+        std::fs::write(
+            d.join("review-state.json"),
+            serde_json::to_string(&st).unwrap(),
+        )
+        .unwrap();
+        let cross = write_cross_structured(
+            &d,
+            "k3",
+            "cross-k3-acc.md",
+            "5",
+            "completed",
+            r#"[{"id": "X", "verdict": "accept"}]"#,
+        );
+        let (ok, so, _) = run(&[
+            "cross",
+            d.to_str().unwrap(),
+            "--cross-report",
+            cross.to_str().unwrap(),
+            "--cross-slug",
+            "k3",
+            "--native-root",
+            native_root(&d).to_str().unwrap(),
+        ]);
+        assert!(!ok, "accepted={bad} 不得过 cross: {so}");
+        let v: serde_json::Value = serde_json::from_str(so.trim())
+            .unwrap_or_else(|_| panic!("accepted={bad} 应输出 JSON: {so}"));
+        assert_eq!(
+            v["error"]["code"].as_str().unwrap_or("?"),
+            "state-shape-invalid",
+            "accepted={bad} 错误码: {so}"
+        );
+    }
+    // (b) history 非 bool 同样结构化拒绝
+    let mut st = base_state.clone();
+    st["challenges"]["X"]["history"] = serde_json::json!([{ "accepted": 1, "executed": null }]);
+    std::fs::write(
+        d.join("review-state.json"),
+        serde_json::to_string(&st).unwrap(),
+    )
+    .unwrap();
+    let (oks, sos, _) = run(&["status", d.to_str().unwrap()]);
+    assert!(!oks, "history accepted=1 status 必须拒绝: {sos}");
+    let vs: serde_json::Value = serde_json::from_str(sos.trim()).unwrap();
+    assert_eq!(
+        vs["error"]["code"].as_str().unwrap_or("?"),
+        "state-shape-invalid"
+    );
+    // (c) 合法兼容: accepted:false + imported:true 不拒(status 仍成功——
+    // challenged_dir 基线本身是真实注册 accepted:true,这里仅验 false 注入不崩)
+    let mut st = base_state.clone();
+    st["challenges"]["X"]["latest"] = serde_json::json!({ "accepted": false, "imported": true });
+    std::fs::write(
+        d.join("review-state.json"),
+        serde_json::to_string(&st).unwrap(),
+    )
+    .unwrap();
+    let (okf2, sof2, _) = run(&["status", d.to_str().unwrap()]);
+    assert!(okf2, "accepted:false/imported:true 合法兼容: {sof2}");
+}
+
+/// 后发 review 修复轮 R3a: 核心 int 0 vs bool False 必须类型敏感拒绝。
+/// 用真实 PASS selector(exit_code==0),先断言回执 exit_code 为 int 0,
+/// 再把快照 latest/history 的 exit_code 改为 bool false —— Python 宽松
+/// 比较 0==False 为真,若一致性门不做类型检查会静默通过;必须
+/// live-receipt-tampered。latest 与 history 分别覆盖。
+#[test]
+fn olp_review_snapshot_core_false_vs_zero_rejected() {
+    let (ft, repo, _h) = make_cargo_fixture("fvs0", FIXTURE_PASS_TEST);
+    let d = ft.path().join("rev");
+    std::fs::create_dir_all(&d).unwrap();
+    init_review_at(&d, &repo);
+    write_authority(&d, "glm", "1", "completed");
+    write_authority(&d, "k3", "1", "completed");
+    let glm = write_review(&d, "glm.md", "completed", "1", Some(&state_head_of(&repo)));
+    let k3 = write_review(&d, "k3.md", "completed", "1", Some(&state_head_of(&repo)));
+    let (okf, sof, sef) = run(&[
+        "freeze",
+        d.to_str().unwrap(),
+        "--glm-review",
+        glm.to_str().unwrap(),
+        "--k3-review",
+        k3.to_str().unwrap(),
+        "--glm-slug",
+        "glm",
+        "--k3-slug",
+        "k3",
+        "--native-root",
+        d.join("native").to_str().unwrap(),
+        "--head",
+        &state_head_of(&repo),
+    ]);
+    assert!(okf, "freeze failed: {sof} {sef}");
+    let (okc, soc, sec) = live_challenge(
+        &d,
+        &repo,
+        "X",
+        "fixture_probe_pass",
+        "pass",
+        &ft.path().join("target"),
+    );
+    assert!(okc, "live challenge failed: {soc} {sec}");
+    let sp = d.join("review-state.json");
+    let orig = std::fs::read_to_string(&sp).unwrap();
+    let st0: serde_json::Value = serde_json::from_str(&orig).unwrap();
+    let hist0 = st0["challenges"]["X"]["history"].as_array().unwrap();
+    let last0 = hist0.last().unwrap();
+    // 先证明基线是真实 int 0(不是 False/缺失)
+    assert_eq!(
+        last0["executed"]["exit_code"].as_i64(),
+        Some(0),
+        "PASS 回执 exit_code 应为 int 0"
+    );
+    assert!(
+        !last0["executed"]["exit_code"].is_boolean(),
+        "基线 exit_code 不得是 bool"
+    );
+    // (a) history: exit_code 0(int) → false(bool) —— 0==False 宽松相等反例
+    let mut st: serde_json::Value = serde_json::from_str(&orig).unwrap();
+    let hist = st["challenges"]["X"]["history"].as_array_mut().unwrap();
+    hist.last_mut().unwrap()["executed"]["exit_code"] = serde_json::Value::Bool(false);
+    std::fs::write(&sp, serde_json::to_string(&st).unwrap()).unwrap();
+    let (ok1, so1, _) = run(&["status", d.to_str().unwrap()]);
+    assert!(!ok1, "history exit_code false 冒充 int 0 必须拒绝: {so1}");
+    let v1: serde_json::Value = serde_json::from_str(so1.trim()).unwrap();
+    assert_eq!(
+        v1["error"]["code"].as_str().unwrap_or("?"),
+        "live-receipt-tampered"
+    );
+    // (b) latest 同字段同改法
+    let mut st2: serde_json::Value = serde_json::from_str(&orig).unwrap();
+    st2["challenges"]["X"]["latest"]["executed"]["exit_code"] = serde_json::Value::Bool(false);
+    std::fs::write(&sp, serde_json::to_string(&st2).unwrap()).unwrap();
+    let (ok2, so2, _) = run(&["status", d.to_str().unwrap()]);
+    assert!(!ok2, "latest exit_code false 冒充 int 0 必须拒绝: {so2}");
+    let v2: serde_json::Value = serde_json::from_str(so2.trim()).unwrap();
+    assert_eq!(
+        v2["error"]["code"].as_str().unwrap_or("?"),
+        "live-receipt-tampered"
+    );
+    // 恢复后复绿
+    std::fs::write(&sp, &orig).unwrap();
+    let (ok3, _so3, _) = run(&["status", d.to_str().unwrap()]);
+    assert!(ok3, "恢复原件后 status 复绿");
+}
+
+/// 后发 review 修复轮 R3b: legacy 快照缺字段兼容 + 工件门不可绕。
+/// 正确语义(ROOT 明确指令): 注册真实 receipt 后,删除快照 executed 或其
+/// 内部 artifacts/hash —— status 仍通过(完整有效原 receipt 单侧恢复);
+/// 但再删除/篡改真实 stdout 工件,status 必须 live-receipt-tampered,
+/// 证明缺快照字段不能绕过工件一致性校验;恢复可绿。
+#[test]
+fn olp_review_latest_executed_shape_gates() {
+    let (ft, repo, _h) = make_cargo_fixture("noexec", FIXTURE_FAIL_TEST);
+    let d = ft.path().join("rev");
+    std::fs::create_dir_all(&d).unwrap();
+    init_review_at(&d, &repo);
+    write_authority(&d, "glm", "1", "completed");
+    write_authority(&d, "k3", "1", "completed");
+    let glm = write_review(&d, "glm.md", "completed", "1", Some(&state_head_of(&repo)));
+    let k3 = write_review(&d, "k3.md", "completed", "1", Some(&state_head_of(&repo)));
+    let (okf, sof, sef) = run(&[
+        "freeze",
+        d.to_str().unwrap(),
+        "--glm-review",
+        glm.to_str().unwrap(),
+        "--k3-review",
+        k3.to_str().unwrap(),
+        "--glm-slug",
+        "glm",
+        "--k3-slug",
+        "k3",
+        "--native-root",
+        d.join("native").to_str().unwrap(),
+        "--head",
+        &state_head_of(&repo),
+    ]);
+    assert!(okf, "freeze failed: {sof} {sef}");
+    let (okc, soc, sec) = live_challenge(
+        &d,
+        &repo,
+        "X",
+        "fixture_probe_fails",
+        "fail",
+        &ft.path().join("target"),
+    );
+    assert!(okc, "live challenge failed: {soc} {sec}");
+    let sp = d.join("review-state.json");
+    let orig = std::fs::read_to_string(&sp).unwrap();
+    let st0: serde_json::Value = serde_json::from_str(&orig).unwrap();
+    let last0 = st0["challenges"]["X"]["history"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap();
+    // 真实 stdout 工件路径(receipt 声明,与快照同源)
+    let stdout_p =
+        std::path::PathBuf::from(last0["executed"]["artifacts"]["stdout"].as_str().unwrap());
+    let orig_stdout = std::fs::read(&stdout_p).unwrap();
+    // (a) 所有 accepted 快照都缺 executed，避免另一条完整快照替
+    // legacy 路径拦住工件篡改，导致测试无法证明 receipt 回退验真。
+    let mut st: serde_json::Value = serde_json::from_str(&orig).unwrap();
+    for record in st["challenges"]["X"]["history"].as_array_mut().unwrap() {
+        record.as_object_mut().unwrap().remove("executed");
+    }
+    st["challenges"]["X"]["latest"]
+        .as_object_mut()
+        .unwrap()
+        .remove("executed");
+    std::fs::write(&sp, serde_json::to_string(&st).unwrap()).unwrap();
+    let (oka, soa, _) = run(&["status", d.to_str().unwrap()]);
+    assert!(oka, "legacy 缺 executed 且原 receipt 完整应允许: {soa}");
+    // (b) legacy 状态下删除真实 stdout 工件 → 必须拒(工件门不可绕)
+    std::fs::remove_file(&stdout_p).unwrap();
+    let (okb, sob, _) = run(&["status", d.to_str().unwrap()]);
+    assert!(!okb, "缺快照字段不得绕过工件校验: {sob}");
+    let vb: serde_json::Value = serde_json::from_str(sob.trim()).unwrap();
+    assert_eq!(
+        vb["error"]["code"].as_str().unwrap_or("?"),
+        "live-receipt-tampered"
+    );
+    // (c) legacy 状态下篡改 stdout 字节 → 同拒
+    std::fs::write(&stdout_p, b"tampered").unwrap();
+    let (okc2, soc2, _) = run(&["status", d.to_str().unwrap()]);
+    assert!(!okc2, "篡改真实工件必须拒绝: {soc2}");
+    let vc: serde_json::Value = serde_json::from_str(soc2.trim()).unwrap();
+    assert_eq!(
+        vc["error"]["code"].as_str().unwrap_or("?"),
+        "live-receipt-tampered"
+    );
+    // 保持 legacy 状态(不恢复完整快照)恢复 stdout → 复绿,证明 legacy
+    // 路径的工件校验真实存在且通过
+    std::fs::write(&stdout_p, &orig_stdout).unwrap();
+    let (okd, sod, _) = run(&["status", d.to_str().unwrap()]);
+    assert!(okd, "legacy 状态恢复工件后应复绿: {sod}");
+    // 追加: latest.executed="bad" / artifacts=[] → state-shape-invalid
+    std::fs::write(&sp, &orig).unwrap();
+    let mut stb: serde_json::Value = serde_json::from_str(&orig).unwrap();
+    stb["challenges"]["X"]["latest"]["executed"] = serde_json::json!("bad");
+    std::fs::write(&sp, serde_json::to_string(&stb).unwrap()).unwrap();
+    let (oke, soe, _) = run(&["status", d.to_str().unwrap()]);
+    assert!(!oke, "latest.executed=字符串 必须拒: {soe}");
+    let ve: serde_json::Value = serde_json::from_str(soe.trim()).unwrap();
+    assert_eq!(
+        ve["error"]["code"].as_str().unwrap_or("?"),
+        "state-shape-invalid"
+    );
+    let mut stf: serde_json::Value = serde_json::from_str(&orig).unwrap();
+    stf["challenges"]["X"]["latest"]["executed"]["artifacts"] = serde_json::json!([]);
+    std::fs::write(&sp, serde_json::to_string(&stf).unwrap()).unwrap();
+    let (okf, sof, _) = run(&["status", d.to_str().unwrap()]);
+    assert!(!okf, "latest.executed.artifacts=数组 必须拒: {sof}");
+    let vf: serde_json::Value = serde_json::from_str(sof.trim()).unwrap();
+    assert_eq!(
+        vf["error"]["code"].as_str().unwrap_or("?"),
+        "state-shape-invalid"
+    );
+    // 恢复原件复绿
+    std::fs::write(&sp, &orig).unwrap();
+    let (okg, _sog, _) = run(&["status", d.to_str().unwrap()]);
+    assert!(okg, "恢复原件后 status 复绿");
+}
+
+/// 后发 review 修复轮 R3c: tracked-source-modified 三面 ——
+/// (前置)执行前 tracked 修改 → 拒;
+/// (后置/同次)测试函数运行中改写已 tracked 的无关 src 文件,执行前
+/// clean、本次 cargo test 运行后 dirty → 同一次 adapter 末尾
+/// fail_if_tracked_modified(phase=执行后) 拒(断言 JSON code + 执行后
+/// 提示,并确认测试确已运行);
+/// (负控)untracked 工件/probe 文件不触发;
+/// (fail-closed)git status 查询失败 ≠ clean → 拒。
+#[test]
+fn olp_review_adapter_tracked_modified_before_and_after() {
+    // fixture: probe 测试运行时改写已 tracked 的 src/lib.rs(真实写盘)
+    let dirty_src_probe = r#"
+use std::fs;
+#[test]
+fn fixture_probe_fails() {
+    assert_eq!(2 + 2, 5, "fixture real assertion failure");
+}
+#[test]
+fn fixture_probe_writes_tracked_src() {
+    let p = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap())
+        .join("src")
+        .join("lib.rs");
+    let cur = fs::read_to_string(&p).unwrap_or_default();
+    fs::write(&p, format!("{cur}\n// tracked drift written by test\n")).unwrap();
+    assert!(fs::metadata(&p).is_ok());
+}
+"#;
+    let (_ft, repo, _h) = make_cargo_fixture("trkmod", dirty_src_probe);
+    // tracked src/lib.rs(测试要改写的目标必须已被 git 跟踪)
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(
+        repo.join("src").join("lib.rs"),
+        "pub fn anchor() {}
+",
+    )
+    .unwrap();
+    {
+        let out = Command::new("git")
+            .args(["add", "src/lib.rs"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git add src/lib.rs failed");
+        let out = Command::new("git")
+            .args(["commit", "--quiet", "-m", "tracked lib"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    // (前置) 执行前 tracked 修改 → 拒
+    let tracked_file = repo.join("tests").join("fixture.rs");
+    let orig_src = std::fs::read_to_string(&tracked_file).unwrap();
+    std::fs::write(&tracked_file, format!("{orig_src}\n// pre drift\n")).unwrap();
+    let (ok1, so1) = run_adapter(
+        &repo,
+        &["--selector", "fixture_probe_fails", "--expect", "fail"],
+        None,
+        300,
+    );
+    assert!(!ok1, "执行前 tracked 修改必须拒绝: {so1}");
+    assert!(so1.contains("tracked-source-modified"), "前置错误码: {so1}");
+    assert!(so1.contains("执行前"), "前置 phase 提示: {so1}");
+    std::fs::write(&tracked_file, &orig_src).unwrap();
+    // (后置/同次) 执行前 clean; probe 测试运行中改写 tracked src/lib.rs
+    // → 本次 adapter 末尾(执行后)必须拒
+    let (ok2, so2) = run_adapter(
+        &repo,
+        &[
+            "--selector",
+            "fixture_probe_writes_tracked_src",
+            "--expect",
+            "pass",
+        ],
+        None,
+        300,
+    );
+    assert!(!ok2, "同次执行后 tracked 修改必须拒绝: {so2}");
+    assert!(so2.contains("tracked-source-modified"), "后置错误码: {so2}");
+    assert!(so2.contains("执行后"), "后置 phase 提示: {so2}");
+    // 确认 probe 确已运行过(改写真实发生 → lib.rs 含 drift 标记)
+    let lib = std::fs::read_to_string(repo.join("src").join("lib.rs")).unwrap();
+    assert!(
+        lib.contains("tracked drift written by test"),
+        "probe 未真实运行(无 drift 标记): {lib}"
+    );
+    // 还原 tracked 源 + 负控: untracked 文件不触发门
+    std::fs::write(repo.join("src").join("lib.rs"), "pub fn anchor() {}\n").unwrap();
+    std::fs::write(repo.join("untracked-probe.tmp"), b"untracked").unwrap();
+    let (ok3, so3) = run_adapter(
+        &repo,
+        &["--selector", "fixture_probe_fails", "--expect", "fail"],
+        None,
+        300,
+    );
+    assert!(ok3, "untracked 文件不得触发 tracked 门: {so3}");
+    // (fail-closed A) 非 git 工作树: CLI 在 HEAD/worktree 预检即拒
+    // (走不到 status 门)——断言其实际结构化错误,不得放行
+    let git_dir = repo.join(".git");
+    let git_dir_hidden = repo.join("_git_hidden_for_probe");
+    std::fs::rename(&git_dir, &git_dir_hidden).unwrap();
+    let (ok4, so4) = run_adapter(
+        &repo,
+        &["--selector", "fixture_probe_fails", "--expect", "fail"],
+        None,
+        300,
+    );
+    assert!(!ok4, "非 git 工作树不得放行: {so4}");
+    assert!(
+        so4.contains("head-unresolvable") || so4.contains("not-a-git"),
+        "CLI 早拒错误码: {so4}"
+    );
+    std::fs::rename(&git_dir_hidden, &git_dir).unwrap();
+    // (fail-closed B) 专用钉 git status 查询失败门: 直接以 python
+    // importlib 导入生产 adapter,对其调用 fail_if_tracked_modified(
+    // 非 git 临时目录, "执行前") —— 真实 subprocess git status 失败,
+    // 断言结构化 tracked-source-modified + 查询失败。此为门函数真实
+    // I/O 边界测试,不 mock、不改生产、不伪造回执。
+    {
+        let adapter = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("scripts/olp-review-evidence-cargo.py");
+        let out = Command::new("python3")
+            .arg("-B")
+            .arg("-c")
+            .arg([
+                "import importlib.util, io, json, sys, tempfile\n",
+                "from pathlib import Path\n",
+                "spec = importlib.util.spec_from_file_location('olp_cargo', sys.argv[1])\n",
+                "m = importlib.util.module_from_spec(spec)\n",
+                "spec.loader.exec_module(m)\n",
+                "buf = io.StringIO()\n",
+                "real = sys.stdout\n",
+                "sys.stdout = buf\n",
+                "with tempfile.TemporaryDirectory() as td:\n",
+                "    rc = m.fail_if_tracked_modified(Path(td), '执行前')\n",
+                "sys.stdout = real\n",
+                "print(json.dumps({'rc': rc, 'emitted': buf.getvalue()}, ensure_ascii=False))\n",
+            ].concat())
+            .arg(&adapter)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "python 门函数探针失败: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // emit_json 写 stdout(被重定向到 buf): 探针回传 rc+emitted,
+        // 解析 emitted JSON 断言 code=tracked-source-modified 且提示含
+        // "查询失败"(真实 subprocess git status 在非 git 目录失败)
+        let probe: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(probe["rc"].as_i64(), Some(1), "git status 失败必须拒(rc=1)");
+        let emitted: serde_json::Value =
+            serde_json::from_str(probe["emitted"].as_str().unwrap_or("")).unwrap();
+        assert_eq!(
+            emitted["error"]["code"].as_str().unwrap_or("?"),
+            "tracked-source-modified",
+            "门函数错误码: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(
+            emitted["error"]["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("查询失败"),
+            "查询失败提示: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+    // 还原后复跑确认门恢复
+    let (ok5, _so5) = run_adapter(
+        &repo,
+        &["--selector", "fixture_probe_fails", "--expect", "fail"],
+        None,
+        300,
+    );
+    assert!(ok5, "还原 .git 后门应恢复: {_so5}");
 }

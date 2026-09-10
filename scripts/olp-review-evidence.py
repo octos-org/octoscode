@@ -763,7 +763,7 @@ def record_challenge(state: dict, claim: str, rec: dict) -> None:
     slot = state.setdefault("challenges", {}).setdefault(claim, {"history": []})
     slot["latest"] = rec
     slot.setdefault("history", []).append(rec)
-    if rec.get("accepted"):
+    if rec.get("accepted") is True:
         # 兼容字段: 最近一次被接纳的挑战(旧测试/外层 status 依赖)
         state["challenge"] = rec
 
@@ -997,6 +997,33 @@ def require_frozen(state: dict) -> None:
         raise fail("not-frozen", "初审未冻结")
 
 
+def _record_shape_ok(rec: object, claim: str, where: str, rd: Path) -> None:
+    """challenges 记录(latest/history[] 共用)形状门,见 _validated_state_or_fail 注。"""
+    if not isinstance(rec, dict):
+        raise fail(
+            "state-shape-invalid",
+            f"state.challenges[{claim}] {where} 元素非对象: {rd}",
+        )
+    if "accepted" in rec and not isinstance(rec.get("accepted"), bool):
+        raise fail(
+            "state-shape-invalid",
+            f"state.challenges[{claim}] {where}.accepted 非布尔: {rd}",
+        )
+    ex = rec.get("executed")
+    if ex is not None and not isinstance(ex, dict):
+        raise fail(
+            "state-shape-invalid",
+            f"state.challenges[{claim}] {where}.executed 非对象: {rd}",
+        )
+    if isinstance(ex, dict):
+        art = ex.get("artifacts")
+        if art is not None and not isinstance(art, dict):
+            raise fail(
+                "state-shape-invalid",
+                f"state.challenges[{claim}] {where}.executed.artifacts 非对象: {rd}",
+            )
+
+
 def _validated_state_or_fail(state: object, rd: Path) -> dict:
     """共用 state 形状校验(合法 JSON 但结构损坏 → 结构化 JSON 错误)。
 
@@ -1030,6 +1057,22 @@ def _validated_state_or_fail(state: object, rd: Path) -> dict:
                 "state-shape-invalid",
                 f"state.frozen=true 但缺合法 head(结构损坏): {rd}",
             )
+        # 不变量: freeze 事务恒写 verdicts/challenges/repo;frozen 态
+        # 缺任一或类型不符 = 结构损坏,结构化拒绝(不 KeyError)。
+        for key in ("verdicts", "challenges"):
+            if key not in state or not isinstance(state.get(key), dict):
+                raise fail(
+                    "state-shape-invalid",
+                    f"state.frozen=true 但 {key} 缺失/非对象(结构损坏): {rd}",
+                )
+        if (
+            not isinstance(state.get("repo"), str)
+            or not state.get("repo").strip()
+        ):
+            raise fail(
+                "state-shape-invalid",
+                f"state.frozen=true 但 repo 缺失/非非空字符串(结构损坏): {rd}",
+            )
     if "reviews" in state:
         reviews = state.get("reviews")
         if not isinstance(reviews, dict):
@@ -1061,42 +1104,20 @@ def _validated_state_or_fail(state: object, rd: Path) -> dict:
                     f"state.challenges[{claim!r}] 形状非法(须对象): {rd}",
                 )
             latest = entry.get("latest")
-            if latest is not None and not isinstance(latest, dict):
+            history = entry.get("history")
+            if history is not None and not isinstance(history, list):
                 raise fail(
                     "state-shape-invalid",
-                    f"state.challenges[{claim}].latest 非对象: {rd}",
+                    f"state.challenges[{claim}].history 非数组: {rd}",
                 )
-            history = entry.get("history")
-            if history is not None:
-                if not isinstance(history, list):
-                    raise fail(
-                        "state-shape-invalid",
-                        f"state.challenges[{claim}].history 非数组: {rd}",
-                    )
-                for rec in history:
-                    if not isinstance(rec, dict):
-                        raise fail(
-                            "state-shape-invalid",
-                            f"state.challenges[{claim}].history 元素非对象: {rd}",
-                        )
-                    if "accepted" in rec and not isinstance(rec.get("accepted"), bool):
-                        raise fail(
-                            "state-shape-invalid",
-                            f"state.challenges[{claim}] accepted 非布尔: {rd}",
-                        )
-                    ex = rec.get("executed")
-                    if ex is not None and not isinstance(ex, dict):
-                        raise fail(
-                            "state-shape-invalid",
-                            f"state.challenges[{claim}] executed 非对象: {rd}",
-                        )
-                    if isinstance(ex, dict):
-                        art = ex.get("artifacts")
-                        if art is not None and not isinstance(art, dict):
-                            raise fail(
-                                "state-shape-invalid",
-                                f"state.challenges[{claim}] executed.artifacts 非对象: {rd}",
-                            )
+            # 不变量: latest 与 history 记录同门(_record_shape_ok):
+            # accepted 在场必须 bool(显式 null 非法);executed 在场必须
+            # dict、其 artifacts 在场必须 dict。所有 accepted 读点统一
+            # is True,truthiness 不再作为判真依据。
+            for rec, where in ([(latest, "latest")] if latest is not None else []) + [
+                (rec, "history[]") for rec in (history or [])
+            ]:
+                _record_shape_ok(rec, claim, where, rd)
     if "verdicts" in state:
         verdicts = state.get("verdicts")
         if not isinstance(verdicts, dict):
@@ -1208,6 +1229,8 @@ def _verify_live_receipts_untampered(state: dict) -> None:
                 "live-receipt-tampered",
                 f"{claim} {where} receipt_kind 非 cargo-test-execution: {rp_s}",
             )
+        # executed 快照: 在场必须 dict(形状门已拒);整段缺失 = legacy
+        # 形态,由 hash 验证过的 receipt 原件单侧重建核心字段校验。
         ex = rec.get("executed") if isinstance(rec.get("executed"), dict) else {}
         # 核心字段类型敏感一致(快照 vs receipt;False != 0)
         for f in (
@@ -1452,7 +1475,8 @@ def cmd_cross(args: argparse.Namespace) -> None:
         verify_no_tamper(state)
         chs = state.get("challenges") or {}
         any_accepted = any(
-            (slot.get("latest") or {}).get("accepted") for slot in chs.values()
+            (slot.get("latest") or {}).get("accepted") is True
+            for slot in chs.values()
         )
         if not any_accepted:
             raise fail("challenge-pending", "挑战证据尚未接纳,不得收录 cross")
@@ -1552,7 +1576,7 @@ def cmd_cross(args: argparse.Namespace) -> None:
                 want = ref.get("ref") or ""
                 history = (state.get("challenges", {}).get(cid) or {}).get("history", [])
                 substantiated = any(
-                    h.get("accepted")
+                    h.get("accepted") is True
                     and h.get("observed") == "pass"
                     and h.get("receipt_sha256") == want
                     for h in history
@@ -1594,7 +1618,10 @@ def cross_completed_slugs(state: dict) -> set[str]:
 
 def any_challenge_accepted(state: dict) -> bool:
     chs = state.get("challenges") or {}
-    return any((slot.get("latest") or {}).get("accepted") for slot in chs.values())
+    return any(
+        (slot.get("latest") or {}).get("accepted") is True
+        for slot in chs.values()
+    )
 
 
 def review_accepted(state: dict) -> bool:

@@ -47,3 +47,61 @@
 - cargo test: evidence 57 pass/0 fail/1 ignored;monitor 31 pass/
   0 fail;fmt/clippy --all-targets -D warnings/cargo test
   --all-targets 全 EXIT0(45 suites)。
+
+
+## 后发 review 修复轮(2026-09-10 晚,PR#636 BH3GEI 三组尾项)
+
+### 初始 RED(两个真实 bug,外部 636-probes 复现)
+
+1. frozen 缺 verdicts → cross `KeyError: verdicts` traceback;缺
+   repo → challenge --live-cargo `KeyError: repo` traceback(均非
+   结构化 JSON)。
+2. latest.accepted=1(truthy 非 bool)无 receipt 可过 cross 记录
+   (cross 用 truthiness 而 receipt 验真用 is True,层间标准不一致);
+   accepted=true 无 receipt 则被正确拒。
+
+### 修复(生产 scripts/olp-review-evidence.py)
+
+- frozen 必需键: verdicts/challenges 必须 dict、repo 必须非空
+  (strip)字符串 → state-shape-invalid 结构化拒绝。
+- `_record_shape_ok` 共用形状门: latest/history 同门(accepted
+  在场必须 bool,显式 null 非法;executed 在场必须 dict;其
+  artifacts 在场必须 dict)。
+- accepted 读点统一 is True(cross 门/any_challenge_accepted/
+  refutation substantiated/apply 前置)。
+- legacy 兼容保持: executed 整段缺失 + receipt 原件完整 → 单侧
+  重建;工件门在 legacy 路径同样生效。
+
+### 既有行为补覆盖(R3,TDD 正向补测)
+
+- 快照 int 0 vs bool False 类型敏感(PASS selector 基线 int 0 →
+  改 bool false 拒;latest/history 双侧)。
+- latest.executed="bad"/artifacts=[] → state-shape-invalid。
+- tracked 门三面: 前置拒、**同次执行后门**(probe 测试运行中真实
+  改写 tracked src/lib.rs,断言执行后 phase + drift 标记)、
+  untracked 负控、非 git 工作树 CLI 早拒、git status 失败门函数
+  真实 I/O 直测(python importlib 导入生产 adapter,断言 rc=1 +
+  tracked-source-modified + 查询失败)。
+- T2(d) 补删除 stdout 错误码断言(live-receipt-tampered)。
+
+### 新测试(5)
+
+- olp_review_frozen_missing_keys_structured_status_and_live_cargo
+- olp_review_latest_accepted_must_be_bool
+- olp_review_snapshot_core_false_vs_zero_rejected
+- olp_review_latest_executed_shape_gates
+- olp_review_adapter_tracked_modified_before_and_after
+
+### 过程修正记录(如实)
+
+candidate 阶段 R3b 测试源码最初只删 history.executed、latest 保留
+完整记录——报告声称"latest 也删"与源码不符,由 ROOT 审查发现并做
+唯一整合补丁(所有 history 记录 + latest 都移除 executed),反例
+条件此后真实成立。最终版以 ROOT source manifest 哈希为准。
+
+### 计数(本轮实测)
+
+- evidence suite: **62 pass / 0 fail / 1 ignored**。
+- spec 场景: 44 + 5 = 49(agent-spec parse 实测)。
+- fmt/clippy --all-targets -D warnings EXIT0(定点阶段);全量
+  all-targets 结果见 final-validation.*(本文件同步后执行)。

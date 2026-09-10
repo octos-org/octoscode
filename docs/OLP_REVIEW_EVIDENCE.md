@@ -64,19 +64,25 @@ frontmatter HEAD 必须与之精确一致)。
 blocked-on-evidence 等)→ `claims-verdict-invalid` 拒绝。
 
 **state 形状校验(全入口)**: init/freeze/challenge/cross/status/classify
-读取合法 JSON 但结构损坏的 state(顶层非对象/frozen 缺 reviews 或
-head/嵌套 reviews/challenges/history/latest/verdicts/cross 形状非法)
-时一致返回结构化 JSON 错误(`state-shape-invalid` / classify 专用码),
-对**已列举的畸形状态形态**不再出现 KeyError traceback(其余错误类型
-不在此保证范围)。
+读取合法 JSON 但结构损坏的 state(顶层非对象/frozen 缺 reviews/head/
+verdicts/challenges/repo,或 repo 非非空字符串/嵌套
+reviews/challenges/history/latest/verdicts/cross 形状非法)时一致返回
+结构化 JSON 错误(`state-shape-invalid` / classify 专用码),对**已列举
+的畸形状态形态**不再出现 KeyError traceback(其余错误类型不在此保证
+范围)。latest 与 history 记录同门共用形状校验: `accepted` 在场必须
+bool(显式 null 非法,缺键才缺省);`executed` 和其 `artifacts`
+为非 null 值时必须是 dict,缺键或 null 延续旧版缺省语义。全部 accepted 读点(cross 门/汇总/refutation/
+apply 前置)统一以 `is True` 判真,truthiness(如 1/"1")不再作为判真
+依据。
 
 **旧 receipt 与日志验真(全生命周期)**: `verify_no_tamper` 对每条
 accepted=True 的 live 记录无条件校验 receipt 路径+sha256(改写/删除/
 缺键 → `live-receipt-tampered`);receipt_kind 必须
-`cargo-test-execution`;快照核心字段与 receipt 类型敏感一致(False
-≠0);stdout/stderr 工件删除/改写/缺声明全拒;legacy 快照缺字段由
-hash 验证过的完整 receipt **补齐后再验**(不降低强度)。status 在
-review_lock 临界区读取一致快照。
+`cargo-test-execution`;快照核心字段与 receipt 类型敏感一致(bool
+False 不得冒充 int 0,反之亦然);stdout/stderr 工件删除/改写/缺声明
+全拒;legacy 快照(executed 整段缺失或内部缺字段)由 hash 验证过的
+完整 receipt **补齐后再验**(不降低强度——工件篡改在 legacy 路径下
+同样被拒)。status 在 review_lock 临界区读取一致快照。
 
 **执行前后 tracked 干净门(生产 adapter)**: 被测 repo 的 tracked 源
 必须等于 HEAD(staged/unstaged 修改 → `tracked-source-modified` 拒绝,
@@ -263,7 +269,7 @@ unverified          not-replayed(imported 未独立复验)
 
 ## 测试真实性边界
 
-- `tests/olp_review_evidence.rs`(57 pass / 1 ignored):
+- `tests/olp_review_evidence.rs`(62 pass / 1 ignored):
   子进程真实调用生产入口;外层反例回归先 RED 后修(证据 `.octos/red-proof/`)。
 - `olp_review_k3_full_happy_path_accepted` 替代旧假日志 approve 路线
   (python 假 cargo 日志违反合约 3,已 REMOVED)。
