@@ -472,15 +472,21 @@ fn olp_evo_retro_no_cards_exit_zero() {
 }
 
 /// #42c: skill outer step 5 present; protected sections byte-identical
-/// to the phase-0 baseline (origin/main 18907aa).
+/// to their documented baselines (phase 0, plus the OLP CLI init update).
 #[test]
 fn olp_evo_retro_skill_step5_and_protected_sections_golden() {
-    let skill =
-        std::fs::read_to_string(repo_root().join(".claude/skills/octoloop/SKILL.md")).unwrap();
+    // Hash repository text in LF form, independent of Git's Windows checkout
+    // line-ending conversion. Content edits still change the golden.
+    let skill = std::fs::read_to_string(repo_root().join(".claude/skills/octoloop/SKILL.md"))
+        .unwrap()
+        .replace("\r\n", "\n");
 
-    // protected-section constants (sha256, baseline 18907aa)
+    // Protected-section constants (sha256, baseline 18907aa except INIT).
+    // INIT intentionally changed in PR #634 (5b9120a): invoke the bundled
+    // `octoscode olp init .` command and describe its existing-file policy.
+    // Keep the other sections pinned to phase 0; see task-olp-cli-bash.spec.
     const DESC: &str = "b2c32593cc6a5dacbc6e42ded9186c9ac94171c0d9d1883aa19f6ac760c5ccb4";
-    const INIT: &str = "71cd93889dcf5a437f0cd35e08ce069e1f8f589f2d0243553dd9017d6d73bcee";
+    const INIT: &str = "47d7c2f46ee67a32691d4b95a0197e8d0813c9e9f800f456fd6b437771c9af6e";
     const INNER: &str = "1e21d03921302a2125df06eb439bcc02edf14e1dc91bf77395238f8b78289597";
     const DISC: &str = "adbb09472cc51deae4184c80c989e916ba9d1c03360487bfaa86a5c22a263f84";
 

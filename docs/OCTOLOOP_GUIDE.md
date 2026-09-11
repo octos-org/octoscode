@@ -48,20 +48,23 @@ octos serve,如 glm/kimi 档)在你的仓库里干活——读黑板、执行、
 ### 2.2 一键路径
 
 ```bash
-# ① 装 TUI
+# ① 安装 octoscode
 npm install -g @octos-org/octoscode
 
-# ② 在你的项目目录铺 OLP 脚手架(幂等,绝不覆盖已有文件)
+# ② 在项目目录初始化 OLP(可重复执行,不覆盖已有文件)
 cd your-project/
-bash scripts/olp-init.sh     # 或 curl 官方 raw 地址 | bash
+octoscode olp init .
 
 # ③ 启动内环
 octoscode --stdio-command 'octos serve --stdio --solo'
 ```
 
-`olp-init.sh` 做四件事:依赖体检、生成 `.octos/loop.md` 与
+`octoscode olp init` 做四件事:依赖体检、生成 `.octos/loop.md` 与
 `.octos/OUTER_LOOP_REVIEW.md`(黑板模板)、黑板加 `.gitignore`、打印启动
 命令。两件事脚本刻意不代办:API key(向导里自己粘贴)、免沙箱授权(见 §3.1)。
+
+初始化入口仍调用内置的 Bash 脚本,无需下载源码或查找脚本文件。
+Windows 下的 Git Bash 选择及工具依赖见 [OLP 快速开始](OLP_QUICKSTART.md)。
 
 ## 3. 三模式上手
 
@@ -71,7 +74,7 @@ OctoLoop 的一键入口是 `.claude/skills/octoloop` 这张 skill 卡(即本仓
 
 ### 3.1 模式 init — 铺脚手架(首次/新机器)
 
-引导运行 `bash scripts/olp-init.sh`,完成后逐项核对 `docs/OLP_QUICKSTART.md`
+引导运行 `octoscode olp init .`,完成后逐项核对 `docs/OLP_QUICKSTART.md`
 §1 依赖清单;缺口按 §6 故障速查处理,再跑 QUICKSTART §5 冒烟验证(两分钟:
 发个 hello、黑板首条 ACK 掉、`herdr agent list` 显示 octoscode 窗格)。
 
