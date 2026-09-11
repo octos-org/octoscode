@@ -136,15 +136,26 @@ def save_state(review_dir: Path, state: dict) -> None:
 
 
 @contextlib.contextmanager
-def review_lock(review_dir: Path):
-    """Per-review-dir 排他锁:包住 load→validate→save 全事务。"""
-    review_dir.mkdir(parents=True, exist_ok=True)
-    fd = os.open(review_dir / LOCK_FILENAME, os.O_CREAT | os.O_RDWR, 0o644)
+def review_lock(review_dir: Path, *, read_only: bool = False):
+    """同一 lock inode:写事务排他,只读入口共享且不创建路径/锁。"""
+    if read_only:
+        try:
+            fd = os.open(review_dir / LOCK_FILENAME, os.O_RDONLY)
+        except OSError as e:
+            raise fail("review-lock-unavailable", f"无法读取评审锁: {review_dir}: {e}")
+    else:
+        review_dir.mkdir(parents=True, exist_ok=True)
+        fd = os.open(review_dir / LOCK_FILENAME, os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH if read_only else fcntl.LOCK_EX)
+        except OSError as e:
+            if read_only:
+                raise fail("review-lock-unavailable", f"无法获取评审锁: {review_dir}: {e}")
+            raise
         yield
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        # close 同时释放 flock,包括加锁失败和事务内部抛异常的路径。
         os.close(fd)
 
 
@@ -1030,7 +1041,7 @@ def _validated_state_or_fail(state: object, rd: Path) -> dict:
     只验实际 schema(state dict/frozen bool/reviews dict+嵌套 path/sha256
     字符串/challenges dict),fail-closed;**不**用笼统 except 吞编程 bug
     —— 形状分支以外的异常照常抛出。classify 的受信上下文加载保留其
-    专用错误码(classify-context-*),本函数用于其余入口的统一前置。
+    专用错误码(classify-context-*),在 loader 中映射本门的形状错误。
     """
     if not isinstance(state, dict):
         raise fail("state-shape-invalid", f"state 顶层非对象: {rd}")
@@ -2315,10 +2326,12 @@ def _load_trusted_live_records(review_dirs: list[Path]) -> dict:
                 "classify-context-invalid",
                 f"受信上下文 state 非合法 JSON: {e}: {rd}",
             )
-        if not isinstance(state, dict):
+        try:
+            state = _validated_state_or_fail(state, rd)
+        except ReviewError as e:
             raise fail(
                 "classify-context-invalid",
-                f"受信上下文 state 顶层须为对象: {rd}",
+                f"受信上下文 state 形状非法: {e.message}",
             )
         if state.get("frozen") is not True:
             raise fail(
@@ -2581,10 +2594,12 @@ def build_status(state: dict) -> dict:
 
 def cmd_status(args: argparse.Namespace) -> None:
     review_dir = Path(args.review_dir)
+    if not review_dir.is_dir() or not (review_dir / STATE_FILENAME).exists():
+        raise fail("not-initialized", "先 init")
     # 与 freeze/challenge/cross 同一 flock 读取临界区(单次持锁;不与
     # classify 的 ExitStack 外层重复嵌套同一锁),保证 verify 与渲染基于
     # 一致快照。
-    with review_lock(review_dir):
+    with review_lock(review_dir, read_only=True):
         state = _validated_state_or_fail(load_state(review_dir), review_dir)
         if not state:
             raise fail("not-initialized", "先 init")

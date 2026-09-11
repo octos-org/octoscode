@@ -4764,17 +4764,72 @@ fn copy_dir_tree(src: &Path, dst: &Path) {
     }
 }
 
-/// 修复轮 2026-09-10 T1: 合法 JSON 但结构损坏的 state({"frozen":true} 缺
-/// reviews)在 status/challenge/cross/freeze/classify 五入口一致结构化 JSON
-/// 错误(state-shape-invalid / classify-context-invalid),不再 KeyError
-/// traceback(审计 RED: status 曾 exit=1 stdout 空 + KeyError: reviews)。
+/// 合法冻结基线上逐项损坏状态,六个真实 CLI 入口均结构化拒绝。
+/// classify 额外绑定有效 manifest/summary 与真实 repo HEAD,确保触达 loader。
 #[test]
 fn olp_review_malformed_state_all_entries_structured() {
     let t = TmpDir::new("shape-state");
-    let d = t.path().to_path_buf();
-    std::fs::write(d.join("review-state.json"), r#"{"frozen": true}"#).unwrap();
-    let cases: Vec<(&str, Vec<&str>)> = vec![
+    let d = t.path();
+    let h = head();
+    init_review(d, &h);
+    write_authority(d, "glm", "1", "completed");
+    write_authority(d, "k3", "1", "completed");
+    let glm = write_review(d, "glm.md", "completed", "1", Some(&h));
+    let k3 = write_review(d, "k3.md", "completed", "1", Some(&h));
+    let native = native_root(d);
+    let freeze_args = vec![
+        "freeze",
+        d.to_str().unwrap(),
+        "--glm-review",
+        glm.to_str().unwrap(),
+        "--k3-review",
+        k3.to_str().unwrap(),
+        "--native-root",
+        native.to_str().unwrap(),
+        "--head",
+        &h,
+    ];
+    let (ok, so, se) = run(&freeze_args);
+    assert!(ok, "freeze: {so} {se}");
+    let state_path = d.join("review-state.json");
+    let original = std::fs::read(&state_path).unwrap();
+    let base: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    let manifest = d.join("manifest.json");
+    let summary = d.join("summary.json");
+    std::fs::write(
+        &manifest,
+        serde_json::to_vec(&serde_json::json!({"prs":{"shape":{"head":h,"base":h}}})).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(&summary, serde_json::to_vec(&serde_json::json!({"results":[{"pr":"shape","head":h,"selector":"missing","adapter_exit":1,"observed":"error"}]})).unwrap()).unwrap();
+    let classify_args = vec![
+        "classify",
+        "--manifest",
+        manifest.to_str().unwrap(),
+        "--replay-summary",
+        summary.to_str().unwrap(),
+        "--review-dir",
+        d.to_str().unwrap(),
+    ];
+    let (ok, so, se) = run(&classify_args);
+    assert!(ok, "valid classify baseline: {so} {se}");
+    let cases = vec![
         ("status", vec!["status", d.to_str().unwrap()]),
+        (
+            "init",
+            vec![
+                "init",
+                d.to_str().unwrap(),
+                "--base",
+                "base",
+                "--runtime",
+                "runtime",
+                "--session",
+                "session",
+                "--goal",
+                "goal",
+            ],
+        ),
         (
             "challenge",
             vec![
@@ -4800,34 +4855,204 @@ fn olp_review_malformed_state_all_entries_structured() {
                 "k3",
             ],
         ),
-        (
-            "freeze",
-            vec![
-                "freeze",
-                d.to_str().unwrap(),
-                "--glm-review",
-                "a.md",
-                "--k3-review",
-                "b.md",
-                "--glm-slug",
-                "glm",
-                "--k3-slug",
-                "k3",
-            ],
-        ),
+        ("freeze", freeze_args),
+        ("classify", classify_args),
     ];
-    for (name, args) in cases {
-        let argv: Vec<&str> = args.to_vec();
-        let (ok, so, _se) = run(&argv);
-        assert!(!ok, "{name} 畸形 state 不得成功");
-        let v: serde_json::Value = serde_json::from_str(so.trim())
-            .unwrap_or_else(|_| panic!("{name} 应输出可解析 JSON,实际: {so}"));
-        assert_eq!(
-            v["error"]["code"].as_str().unwrap_or("?"),
-            "state-shape-invalid",
-            "{name} 错误码: {v}"
-        );
+    let mut bad_history = base.clone();
+    bad_history["challenges"] = serde_json::json!({"X":{"latest":null,"history":5}});
+    let mut malformed = vec![
+        ("history-integer-first", bad_history),
+        ("top-level", serde_json::json!([])),
+        ("missing-reviews", serde_json::json!({"frozen":true})),
+    ];
+    let mut missing_head = base.clone();
+    missing_head.as_object_mut().unwrap().remove("head");
+    malformed.push(("missing-head", missing_head));
+    for (label, key, value) in [
+        ("frozen-type", "frozen", serde_json::json!(1)),
+        ("reviews-type", "reviews", serde_json::json!([])),
+        (
+            "review-record",
+            "reviews",
+            serde_json::json!({"glm":5,"k3":{}}),
+        ),
+        ("challenges-type", "challenges", serde_json::json!([])),
+        ("challenge-entry", "challenges", serde_json::json!({"X":5})),
+        (
+            "history-integer",
+            "challenges",
+            serde_json::json!({"X":{"latest":null,"history":5}}),
+        ),
+        (
+            "history-zero",
+            "challenges",
+            serde_json::json!({"X":{"history":0}}),
+        ),
+        (
+            "history-false",
+            "challenges",
+            serde_json::json!({"X":{"history":false}}),
+        ),
+        (
+            "history-object",
+            "challenges",
+            serde_json::json!({"X":{"history":{}}}),
+        ),
+        (
+            "history-string",
+            "challenges",
+            serde_json::json!({"X":{"history":"bad"}}),
+        ),
+        (
+            "history-record",
+            "challenges",
+            serde_json::json!({"X":{"history":[5]}}),
+        ),
+        (
+            "latest-type",
+            "challenges",
+            serde_json::json!({"X":{"latest":5}}),
+        ),
+        (
+            "latest-accepted",
+            "challenges",
+            serde_json::json!({"X":{"latest":{"accepted":1}}}),
+        ),
+        (
+            "latest-executed",
+            "challenges",
+            serde_json::json!({"X":{"latest":{"executed":5}}}),
+        ),
+        (
+            "history-artifacts",
+            "challenges",
+            serde_json::json!({"X":{"history":[{"executed":{"artifacts":5}}]}}),
+        ),
+        ("verdicts-type", "verdicts", serde_json::json!([])),
+        ("verdict-record", "verdicts", serde_json::json!({"X":5})),
+        ("cross-type", "cross", serde_json::json!({})),
+        ("cross-record", "cross", serde_json::json!([5])),
+    ] {
+        let mut state = base.clone();
+        state[key] = value;
+        malformed.push((label, state));
     }
+    for (shape, state) in malformed {
+        let bytes = serde_json::to_vec(&state).unwrap();
+        std::fs::write(&state_path, &bytes).unwrap();
+        for (name, args) in &cases {
+            let (ok, so, se) = run(args);
+            assert!(!ok, "{shape} {name} 不得成功: {so}");
+            assert!(!se.contains("Traceback"), "{shape} {name}: {se}");
+            let v: serde_json::Value = serde_json::from_str(so.trim())
+                .unwrap_or_else(|_| panic!("{shape} {name} 应输出 JSON: {so} {se}"));
+            let expected = if *name == "classify" {
+                "classify-context-invalid"
+            } else {
+                "state-shape-invalid"
+            };
+            assert_eq!(v["error"]["code"], expected, "{shape} {name}: {v}");
+            assert_eq!(
+                std::fs::read(&state_path).unwrap(),
+                bytes,
+                "{shape} {name} 不得改写损坏状态"
+            );
+        }
+    }
+    std::fs::write(&state_path, original).unwrap();
+    let (ok, so, se) = run(&["status", d.to_str().unwrap()]);
+    assert!(ok, "restored status: {so} {se}");
+}
+
+/// status 不创建路径/锁;读锁与 writer 协调,只读目录和只读锁可读,
+/// 无法取得同一锁 inode 时结构化拒绝,不退化无锁读取。
+#[test]
+fn olp_review_status_read_only_lock_contract() {
+    let t = TmpDir::new("status-read-lock");
+    let d = t.path().join("review");
+    init_review(&d, &head());
+    let probe = r#"
+import fcntl, json, os, pathlib, subprocess, sys
+script, root, review = map(pathlib.Path, sys.argv[1:])
+def status(path):
+    p = subprocess.run([sys.executable, str(script), 'status', str(path)], capture_output=True, text=True, timeout=10)
+    assert 'Traceback' not in p.stderr, p.stderr
+    return p.returncode, json.loads(p.stdout)
+missing = root / 'missing' / 'nested'
+rc, obj = status(missing)
+assert rc == 1 and obj['error']['code'] == 'not-initialized', obj
+assert not missing.parent.exists(), 'status created missing path'
+empty = root / 'empty'
+empty.mkdir()
+rc, obj = status(empty)
+assert rc == 1 and obj['error']['code'] == 'not-initialized', obj
+assert list(empty.iterdir()) == [], 'status created lock in empty directory'
+lock = review / '.review-state.lock'
+state = review / 'review-state.json'
+original = state.read_bytes()
+# Exercise real writer exclusion. The child signals immediately before entering cmd_status.
+fd = os.open(lock, os.O_RDWR)
+fcntl.flock(fd, fcntl.LOCK_EX)
+child_code = """
+import importlib.util, pathlib, sys
+spec = importlib.util.spec_from_file_location('review', sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+original_load = m.load_state
+def checked_load(path):
+    assert (pathlib.Path(sys.argv[2]).parent / 'writer-released').exists(), 'read bypassed writer lock'
+    return original_load(path)
+m.load_state = checked_load
+print('ready', flush=True)
+sys.exit(m.main(['status', sys.argv[2]]))
+"""
+child = subprocess.Popen([sys.executable, '-B', '-c', child_code, str(script), str(review)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+try:
+    assert child.stdout.readline().strip() == 'ready'
+    try:
+        child.wait(timeout=0.2)
+        raise AssertionError('status did not wait for writer')
+    except subprocess.TimeoutExpired:
+        pass
+    (root / 'writer-released').write_text('released')
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    so, se = child.communicate(timeout=10)
+    assert child.returncode == 0, (so, se)
+    assert json.loads(so)['frozen'] is False
+finally:
+    os.close(fd)
+    if child.poll() is None:
+        child.kill(); child.communicate()
+try:
+    lock.chmod(0o444); review.chmod(0o555)
+    rc, obj = status(review)
+    assert rc == 0 and obj['frozen'] is False, obj
+finally:
+    review.chmod(0o755); lock.chmod(0o644)
+lock.unlink()
+try:
+    review.chmod(0o555)
+    rc, obj = status(review)
+    assert rc == 1 and obj['error']['code'] == 'review-lock-unavailable', obj
+    assert not lock.exists(), 'status recreated missing lock'
+finally:
+    review.chmod(0o755)
+assert state.read_bytes() == original
+print('missing, empty, writer exclusion, read-only, missing-lock: pass')
+"#;
+    let mut cmd = Command::new("python3");
+    cmd.arg("-B")
+        .arg("-c")
+        .arg(probe)
+        .arg(script())
+        .arg(t.path())
+        .arg(&d);
+    let out = run_deadline(&mut cmd, 60, "status read-lock probe");
+    assert!(
+        out.status.success(),
+        "status lock probe: {} {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// 修复轮 2026-09-10 T2: accepted receipt 与执行工件全生命周期校验 ——
@@ -5230,8 +5455,8 @@ fn olp_review_frozen_missing_keys_structured_status_and_live_cargo() {
             serde_json::to_string(&st).unwrap(),
         )
         .unwrap();
-        // Replay the actual cross entry that originally raised KeyError:
-        // verdicts, as well as status. Both must reject before other gates.
+        // Pin state-shape rejection before challenge/verdict gates in both
+        // cross and status, even when no challenge has been accepted.
         for entry in ["status", "cross"] {
             let native = native_root(&d);
             let mut args = vec![entry, d.to_str().unwrap()];

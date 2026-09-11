@@ -480,7 +480,19 @@ Rule: review-regression — 前轮八反例回归数据集
     嵌套 reviews/challenges/history/latest/verdicts/cross 形状非法)
   当 任一 init/freeze/challenge/cross/status/classify 入口读取
   那么 一致结构化 JSON 错误(state-shape-invalid / classify-context-*),
-    不出现 KeyError traceback;git status 查询失败不得当作 clean
+    不出现 KeyError/TypeError traceback,不改写损坏状态;classify 共用
+    状态形状门并映射为 classify-context-invalid
+
+场景: status 只读锁与写事务协调(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_status_read_only_lock_contract
+  假设 review 由 init 创建,或查询路径不存在/空目录/已有 state 但缺锁
+  当 status 查询,包括目录 555 + 锁 444 和 writer 持有排他锁
+  那么 不创建目录或锁;缺目录/state 返回 not-initialized;已有锁以
+    只读 fd 获取共享 flock,等待 writer 释放后才读 state;只读目录和锁
+    可正常查询;缺锁返回 review-lock-unavailable 结构化错误且不退化
+    无锁读取;所有路径保持 state 字节不变
 
 场景: accepted live 记录全生命周期 fail-closed(critical)
   测试:
@@ -504,16 +516,15 @@ Rule: review-regression — 前轮八反例回归数据集
   那么 observed=pass、test_target=--lib、selector_qualified 经
     cargo --list 全限定定位、源文件 SHA256 绑定、stdout/stderr 工件
     mkstemp 唯一;tracked 源修改(执行前后同门)拒绝且 git status 查询
-    失败不得当作 clean —— 主仓开发树因未提交 tracked 修改被正确拒绝,
-    被测 repo 须 tracked == HEAD
+    失败不得当作 clean;被测 fixture repo 须 tracked == HEAD
 
 场景: adapter 同 selector 多轮工件不覆盖(critical)
   测试:
     包: octoscode
     过滤: olp_review_adapter_same_selector_two_runs_no_overwrite
-  假设 同一 selector 于同一 artifact-dir 多次真实执行(含并发)
+  假设 同一 selector 于同一 artifact-dir 顺序两次真实执行
   当 adapter 落盘 stdout/stderr
-  Then 每次独立唯一文件(mkstemp,同进程同秒/多进程均不碰撞),旧
+  Then 每次独立唯一文件(mkstemp),旧
     receipt 的 hash 与文件仍可验证;tracked 源修改(执行前后同门)拒绝,
     untracked 探针/工件接受,git status 失败拒绝
   那么 两套工件都在场且 hash 与各自 receipt 一致

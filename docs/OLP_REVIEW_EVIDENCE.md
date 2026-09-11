@@ -82,7 +82,11 @@ accepted=True 的 live 记录无条件校验 receipt 路径+sha256(改写/删除
 False 不得冒充 int 0,反之亦然);stdout/stderr 工件删除/改写/缺声明
 全拒;legacy 快照(executed 整段缺失或内部缺字段)由 hash 验证过的
 完整 receipt **补齐后再验**(不降低强度——工件篡改在 legacy 路径下
-同样被拒)。status 在 review_lock 临界区读取一致快照。
+同样被拒)。status 以只读 fd 在已有 `.review-state.lock` 上获取共享
+flock,与写入口的排他锁协调后读取一致快照,不创建目录或锁。目录或
+state 不存在返回 `not-initialized`;锁缺失/不可读取/不可加锁返回
+`review-lock-unavailable`,不退化无锁读取。由 init 创建的上下文即使
+目录和锁只读仍可查询(不要求锁有写权限)。
 
 **执行前后 tracked 干净门(生产 adapter)**: 被测 repo 的 tracked 源
 必须等于 HEAD(staged/unstaged 修改 → `tracked-source-modified` 拒绝,
@@ -269,7 +273,9 @@ unverified          not-replayed(imported 未独立复验)
 
 ## 测试真实性边界
 
-- `tests/olp_review_evidence.rs`(62 pass / 1 ignored):
+- `tests/olp_review_evidence.rs`(63 enabled / 1 ignored):
+  完整冻结基线的嵌套坏形状矩阵覆盖 init/freeze/challenge/cross/status/classify;
+  status 探针覆盖缺路径、空目录、真实只读权限、缺锁和 writer/reader 等待。
   frozen 坏状态覆盖 status/cross 与 live-cargo 的 repo 消费入口,包含纯空格
   repo;latest/history 分别验证 accepted 缺键的兼容语义。非 Git 负向夹具
   固定嵌在真实父 Git 仓库下,测试子进程设置 `GIT_CEILING_DIRECTORIES`
