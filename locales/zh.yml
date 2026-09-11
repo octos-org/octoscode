@@ -468,7 +468,7 @@ command:
   profiles:
     desc: 管理本地档案——列出、设为默认、删除或新建。
   goal:
-    desc: "设置：/goal <目标> [--budget 2m|500k]。管理：pause、resume、stop、clear。单独 /goal 查看当前目标。"
+    desc: "设置：/goal <目标> [--budget 2m|500k]。管理：pause、resume、stop、clear、archive、reopen [--reason <说明>]。单独 /goal 查看当前目标。"
   help:
     desc: 显示可用命令
   keymap:
@@ -1615,6 +1615,10 @@ status:
   goal_verb_resuming: "正在恢复"
   goal_verb_stopping: "正在停止"
   goal_verb_updating: "正在更新"
+  goal_verb_archiving: "正在归档"
+  goal_verb_reopening: "正在重开"
+  goal_default_archive_reason: "操作者经 octoscode 归档"
+  goal_default_reopen_reason: "操作者经 octoscode 重开"
   goal_resume_over_budget: "目标已恢复但仍超出预算 —— 提高预算后才会继续：/goal %{objective} --budget <N>"
   goal_now_active: "目标进行中 —— 自主推进已恢复"
   goal_now_paused: "目标已暂停 —— 使用 /goal resume 恢复自主推进"

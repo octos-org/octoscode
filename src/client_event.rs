@@ -16,9 +16,10 @@ use crate::model::{
     McpStatusListResult, ModelListResult, ModelSelectResult, ProfileLlmCatalogResult,
     ProfileLlmListResult, ProfileLlmMutationResult, ProfileLocalCreateResult,
     ProfileSkillsListResult, ProfileSkillsMutationResult, ProfileSkillsRegistrySearchResult,
-    ReviewStartResult, SessionGoalClearResult, SessionGoalGetResult, SessionGoalSetResult,
-    SessionStatusReadResult, SubProvidersListResult, SubProvidersMutationResult,
-    ToolConfigListResult, ToolConfigMutationResult, ToolStatusListResult,
+    ReviewStartResult, SessionGoalClearResult, SessionGoalGetResult,
+    SessionGoalOperatorTransitionResult, SessionGoalSetResult, SessionStatusReadResult,
+    SubProvidersListResult, SubProvidersMutationResult, ToolConfigListResult,
+    ToolConfigMutationResult, ToolStatusListResult,
 };
 
 #[derive(Debug, Clone)]
@@ -387,6 +388,7 @@ pub enum AutonomyResult {
     GoalGet(SessionGoalGetResult),
     GoalSet(SessionGoalSetResult),
     GoalClear(SessionGoalClearResult),
+    GoalOperatorTransition(SessionGoalOperatorTransitionResult),
     LoopCreate(LoopCreateResult),
     LoopList(LoopListResult),
     /// `loop/delete`, `loop/pause`, `loop/resume`, `loop/fire_now`

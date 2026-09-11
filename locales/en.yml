@@ -853,6 +853,10 @@ status:
   goal_verb_resuming: "Resuming"
   goal_verb_stopping: "Stopping"
   goal_verb_updating: "Updating"
+  goal_verb_archiving: "Archiving"
+  goal_verb_reopening: "Reopening"
+  goal_default_archive_reason: "archived by operator from octoscode"
+  goal_default_reopen_reason: "reopened by operator from octoscode"
   goal_resume_over_budget: "Goal resumed but still over budget — it will not fire until you raise it: /goal %{objective} --budget <N>"
   goal_now_active: "Goal active — autonomous continuations resume"
   goal_now_paused: "Goal paused — no autonomous continuations until /goal resume"
@@ -979,7 +983,7 @@ command:
   profiles:
     desc: Manage local profiles — list, set the default, delete, or create one.
   goal:
-    desc: "Set: /goal <objective> [--budget 2m|500k]. Manage: pause, resume, stop, clear. Plain /goal shows the current goal."
+    desc: "Set: /goal <objective> [--budget 2m|500k]. Manage: pause, resume, stop, clear, archive, reopen [--reason <text>]. Plain /goal shows the current goal."
   help:
     desc: Show available commands.
   keymap:

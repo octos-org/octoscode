@@ -969,6 +969,13 @@ impl Store {
         // readonly-mutating block, bad id, no active turn). Map that Option by
         // `is_some` to Accepted/Rejected. Parse errors and `Ok(None)` (no
         // intent, e.g. bare `/turn`) are rejected — fail-closed, never recorded.
+        // Snapshot so `reject_autonomy_slash` can tell whether the rejecting
+        // dispatcher actually explained itself, and never republish a stale
+        // status as if it were this command's reason.
+        // Clear before dispatch: a reason recorded by an EARLIER command must
+        // never be attributed to this one. Only what this dispatch records is
+        // eligible to be surfaced below.
+        self.state.pending_autonomy_rejection = None;
         let produced = match crate::autonomy::parse_autonomy_slash(draft) {
             Ok(Some(crate::autonomy::AutonomyCommand::Agents(cmd))) => {
                 self.dispatch_agents_command(cmd)
@@ -988,16 +995,84 @@ impl Store {
             Ok(Some(crate::autonomy::AutonomyCommand::Loop(cmd))) => {
                 self.dispatch_loop_command(cmd)
             }
-            Ok(None) => return SlashDispatchOutcome::Rejected,
+            // Bare `/turn` etc.: a parsed no-op with no reason of its own.
+            Ok(None) => {
+                self.reject_autonomy_slash(draft);
+                return SlashDispatchOutcome::Rejected;
+            }
+            // A parse error carries its own reason; record it explicitly
+            // rather than leaving it to be re-read off the shared status bar.
             Err(err) => {
-                self.state.status = err.to_string();
+                self.reject_with_reason(err.to_string());
+                self.reject_autonomy_slash(draft);
                 return SlashDispatchOutcome::Rejected;
             }
         };
         match produced {
             Some(command) => SlashDispatchOutcome::accepted(Some(command)),
-            None => SlashDispatchOutcome::Rejected,
+            None => {
+                self.reject_autonomy_slash(draft);
+                SlashDispatchOutcome::Rejected
+            }
         }
+    }
+
+    /// Surface an autonomy-slash rejection in the transcript, not only in
+    /// the status bar.
+    ///
+    /// The `dispatch_*_command` helpers reject by setting `state.status`
+    /// and returning `None` (missing session, capability gate, illegal
+    /// goal state, readonly, bad id). That bar is shared with turn state,
+    /// approval mode, and user chrome, and `dispatch_slash_command` has
+    /// already cleared the composer by the time we get here — so a
+    /// rejected `/goal archive` read as "Enter did nothing": the typed
+    /// command vanished and no transcript line replaced it. The registry's
+    /// own rejection paths ([`Self::show_unknown_slash_command`],
+    /// [`Self::show_unavailable_slash_command`]) push a Warning activity
+    /// for precisely this reason; autonomy dispatch now matches them.
+    ///
+    /// A rejection reason reaches the transcript only when the dispatcher
+    /// recorded one through [`Self::reject_with_reason`]. A path that records
+    /// nothing falls back to the generic unavailable text rather than
+    /// republishing whatever the shared status bar happens to hold, which
+    /// would attribute an unrelated message to this command.
+    fn reject_autonomy_slash(&mut self, draft: &str) {
+        let reason = self
+            .state
+            .pending_autonomy_rejection
+            .take()
+            .unwrap_or_else(|| t!("status.command_unavailable").into_owned());
+        // `Report`, not `Warning` — this is the whole of the visibility fix.
+        //
+        // `flow_activity_items` (`app.rs`) routes Warnings through the
+        // agent-task flow, which filters by the ACTIVE turn id: a turn-less
+        // local rejection is dropped outright while a turn runs, and when idle
+        // it lands inside a settled group whose children are collapsed by
+        // default (`transcript_build.rs`) — so only the group summary shows
+        // and the reason is never rendered in either state.
+        //
+        // `flow_report_items` applies neither filter: reports get their own
+        // full-fidelity block, are never grouped, and are never collapsed.
+        // That is exactly what a client-local rejection needs — it is not an
+        // agent action and belongs to no turn.
+        let mut item = ActivityItem::new(
+            ActivityKind::Report,
+            t!("status.local_slash_command").into_owned(),
+            reason,
+        )
+        .with_detail(t!("status.ignored_input", draft = draft).into_owned());
+        // Ownership: scope to the session the user typed in so the report
+        // follows that session and never bleeds into another after a switch.
+        // (`flow_report_items` keeps UNSCOPED reports visible everywhere —
+        // right for a global `/loop list`, wrong for this.)
+        if let Some(session_id) = self
+            .state
+            .active_session()
+            .map(|session| session.id.clone())
+        {
+            item = item.with_session(session_id);
+        }
+        self.state.push_activity(item);
     }
 
     /// `/research` — manage the named provider lanes (`sub_providers`) that back
@@ -1993,7 +2068,9 @@ impl Store {
                     return None;
                 }
                 let Ok(task_id) = task_id.parse::<TaskId>() else {
-                    self.state.status = t!("status.invalid_task_id", id = task_id).into_owned();
+                    self.reject_with_reason(
+                        t!("status.invalid_task_id", id = task_id).into_owned(),
+                    );
                     return None;
                 };
                 let (artifact_id, path, label) = match selector {
@@ -2061,14 +2138,18 @@ impl Store {
                     {
                         Ok(turn_id) => turn_id,
                         Err(_) => {
-                            self.state.status = t!("status.invalid_turn_id", id = raw).into_owned();
+                            self.reject_with_reason(
+                                t!("status.invalid_turn_id", id = raw).into_owned(),
+                            );
                             return None;
                         }
                     },
                     None => match self.state.active_turn().map(|(_, turn_id)| turn_id.clone()) {
                         Some(turn_id) => turn_id,
                         None => {
-                            self.state.status = t!("status.no_active_turn_inspect").into_owned();
+                            self.reject_with_reason(
+                                t!("status.no_active_turn_inspect").into_owned(),
+                            );
                             return None;
                         }
                     },
@@ -2265,7 +2346,7 @@ impl Store {
             }
             AgentsCommand::Spawn { count, prompt } => {
                 if self.state.active_turn().is_some() {
-                    self.state.status = t!("status.cannot_spawn_active_turn").into_owned();
+                    self.reject_with_reason(t!("status.cannot_spawn_active_turn").into_owned());
                     return None;
                 }
                 if !self.require_mutating_appui_method(crate::model::APPUI_METHOD_AGENT_LIST) {
@@ -2303,7 +2384,7 @@ impl Store {
             } => {
                 let objective = objective.trim().to_string();
                 if objective.is_empty() {
-                    self.state.status = t!("status.goal_objective_empty").into_owned();
+                    self.reject_with_reason(t!("status.goal_objective_empty").into_owned());
                     return None;
                 }
                 if !self.require_mutating_appui_method(crate::model::APPUI_METHOD_SESSION_GOAL_SET)
@@ -2329,23 +2410,49 @@ impl Store {
             GoalCommand::Pause => self.start_goal_transition(
                 session_id,
                 profile_id,
-                "paused",
-                crate::model::SessionGoalSetAction::Pause,
+                crate::model::PendingGoalFollowUp::Set {
+                    status: "paused",
+                    action: crate::model::SessionGoalSetAction::Pause,
+                },
                 "pause",
             ),
             GoalCommand::Resume => self.start_goal_transition(
                 session_id,
                 profile_id,
-                "active",
-                crate::model::SessionGoalSetAction::Resume,
+                crate::model::PendingGoalFollowUp::Set {
+                    status: "active",
+                    action: crate::model::SessionGoalSetAction::Resume,
+                },
                 "resume",
             ),
             GoalCommand::Stop => self.start_goal_transition(
                 session_id,
                 profile_id,
-                "complete",
-                crate::model::SessionGoalSetAction::Stop,
+                crate::model::PendingGoalFollowUp::Set {
+                    status: "complete",
+                    action: crate::model::SessionGoalSetAction::Stop,
+                },
                 "stop",
+            ),
+            GoalCommand::Archive { reason } => self.start_goal_transition(
+                session_id,
+                profile_id,
+                crate::model::PendingGoalFollowUp::OperatorTransition {
+                    action: crate::model::SessionGoalOperatorAction::Archive,
+                    reason: reason
+                        .unwrap_or_else(|| t!("status.goal_default_archive_reason").into_owned()),
+                },
+                "archive",
+            ),
+            GoalCommand::Reopen { reason } => self.start_goal_transition(
+                session_id,
+                profile_id,
+                crate::model::PendingGoalFollowUp::OperatorTransition {
+                    action: crate::model::SessionGoalOperatorAction::Reopen,
+                    reason: reason
+                        .unwrap_or_else(|| t!("status.goal_default_reopen_reason").into_owned()),
+                },
+                "reopen",
             ),
             GoalCommand::Clear => {
                 if !self
@@ -2408,7 +2515,7 @@ impl Store {
                     LoopCadence::Every(duration) => {
                         let secs = duration.as_secs();
                         if secs == 0 {
-                            self.state.status = t!("status.loop_interval_min").into_owned();
+                            self.reject_with_reason(t!("status.loop_interval_min").into_owned());
                             return None;
                         }
                         (crate::model::LoopMode::FixedInterval, Some(secs))
@@ -2500,14 +2607,21 @@ impl Store {
     }
 
     /// Returns the cached goal record IFF the goal is in a state the
-    /// TUI is allowed to transition. Per UPCR-2026-021 the model owns
-    /// the `complete` transition — the TUI must not reactivate a
-    /// completed goal via pause/resume. Returns `Err(status)` when a
-    /// goal is cached but not in a TUI-transitionable state, so the
-    /// caller can surface a precise message.
+    /// staged `follow_up` is allowed to transition from. Returns
+    /// `Err(status)` when a goal is cached but not in a transitionable
+    /// state, so the caller can surface a precise message.
+    ///
+    /// The allowance is per follow-up because the two paths have
+    /// genuinely different domains. Per UPCR-2026-021 the model owns the
+    /// `complete` transition, so `session/goal/set` must not reactivate
+    /// a completed goal via pause/resume. The operator path is the
+    /// opposite: archiving a `complete` goal is its primary use, and
+    /// reopen is narrower still (the backend takes it only from
+    /// `blocked` / `paused` / `budget_limited`).
     fn cached_goal_for_transition(
         &self,
         session_id: &SessionKey,
+        follow_up: &crate::model::PendingGoalFollowUp,
     ) -> Result<octos_core::ui_protocol::UiGoalRecord, Option<String>> {
         let goal = self
             .state
@@ -2515,35 +2629,58 @@ impl Store {
             .and_then(|entry| entry.goal.as_ref())
             .ok_or(None)?
             .clone();
-        match goal.status.as_str() {
+        let allowed = match follow_up {
             // `blocked` (#1693 circuit breaker) is user-recoverable:
             // resume forgives the failure streak, stop completes it.
-            "active" | "paused" | "budget_limited" | "blocked" => Ok(goal),
-            other => Err(Some(other.to_string())),
+            crate::model::PendingGoalFollowUp::Set { .. } => matches!(
+                goal.status.as_str(),
+                "active" | "paused" | "budget_limited" | "blocked"
+            ),
+            crate::model::PendingGoalFollowUp::OperatorTransition { action, .. } => {
+                action.allows_from(goal.status.as_str())
+            }
+        };
+        if allowed {
+            Ok(goal)
+        } else {
+            Err(Some(goal.status.clone()))
         }
     }
 
-    /// Shared `/goal pause` / `/goal resume` entry. To avoid sending a
-    /// stale cached objective on transition (the cached mirror can drift
-    /// between explicit refreshes), this stages the desired status in
-    /// `pending_goal_transition` and emits a `session/goal/get`. When
-    /// the `GoalGet` response arrives, [`Self::apply_autonomy_result`]
-    /// emits the follow-up `session/goal/set` with the freshly-fetched
-    /// objective + staged status. The model-owned `complete` guard is
-    /// still enforced up front using the cached mirror so the TUI fails
-    /// fast on a clearly invalid transition without a round-trip.
+    /// Shared entry for every two-step `/goal` transition —
+    /// `pause` / `resume` / `stop` (which land on `session/goal/set`)
+    /// and `archive` / `reopen` (which land on
+    /// `session/goal/operator_transition`).
+    ///
+    /// Neither follow-up may carry a stale cached mirror: the set path
+    /// would rewrite the goal with a drifted objective, and the operator
+    /// path would be rejected outright by the backend's `goal_id`
+    /// identity check. So this stages the intent in
+    /// `pending_goal_transition` and emits a `session/goal/get` first;
+    /// when the `GoalGet` response arrives,
+    /// [`Self::apply_autonomy_result`] emits the follow-up against the
+    /// freshly-fetched record. The status guard is still enforced up
+    /// front against the cached mirror so the TUI fails fast on a
+    /// clearly invalid transition without a round-trip.
     fn start_goal_transition(
         &mut self,
         session_id: SessionKey,
         profile_id: Option<String>,
-        status: &'static str,
-        action: crate::model::SessionGoalSetAction,
+        follow_up: crate::model::PendingGoalFollowUp,
         verb: &str,
     ) -> Option<AppUiCommand> {
-        if !self.require_mutating_appui_method(crate::model::APPUI_METHOD_SESSION_GOAL_SET) {
+        let method = match follow_up {
+            crate::model::PendingGoalFollowUp::Set { .. } => {
+                crate::model::APPUI_METHOD_SESSION_GOAL_SET
+            }
+            crate::model::PendingGoalFollowUp::OperatorTransition { .. } => {
+                crate::model::APPUI_METHOD_SESSION_GOAL_OPERATOR_TRANSITION
+            }
+        };
+        if !self.require_mutating_appui_method(method) {
             return None;
         }
-        match self.cached_goal_for_transition(&session_id) {
+        match self.cached_goal_for_transition(&session_id, &follow_up) {
             Ok(_) => {}
             Err(None) => {
                 self.state.status =
@@ -2567,8 +2704,7 @@ impl Store {
         self.state.pending_goal_transition = Some(crate::model::PendingGoalTransition {
             session_id: session_id.clone(),
             profile_id: profile_id.clone(),
-            status,
-            action,
+            follow_up,
         });
         self.state.status = t!("status.refreshing_goal_before", verb = verb).into_owned();
         Some(AppUiCommand::GetSessionGoal(
@@ -5625,6 +5761,21 @@ impl Store {
         })
     }
 
+    /// Publish a rejection reason on BOTH surfaces: the status bar (where it
+    /// has always gone) and the explicit
+    /// [`AppState::pending_autonomy_rejection`] channel that
+    /// [`Self::reject_autonomy_slash`] consumes.
+    ///
+    /// The channel exists because the status bar cannot answer "did this
+    /// dispatcher set a reason?". It is shared with turn state and chrome, and
+    /// the same invalid command submitted twice writes identical text both
+    /// times — indistinguishable, by before/after comparison alone, from a
+    /// dispatcher that set nothing.
+    fn reject_with_reason(&mut self, reason: String) {
+        self.state.status = reason.clone();
+        self.state.pending_autonomy_rejection = Some(reason);
+    }
+
     fn require_appui_method(&mut self, method: &'static str) -> bool {
         if self
             .state
@@ -5634,7 +5785,9 @@ impl Store {
         {
             return true;
         }
-        self.state.status = t!("status.appui_method_not_advertised", method = method).into_owned();
+        self.reject_with_reason(
+            t!("status.appui_method_not_advertised", method = method).into_owned(),
+        );
         false
     }
 
@@ -5650,14 +5803,17 @@ impl Store {
         {
             return true;
         }
-        self.state.status =
-            t!("status.appui_feature_not_advertised", feature = feature).into_owned();
+        self.reject_with_reason(
+            t!("status.appui_feature_not_advertised", feature = feature).into_owned(),
+        );
         false
     }
 
     fn require_mutating_appui_method(&mut self, method: &'static str) -> bool {
         if self.state.readonly {
-            self.state.status = t!("status.readonly_method_disabled", method = method).into_owned();
+            self.reject_with_reason(
+                t!("status.readonly_method_disabled", method = method).into_owned(),
+            );
             return false;
         }
         self.require_appui_method(method)
@@ -8859,6 +9015,24 @@ impl Store {
                     .set_session_goal(&session_id, result.goal, result.transition_actor);
                 self.state.status = summary;
             }
+            AutonomyResult::GoalOperatorTransition(result) => {
+                let session_id = result.session_id.clone();
+                let summary = match result.goal.as_ref() {
+                    Some(goal) => t!(
+                        "status.goal_summary",
+                        status = goal.status,
+                        objective = goal.objective
+                    )
+                    .into_owned(),
+                    // The backend always returns the post-transition
+                    // snapshot on success; a rejection arrives as an
+                    // error frame, not as a goal-less result.
+                    None => t!("status.goal_accepted_no_record").into_owned(),
+                };
+                self.state
+                    .set_session_goal(&session_id, result.goal, result.transition_actor);
+                self.state.status = summary;
+            }
             AutonomyResult::GoalClear(result) => {
                 if result.cleared {
                     self.state
@@ -9027,12 +9201,13 @@ impl Store {
         None
     }
 
-    /// Consume a staged pause/resume transition with the freshly-fetched
-    /// goal record. Returns the follow-up `session/goal/set` command, or
-    /// `None` if there is no matching pending transition, if the goal
-    /// vanished server-side, or if the fresh goal status is no longer
-    /// transitionable (e.g. the model marked it complete between dispatch
-    /// and refresh).
+    /// Consume a staged transition with the freshly-fetched goal record.
+    /// Returns the follow-up command — `session/goal/set` for
+    /// pause/resume/stop, `session/goal/operator_transition` for
+    /// archive/reopen — or `None` if there is no matching pending
+    /// transition, if the goal vanished server-side, or if the fresh goal
+    /// status is no longer transitionable (e.g. the model marked it
+    /// complete between dispatch and refresh).
     fn consume_pending_goal_transition(
         &mut self,
         session_id: &SessionKey,
@@ -9050,45 +9225,94 @@ impl Store {
                 return None;
             }
         };
-        if !matches!(
-            goal.status.as_str(),
-            "active" | "paused" | "budget_limited" | "blocked"
-        ) {
+        // Re-check against the FRESH status, not the cached one the
+        // dispatch guarded on — the record may have moved underneath us
+        // during the refresh round-trip.
+        let transitionable = match &pending.follow_up {
+            crate::model::PendingGoalFollowUp::Set { .. } => matches!(
+                goal.status.as_str(),
+                "active" | "paused" | "budget_limited" | "blocked"
+            ),
+            crate::model::PendingGoalFollowUp::OperatorTransition { action, .. } => {
+                action.allows_from(goal.status.as_str())
+            }
+        };
+        if !transitionable {
             self.state.status =
                 t!("status.cannot_transition_goal_state", state = goal.status).into_owned();
             return None;
         }
-        let verb = match pending.action {
-            crate::model::SessionGoalSetAction::Pause => t!("status.goal_verb_pausing"),
-            crate::model::SessionGoalSetAction::Resume => t!("status.goal_verb_resuming"),
-            crate::model::SessionGoalSetAction::Stop => t!("status.goal_verb_stopping"),
-            crate::model::SessionGoalSetAction::Set => t!("status.goal_verb_updating"),
-        };
-        self.state.status = t!("status.verb_goal", verb = verb).into_owned();
-        // Resuming a goal that is still over its budget re-activates it but
-        // the scheduler will never fire (token gate) — tell the user how to
-        // actually un-freeze it instead of leaving a silently idle goal.
-        if matches!(pending.action, crate::model::SessionGoalSetAction::Resume)
-            && goal.token_budget > 0
-            && goal.tokens_used >= goal.token_budget
-        {
-            self.state.status = t!(
-                "status.goal_resume_over_budget",
-                objective = goal.objective.clone()
-            )
-            .into_owned();
+        match pending.follow_up {
+            crate::model::PendingGoalFollowUp::Set { status, action } => {
+                let verb = match action {
+                    crate::model::SessionGoalSetAction::Pause => t!("status.goal_verb_pausing"),
+                    crate::model::SessionGoalSetAction::Resume => t!("status.goal_verb_resuming"),
+                    crate::model::SessionGoalSetAction::Stop => t!("status.goal_verb_stopping"),
+                    crate::model::SessionGoalSetAction::Set => t!("status.goal_verb_updating"),
+                };
+                self.state.status = t!("status.verb_goal", verb = verb).into_owned();
+                // Resuming a goal that is still over its budget re-activates it but
+                // the scheduler will never fire (token gate) — tell the user how to
+                // actually un-freeze it instead of leaving a silently idle goal.
+                if matches!(action, crate::model::SessionGoalSetAction::Resume)
+                    && goal.token_budget > 0
+                    && goal.tokens_used >= goal.token_budget
+                {
+                    self.state.status = t!(
+                        "status.goal_resume_over_budget",
+                        objective = goal.objective.clone()
+                    )
+                    .into_owned();
+                }
+                Some(AppUiCommand::SetSessionGoal(
+                    crate::model::SessionGoalSetParams {
+                        session_id: pending.session_id,
+                        profile_id: pending.profile_id,
+                        objective: goal.objective.clone(),
+                        status: Some(status.into()),
+                        token_budget: None,
+                        transition_actor: Some("user".into()),
+                        action,
+                    },
+                ))
+            }
+            crate::model::PendingGoalFollowUp::OperatorTransition { action, reason } => {
+                let verb = match action {
+                    crate::model::SessionGoalOperatorAction::Archive => {
+                        t!("status.goal_verb_archiving")
+                    }
+                    crate::model::SessionGoalOperatorAction::Reopen => {
+                        t!("status.goal_verb_reopening")
+                    }
+                };
+                self.state.status = t!("status.verb_goal", verb = verb).into_owned();
+                // Same token gate as resume: the backend refuses to reopen an
+                // exhausted goal outright, so name the fix rather than letting
+                // the user read a bare rejection.
+                if matches!(action, crate::model::SessionGoalOperatorAction::Reopen)
+                    && goal.token_budget > 0
+                    && goal.tokens_used >= goal.token_budget
+                {
+                    self.state.status = t!(
+                        "status.goal_resume_over_budget",
+                        objective = goal.objective.clone()
+                    )
+                    .into_owned();
+                }
+                Some(AppUiCommand::OperatorTransitionSessionGoal(
+                    crate::model::SessionGoalOperatorTransitionParams {
+                        session_id: pending.session_id,
+                        profile_id: pending.profile_id,
+                        // The backend treats this as an identity assertion:
+                        // if the session's live goal is a different one the
+                        // transition is refused rather than misapplied.
+                        goal_id: goal.goal_id.clone(),
+                        action,
+                        reason,
+                    },
+                ))
+            }
         }
-        Some(AppUiCommand::SetSessionGoal(
-            crate::model::SessionGoalSetParams {
-                session_id: pending.session_id,
-                profile_id: pending.profile_id,
-                objective: goal.objective.clone(),
-                status: Some(pending.status.into()),
-                token_budget: None,
-                transition_actor: Some("user".into()),
-                action: pending.action,
-            },
-        ))
     }
 
     /// Drop any staged pause/resume that targeted the given session.
@@ -39945,6 +40169,7 @@ now analyzing the bus module"
                 crate::model::APPUI_METHOD_SESSION_GOAL_GET,
                 crate::model::APPUI_METHOD_SESSION_GOAL_SET,
                 crate::model::APPUI_METHOD_SESSION_GOAL_CLEAR,
+                crate::model::APPUI_METHOD_SESSION_GOAL_OPERATOR_TRANSITION,
                 crate::model::APPUI_METHOD_LOOP_CREATE,
                 crate::model::APPUI_METHOD_LOOP_LIST,
                 crate::model::APPUI_METHOD_LOOP_DELETE,
@@ -40658,8 +40883,13 @@ now analyzing the bus module"
             .as_ref()
             .expect("pause stages a transition");
         assert_eq!(pending.session_id, session_id);
-        assert_eq!(pending.status, "paused");
-        assert_eq!(pending.action, crate::model::SessionGoalSetAction::Pause);
+        assert_eq!(
+            pending.follow_up,
+            crate::model::PendingGoalFollowUp::Set {
+                status: "paused",
+                action: crate::model::SessionGoalSetAction::Pause,
+            }
+        );
     }
 
     #[test]
@@ -40764,8 +40994,13 @@ now analyzing the bus module"
             .pending_goal_transition
             .as_ref()
             .expect("resume stages a transition");
-        assert_eq!(pending.status, "active");
-        assert_eq!(pending.action, crate::model::SessionGoalSetAction::Resume);
+        assert_eq!(
+            pending.follow_up,
+            crate::model::PendingGoalFollowUp::Set {
+                status: "active",
+                action: crate::model::SessionGoalSetAction::Resume,
+            }
+        );
     }
 
     /// `/goal stop` stages a user-owned terminal transition to `complete`
@@ -40802,8 +41037,13 @@ now analyzing the bus module"
             .pending_goal_transition
             .as_ref()
             .expect("stop stages a transition");
-        assert_eq!(pending.status, "complete");
-        assert_eq!(pending.action, crate::model::SessionGoalSetAction::Stop);
+        assert_eq!(
+            pending.follow_up,
+            crate::model::PendingGoalFollowUp::Set {
+                status: "complete",
+                action: crate::model::SessionGoalSetAction::Stop,
+            }
+        );
 
         // The refreshed goal (still blocked) must yield the follow-up set
         // with status=complete and the SERVER objective.
@@ -40829,6 +41069,413 @@ now analyzing the bus module"
             }
             other => panic!("expected SetSessionGoal, got {other:?}"),
         }
+    }
+
+    fn goal_record(status: &str) -> octos_core::ui_protocol::UiGoalRecord {
+        octos_core::ui_protocol::UiGoalRecord {
+            profile_id: Some("coding".into()),
+            goal_id: "goal_01".into(),
+            objective: "ongoing work".into(),
+            status: status.into(),
+            token_budget: 1000,
+            tokens_used: 10,
+            time_used_seconds: 5,
+            created_at_ms: 1,
+            updated_at_ms: 2,
+        }
+    }
+
+    /// `/goal archive` takes the same refresh-first path as pause/resume,
+    /// then lands on `session/goal/operator_transition` carrying the
+    /// FRESH goal id — the backend rejects the transition outright when
+    /// that id is not the session's live goal, so a cached id would turn
+    /// a drifted mirror into a hard failure.
+    #[test]
+    fn goal_archive_dispatches_operator_transition_with_fresh_goal_id() {
+        let mut store = protocol_store_with_autonomy();
+        let session_id = SessionKey("local:test".into());
+        store.state.set_session_goal(
+            &session_id,
+            Some(goal_record("active")),
+            Some("user".into()),
+        );
+        store.state.composer = "/goal archive --reason battle wrapped".into();
+        match store.compose_command().expect("dispatch") {
+            AppUiCommand::GetSessionGoal(params) => assert_eq!(params.session_id, session_id),
+            other => panic!("expected GetSessionGoal, got {other:?}"),
+        }
+        assert_eq!(
+            store
+                .state
+                .pending_goal_transition
+                .as_ref()
+                .expect("archive stages a transition")
+                .follow_up,
+            crate::model::PendingGoalFollowUp::OperatorTransition {
+                action: crate::model::SessionGoalOperatorAction::Archive,
+                reason: "battle wrapped".into(),
+            }
+        );
+
+        let mut fresh = goal_record("active");
+        fresh.goal_id = "goal_07_server_truth".into();
+        let command = store.consume_pending_goal_transition(&session_id, Some(&fresh));
+        match command.expect("operator transition dispatched") {
+            AppUiCommand::OperatorTransitionSessionGoal(params) => {
+                assert_eq!(
+                    params.goal_id, "goal_07_server_truth",
+                    "the id must come from the refresh, not the cached mirror"
+                );
+                assert_eq!(
+                    params.action,
+                    crate::model::SessionGoalOperatorAction::Archive
+                );
+                assert_eq!(params.reason, "battle wrapped");
+                assert_eq!(params.profile_id.as_deref(), Some("coding"));
+            }
+            other => panic!("expected OperatorTransitionSessionGoal, got {other:?}"),
+        }
+    }
+
+    /// A backend older than octos v2.0.3-rc.10 advertises `session/goal/
+    /// {get,set,clear}` but not `session/goal/operator_transition`, so
+    /// `/goal archive` is gated off. The gate itself is correct — but it
+    /// used to report ONLY through `state.status`, a bar already carrying
+    /// turn state, approval mode, and user chrome, while
+    /// `clear_current_composer_draft` wiped the typed command. Enter
+    /// therefore looked like a no-op: text gone, nothing in the
+    /// transcript. Every other slash rejection path
+    /// (`show_unknown_slash_command`, `show_unavailable_slash_command`)
+    /// pushes a Warning activity for exactly this reason; the autonomy
+    /// dispatchers must too.
+    #[test]
+    fn goal_archive_on_a_backend_without_the_rpc_pushes_a_visible_warning() {
+        let mut store = protocol_store_with_autonomy();
+        // Reproduce the older server: goal runtime present, operator
+        // transition absent.
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods_and_features(
+            [
+                crate::model::APPUI_METHOD_SESSION_GOAL_GET,
+                crate::model::APPUI_METHOD_SESSION_GOAL_SET,
+                crate::model::APPUI_METHOD_SESSION_GOAL_CLEAR,
+            ],
+            [crate::model::APPUI_FEATURE_CODING_AUTONOMY_V1],
+        ));
+        let session_id = SessionKey("local:test".into());
+        store.state.set_session_goal(
+            &session_id,
+            Some(goal_record("active")),
+            Some("user".into()),
+        );
+        store.state.composer = "/goal archive --reason retiring stale goal".into();
+
+        assert!(
+            store.compose_command().is_none(),
+            "the gate must still refuse to probe an unadvertised method"
+        );
+        assert!(
+            store
+                .state
+                .status
+                .contains("session/goal/operator_transition"),
+            "status should still name the missing method: {}",
+            store.state.status
+        );
+        let activity = store
+            .state
+            .activity
+            .last()
+            .expect("rejection must surface a visible activity, not just a status line");
+        // `Report`, not `Warning`: Warnings are filtered by active turn id and
+        // collapsed inside settled groups, so the reason never reached the
+        // screen in either state (outer review #628, P1).
+        assert_eq!(activity.kind, ActivityKind::Report);
+        assert_eq!(activity.title, "local slash command");
+        assert!(
+            activity.status.contains("session/goal/operator_transition"),
+            "the visible report must carry the dispatcher's reason: {}",
+            activity.status
+        );
+
+        // The model-level assertions above passed BEFORE this fix while the
+        // reason was still absent from the screen. Assert the actual render.
+        let reason = activity.status.clone();
+        store.state.status = "idle".into();
+        let rendered = crate::app::debug_render_text(&store.state);
+        assert!(
+            rendered.contains(&reason),
+            "idle transcript must render the rejection reason.\nreason={reason:?}\n{rendered}"
+        );
+    }
+
+    /// Same rejection while a turn is running. `flow_activity_items` filters
+    /// activities by the ACTIVE turn id, so the turn-less local rejection used
+    /// to be excluded outright — the state where "Enter did nothing" was most
+    /// confusing, because the screen is otherwise busy (outer review #628, P1).
+    #[test]
+    fn goal_rejection_renders_in_the_transcript_during_an_active_turn() {
+        let configured = protocol_store_with_autonomy();
+        let mut store = store_with_live_reply(TurnId::new(), "active request");
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods_and_features(
+            [
+                crate::model::APPUI_METHOD_SESSION_GOAL_GET,
+                crate::model::APPUI_METHOD_SESSION_GOAL_SET,
+                crate::model::APPUI_METHOD_SESSION_GOAL_CLEAR,
+            ],
+            [crate::model::APPUI_FEATURE_CODING_AUTONOMY_V1],
+        ));
+        store.state.target = configured.state.target;
+        let session_id = store.state.sessions[0].id.clone();
+        store.state.set_session_goal(
+            &session_id,
+            Some(goal_record("active")),
+            Some("user".into()),
+        );
+        store.state.composer = "/goal archive --reason retiring stale goal".into();
+
+        assert!(store.compose_command().is_none());
+        let reason = store
+            .state
+            .activity
+            .last()
+            .expect("a rejection report")
+            .status
+            .clone();
+        // Exclude the status bar from the assertion: the bar is exactly the
+        // surface this fix exists to stop relying on.
+        store.state.status = "working".into();
+        let rendered = crate::app::debug_render_text(&store.state);
+        assert!(
+            rendered.contains(&reason),
+            "active-turn transcript must render the rejection.\nreason={reason:?}\n{rendered}"
+        );
+    }
+
+    /// The same invalid command twice must keep its specific reason. The old
+    /// before/after status comparison read the second identical write as
+    /// "the dispatcher set nothing" and replaced the explanation with the
+    /// generic unavailable line (outer review #628, P2).
+    #[test]
+    fn repeated_goal_rejection_keeps_its_specific_reason() {
+        let mut store = protocol_store_with_autonomy();
+        store.state.composer = "/goal archive --reason".into();
+        assert!(store.compose_command().is_none());
+        let first = store
+            .state
+            .activity
+            .last()
+            .expect("first rejection report")
+            .status
+            .clone();
+
+        store.state.composer = "/goal archive --reason".into();
+        assert!(store.compose_command().is_none());
+        let second = store
+            .state
+            .activity
+            .last()
+            .expect("second rejection report")
+            .status
+            .clone();
+
+        assert_eq!(
+            second, first,
+            "a repeated rejection must keep its explanation, not degrade to the generic line"
+        );
+        assert_ne!(
+            second,
+            t!("status.command_unavailable").into_owned(),
+            "the specific parse reason must survive the repeat"
+        );
+    }
+
+    /// A rejection recorded by an EARLIER command must not be attributed to a
+    /// later one that rejects without recording a reason of its own.
+    #[test]
+    fn stale_rejection_reason_is_not_reused_by_a_later_command() {
+        let mut store = protocol_store_with_autonomy();
+        store.state.composer = "/goal archive --reason".into();
+        assert!(store.compose_command().is_none());
+        let specific = store
+            .state
+            .activity
+            .last()
+            .expect("first rejection")
+            .status
+            .clone();
+        assert!(store.state.pending_autonomy_rejection.is_none(), "consumed");
+
+        // A DIFFERENT command that rejects for its own reason must report
+        // that reason, never the previous command's.
+        store.state.composer = "/turn".into();
+        assert!(store.compose_command().is_none());
+        let second = store
+            .state
+            .activity
+            .last()
+            .expect("second rejection")
+            .status
+            .clone();
+        assert_ne!(
+            second, specific,
+            "a later rejection must not inherit the previous command's explanation"
+        );
+        assert!(
+            !second.contains("reason"),
+            "the goal parse error must not leak into the /turn rejection: {second}"
+        );
+        assert!(store.state.pending_autonomy_rejection.is_none(), "consumed");
+    }
+
+    /// `/goal archive` with no `--reason` still sends a non-empty reason:
+    /// the backend records it in the transition log and syncs it to the
+    /// durable ledger, so an empty one would leave an unattributed row.
+    #[test]
+    fn goal_archive_without_reason_flag_sends_a_default() {
+        let mut store = protocol_store_with_autonomy();
+        let session_id = SessionKey("local:test".into());
+        store.state.set_session_goal(
+            &session_id,
+            Some(goal_record("active")),
+            Some("user".into()),
+        );
+        store.state.composer = "/goal archive".into();
+        let _ = store.compose_command().expect("stages the transition");
+        let command =
+            store.consume_pending_goal_transition(&session_id, Some(&goal_record("active")));
+        match command.expect("operator transition dispatched") {
+            AppUiCommand::OperatorTransitionSessionGoal(params) => {
+                assert!(
+                    !params.reason.trim().is_empty(),
+                    "a default reason must be substituted"
+                );
+            }
+            other => panic!("expected OperatorTransitionSessionGoal, got {other:?}"),
+        }
+    }
+
+    /// The divergence that motivates a per-action guard: `complete` is a
+    /// model-owned terminal state the SET path must never transition, but
+    /// archiving a completed goal is exactly what the operator verb is
+    /// for. One shared status allow-list would have blocked it.
+    #[test]
+    fn goal_archive_is_allowed_from_complete_where_pause_is_not() {
+        let mut store = protocol_store_with_autonomy();
+        let session_id = SessionKey("local:test".into());
+        store.state.set_session_goal(
+            &session_id,
+            Some(goal_record("complete")),
+            Some("model".into()),
+        );
+
+        store.state.composer = "/goal pause".into();
+        assert!(
+            store.compose_command().is_none(),
+            "pause must refuse a model-completed goal"
+        );
+
+        store.state.composer = "/goal archive".into();
+        assert!(
+            matches!(
+                store.compose_command(),
+                Some(AppUiCommand::GetSessionGoal(_))
+            ),
+            "archive must accept a completed goal — retiring one is its purpose"
+        );
+    }
+
+    /// Reopen mirrors the backend's narrower domain: it takes a goal only
+    /// from `blocked` / `paused` / `budget_limited`, so an already-active
+    /// goal fails fast in the TUI instead of spending a round-trip.
+    #[test]
+    fn goal_reopen_refuses_an_already_active_goal() {
+        let mut store = protocol_store_with_autonomy();
+        let session_id = SessionKey("local:test".into());
+        store.state.set_session_goal(
+            &session_id,
+            Some(goal_record("active")),
+            Some("user".into()),
+        );
+        store.state.composer = "/goal reopen".into();
+        assert!(
+            store.compose_command().is_none(),
+            "reopen is only legal from blocked|paused|budget_limited"
+        );
+
+        store.state.set_session_goal(
+            &session_id,
+            Some(goal_record("paused")),
+            Some("user".into()),
+        );
+        store.state.composer = "/goal reopen".into();
+        assert!(
+            matches!(
+                store.compose_command(),
+                Some(AppUiCommand::GetSessionGoal(_))
+            ),
+            "reopen from paused must stage the transition"
+        );
+    }
+
+    /// A goal that moved to a non-transitionable status DURING the refresh
+    /// round-trip must not be transitioned on the stale premise the
+    /// dispatch guarded against.
+    #[test]
+    fn goal_archive_aborts_when_the_fresh_record_is_already_archived() {
+        let mut store = protocol_store_with_autonomy();
+        let session_id = SessionKey("local:test".into());
+        store.state.set_session_goal(
+            &session_id,
+            Some(goal_record("active")),
+            Some("user".into()),
+        );
+        store.state.composer = "/goal archive".into();
+        let _ = store.compose_command().expect("stages the transition");
+        assert!(
+            store
+                .consume_pending_goal_transition(&session_id, Some(&goal_record("archived")))
+                .is_none(),
+            "an already-archived goal must not be re-archived"
+        );
+        assert!(
+            store.state.pending_goal_transition.is_none(),
+            "the aborted transition must not stay staged"
+        );
+    }
+
+    /// The operator result carries the post-transition snapshot with
+    /// `transition_actor: "operator"` and NO `ok` field; the store must
+    /// apply it to the goal mirror rather than reading the absent `ok`
+    /// as a rejection.
+    #[test]
+    fn goal_operator_transition_result_updates_the_goal_mirror() {
+        use crate::client_event::{AutonomyClientEvent, AutonomyResult, ClientEvent};
+        let mut store = protocol_store_with_autonomy();
+        let session_id = SessionKey("local:test".into());
+        store.state.set_session_goal(
+            &session_id,
+            Some(goal_record("active")),
+            Some("user".into()),
+        );
+        let _ = store.apply_client_event(ClientEvent::Autonomy(AutonomyClientEvent {
+            result: AutonomyResult::GoalOperatorTransition(
+                crate::model::SessionGoalOperatorTransitionResult {
+                    session_id: session_id.clone(),
+                    profile_id: Some("coding".into()),
+                    goal: Some(goal_record("archived")),
+                    transition_actor: Some("operator".into()),
+                },
+            ),
+        }));
+        let mirror = store
+            .state
+            .session_autonomy_for(&session_id)
+            .expect("autonomy mirror");
+        assert_eq!(
+            mirror.goal.as_ref().map(|goal| goal.status.as_str()),
+            Some("archived")
+        );
+        assert_eq!(mirror.goal_transition_actor.as_deref(), Some("operator"));
     }
 
     /// Resuming a goal that is still over budget re-activates it server-side
@@ -41106,8 +41753,10 @@ now analyzing the bus module"
         store.state.pending_goal_transition = Some(crate::model::PendingGoalTransition {
             session_id: session_id.clone(),
             profile_id: Some("coding".into()),
-            status: "paused",
-            action: crate::model::SessionGoalSetAction::Pause,
+            follow_up: crate::model::PendingGoalFollowUp::Set {
+                status: "paused",
+                action: crate::model::SessionGoalSetAction::Pause,
+            },
         });
         let _ = store.apply_client_event(ClientEvent::Autonomy(AutonomyClientEvent {
             result: AutonomyResult::GoalClear(crate::model::SessionGoalClearResult {
