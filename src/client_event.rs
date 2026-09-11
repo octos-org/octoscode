@@ -13,12 +13,13 @@ use crate::model::{
     AuthSendCodeResult, AuthStatusResult, AuthVerifyResult, ConfigCapabilitiesListResult,
     ContextCacheDiagnostics, DiffPreviewGetResult, LaunchResolveResult, LoopCreateResult,
     LoopListResult, LoopMutationResult, McpConfigListResult, McpConfigMutationResult,
-    McpStatusListResult, ModelListResult, ModelSelectResult, ProfileLlmCatalogResult,
-    ProfileLlmListResult, ProfileLlmMutationResult, ProfileLocalCreateResult,
-    ProfileSkillsListResult, ProfileSkillsMutationResult, ProfileSkillsRegistrySearchResult,
-    ReviewStartResult, SessionGoalClearResult, SessionGoalGetResult, SessionGoalSetResult,
-    SessionStatusReadResult, SubProvidersListResult, SubProvidersMutationResult,
-    ToolConfigListResult, ToolConfigMutationResult, ToolStatusListResult,
+    McpStatusListResult, ModelListResult, ModelSelectResult, MonitorCreateResult,
+    MonitorListResult, MonitorMutationResult, ProfileLlmCatalogResult, ProfileLlmListResult,
+    ProfileLlmMutationResult, ProfileLocalCreateResult, ProfileSkillsListResult,
+    ProfileSkillsMutationResult, ProfileSkillsRegistrySearchResult, ReviewStartResult,
+    SessionGoalClearResult, SessionGoalGetResult, SessionGoalSetResult, SessionStatusReadResult,
+    SubProvidersListResult, SubProvidersMutationResult, ToolConfigListResult,
+    ToolConfigMutationResult, ToolStatusListResult,
 };
 
 #[derive(Debug, Clone)]
@@ -395,6 +396,14 @@ pub enum AutonomyResult {
     LoopMutation {
         method: String,
         result: LoopMutationResult,
+    },
+    MonitorCreate(MonitorCreateResult),
+    MonitorList(MonitorListResult),
+    /// `monitor/pause|resume|delete` share one wire shape; the method is kept
+    /// so the store can emit a precise status line, mirroring `LoopMutation`.
+    MonitorMutation {
+        method: String,
+        result: MonitorMutationResult,
     },
 }
 

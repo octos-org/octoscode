@@ -605,6 +605,12 @@ status:
   deleting_loop: "Deleting loop %{id}"
   pausing_loop: "Pausing loop %{id}"
   resuming_loop: "Resuming loop %{id}"
+  listing_monitors: "Listing monitors"
+  creating_monitor: "Creating monitor %{name}"
+  deleting_monitor: "Deleting monitor %{id}"
+  pausing_monitor: "Pausing monitor %{id}"
+  resuming_monitor: "Resuming monitor %{id}"
+  monitor_interval_min: "Monitor poll interval must be at least 1 second"
   firing_loop: "Firing loop %{id}"
   cannot_verb_no_goal_cached: "Cannot %{verb}: no goal cached. Run /goal to refresh first."
   cannot_verb_goal_state: "Cannot %{verb} goal in `%{state}` state (model-owned)."
@@ -843,10 +849,15 @@ status:
   goal_cleared: "Goal cleared"
   goal_clear_rejected: "Goal clear rejected"
   loop_created: "Loop %{id} created (%{mode})"
+  monitor_created: "Monitor %{id} created (%{name})"
   loop_list_title: "↻ Loops"
   loop_list_empty_hint: "No loops in this session. Create one with /loop <prompt> (self-paced) or /loop every 10m <prompt>."
+  monitor_list_title: "◉ Monitors"
+  monitor_list_empty_hint: "No monitors in this session. Create one with /monitor watch <name> -- <command> or /monitor poll <name> every 30s -- <command>."
   loop_list_refreshed: "Loop list refreshed: %{count} loop(s)"
+  monitor_list_refreshed: "Monitor list refreshed: %{count} monitor(s)"
   loop_mutation: "Loop %{id} %{verb} %{outcome}"
+  monitor_mutation: "Monitor %{id} %{verb} %{outcome}"
   cannot_transition_no_goal: "Cannot transition: server reports no goal."
   cannot_transition_goal_state: "Cannot transition goal in `%{state}` state (model-owned)."
   goal_verb_pausing: "Pausing"
@@ -990,6 +1001,8 @@ command:
     desc: Sign in with email OTP or inspect current auth state.
   loop:
     desc: Create, list, pause, resume, fire-now, or delete backend loops.
+  monitor:
+    desc: Create, list, pause, resume, or delete zero-token event monitors.
   mcp:
     desc: List or configure server-owned MCP entries when supported.
   model:

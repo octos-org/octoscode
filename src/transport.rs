@@ -2523,6 +2523,7 @@ impl ProtocolAppUiBackend {
                 | AppUiCommand::ReadAgentArtifact(_)
                 | AppUiCommand::GetSessionGoal(_)
                 | AppUiCommand::ListLoops(_)
+                | AppUiCommand::ListMonitors(_)
         )
     }
 
@@ -2748,6 +2749,10 @@ impl ProtocolAppUiBackend {
             | AppUiCommand::PauseLoop(_)
             | AppUiCommand::ResumeLoop(_)
             | AppUiCommand::FireLoopNow(_)
+            | AppUiCommand::CreateMonitor(_)
+            | AppUiCommand::PauseMonitor(_)
+            | AppUiCommand::ResumeMonitor(_)
+            | AppUiCommand::DeleteMonitor(_)
             | AppUiCommand::CompactContext(_)
             | AppUiCommand::SetCompactionMode(_) => {
                 self.queue.push_back(
@@ -3271,6 +3276,7 @@ fn appui_feature_tokens_for(old_server: bool) -> Vec<String> {
         UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1,
         UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1,
         UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1,
+        crate::model::APPUI_FEATURE_CODING_MONITOR_RUNTIME_V1,
         UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1,
         UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1,
         UI_PROTOCOL_FEATURE_USER_QUESTION_V1,
@@ -3508,6 +3514,11 @@ fn rpc_request_from_command(
         | AppUiCommand::PauseLoop(params)
         | AppUiCommand::ResumeLoop(params)
         | AppUiCommand::FireLoopNow(params) => serde_json::to_value(params),
+        AppUiCommand::CreateMonitor(params) => serde_json::to_value(params),
+        AppUiCommand::ListMonitors(params) => serde_json::to_value(params),
+        AppUiCommand::PauseMonitor(params)
+        | AppUiCommand::ResumeMonitor(params)
+        | AppUiCommand::DeleteMonitor(params) => serde_json::to_value(params),
         _ => {
             return Err(eyre!(
                 "unsupported Octos UI command for first-server transport: {method}"
@@ -4480,6 +4491,38 @@ fn success_response_to_app_event(
         | crate::model::APPUI_METHOD_LOOP_FIRE_NOW => {
             match serde_json::from_value::<crate::model::LoopMutationResult>(result) {
                 Ok(result) => Ok(Some(autonomy_event(AutonomyResult::LoopMutation {
+                    method: pending_request.method.clone(),
+                    result,
+                }))),
+                Err(err) => Ok(Some(autonomy_decode_error(
+                    pending_request.method.as_str(),
+                    err,
+                ))),
+            }
+        }
+        crate::model::APPUI_METHOD_MONITOR_CREATE => {
+            match serde_json::from_value::<crate::model::MonitorCreateResult>(result) {
+                Ok(result) => Ok(Some(autonomy_event(AutonomyResult::MonitorCreate(result)))),
+                Err(err) => Ok(Some(autonomy_decode_error(
+                    crate::model::APPUI_METHOD_MONITOR_CREATE,
+                    err,
+                ))),
+            }
+        }
+        crate::model::APPUI_METHOD_MONITOR_LIST => {
+            match serde_json::from_value::<crate::model::MonitorListResult>(result) {
+                Ok(result) => Ok(Some(autonomy_event(AutonomyResult::MonitorList(result)))),
+                Err(err) => Ok(Some(autonomy_decode_error(
+                    crate::model::APPUI_METHOD_MONITOR_LIST,
+                    err,
+                ))),
+            }
+        }
+        crate::model::APPUI_METHOD_MONITOR_PAUSE
+        | crate::model::APPUI_METHOD_MONITOR_RESUME
+        | crate::model::APPUI_METHOD_MONITOR_DELETE => {
+            match serde_json::from_value::<crate::model::MonitorMutationResult>(result) {
+                Ok(result) => Ok(Some(autonomy_event(AutonomyResult::MonitorMutation {
                     method: pending_request.method.clone(),
                     result,
                 }))),
@@ -8949,6 +8992,25 @@ mod tests {
         assert!(
             !appui_feature_header_for(true)
                 .contains(crate::model::APPUI_FEATURE_BACKGROUND_ACTIVITY_V1),
+            "the old-server baseline must not request it"
+        );
+    }
+
+    #[test]
+    fn should_advertise_monitor_runtime_when_negotiating_features() {
+        // octos gates monitor notifications on this token server-side (#1977
+        // blocker 6: a connection that did not negotiate never receives
+        // `monitor/updated|fired|expired`, on live broadcast AND reconnect
+        // replay). Without it in the header the lifecycle handlers in
+        // `store::apply_notification` are unreachable by construction.
+        let header = appui_feature_header_for(false);
+        assert!(
+            header.contains(crate::model::APPUI_FEATURE_CODING_MONITOR_RUNTIME_V1),
+            "modern feature header must request the monitor runtime: {header}"
+        );
+        assert!(
+            !appui_feature_header_for(true)
+                .contains(crate::model::APPUI_FEATURE_CODING_MONITOR_RUNTIME_V1),
             "the old-server baseline must not request it"
         );
     }

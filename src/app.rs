@@ -3925,6 +3925,72 @@ pub(crate) fn format_loop_list_block(
         .join("\n")
 }
 
+/// Render a `monitor/list` response as a transcript block, mirroring
+/// [`format_loop_list_block`].
+///
+/// Columns are id, status, mode/cadence, then the human name — the id comes
+/// first because every id-taking verb (`/monitor pause|resume|delete`) needs
+/// it, and a list the user cannot act on is the failure this mirrors.
+pub(crate) fn format_monitor_list_block(
+    monitors: &[octos_core::ui_protocol::UiMonitorRecord],
+    global: bool,
+) -> String {
+    if monitors.is_empty() {
+        return t!("status.monitor_list_empty_hint").into_owned();
+    }
+    monitors
+        .iter()
+        .map(|record| {
+            // Poll monitors carry a cadence; stream monitors do not, so the
+            // mode alone is the honest description.
+            let cadence = match (record.mode.as_str(), record.interval_seconds) {
+                ("poll", Some(secs)) => format!("poll every {}", format_loop_duration(secs)),
+                (mode, _) => mode.to_string(),
+            };
+            let mut segments = vec![cadence];
+            // The auto-pause reason is the one field that explains why a
+            // monitor stopped producing lines; never omit it when present.
+            if let Some(reason) = record
+                .pause_reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|reason| !reason.is_empty())
+            {
+                segments.push(reason.to_string());
+            }
+            if record.fires_used > 0 {
+                segments.push(format!(
+                    "{}/{} fires",
+                    record.fires_used, record.max_events_per_hour
+                ));
+            }
+            let session = if global {
+                let key = &record.session_id;
+                let shown = key
+                    .profile_id()
+                    .and_then(|profile| {
+                        key.0
+                            .strip_prefix(profile)
+                            .map(|r| r.trim_start_matches(':'))
+                    })
+                    .unwrap_or(key.0.as_str());
+                format!("  [{shown}]")
+            } else {
+                String::new()
+            };
+            format!(
+                "{}  {}  {}  {}{}",
+                record.monitor_id,
+                record.status,
+                segments.join(" · "),
+                record.name,
+                session
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Shortest next-run countdown across the active session's active loops,
 /// pre-formatted for the status bar chip. `None` when no active loop has a
 /// scheduled next run (a self-paced loop mid-turn).

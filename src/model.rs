@@ -274,6 +274,24 @@ pub const APPUI_FEATURE_CODING_AGENT_CONTROL_V1: &str = "coding.agent_control.v1
 pub const APPUI_FEATURE_CODING_GOAL_RUNTIME_V1: &str = "coding.goal_runtime.v1";
 pub const APPUI_FEATURE_CODING_LOOP_RUNTIME_V1: &str = "coding.loop_runtime.v1";
 
+/// octos#1977 monitor runtime — the ZERO-TOKEN sibling of `coding.loop_runtime.v1`.
+/// A monitor is a probe subprocess whose filtered stdout lines wake the master
+/// through an external continuation; unlike `/loop` it does not burn a master
+/// turn per tick, so it runs only when an event line actually appears.
+///
+/// Negotiating this gates the `monitor/updated|fired|expired` LIFECYCLE
+/// notifications. It does not imply a control surface: monitors are armed by
+/// the MODEL through the keeper-gated `monitor_create` tool (octos
+/// `goal_tool.rs`), not by this client, so the TUI is a lifecycle OBSERVER.
+///
+/// The matched event lines themselves already arrive over a separate,
+/// already-negotiated channel — `background/activity` with
+/// `origin_kind = "monitor"` ([`APPUI_FEATURE_BACKGROUND_ACTIVITY_V1`]). What
+/// this feature adds is the state around them: armed, fired, auto-paused on
+/// the per-hour flood cap, expired. Without it a monitor silently
+/// auto-pauses and the user sees their event lines simply stop.
+pub const APPUI_FEATURE_CODING_MONITOR_RUNTIME_V1: &str = "coding.monitor_runtime.v1";
+
 /// octos#2019 human sink over background events that today only wake the
 /// model. When negotiated the server pushes `background/activity`; when it is
 /// NOT negotiated the server never sends the frame, so an older TUI can never
@@ -332,6 +350,16 @@ pub const APPUI_METHOD_LOOP_DELETE: &str = "loop/delete";
 pub const APPUI_METHOD_LOOP_PAUSE: &str = "loop/pause";
 pub const APPUI_METHOD_LOOP_RESUME: &str = "loop/resume";
 pub const APPUI_METHOD_LOOP_FIRE_NOW: &str = "loop/fire_now";
+
+/// octos#1977 monitor runtime methods, gated on
+/// [`APPUI_FEATURE_CODING_MONITOR_RUNTIME_V1`]. Mirrors the loop family; there
+/// is deliberately no `fire_now` analogue — a monitor fires when its probe
+/// emits a matching line, and there is nothing to force.
+pub const APPUI_METHOD_MONITOR_CREATE: &str = "monitor/create";
+pub const APPUI_METHOD_MONITOR_LIST: &str = "monitor/list";
+pub const APPUI_METHOD_MONITOR_PAUSE: &str = "monitor/pause";
+pub const APPUI_METHOD_MONITOR_RESUME: &str = "monitor/resume";
+pub const APPUI_METHOD_MONITOR_DELETE: &str = "monitor/delete";
 
 /// Pseudo-method for the `!`-bang client-local shell exec. This command is
 /// never sent over the UI protocol wire — the event loop intercepts it and
@@ -672,6 +700,98 @@ pub struct LoopIdParams {
     pub loop_id: String,
 }
 
+/// `monitor/create` (octos#1977). Only `name` + `argv` are required; every
+/// other field is server-defaulted, so the TUI sends exactly what the user
+/// typed and never invents a cadence, cap, or lifetime of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MonitorCreateParams {
+    pub session_id: SessionKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    pub name: String,
+    pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter_regex: Option<String>,
+    /// `"poll"` or `"stream"`. Omitted means the server's default (poll).
+    /// Never guessed client-side: octos rejects an unknown mode with a typed
+    /// `monitor_invalid_spec` rather than falling back, so sending a mode the
+    /// user did not ask for would arm a different watcher than requested.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MonitorCreateResult {
+    #[serde(default)]
+    pub session_id: Option<SessionKey>,
+    #[serde(rename = "monitor")]
+    pub monitor_state: octos_core::ui_protocol::UiMonitorRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MonitorListParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MonitorListResult {
+    /// Optional for the same reason as [`LoopListResult::session_id`]: a
+    /// global query sends none and the server echoes `null`.
+    #[serde(default)]
+    pub session_id: Option<SessionKey>,
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_monitor_records")]
+    pub monitors: Vec<octos_core::ui_protocol::UiMonitorRecord>,
+}
+
+/// Per-record decode, mirroring [`deserialize_loop_records`]: one malformed
+/// monitor must not make the whole list undecodable and leave
+/// `/monitor pause|resume|delete` with no ids to name.
+fn deserialize_monitor_records<'de, D>(
+    deserializer: D,
+) -> Result<Vec<octos_core::ui_protocol::UiMonitorRecord>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = Vec::<Value>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|record| serde_json::from_value(record).ok())
+        .collect())
+}
+
+/// `monitor/pause|resume|delete`. `session_id` is optional on the wire (the
+/// server can resolve scope from the monitor itself) but the TUI always sends
+/// it so the server scopes to the session the user is looking at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MonitorIdParams {
+    pub monitor_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MonitorMutationResult {
+    #[serde(default)]
+    pub session_id: Option<SessionKey>,
+    #[serde(default)]
+    pub monitor_id: Option<String>,
+    #[serde(default)]
+    pub ok: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, rename = "monitor", skip_serializing_if = "Option::is_none")]
+    pub monitor_state: Option<octos_core::ui_protocol::UiMonitorRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted: Option<bool>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LoopMutationResult {
     pub session_id: SessionKey,
@@ -707,6 +827,11 @@ pub struct SessionAutonomyState {
     /// applies and never advances the watermark.
     pub last_goal_event_generation: u64,
     pub loops: Vec<octos_core::ui_protocol::UiLoopRecord>,
+    /// octos#1977 monitor mirror, populated by `monitor/list` responses and
+    /// the `monitor/updated|fired` notifications. Kept beside `loops` because
+    /// a monitor is the zero-token sibling of a loop and the two surfaces are
+    /// read together.
+    pub monitors: Vec<octos_core::ui_protocol::UiMonitorRecord>,
     /// Latest model-authored plan/todo checklist (`plan/updated`). `None` until
     /// the agent calls `update_plan` this session.
     pub plan: Option<octos_core::ui_protocol::UiPlanRecord>,
@@ -741,6 +866,7 @@ impl SessionAutonomyState {
             goal_transition_actor: None,
             last_goal_event_generation: 0,
             loops: Vec::new(),
+            monitors: Vec::new(),
             plan: None,
             plan_turn_id: None,
             terminal_seen: Vec::new(),
@@ -936,6 +1062,11 @@ pub enum AppUiCommand {
     PauseLoop(LoopIdParams),
     ResumeLoop(LoopIdParams),
     FireLoopNow(LoopIdParams),
+    CreateMonitor(MonitorCreateParams),
+    ListMonitors(MonitorListParams),
+    PauseMonitor(MonitorIdParams),
+    ResumeMonitor(MonitorIdParams),
+    DeleteMonitor(MonitorIdParams),
     /// `!`-bang client-local shell exec (Claude Code's `!` model). Runs a
     /// native shell command on the machine octoscode runs on — NOT the
     /// agent's sandboxed server `shell` tool — so it intentionally bypasses
@@ -1038,6 +1169,11 @@ impl AppUiCommand {
             Self::DeleteLoop(_) => APPUI_METHOD_LOOP_DELETE,
             Self::PauseLoop(_) => APPUI_METHOD_LOOP_PAUSE,
             Self::ResumeLoop(_) => APPUI_METHOD_LOOP_RESUME,
+            Self::CreateMonitor(_) => APPUI_METHOD_MONITOR_CREATE,
+            Self::ListMonitors(_) => APPUI_METHOD_MONITOR_LIST,
+            Self::PauseMonitor(_) => APPUI_METHOD_MONITOR_PAUSE,
+            Self::ResumeMonitor(_) => APPUI_METHOD_MONITOR_RESUME,
+            Self::DeleteMonitor(_) => APPUI_METHOD_MONITOR_DELETE,
             Self::FireLoopNow(_) => APPUI_METHOD_LOOP_FIRE_NOW,
             // `!`-bang local exec never crosses the wire; the event loop
             // intercepts it before backend dispatch. This pseudo
@@ -4912,6 +5048,10 @@ pub struct AppState {
     /// session-open hydration fires the same RPC silently; only an explicit
     /// user query may pop the loops menu when the result lands.
     pub pending_loop_list_menu: bool,
+    /// Same latch for `/monitor list`: only a USER-dispatched list pops the
+    /// monitors menu when its result lands, so hydration and reconnect
+    /// refreshes stay silent.
+    pub pending_monitor_list_menu: bool,
     /// Loop id the `MENU_LOOP_ACTIONS` submenu is acting on (set when a
     /// loops-list row is activated).
     pub loop_actions_target: Option<String>,
@@ -7157,6 +7297,7 @@ impl AppState {
             loop_attributed_turns: std::collections::HashSet::new(),
             pending_loop_attribution: std::collections::HashSet::new(),
             pending_loop_list_menu: false,
+            pending_monitor_list_menu: false,
             loop_actions_target: None,
             config_path: None,
             activity_navigator: ActivityNavigatorState::default(),
@@ -7492,6 +7633,52 @@ impl AppState {
     /// Remove a loop entry by id (used for explicit `loop/delete`
     /// responses where the backend doesn't echo a deleted-status loop
     /// record).
+    pub fn set_session_monitors(
+        &mut self,
+        session_id: &SessionKey,
+        monitors: Vec<octos_core::ui_protocol::UiMonitorRecord>,
+    ) -> usize {
+        let entry = self.session_autonomy_mut(session_id);
+        entry.monitors = monitors
+            .into_iter()
+            .filter(|monitor| monitor.status != "deleted")
+            .collect();
+        entry.monitors.len()
+    }
+
+    pub fn upsert_session_monitor(
+        &mut self,
+        session_id: &SessionKey,
+        monitor_state: octos_core::ui_protocol::UiMonitorRecord,
+    ) {
+        let entry = self.session_autonomy_mut(session_id);
+        if monitor_state.status == "deleted" {
+            entry
+                .monitors
+                .retain(|m| m.monitor_id != monitor_state.monitor_id);
+            return;
+        }
+        if let Some(pos) = entry
+            .monitors
+            .iter()
+            .position(|m| m.monitor_id == monitor_state.monitor_id)
+        {
+            entry.monitors[pos] = monitor_state;
+        } else {
+            entry.monitors.push(monitor_state);
+        }
+    }
+
+    pub fn remove_session_monitor(&mut self, session_id: &SessionKey, monitor_id: &str) {
+        if let Some(entry) = self
+            .session_autonomy
+            .iter_mut()
+            .find(|entry| &entry.session_id == session_id)
+        {
+            entry.monitors.retain(|m| m.monitor_id != monitor_id);
+        }
+    }
+
     pub fn remove_session_loop(&mut self, session_id: &SessionKey, loop_id: &str) {
         if let Some(entry) = self
             .session_autonomy

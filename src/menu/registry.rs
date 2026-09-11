@@ -260,6 +260,17 @@ pub const APPUI_GOAL_MENU_METHODS_ANY: &[&str] = &[
     crate::model::APPUI_METHOD_SESSION_GOAL_SET,
     crate::model::APPUI_METHOD_SESSION_GOAL_CLEAR,
 ];
+/// octos#1977: any monitor method enables `/monitor`. Mirrors
+/// [`APPUI_LOOP_MENU_METHODS_ANY`]; there is no `fire_now` analogue because a
+/// monitor fires on its probe's output, not on demand.
+pub const APPUI_MONITOR_METHODS_ANY: &[&str] = &[
+    crate::model::APPUI_METHOD_MONITOR_CREATE,
+    crate::model::APPUI_METHOD_MONITOR_LIST,
+    crate::model::APPUI_METHOD_MONITOR_PAUSE,
+    crate::model::APPUI_METHOD_MONITOR_RESUME,
+    crate::model::APPUI_METHOD_MONITOR_DELETE,
+];
+
 pub const APPUI_LOOP_MENU_METHODS_ANY: &[&str] = &[
     crate::model::APPUI_METHOD_LOOP_CREATE,
     crate::model::APPUI_METHOD_LOOP_LIST,
@@ -269,6 +280,7 @@ pub const APPUI_LOOP_MENU_METHODS_ANY: &[&str] = &[
     crate::model::APPUI_METHOD_LOOP_FIRE_NOW,
 ];
 const AUTONOMY_FEATURES: &[&str] = &[APPUI_FEATURE_CODING_AUTONOMY_V1];
+const MONITOR_FEATURES: &[&str] = &[crate::model::APPUI_FEATURE_CODING_MONITOR_RUNTIME_V1];
 const TASK_ARTIFACT_FEATURES: &[&str] = &[APPUI_FEATURE_TASK_ARTIFACTS_V1];
 const THREAD_GRAPH_FEATURES: &[&str] = &[APPUI_FEATURE_THREAD_GRAPH_V1];
 const TURN_STATE_FEATURES: &[&str] = &[APPUI_FEATURE_TURN_STATE_GET_V1];
@@ -1080,6 +1092,22 @@ pub fn core_command_specs() -> Vec<CommandSpec> {
                 .with_session(SessionRequirement::Any)
                 .with_required_methods_any(APPUI_LOOP_MENU_METHODS_ANY)
                 .with_required_features(AUTONOMY_FEATURES),
+            inline_args: InlineArgMode::Optional,
+            entry: CommandEntry::LocalAction(LocalAction::Custom("autonomy")),
+        },
+        CommandSpec {
+            name: "monitor",
+            aliases: &["monitors"],
+            description: "command.monitor.desc",
+            category: CommandCategory::Runtime,
+            // Gated on the monitor feature rather than `AUTONOMY_FEATURES`:
+            // a server can advertise the autonomy surface without the #1977
+            // monitor runtime, and offering `/monitor` there would produce
+            // method_not_supported on every verb.
+            availability: CommandAvailability::app_ui_read(&[])
+                .with_session(SessionRequirement::Any)
+                .with_required_methods_any(APPUI_MONITOR_METHODS_ANY)
+                .with_required_features(MONITOR_FEATURES),
             inline_args: InlineArgMode::Optional,
             entry: CommandEntry::LocalAction(LocalAction::Custom("autonomy")),
         },

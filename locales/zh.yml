@@ -479,6 +479,8 @@ command:
     desc: 使用邮件 OTP 登录或查看当前认证状态
   loop:
     desc: 创建、列出、暂停/恢复、立即触发或删除后端定时任务循环
+  monitor:
+    desc: 创建、列出、暂停/恢复或删除零 token 事件监视器
   mcp:
     desc: 列出或配置服务器支持的 MCP 条目
   model:
@@ -1367,6 +1369,12 @@ status:
   deleting_loop: "正在删除循环 %{id}"
   pausing_loop: "正在暂停循环 %{id}"
   resuming_loop: "正在恢复循环 %{id}"
+  listing_monitors: "正在列出监视器"
+  creating_monitor: "正在创建监视器 %{name}"
+  deleting_monitor: "正在删除监视器 %{id}"
+  pausing_monitor: "正在暂停监视器 %{id}"
+  resuming_monitor: "正在恢复监视器 %{id}"
+  monitor_interval_min: "监视器轮询间隔至少为 1 秒"
   firing_loop: "正在触发循环 %{id}"
   cannot_verb_no_goal_cached: "无法 %{verb}：未缓存目标。请先运行 /goal 刷新。"
   cannot_verb_goal_state: "无法在 `%{state}` 状态下 %{verb} 目标（由模型管控）。"
@@ -1605,10 +1613,15 @@ status:
   goal_cleared: "目标已清除"
   goal_clear_rejected: "目标清除被拒绝"
   loop_created: "循环 %{id} 已创建（%{mode}）"
+  monitor_created: "监视器 %{id} 已创建（%{name}）"
   loop_list_title: "↻ 循环列表"
   loop_list_empty_hint: "当前会话没有循环。用 /loop <提示词> 创建自主循环,或 /loop every 10m <提示词> 创建定时循环。"
+  monitor_list_title: "◉ 监视器"
+  monitor_list_empty_hint: "当前会话没有监视器。用 /monitor watch <名称> -- <命令> 或 /monitor poll <名称> every 30s -- <命令> 创建。"
   loop_list_refreshed: "循环列表已刷新：%{count} 个循环"
+  monitor_list_refreshed: "监视器列表已刷新：%{count} 个监视器"
   loop_mutation: "循环 %{id} %{verb} %{outcome}"
+  monitor_mutation: "监视器 %{id} %{verb} %{outcome}"
   cannot_transition_no_goal: "无法转换：服务器报告无目标。"
   cannot_transition_goal_state: "无法在 `%{state}` 状态下转换目标（由模型管控）。"
   goal_verb_pausing: "正在暂停"
