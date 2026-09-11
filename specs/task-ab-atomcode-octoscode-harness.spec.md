@@ -12,12 +12,14 @@ The atomcode vs octoscode comparison exists only as scratch in `tmp/`
 (`ab_run.sh`, `ab_proxy.py`, `bench.py`, `bench_report.md`), and both arms call
 the live DeepSeek API — so a rerun needs a key, spends money, and returns
 different numbers each time. The prior report's headline latency column is
-therefore a measurement of the provider, not of the two clients. Meanwhile
-`examples/automation/ab_prompt_tap.rs` already records identical input for both
-agents, but the `scripts/ab_replay.py` its own header names was never written.
-This task puts both arms behind wasm_mock_server so one mocked model answers
-both, captures each arm's TUI as PTY text, and emits a diffable report keyed by
-the model scenario it ran under.
+therefore a measurement of the provider, not of the two clients. Meanwhile the
+tap at `examples/automation/ab_prompt_tap.rs` in the **wasm_mock_rust** repo
+(`/Users/alanpoon/Documents/go/wasm_mock_rust`, which is also where the mock
+guest and the scenario runner live) already records identical input for both
+agents, but the `scripts/ab_replay.py` its own header names was never written,
+and it is named relative to this repository. This task puts both arms behind
+wasm_mock_server so one mocked model answers both, captures each arm's TUI as
+PTY text, and emits a diffable report keyed by the model scenario it ran under.
 
 ## Decisions
 
@@ -59,6 +61,20 @@ the model scenario it ran under.
 - Before reporting, the harness reads `server/heartbeat` for both arms and
   refuses to emit a report if they were served different `scenario_id`s. An A/B
   where the arms saw different data is not an A/B.
+- The bound tests live in `tests/ab_harness_contract.rs` and run under
+  `cargo test`, the only runner this repository's verification gate invokes. A
+  selector naming a test that does not exist is reported as a **pass** rather
+  than a skip, so a contract whose selectors resolve to nothing verifies green
+  against an empty repository — the state this contract was in before those
+  tests existed. Each scenario's test therefore drives the Python and shell
+  harness as a subprocess and asserts on what it wrote, following the repo's
+  existing `tests/*_contract.rs` convention.
+- Every bound test is hermetic: stub arms, fixture heartbeat payloads, and a
+  temporary run directory passed through `--out`. The inherited project spec
+  requires each acceptance scenario to bind a deterministic mock-backed or
+  fixture-backed test and forbids binding a live soak, so no bound test deploys
+  a wasm guest or executes a real atomcode binary. Driving a real deploy stays
+  an operation the harness supports and the contract does not verify.
 - This contract is octoscode-side only. The guest that does the capturing already
   exists and is not touched.
 
@@ -69,6 +85,7 @@ the model scenario it ran under.
 - scripts/run-ab-atomcode-octoscode.sh
 - scripts/validate-ab-capture.sh
 - scripts/tests/test_ab_replay.py
+- tests/ab_harness_contract.rs
 - docs/ab-atomcode-octoscode.md
 
 ### Forbidden
@@ -95,7 +112,7 @@ the model scenario it ran under.
 Scenario: both arms are answered by the same scenario
   Test: test_both_arms_served_same_scenario
   Level: integration
-  Test Double: deployed mock guest, no live provider
+  Test Double: stub arms and fixture heartbeat payloads, no deploy, no live provider
   Given the scenario "model-kimi-no-reasoning" is installed
   When a round runs both arms
   Then the heartbeat `scenario_id` read for each arm is equal
@@ -127,7 +144,7 @@ Scenario: the replay reads the tap's recorded steps
 Scenario: mismatched scenarios refuse to produce a report
   Test: test_refuses_report_on_scenario_mismatch
   Level: integration
-  Test Double: deployed mock guest reporting divergent heartbeats
+  Test Double: fixture heartbeat payloads carrying divergent scenario ids
   Given the two arms report different `scenario_id` values
   When the harness reaches the reporting step
   Then no report file is written
@@ -143,7 +160,7 @@ Scenario: the replay never reads a full messages body
 Scenario: a modifying tap aborts the run
   Test: test_harness_aborts_if_tap_guest_modifies_requests
   Level: integration
-  Test Double: deployed guest advertising a modify hook
+  Test Double: fixture guest manifest advertising a modify hook
   Given the deployed guest advertises a `modify http_req` hook on the messages path
   When the harness starts a round
   Then the run aborts before either arm is driven
@@ -165,6 +182,8 @@ Scenario: a failing arm fails its round
 
 Scenario: a missing atomcode binary is named
   Test: test_missing_atomcode_binary_reports_clearly
+  Level: integration
+  Test Double: a configured arm path pointing at a nonexistent file
   Given the atomcode binary is absent from its configured path
   When the harness starts
   Then it exits non-zero before deploying anything
@@ -193,3 +212,12 @@ Scenario: a run never overwrites a prior run
   When a second run starts
   Then it writes to a different directory
   And the prior run's captures and report are unchanged
+
+Scenario: every bound selector names a test that exists
+  Test: test_every_bound_selector_resolves
+  Level: integration
+  Test Double: this contract file and the bound test source, both read from disk
+  Given this contract's `Test:` selectors
+  When each selector is looked up in `tests/ab_harness_contract.rs`
+  Then every selector names a test function present in that file
+  And no selector resolves to nothing
