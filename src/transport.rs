@@ -2743,6 +2743,7 @@ impl ProtocolAppUiBackend {
             | AppUiCommand::CloseAgent(_)
             | AppUiCommand::SetSessionGoal(_)
             | AppUiCommand::ClearSessionGoal(_)
+            | AppUiCommand::OperatorTransitionSessionGoal(_)
             | AppUiCommand::CreateLoop(_)
             | AppUiCommand::DeleteLoop(_)
             | AppUiCommand::PauseLoop(_)
@@ -3502,6 +3503,7 @@ fn rpc_request_from_command(
         AppUiCommand::GetSessionGoal(params) => serde_json::to_value(params),
         AppUiCommand::SetSessionGoal(params) => serde_json::to_value(params),
         AppUiCommand::ClearSessionGoal(params) => serde_json::to_value(params),
+        AppUiCommand::OperatorTransitionSessionGoal(params) => serde_json::to_value(params),
         AppUiCommand::CreateLoop(params) => serde_json::to_value(params),
         AppUiCommand::ListLoops(params) => serde_json::to_value(params),
         AppUiCommand::DeleteLoop(params)
@@ -4443,6 +4445,19 @@ fn success_response_to_app_event(
                 Ok(result) => Ok(Some(autonomy_event(AutonomyResult::GoalSet(result)))),
                 Err(err) => Ok(Some(autonomy_decode_error(
                     crate::model::APPUI_METHOD_SESSION_GOAL_SET,
+                    err,
+                ))),
+            }
+        }
+        crate::model::APPUI_METHOD_SESSION_GOAL_OPERATOR_TRANSITION => {
+            match serde_json::from_value::<crate::model::SessionGoalOperatorTransitionResult>(
+                result,
+            ) {
+                Ok(result) => Ok(Some(autonomy_event(
+                    AutonomyResult::GoalOperatorTransition(result),
+                ))),
+                Err(err) => Ok(Some(autonomy_decode_error(
+                    crate::model::APPUI_METHOD_SESSION_GOAL_OPERATOR_TRANSITION,
                     err,
                 ))),
             }

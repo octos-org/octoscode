@@ -323,6 +323,14 @@ pub const APPUI_METHOD_AGENT_CLOSE: &str = "agent/close";
 pub const APPUI_METHOD_SESSION_GOAL_GET: &str = "session/goal/get";
 pub const APPUI_METHOD_SESSION_GOAL_SET: &str = "session/goal/set";
 pub const APPUI_METHOD_SESSION_GOAL_CLEAR: &str = "session/goal/clear";
+/// Operator-only online archive/reopen. Distinct from `session/goal/set`:
+/// the backend mutates the RUNNING orchestrator's goal record (and, on
+/// archive, fences the scheduler by retiring queued continuations), where
+/// the offline `octos goal archive` CLI is overwritten by the live cache
+/// while `serve` is up. Gated on the same `coding.goal_runtime.v1` feature
+/// as the rest of the goal surface, so old servers simply do not advertise
+/// it and the TUI refuses the verb up front.
+pub const APPUI_METHOD_SESSION_GOAL_OPERATOR_TRANSITION: &str = "session/goal/operator_transition";
 
 /// M15-E backend-owned loop runtime methods (UPCR-2026-021 §"Loop
 /// Runtime Surface"). These are gated on `coding.loop_runtime.v1`.
@@ -550,22 +558,126 @@ pub struct SessionGoalSetResult {
     pub transition_actor: Option<String>,
 }
 
-/// Two-step goal pause/resume state. Pause/resume must NOT carry a
-/// possibly-stale cached objective to the backend (the cached mirror
-/// can drift between `session/goal/get` refreshes). Instead, the
-/// dispatch issues a `session/goal/get` first and stages the desired
-/// transition here; when the `GoalGet` response arrives, the store
-/// emits the follow-up `session/goal/set` with the freshly-fetched
-/// objective and the staged status.
+/// Operator-only goal transition the backend accepts on
+/// `session/goal/operator_transition`. The backend rejects anything
+/// outside these two verbs, so modelling them as an enum keeps the
+/// invalid string unrepresentable on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionGoalOperatorAction {
+    /// `/goal archive` — terminal. Legal from every status except
+    /// `archived`, INCLUDING `complete`, which is the whole point: it is
+    /// how an already-finished goal gets retired from the live record.
+    Archive,
+    /// `/goal reopen` — back to `active`. The backend allows this only
+    /// from `blocked` / `paused` / `budget_limited`, and refuses a goal
+    /// that has exhausted its token budget.
+    Reopen,
+}
+
+impl SessionGoalOperatorAction {
+    /// Status the goal lands in when the backend accepts the action.
+    pub fn target_status(self) -> &'static str {
+        match self {
+            Self::Archive => "archived",
+            Self::Reopen => "active",
+        }
+    }
+
+    /// Whether the action is legal from `status`. Mirrors the backend
+    /// guards in `operator_transition_goal` so the TUI fails fast on the
+    /// cached mirror instead of spending a round-trip to be told no.
+    /// The backend remains the authority — this only front-runs the
+    /// clearly-invalid cases.
+    pub fn allows_from(self, status: &str) -> bool {
+        match self {
+            Self::Archive => status != "archived",
+            Self::Reopen => matches!(status, "blocked" | "paused" | "budget_limited"),
+        }
+    }
+}
+
+/// `session/goal/operator_transition` wire shape. Matches the backend
+/// `RawGoalOperatorTransitionParams` exactly. `goal_id` is an identity
+/// assertion, not a lookup key: the backend refuses the transition when
+/// the session's live goal is a different one, which is why this must
+/// carry a FRESHLY-fetched id rather than a cached mirror's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionGoalOperatorTransitionParams {
+    pub session_id: SessionKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    pub goal_id: String,
+    pub action: SessionGoalOperatorAction,
+    /// Free text recorded in the backend's transition log and synced to
+    /// the durable goal ledger. Never empty — the dispatch substitutes a
+    /// default when the user does not pass `--reason`.
+    pub reason: String,
+}
+
+/// `session/goal/operator_transition` result. Deliberately NOT
+/// [`SessionGoalSetResult`]: the backend wraps the post-transition
+/// snapshot as `{session_id, profile_id, goal, transition_actor}` with
+/// no `ok` field, so reusing the set result would hand the store an
+/// `ok: false` that means "absent", not "rejected". A rejected
+/// transition arrives as a JSON-RPC error, never as a falsy result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionGoalOperatorTransitionResult {
+    pub session_id: SessionKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<octos_core::ui_protocol::UiGoalRecord>,
+    /// `"operator"` from this backend path — the field the goal mirror
+    /// records so the activity row can attribute the transition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition_actor: Option<String>,
+}
+
+/// Follow-up a staged goal transition emits once the fresh record lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingGoalFollowUp {
+    /// `/goal pause|resume|stop` → `session/goal/set` carrying the
+    /// freshly-fetched objective plus the staged status.
+    Set {
+        /// `"paused"` for `/goal pause`, `"active"` for `/goal resume`,
+        /// `"complete"` for `/goal stop`.
+        status: &'static str,
+        /// TUI-side classifier echoed into the emitted
+        /// [`SessionGoalSetParams::action`].
+        action: SessionGoalSetAction,
+    },
+    /// `/goal archive|reopen` → `session/goal/operator_transition`
+    /// carrying the freshly-fetched goal id.
+    OperatorTransition {
+        action: SessionGoalOperatorAction,
+        reason: String,
+    },
+}
+
+/// Two-step goal transition state. A transition must NOT carry a
+/// possibly-stale cached mirror to the backend (it can drift between
+/// `session/goal/get` refreshes) — a stale objective would silently
+/// rewrite the goal, and a stale `goal_id` is rejected outright by the
+/// operator path's identity check. Instead, the dispatch issues a
+/// `session/goal/get` first and stages the intended follow-up here;
+/// when the `GoalGet` response arrives, the store emits the follow-up
+/// against the freshly-fetched record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingGoalTransition {
     pub session_id: SessionKey,
     pub profile_id: Option<String>,
-    /// `"paused"` for `/goal pause`, `"active"` for `/goal resume`.
-    pub status: &'static str,
-    /// TUI-side classifier echoed into the emitted
-    /// [`SessionGoalSetParams::action`].
-    pub action: SessionGoalSetAction,
+    pub follow_up: PendingGoalFollowUp,
+    /// The goal this intent was AUTHORIZED against, captured from the cached
+    /// record the dispatch guard accepted. The refresh response must name the
+    /// same goal or the intent is abandoned: the backend's `goal_id` identity
+    /// check cannot catch a mismatch, because the client would be sending the
+    /// replacement's own valid id paired with an intent aimed at a different
+    /// goal. Archive is terminal at the pinned backend, so misapplying one is
+    /// irreversible.
+    pub staged_goal_id: String,
+    /// The verb the operator typed, for the abandonment message.
+    pub verb: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -930,6 +1042,7 @@ pub enum AppUiCommand {
     GetSessionGoal(SessionGoalGetParams),
     SetSessionGoal(SessionGoalSetParams),
     ClearSessionGoal(SessionGoalClearParams),
+    OperatorTransitionSessionGoal(SessionGoalOperatorTransitionParams),
     CreateLoop(LoopCreateParams),
     ListLoops(LoopListParams),
     DeleteLoop(LoopIdParams),
@@ -1033,6 +1146,7 @@ impl AppUiCommand {
             Self::GetSessionGoal(_) => APPUI_METHOD_SESSION_GOAL_GET,
             Self::SetSessionGoal(_) => APPUI_METHOD_SESSION_GOAL_SET,
             Self::ClearSessionGoal(_) => APPUI_METHOD_SESSION_GOAL_CLEAR,
+            Self::OperatorTransitionSessionGoal(_) => APPUI_METHOD_SESSION_GOAL_OPERATOR_TRANSITION,
             Self::CreateLoop(_) => APPUI_METHOD_LOOP_CREATE,
             Self::ListLoops(_) => APPUI_METHOD_LOOP_LIST,
             Self::DeleteLoop(_) => APPUI_METHOD_LOOP_DELETE,
