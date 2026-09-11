@@ -270,6 +270,11 @@ unverified          not-replayed(imported 未独立复验)
 ## 测试真实性边界
 
 - `tests/olp_review_evidence.rs`(62 pass / 1 ignored):
+  frozen 坏状态覆盖 status/cross 与 live-cargo 的 repo 消费入口,包含纯空格
+  repo;latest/history 分别验证 accepted 缺键的兼容语义。非 Git 负向夹具
+  固定嵌在真实父 Git 仓库下,测试子进程设置 `GIT_CEILING_DIRECTORIES`
+  防止隐藏 `.git` 后误认父仓库;新增 git/python 探针使用 deadline。
+  该隔离仅用于测试夹具,生产 adapter 仍允许 Git 工作树内的 Cargo 子项目。
   子进程真实调用生产入口;外层反例回归先 RED 后修(证据 `.octos/red-proof/`)。
 - `olp_review_k3_full_happy_path_accepted` 替代旧假日志 approve 路线
   (python 假 cargo 日志违反合约 3,已 REMOVED)。

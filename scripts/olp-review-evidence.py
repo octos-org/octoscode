@@ -1002,7 +1002,7 @@ def _record_shape_ok(rec: object, claim: str, where: str, rd: Path) -> None:
     if not isinstance(rec, dict):
         raise fail(
             "state-shape-invalid",
-            f"state.challenges[{claim}] {where} 元素非对象: {rd}",
+            f"state.challenges[{claim}] {where} 非对象: {rd}",
         )
     if "accepted" in rec and not isinstance(rec.get("accepted"), bool):
         raise fail(

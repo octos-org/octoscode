@@ -614,7 +614,8 @@ Rule: review-regression — 前轮八反例回归数据集
     过滤: olp_review_frozen_missing_keys_structured_status_and_live_cargo
   假设 合法 freeze 后的 review-state.json 被注入缺键/坏类型
     (verdicts/challenges 缺失或非 dict;repo 缺失/空串/纯空格/非 str)
-  当 status 或 challenge --live-cargo 读取
+  当 status/cross 分别读取全部上述坏状态,或 challenge --live-cargo 读取
+    repo 缺失/空串/纯空格/非 str
   那么 一律 state-shape-invalid 结构化 JSON 拒绝(非零退出),
     不再出现 KeyError: verdicts / KeyError: repo traceback
 
@@ -623,7 +624,7 @@ Rule: review-regression — 前轮八反例回归数据集
     包: octoscode
     过滤: olp_review_latest_accepted_must_be_bool
   假设 accepted 值被注入 1/0/"1"/[]/{}/显式 null(truthy 或 falsy
-    非 bool);或 history 记录同类注入;或缺键(缺省)
+    非 bool);或 history 记录同类注入;或 latest/history 分别删除该键(缺省)
   当 状态被 cross/status 消费
   那么 非 bool 一律 state-shape-invalid;缺键=缺省豁免;
     accepted:false + imported:true 合法兼容仍可通过;
@@ -657,9 +658,11 @@ Rule: review-regression — 前轮八反例回归数据集
     过滤: olp_review_adapter_tracked_modified_before_and_after
   假设 fixture probe 测试运行中真实改写已 tracked 的 src/lib.rs
     (执行前 clean,本次 cargo test 运行后 dirty);untracked 探针
-    文件;非 git 工作树
+    文件;非 git 工作树(夹具外层固定建有真实父 Git 仓库)
   当 生产 adapter 执行(前置/末尾同门)或门函数直调
+    (测试子进程以 GIT_CEILING_DIRECTORIES 隔离夹具边界,git/python
+    调用带 deadline;TMPDIR 位于 Git 工作树内时同样适用)
   那么 同次执行后 tracked 修改 → tracked-source-modified(执行后
     phase,drift 标记证明测试确已运行);untracked 不触发;CLI 早拒
-    非 git 工作树;git status 查询失败经门函数真实 I/O 返回
+    非 git 工作树,不误认父仓库 HEAD;git status 查询失败经门函数真实 I/O 返回
     rc=1 + tracked-source-modified(查询失败),不得当作 clean

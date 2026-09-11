@@ -461,6 +461,12 @@ fn run_adapter(
         .args(args)
         .arg("--timeout")
         .arg(deadline.to_string());
+    // Every adapter fixture is its own Git root. If a negative probe hides
+    // .git, do not silently discover a parent worktree under a nested TMPDIR.
+    c.env(
+        "GIT_CEILING_DIRECTORIES",
+        std::env::join_paths([repo.parent().unwrap().canonicalize().unwrap()]).unwrap(),
+    );
     if let Some(v) = env_fixture {
         c.env("OLP_ADAPTER_FIXTURE", v);
     }
@@ -5171,6 +5177,14 @@ fn olp_review_frozen_missing_keys_structured_status_and_live_cargo() {
     let base_state: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(d.join("review-state.json")).unwrap())
             .unwrap();
+    let cross = write_cross_structured(
+        &d,
+        "k3",
+        "cross-k3-frozen-shape.md",
+        "2",
+        "completed",
+        r#"[{"id": "X", "verdict": "accept"}]"#,
+    );
 
     for (case, patch) in [
         (
@@ -5185,6 +5199,10 @@ fn olp_review_frozen_missing_keys_structured_status_and_live_cargo() {
         (
             "repo-empty-str",
             serde_json::json!({ "set": { "repo": "" } }),
+        ),
+        (
+            "repo-whitespace",
+            serde_json::json!({ "set": { "repo": "   " } }),
         ),
         ("repo-non-str", serde_json::json!({ "set": { "repo": 42 } })),
         (
@@ -5212,23 +5230,43 @@ fn olp_review_frozen_missing_keys_structured_status_and_live_cargo() {
             serde_json::to_string(&st).unwrap(),
         )
         .unwrap();
-        // status 入口(统一前置校验,与 cross/live-cargo 同一形状门)
-        let (ok, so, _) = run(&["status", d.to_str().unwrap()]);
-        assert!(!ok, "{case} status 不得成功: {so}");
-        let v: serde_json::Value = serde_json::from_str(so.trim())
-            .unwrap_or_else(|_| panic!("{case} status 应输出 JSON: {so}"));
-        assert_eq!(
-            v["error"]["code"].as_str().unwrap_or("?"),
-            "state-shape-invalid",
-            "{case} status 错误码: {so}"
-        );
+        // Replay the actual cross entry that originally raised KeyError:
+        // verdicts, as well as status. Both must reject before other gates.
+        for entry in ["status", "cross"] {
+            let native = native_root(&d);
+            let mut args = vec![entry, d.to_str().unwrap()];
+            if entry == "cross" {
+                args.extend([
+                    "--cross-report",
+                    cross.to_str().unwrap(),
+                    "--cross-slug",
+                    "k3",
+                    "--native-root",
+                    native.to_str().unwrap(),
+                ]);
+            }
+            let (ok, so, se) = run(&args);
+            assert!(!ok, "{case} {entry} 不得成功: {so}");
+            assert!(!se.contains("Traceback"), "{case} {entry}: {se}");
+            let v: serde_json::Value = serde_json::from_str(so.trim())
+                .unwrap_or_else(|_| panic!("{case} {entry} 应输出 JSON: {so}"));
+            assert_eq!(
+                v["error"]["code"].as_str().unwrap_or("?"),
+                "state-shape-invalid",
+                "{case} {entry} 错误码: {so}"
+            );
+        }
     }
-    // live-cargo 消费点(曾 KeyError: repo): 缺 repo/空 repo/非 str → 结构化拒绝
+    // live-cargo 消费点(曾 KeyError: repo): 缺/空/纯空格/非 str → 结构化拒绝
     for (case, patch) in [
         ("missing-repo", serde_json::json!({ "remove": ["repo"] })),
         (
             "repo-empty-str",
             serde_json::json!({ "set": { "repo": "" } }),
+        ),
+        (
+            "repo-whitespace",
+            serde_json::json!({ "set": { "repo": "   " } }),
         ),
         ("repo-non-str", serde_json::json!({ "set": { "repo": 42 } })),
     ] {
@@ -5349,6 +5387,23 @@ fn olp_review_latest_accepted_must_be_bool() {
     .unwrap();
     let (okf2, sof2, _) = run(&["status", d.to_str().unwrap()]);
     assert!(okf2, "accepted:false/imported:true 合法兼容: {sof2}");
+    // (d) The key may be absent (unlike explicit null), in either location.
+    for location in ["latest", "history"] {
+        let mut st = base_state.clone();
+        let rec = if location == "latest" {
+            &mut st["challenges"]["X"]["latest"]
+        } else {
+            &mut st["challenges"]["X"]["history"][0]
+        };
+        assert!(rec.as_object_mut().unwrap().remove("accepted").is_some());
+        std::fs::write(
+            d.join("review-state.json"),
+            serde_json::to_string(&st).unwrap(),
+        )
+        .unwrap();
+        let (ok, so, se) = run(&["status", d.to_str().unwrap()]);
+        assert!(ok, "{location} accepted 缺键应通过: {so} {se}");
+    }
 }
 
 /// 后发 review 修复轮 R3a: 核心 int 0 vs bool False 必须类型敏感拒绝。
@@ -5590,17 +5645,21 @@ fn fixture_probe_writes_tracked_src() {
     )
     .unwrap();
     {
-        let out = Command::new("git")
-            .args(["add", "src/lib.rs"])
-            .current_dir(&repo)
-            .output()
-            .unwrap();
+        let out = run_deadline(
+            Command::new("git")
+                .args(["add", "src/lib.rs"])
+                .current_dir(&repo),
+            30,
+            "git add tracked lib",
+        );
         assert!(out.status.success(), "git add src/lib.rs failed");
-        let out = Command::new("git")
-            .args(["commit", "--quiet", "-m", "tracked lib"])
-            .current_dir(&repo)
-            .output()
-            .unwrap();
+        let out = run_deadline(
+            Command::new("git")
+                .args(["commit", "--quiet", "-m", "tracked lib"])
+                .current_dir(&repo),
+            30,
+            "git commit tracked lib",
+        );
         assert!(
             out.status.success(),
             "git commit failed: {}",
@@ -5653,6 +5712,35 @@ fn fixture_probe_writes_tracked_src() {
         300,
     );
     assert!(ok3, "untracked 文件不得触发 tracked 门: {so3}");
+    // Always surround the negative fixtures with a real parent Git repo.
+    // This pins upward-discovery isolation even when TMPDIR is outside Git.
+    for args in [
+        vec!["init", "--quiet"],
+        vec![
+            "-c",
+            "user.name=olp-fixture",
+            "-c",
+            "user.email=olp-fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "parent fixture",
+        ],
+    ] {
+        let out = run_deadline(
+            Command::new("git").args(args).current_dir(_ft.path()),
+            30,
+            "git parent fixture",
+        );
+        assert!(
+            out.status.success(),
+            "parent Git fixture failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
     // (fail-closed A) 非 git 工作树: CLI 在 HEAD/worktree 预检即拒
     // (走不到 status 门)——断言其实际结构化错误,不得放行
     let git_dir = repo.join(".git");
@@ -5678,11 +5766,11 @@ fn fixture_probe_writes_tracked_src() {
     {
         let adapter = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("scripts/olp-review-evidence-cargo.py");
-        let out = Command::new("python3")
+        let out = run_deadline(Command::new("python3")
             .arg("-B")
             .arg("-c")
             .arg([
-                "import importlib.util, io, json, sys, tempfile\n",
+                "import importlib.util, io, json, os, sys, tempfile\n",
                 "from pathlib import Path\n",
                 "spec = importlib.util.spec_from_file_location('olp_cargo', sys.argv[1])\n",
                 "m = importlib.util.module_from_spec(spec)\n",
@@ -5690,14 +5778,17 @@ fn fixture_probe_writes_tracked_src() {
                 "buf = io.StringIO()\n",
                 "real = sys.stdout\n",
                 "sys.stdout = buf\n",
-                "with tempfile.TemporaryDirectory() as td:\n",
+                "with tempfile.TemporaryDirectory(dir=sys.argv[2]) as td:\n",
+                "    os.environ['GIT_CEILING_DIRECTORIES'] = str(Path(td).resolve().parent)\n",
                 "    rc = m.fail_if_tracked_modified(Path(td), '执行前')\n",
                 "sys.stdout = real\n",
                 "print(json.dumps({'rc': rc, 'emitted': buf.getvalue()}, ensure_ascii=False))\n",
             ].concat())
             .arg(&adapter)
-            .output()
-            .unwrap();
+            .arg(_ft.path()),
+            60,
+            "python git-status failure probe",
+        );
         assert!(
             out.status.success(),
             "python 门函数探针失败: {}",
