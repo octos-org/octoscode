@@ -270,3 +270,57 @@ fn normal_x_on_empty_is_safe() {
         "x on empty is a no-op, not a panic"
     );
 }
+
+// ----- #215: Normal-mode modifier edits & pending-operator hygiene -----
+
+fn press_modified(store: &mut Store, code: KeyCode, modifiers: KeyModifiers) -> KeyAction {
+    handle_terminal_event(&mut *store, Event::Key(KeyEvent::new(code, modifiers)))
+}
+
+#[test]
+fn normal_mode_blocks_readline_edit_shortcuts() {
+    // #215 item 1: the readline edit shortcuts are Insert-mode affordances.
+    // In Normal mode none of Ctrl+W / Ctrl+K / Ctrl+J / Alt+D may mutate the
+    // buffer — edits require entering Insert first.
+    for (code, modifiers) in [
+        (KeyCode::Char('w'), KeyModifiers::CONTROL),
+        (KeyCode::Char('k'), KeyModifiers::CONTROL),
+        (KeyCode::Char('j'), KeyModifiers::CONTROL),
+        (KeyCode::Char('d'), KeyModifiers::ALT),
+    ] {
+        let mut store = normal("hello world", 11);
+        press_modified(&mut store, code, modifiers);
+        assert_eq!(
+            store.state.composer, "hello world",
+            "{code:?}+{modifiers:?} must not edit the buffer in Normal mode"
+        );
+        assert_eq!(store.state.composer_mode, ComposerMode::Normal);
+    }
+}
+
+#[test]
+fn normal_mode_insert_mode_edit_shortcuts_still_work() {
+    // The #215 gate is scoped to Normal: Insert keeps the readline shortcuts.
+    let mut store = store_with("hello world", Some(11), true, ComposerMode::Insert);
+    press_modified(&mut store, KeyCode::Char('w'), KeyModifiers::CONTROL);
+    assert_eq!(store.state.composer, "hello ");
+}
+
+#[test]
+fn pending_operator_disarmed_by_non_char_key() {
+    // #215 item 2: `d` then an arrow is a cursor move — the pending operator
+    // must not survive into the next character key.
+    let mut store = normal("hello world", 0);
+    press(&mut store, 'd');
+    press_key(&mut store, KeyCode::Down);
+    assert_eq!(
+        store.state.composer_vim_pending, None,
+        "Down disarms the pending `d`"
+    );
+    press(&mut store, 'w');
+    assert_eq!(
+        store.state.composer, "hello world",
+        "`w` after the disarmed `d` is a motion, not a delayed `dw`"
+    );
+    assert_eq!(store.state.composer_cursor_index(), 6);
+}
