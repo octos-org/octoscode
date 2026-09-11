@@ -610,11 +610,14 @@ const CAT_INSTALLS: &str = "Installations";
 
 /// Best-effort install-method guess from a binary's on-disk path, so the user
 /// knows which package manager put each copy there when cleaning up duplicates.
+/// Separators are normalized first so Windows paths (`C:\Users\u\.cargo\bin\…`,
+/// `%APPDATA%\npm\…`) match the same segments as Unix ones — previously every
+/// Windows copy fell through to "unknown" (#501).
 fn install_method_label(path: &Path) -> &'static str {
-    let p = path.to_string_lossy();
+    let p = path.to_string_lossy().replace('\\', "/");
     if p.contains("/.cargo/bin/") {
         "cargo"
-    } else if p.contains("node_modules") {
+    } else if p.contains("node_modules") || p.contains("/Roaming/npm/") {
         "npm"
     } else if p.contains("/homebrew/") || p.contains("/Cellar/") || p.starts_with("/usr/local/") {
         "brew"
@@ -1902,6 +1905,34 @@ mod tests {
                 "/x/node_modules/@octos-org/octoscode/.bin_real/octoscode"
             )),
             "npm"
+        );
+    }
+
+    #[test]
+    fn install_method_label_recognizes_windows_paths() {
+        // Regression for #501: backslash-separated Windows paths used to fall
+        // through to "unknown" even for the well-known install dirs.
+        assert_eq!(
+            install_method_label(Path::new(r"C:\Users\admin\.cargo\bin\octos.exe")),
+            "cargo"
+        );
+        assert_eq!(
+            install_method_label(Path::new(r"C:\Users\admin\.octos\bin\octos.exe")),
+            "octoscode auto-install"
+        );
+        assert_eq!(
+            install_method_label(Path::new(r"C:\Users\admin\AppData\Roaming\npm\octos.cmd")),
+            "npm"
+        );
+        assert_eq!(
+            install_method_label(Path::new(
+                r"C:\Users\admin\AppData\Roaming\npm\node_modules\@octos-org\octos\bin\octos.exe"
+            )),
+            "npm"
+        );
+        assert_eq!(
+            install_method_label(Path::new(r"C:\Tools\octos\octos.exe")),
+            "unknown"
         );
     }
 
