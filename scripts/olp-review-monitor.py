@@ -785,10 +785,23 @@ def collect_peers(
         # 不得把它晋升 running(不只是"lifetime 存在时拒绝矛盾")。
         ident_ok, ident_reason = peer_identity_bound_here(peer_dir, session, ctx_goal)
 
-        # closed 独立: 终态标记优先,不把旧失败变成功
+        # closed 独立: 终态标记优先,不把旧失败变成功。跨仓 parity
+        # (#2272 约定对齐): closed 在同一可信 lifetime 且归属一致
+        # (ident_ok)时**保留身份字段**(task_id/generation/turn/
+        # master_session_id 取 lifetime),便于关联终止事件;execution
+        # 恒为 "closed" 不受 lifetime phase 影响;foreign/malformed
+        # lifetime → 身份保持 null(不采信);旧失败不改判。
         if peer_dir is not None and (peer_dir / "closed").exists():
             entry["execution"] = "closed"
             entry["execution_source"] = "closed-marker"
+            closed_rec, _closed_reason = trusted_lifetime(
+                peer_dir, profile, slug, session
+            )
+            if closed_rec is not None and ident_ok:
+                entry["task_id"] = closed_rec.get("task_id")
+                entry["generation"] = closed_rec.get("generation")
+                entry["turn_id"] = closed_rec.get("turn_id")
+                entry["master_session_id"] = closed_rec.get("master")
         elif peer_dir is not None:
             rec, reason = trusted_lifetime(peer_dir, profile, slug, session)
             if rec is not None and ident_ok:

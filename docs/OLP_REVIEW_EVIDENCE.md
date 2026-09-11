@@ -31,9 +31,13 @@ python3 scripts/olp-review-evidence.py init <review_dir> \
 python3 scripts/olp-review-evidence.py freeze <review_dir> \
   --glm-review glm.md --k3-review k3.md \
   --glm-slug <slug> --k3-slug <slug> \
-  --native-root <runtime>/data/peers   # 外部权威收据根
+  --native-root <runtime>/data/peers \
+  --head <head_sha> \
   [--runtime-evidence runtime-evidence.json]
 ```
+
+`--native-root` 为外部权威收据根;`--head` **必填**(锚定评审基线,
+frontmatter HEAD 必须与之精确一致)。
 
 **前置校验(fail-closed)**:
 
@@ -49,10 +53,46 @@ python3 scripts/olp-review-evidence.py freeze <review_dir> \
 | 报告 turn < N(旧轮初审) | `stale-turn` |
 | 报告 turn > N(未来轮) | `turn-mismatch` |
 | 报告 turn 非数字/缺失 | `peer-outcome-invalid` |
-| 报告 HEAD == 评审 HEAD(可选) | `head-mismatch` |
+| 报告 HEAD == 评审 HEAD(必填 `--head` 锚定) | `head-mismatch` |
 
 冻结记录每份初审的 SHA256/peer/turn/outcome;此后任何改写或**删除**
 均触发 `first-review-tampered`(verify fail-closed)。
+
+**初审 verdict 白名单(fail-closed)**: 初审报告 claims 块的 `verdict`
+只允许 `{approve, request-changes, comment}`(合约初审初始态词表);
+空/非 str/cross 词表(accept/refute)或执行后状态(flipped/
+blocked-on-evidence 等)→ `claims-verdict-invalid` 拒绝。
+
+**state 形状校验(全入口)**: init/freeze/challenge/cross/status/classify
+读取合法 JSON 但结构损坏的 state(顶层非对象/frozen 缺 reviews/head/
+verdicts/challenges/repo,或 repo 非非空字符串/嵌套
+reviews/challenges/history/latest/verdicts/cross 形状非法)时一致返回
+结构化 JSON 错误(`state-shape-invalid` / classify 专用码),对**已列举
+的畸形状态形态**不再出现 KeyError traceback(其余错误类型不在此保证
+范围)。latest 与 history 记录同门共用形状校验: `accepted` 在场必须
+bool(显式 null 非法,缺键才缺省);`executed` 和其 `artifacts`
+为非 null 值时必须是 dict,缺键或 null 延续旧版缺省语义。全部 accepted 读点(cross 门/汇总/refutation/
+apply 前置)统一以 `is True` 判真,truthiness(如 1/"1")不再作为判真
+依据。
+
+**旧 receipt 与日志验真(全生命周期)**: `verify_no_tamper` 对每条
+accepted=True 的 live 记录无条件校验 receipt 路径+sha256(改写/删除/
+缺键 → `live-receipt-tampered`);receipt_kind 必须
+`cargo-test-execution`;快照核心字段与 receipt 类型敏感一致(bool
+False 不得冒充 int 0,反之亦然);stdout/stderr 工件删除/改写/缺声明
+全拒;legacy 快照(executed 整段缺失或内部缺字段)由 hash 验证过的
+完整 receipt **补齐后再验**(不降低强度——工件篡改在 legacy 路径下
+同样被拒)。status 以只读 fd 在已有 `.review-state.lock` 上获取共享
+flock,与写入口的排他锁协调后读取一致快照,不创建目录或锁。目录或
+state 不存在返回 `not-initialized`;锁缺失/不可读取/不可加锁返回
+`review-lock-unavailable`,不退化无锁读取。由 init 创建的上下文即使
+目录和锁只读仍可查询(不要求锁有写权限)。
+
+**执行前后 tracked 干净门(生产 adapter)**: 被测 repo 的 tracked 源
+必须等于 HEAD(staged/unstaged 修改 → `tracked-source-modified` 拒绝,
+执行前后同门);untracked 探针/工件是合法测试注入面;git status 查询
+失败不得当作 clean。同 selector 多轮执行的 stdout/stderr 工件用
+mkstemp 唯一命名,互不覆盖,旧 receipt 的 hash 仍可验证。
 
 ## challenge — 行为证据(内容校验为门、执行为本)
 
@@ -233,7 +273,14 @@ unverified          not-replayed(imported 未独立复验)
 
 ## 测试真实性边界
 
-- `tests/olp_review_evidence.rs`(53 pass / 1 ignored):
+- `tests/olp_review_evidence.rs`(63 enabled / 1 ignored):
+  完整冻结基线的嵌套坏形状矩阵覆盖 init/freeze/challenge/cross/status/classify;
+  status 探针覆盖缺路径、空目录、真实只读权限、缺锁和 writer/reader 等待。
+  frozen 坏状态覆盖 status/cross 与 live-cargo 的 repo 消费入口,包含纯空格
+  repo;latest/history 分别验证 accepted 缺键的兼容语义。非 Git 负向夹具
+  固定嵌在真实父 Git 仓库下,测试子进程设置 `GIT_CEILING_DIRECTORIES`
+  防止隐藏 `.git` 后误认父仓库;新增 git/python 探针使用 deadline。
+  该隔离仅用于测试夹具,生产 adapter 仍允许 Git 工作树内的 Cargo 子项目。
   子进程真实调用生产入口;外层反例回归先 RED 后修(证据 `.octos/red-proof/`)。
 - `olp_review_k3_full_happy_path_accepted` 替代旧假日志 approve 路线
   (python 假 cargo 日志违反合约 3,已 REMOVED)。

@@ -1,3 +1,9 @@
+> **[HISTORICAL 2026-09-10]** 本 plan 为 2026-09-09 首轮实现记录(部分
+> 计数/验收进度为当时状态,如"23 场景/23 tests"已过期——现为 44 场景
+> / 57+31 tests,以 specs 与 docs/OLP_REVIEW_EVIDENCE.md 当前值为准)。
+> 2026-09-10 合并后 review 修复见
+> docs/superpowers/plans/2026-09-10-merged-evidence-review.md。
+
 # 计划 — OctoLoop 行为证据互审流程 + Herdr pane 监控入口 (goal_01)
 
 日期: 2026-09-09(Phase 5 修订版)

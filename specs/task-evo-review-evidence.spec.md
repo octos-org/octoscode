@@ -472,6 +472,84 @@ Rule: review-monitor — Herdr 监控:区块分离与身份防混
 
 Rule: review-regression — 前轮八反例回归数据集
 
+场景: state 形状校验全入口结构化(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_malformed_state_all_entries_structured
+  假设 合法 JSON 但结构损坏的 state(顶层非对象/frozen 缺 reviews/head/
+    嵌套 reviews/challenges/history/latest/verdicts/cross 形状非法)
+  当 任一 init/freeze/challenge/cross/status/classify 入口读取
+  那么 一致结构化 JSON 错误(state-shape-invalid / classify-context-*),
+    不出现 KeyError/TypeError traceback,不改写损坏状态;classify 共用
+    状态形状门并映射为 classify-context-invalid
+
+场景: status 只读锁与写事务协调(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_status_read_only_lock_contract
+  假设 review 由 init 创建,或查询路径不存在/空目录/已有 state 但缺锁
+  当 status 查询,包括目录 555 + 锁 444 和 writer 持有排他锁
+  那么 不创建目录或锁;缺目录/state 返回 not-initialized;已有锁以
+    只读 fd 获取共享 flock,等待 writer 释放后才读 state;只读目录和锁
+    可正常查询;缺锁返回 review-lock-unavailable 结构化错误且不退化
+    无锁读取;所有路径保持 state 字节不变
+
+场景: accepted live 记录全生命周期 fail-closed(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_live_receipt_lifecycle_tamper_rejected
+  假设 apply_live_verdict 产出的 accepted history/latest 记录(唯一
+    writer,恒带 cargo receipt);篡改 receipt 字节/删除/篡改或删除
+    stdout 工件/删 receipt 键/快照核心字段与 receipt 不一致(类型敏感,
+    False≠0)/快照缺字段由 hash 验证过的 receipt 补齐
+  当 verify_no_tamper 校验(status/cross/challenge/classify 共用)
+  那么 篡改/删除/不一致/缺失 → live-receipt-tampered 拒;真实旧快照
+    缺字段从完整 receipt 重建后通过;legacy 正例保持可验
+
+场景: adapter --lib 入口全工件绑定与 tracked 干净门(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_k3_cargo_adapter_lib_entry_full_artifacts
+  假设 独立 tiny lib fixture(src/lib.rs 真实单测,git 提交后 tracked
+    干净)经生产 adapter --lib 执行
+  当 adapter 运行
+  那么 observed=pass、test_target=--lib、selector_qualified 经
+    cargo --list 全限定定位、源文件 SHA256 绑定、stdout/stderr 工件
+    mkstemp 唯一;tracked 源修改(执行前后同门)拒绝且 git status 查询
+    失败不得当作 clean;被测 fixture repo 须 tracked == HEAD
+
+场景: adapter 同 selector 多轮工件不覆盖(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_adapter_same_selector_two_runs_no_overwrite
+  假设 同一 selector 于同一 artifact-dir 顺序两次真实执行
+  当 adapter 落盘 stdout/stderr
+  Then 每次独立唯一文件(mkstemp),旧
+    receipt 的 hash 与文件仍可验证;tracked 源修改(执行前后同门)拒绝,
+    untracked 探针/工件接受,git status 失败拒绝
+  那么 两套工件都在场且 hash 与各自 receipt 一致
+
+场景: 初审 claim verdict 白名单(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_first_review_verdict_whitelist
+  假设 初审报告 claims 块 verdict 非 {approve, request-changes,
+    comment}(当前合约初审初始态词表;空/非 str/cross 词表 accept/
+    refute/执行后状态均非法)
+  当 freeze 解析初审
+  那么 claims-verdict-invalid 结构化拒绝;合法词表通过,未污染 state
+    的 freeze 全流程正常
+
+场景: monitor closed 身份保留跨仓 parity(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_monitor_closed_keeps_identity_on_trusted_lifetime
+  假设 peer closed 标记 + 可信 lifetime(originator/goal 归属一致)
+  当 渲染监控
+  那么 execution 恒 closed,身份字段(task_id/generation/turn/
+    master_session_id)保留;foreign goal → closed 且身份 null;
+    malformed lifetime → 身份 null;无 lifetime/旧失败语义不变
+
 场景: classify 受信来源门(伪造链拒绝)(critical)
   测试:
     包: octoscode
@@ -539,3 +617,63 @@ Rule: review-regression — 前轮八反例回归数据集
   当 分别以 --format json 与默认 human 运行两个入口
   那么 JSON 可被 json.loads 解析且含同判词集合,human 含四区块可读视图;
     错误输出亦为可解析 JSON
+
+
+场景: frozen state 必需键全入口结构化校验(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_frozen_missing_keys_structured_status_and_live_cargo
+  假设 合法 freeze 后的 review-state.json 被注入缺键/坏类型
+    (verdicts/challenges 缺失或非 dict;repo 缺失/空串/纯空格/非 str)
+  当 status/cross 分别读取全部上述坏状态,或 challenge --live-cargo 读取
+    repo 缺失/空串/纯空格/非 str
+  那么 一律 state-shape-invalid 结构化 JSON 拒绝(非零退出),
+    不再出现 KeyError: verdicts / KeyError: repo traceback
+
+场景: latest/history accepted 必须 bool(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_latest_accepted_must_be_bool
+  假设 accepted 值被注入 1/0/"1"/[]/{}/显式 null(truthy 或 falsy
+    非 bool);或 history 记录同类注入;或 latest/history 分别删除该键(缺省)
+  当 状态被 cross/status 消费
+  那么 非 bool 一律 state-shape-invalid;缺键=缺省豁免;
+    accepted:false + imported:true 合法兼容仍可通过;
+    全部读点以 is True 判真(truthiness 不再作为依据)
+
+场景: 快照核心 int 0 与 bool False 类型敏感(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_snapshot_core_false_vs_zero_rejected
+  假设 真实 PASS selector 注册(exit_code=int 0,先断言基线为 int),
+    快照 latest 或 history 的 exit_code 被改为 bool false
+    (Python 宽松比较 0==False 为真的反例)
+  当 verify_no_tamper 校验
+  那么 live-receipt-tampered 类型敏感拒绝;恢复原件复绿
+
+场景: latest/history 记录形状同门与 legacy 兼容(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_latest_executed_shape_gates
+  假设 latest.executed="bad" 或 executed.artifacts=[](非 dict);
+    或所有 accepted 记录(latest 与全部 history)整段删 executed
+    (legacy 形态,receipt 原件完整且 hash 一致)
+  当 status 校验
+  那么 形状注入 → state-shape-invalid;legacy 缺快照由 receipt 单侧
+    重建允许,但删除/篡改真实 stdout 工件仍 live-receipt-tampered
+    (工件门不可绕),legacy 状态恢复工件复绿
+
+场景: adapter tracked 门三面与 git status fail-closed(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_adapter_tracked_modified_before_and_after
+  假设 fixture probe 测试运行中真实改写已 tracked 的 src/lib.rs
+    (执行前 clean,本次 cargo test 运行后 dirty);untracked 探针
+    文件;非 git 工作树(夹具外层固定建有真实父 Git 仓库)
+  当 生产 adapter 执行(前置/末尾同门)或门函数直调
+    (测试子进程以 GIT_CEILING_DIRECTORIES 隔离夹具边界,git/python
+    调用带 deadline;TMPDIR 位于 Git 工作树内时同样适用)
+  那么 同次执行后 tracked 修改 → tracked-source-modified(执行后
+    phase,drift 标记证明测试确已运行);untracked 不触发;CLI 早拒
+    非 git 工作树,不误认父仓库 HEAD;git status 查询失败经门函数真实 I/O 返回
+    rc=1 + tracked-source-modified(查询失败),不得当作 clean
