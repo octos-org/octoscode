@@ -471,7 +471,9 @@ def _verify_peer_model_from_ledger(runtime_root: Path, session: str | None,
                                    slug: str, lane: str, report_turn: int) -> dict:
     turns = _load_ledger_turns(runtime_root, session, slug)
     if type(report_turn) is not int or not 1 <= report_turn <= len(turns):
-        raise fail("peer-model-unverified", f"{slug} turn={report_turn} 无完整 runtime 轮次证据")
+        raise fail("peer-model-unverified", f"{slug} turn={report_turn} 无完整 runtime 轮次证据；"
+                   "若 ledger 前段已轮转丢失，请新建短 reviewer peer，"
+                   "在新评审上下文重做初审与 cross；不得将剩余尾段重新编号")
     turn = turns[report_turn - 1]
     if turn["terminal"] != "turn_completed" or not turn["models"]:
         raise fail("peer-model-unverified", f"{slug} turn={report_turn} 未完成或缺实际模型")
@@ -1775,7 +1777,17 @@ def cmd_cross(args: argparse.Namespace) -> None:
             }
         )
         save_state(review_dir, state)
-        emit_json({"ok": True, "state": "cross-recorded", "refuted": refutations})
+        warnings = []
+        if model_evidence is None:
+            warning = {
+                "code": "model-evidence-not-verified",
+                "message": "本次 cross 仅收录用于审计，未核验实际模型，"
+                           "最终 review_accepted=false；请带 --require-model-evidence 重新提交",
+            }
+            warnings.append(warning)
+            print(f"warning[{warning['code']}]: {warning['message']}", file=sys.stderr)
+        emit_json({"ok": True, "state": "cross-recorded", "refuted": refutations,
+                   "warnings": warnings})
 
 
 def cross_completed_slugs(state: dict) -> set[str]:

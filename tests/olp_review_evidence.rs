@@ -6160,9 +6160,39 @@ fn olp_review_model_gate_composes_with_live_cargo() {
             slug,
             "--native-root",
             native_root(d).to_str().unwrap(),
+        ]);
+        assert!(ok, "legacy collection remains auditable: {so} {se}");
+        let recorded: serde_json::Value = serde_json::from_str(&so).unwrap();
+        assert_eq!(
+            recorded["warnings"][0]["code"], "model-evidence-not-verified",
+            "{so}"
+        );
+        assert!(
+            se.contains("--require-model-evidence"),
+            "actionable stderr: {se}"
+        );
+        let (ok, so, se) = run(&["status", d.to_str().unwrap()]);
+        assert!(ok, "{so} {se}");
+        let status: serde_json::Value = serde_json::from_str(&so).unwrap();
+        assert_eq!(
+            status["review_accepted"], false,
+            "unverified cross must block: {so}"
+        );
+        let (ok, so, se) = run(&[
+            "cross",
+            d.to_str().unwrap(),
+            "--cross-report",
+            cross.to_str().unwrap(),
+            "--cross-slug",
+            slug,
+            "--native-root",
+            native_root(d).to_str().unwrap(),
             "--require-model-evidence",
         ]);
         assert!(ok, "{so} {se}");
+        let recorded: serde_json::Value = serde_json::from_str(&so).unwrap();
+        assert_eq!(recorded["warnings"], serde_json::json!([]), "{so}");
+        assert!(!se.contains("model-evidence-not-verified"), "{se}");
     }
     let (ok, so, se) = run(&["status", d.to_str().unwrap()]);
     assert!(ok, "{so} {se}");
@@ -6173,7 +6203,13 @@ fn olp_review_model_gate_composes_with_live_cargo() {
     let path = d.join("review-state.json");
     let mut state: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    state["cross"][0]
+    state["cross"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .rev()
+        .find(|entry| entry["slug"] == "glm")
+        .unwrap()
         .as_object_mut()
         .unwrap()
         .remove("model_evidence");

@@ -141,6 +141,22 @@ class ModelGate(unittest.TestCase):
         write_rows(path, rows)
         self.assert_blocked()
 
+    def test_rotated_complete_tail_is_not_renumbered(self):
+        path = self.paths["k3"]
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        # Rotation itself is safe while all original segments remain.
+        tail = path.with_name("ledger-0002.log")
+        write_rows(path, rows[:3])
+        write_rows(tail, rows[3:])
+        self.assertTrue(review.build_status(self.state)["review_accepted"])
+        path.unlink()  # retention deleted the first complete turn
+        self.assert_blocked()
+        with self.assertRaises(review.ReviewError) as error:
+            review._verify_peer_model_from_ledger(self.root, SESSION, "k3", "k3", 1)
+        self.assertEqual(error.exception.code, "peer-model-unverified")
+        self.assertIn("新建短 reviewer peer", str(error.exception))
+        self.assertIn("初审", str(error.exception))
+
     def test_model_name_is_not_a_freeform_prefix(self):
         ledger(self.root, "k3", ("k3-256k", "k3pretending"))
         with self.assertRaises(review.ReviewError) as error:

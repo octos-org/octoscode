@@ -98,6 +98,7 @@ satisfies: [REQ-OLP-REVIEW-EVIDENCE]
 ### Allowed Changes(octoscode 仓库)
 - scripts/olp-review-*.py(含共享 helper)
 - tests/olp_review_evidence.rs
+- tests/olp_review_models.py
 - tests/olp_review_monitor.rs
 - tests/olp_watch_board.rs(仅限 clippy 基线 overly_complex_bool_expr 的
   非行为改变验证修复: `while !read(...).map(...).unwrap_or(false) || true` 改为
@@ -107,6 +108,7 @@ satisfies: [REQ-OLP-REVIEW-EVIDENCE]
 - specs/task-evo-review-evidence.spec.md
 - docs/OLP_REVIEW_EVIDENCE.md
 - docs/superpowers/plans/2026-09-09-review-evidence.md
+- docs/superpowers/plans/2026-09-12-model-review-followup.md
 - .octos/{progress.md, red-proof/, design-*.md, independent-*.md, cross-*.md,
   outer-feedback.md, loop.md, OUTER_LOOP_REVIEW.md, implementation-brief.md,
   baseline-*.log, baseline-summary.json, active-profile, octosfix/}
@@ -700,3 +702,21 @@ Rule: actual-model-evidence — 实际模型与行为证据同时满足才可验
   那么 behavior_accepted/model_verified/review_accepted 均为 true;
     删除模型证据锚后行为条件仍为 true,最终验收必须 false
   注: 此自动测试的模型 ledger 是明确标记的合成 fixture,不是线上模型审查收据
+
+场景: 模型日志切段保留与删除前段的恢复指引(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_models_require_runtime_evidence
+  假设 模型 fixture 的完整轮次分为两个 ledger 文件
+  当 两段保留时核验，随后删除含初审的第一段再核验
+  那么 两段完整时通过；前段缺失时拒绝将尾段首轮当成 turn 1，
+    peer-model-unverified 指引新建短 reviewer peer 并重做初审与 cross
+
+场景: 兼容 cross 收录明确警告且有效重提可恢复(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_model_gate_composes_with_live_cargo
+  假设 真实 Cargo 行为证据已经通过，模型 ledger 是明确标记的合成 fixture
+  当 不带 --require-model-evidence 收录，再带该参数重新提交有效 cross
+  那么 兼容收录返回可解析 JSON warnings 中的 model-evidence-not-verified，
+    stderr 提示参数且最终验收仍 false；有效重提无此警告，双 reviewer 完整后验收 true

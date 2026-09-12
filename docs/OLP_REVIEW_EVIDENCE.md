@@ -168,12 +168,23 @@ GLM/K3 lane 分别接受 `glm`/`glm-*` 与 `k3`/`k3-*`。
 不同 reviewer 的初审与各自最新 cross 是否均核验通过。旧格式或不带模型证据的
 cross 仍可收录用于审计，但不能通过最终验收；删除模型锚点也不会退回
 旧的通过条件。需重新提交带 `--require-model-evidence` 的有效 cross。
+兼容收录会在 JSON `warnings` 数组返回 `model-evidence-not-verified`，
+并在 stderr 提示补带参数；stdout JSON 保持可解析。带参数并核验通过的
+收录返回空 `warnings` 数组。收录成功不等于最终验收通过。
 K3 配额错误等失败记录只能记为审查未完成。
 
 这是对受信本地 runtime 产物的一致性核验，并非提供商的密码学身份认证。
 ledger 不完整或归档被移走会降级为未验证，不猜测缺失轮次。已有 live Cargo
 入口继续独立核对源码、测试命中数、实际退出码与日志摘要；模型一致不能替代
 测试执行证据。
+
+**reviewer 会话生命周期**：使用专用于本轮评审的短 peer 会话，初审与 cross
+必须在该 peer 的完整日志仍保留时验收。当前 octos 默认每段约 10 MiB、最多
+保留 5 段；仅切段不影响核验，删除最早一段后则可能失去全局轮次映射。
+不要复用长时间运行的编码 peer 充当 reviewer。若前段已经丢失，在新的评审
+上下文新建 reviewer peers，重做初审、冻结、挑战和 cross；不得重编号剩余
+日志、沿用旧 cross 锚点，或把旧报告复制成新模型证据。长期会话支持需要
+另外实现可靠持久的报告轮次与 runtime turn ID 映射，当前不接受连续尾段代替它。
 
 ```bash
 python3 scripts/olp-review-evidence.py cross <review_dir> \
