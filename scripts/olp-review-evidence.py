@@ -20,7 +20,8 @@ Plan: docs/superpowers/plans/2026-09-09-review-evidence.md
              --allow-operator-refute 人工裁决)
   status   — 汇总判词状态(claim 级两层词表 + review_accepted 收口标志;
              review_accepted 需全部冻结 claim 有可核对证据且两个原
-             reviewer 各自新 native completed cross)
+             reviewer 各自新 native completed cross，且初审/cross 的原生
+             turn_id 均绑定完整 ledger 中对应 lane 的实际模型)
 
 错误输出一律可解析 JSON: {"error": {"code": "...", "message": "..."}} 且 exit != 0.
 冻结/manifest 写入: per-review-dir flock 包住 load→validate→save(事务),
@@ -379,7 +380,7 @@ def _load_ledger_turns(runtime_root: Path, session: str | None, slug: str) -> li
 
     Native ledger directories encode the peer session and optional cwd scope.
     Sequence gaps, malformed rows, ambiguous streams and missing turn_started
-    records make report ordinal -> runtime turn mapping unverifiable.
+    records make native turn identity/model attribution unverifiable.
     """
     if not isinstance(session, str) or not session or not isinstance(slug, str) or not slug:
         return []
@@ -468,13 +469,20 @@ def _load_ledger_turns(runtime_root: Path, session: str | None, slug: str) -> li
 
 
 def _verify_peer_model_from_ledger(runtime_root: Path, session: str | None,
-                                   slug: str, lane: str, report_turn: int) -> dict:
+                                   slug: str, lane: str, report_turn: int,
+                                   *, native_turn_id: str | None = None) -> dict:
+    if not isinstance(native_turn_id, str) or not native_turn_id.strip():
+        raise fail("peer-model-unverified", f"{slug} 原生报告缺 turn_id；请升级 octos，"
+                   "新建短 reviewer peer 并在新评审上下文重做初审与 cross；不得按文件编号补 ID")
     turns = _load_ledger_turns(runtime_root, session, slug)
-    if type(report_turn) is not int or not 1 <= report_turn <= len(turns):
+    matches = [turn for turn in turns if turn["turn_id"] == native_turn_id]
+    if type(report_turn) is not int or report_turn < 1 or len(matches) != 1:
         raise fail("peer-model-unverified", f"{slug} turn={report_turn} 无完整 runtime 轮次证据；"
                    "若 ledger 前段已轮转丢失，请新建短 reviewer peer，"
                    "在新评审上下文重做初审与 cross；不得将剩余尾段重新编号")
-    turn = turns[report_turn - 1]
+    # result-N counts persisted files; a failed result write can make N
+    # differ from the ledger ordinal. Only the runtime's ID joins the two.
+    turn = matches[0]
     if turn["terminal"] != "turn_completed" or not turn["models"]:
         raise fail("peer-model-unverified", f"{slug} turn={report_turn} 未完成或缺实际模型")
     if lane not in REVIEWER_LANES or any(
@@ -483,17 +491,84 @@ def _verify_peer_model_from_ledger(runtime_root: Path, session: str | None,
     ):
         raise fail("peer-model-mismatch", f"{slug} lane={lane},实际模型={turn['models']}")
     return {"model": turn["models"], "turn_id": turn["turn_id"],
-            "turn_no": report_turn, "stream": turn["stream"], "sha256": turn["sha256"]}
+            "turn_no": report_turn, "ledger_turn_no": turn["turn_no"],
+            "stream": turn["stream"], "sha256": turn["sha256"]}
 
 
-def _model_pair(state: dict, slug: str, cross_turn: object) -> dict:
+def _positive_report_turn(value: object) -> int | None:
+    if type(value) not in (int, str) or not re.fullmatch(r"[0-9]+", str(value)):
+        return None
+    try:
+        number = int(value)
+        return number if number > 0 else None
+    except ValueError:
+        return None
+
+
+def _capture_native_report(native_root: Path | None, slug: str, turn: object) -> dict | None:
+    if native_root is None:
+        return None  # Legacy snapshot authority remains audit-only.
+    number = _positive_report_turn(turn)
+    if number is None:
+        raise fail("peer-model-unverified", "原生报告编号无效")
+    path = (native_root / slug / f"result-{number}.md").resolve()
+    try:
+        return {"path": str(path), "sha256": sha256_file(path)}
+    except FileNotFoundError:
+        # A completed runtime snapshot may authorize legacy audit collection
+        # even when only another lane has native files. Model verification
+        # still rejects the absent binding; never infer or backfill identity.
+        return None
+    except OSError:
+        raise fail("peer-model-unverified", f"{slug} 原生报告不可读取")
+
+
+def _native_report_turn_id(binding: object, slug: str, number: int) -> str:
+    if (not isinstance(binding, dict)
+        or any(not isinstance(binding.get(key), str) or not binding[key]
+               for key in ("path", "sha256"))):
+        raise fail("peer-model-unverified", f"{slug} 缺冻结的原生报告绑定；"
+                   "请新建短 reviewer peer 并在新评审上下文重做初审与 cross")
+    try:
+        path = Path(binding["path"])
+        raw = path.read_bytes()
+        if (path.name != f"result-{number}.md"
+            or hashlib.sha256(raw).hexdigest() != binding["sha256"]):
+            raise fail("peer-model-unverified", f"{slug} 原生报告已变更或编号不匹配")
+        # Identity and digest must describe the SAME read, not two reads
+        # across an atomic replacement of a best-effort native result.
+        match = _FM_RE.match(raw.decode("utf-8"))
+        if match is None:
+            raise fail("peer-model-unverified", f"{slug} 原生报告缺 frontmatter")
+        fm = {}
+        for line in match.group(1).splitlines():
+            if ":" in line:
+                key, _, value = line.partition(":")
+                key = key.strip()
+                if key in fm:
+                    raise fail("peer-model-unverified", f"{slug} 原生报告身份键重复")
+                fm[key] = value.strip()
+    except (OSError, ValueError, UnicodeError):
+        raise fail("peer-model-unverified", f"{slug} 原生报告不可读取")
+    if (fm.get("slug") != slug or fm.get("outcome") != "completed"
+        or fm.get("turn") != str(number)):
+        raise fail("peer-model-unverified", f"{slug} 原生报告身份/编号/终态不匹配")
+    if not fm.get("turn_id"):
+        raise fail("peer-model-unverified", f"{slug} 原生报告缺 turn_id；请升级 octos，"
+                   "新建短 reviewer peer 并在新评审上下文重做初审与 cross；不得按文件编号补 ID")
+    return fm["turn_id"]
+
+
+def _model_pair(state: dict, slug: str, cross_turn: object,
+                cross_native_report: object = None) -> dict:
     """Both the frozen initial review and its later cross must use the lane model."""
     reviews = state.get("reviews") or {}
-    lane = next((lane for lane in REVIEWER_LANES
-                 if reviews.get(lane, {}).get("peer") == slug), None)
-    if lane is None or any(not isinstance(state.get(key), str) or not state[key]
+    lanes = [lane for lane in REVIEWER_LANES if isinstance(reviews, dict)
+             and isinstance(reviews.get(lane), dict) and reviews[lane].get("peer") == slug]
+    if len(lanes) != 1 or any(not isinstance(state.get(key), str) or not state[key]
                            for key in ("runtime", "session")):
         raise fail("peer-model-unverified", "缺 runtime/session/reviewer 绑定")
+    lane = lanes[0]
     try:
         first = int(str(reviews[lane].get("turn")))
         later = int(str(cross_turn))
@@ -502,24 +577,40 @@ def _model_pair(state: dict, slug: str, cross_turn: object) -> dict:
     if first < 1 or later <= first:
         raise fail("peer-model-unverified", "cross 必须属于初审后的新轮次")
     runtime = Path(state["runtime"])
-    return {"initial": _verify_peer_model_from_ledger(runtime, state["session"], slug, lane, first),
-            "cross": _verify_peer_model_from_ledger(runtime, state["session"], slug, lane, later)}
+    initial_id = _native_report_turn_id(reviews[lane].get("native_report"), slug, first)
+    cross_id = _native_report_turn_id(cross_native_report, slug, later)
+    pair = {
+        "initial": _verify_peer_model_from_ledger(runtime, state["session"], slug, lane, first,
+                                                  native_turn_id=initial_id),
+        "cross": _verify_peer_model_from_ledger(runtime, state["session"], slug, lane, later,
+                                                native_turn_id=cross_id),
+    }
+    if pair["cross"]["ledger_turn_no"] <= pair["initial"]["ledger_turn_no"]:
+        raise fail("peer-model-unverified", "cross 的 runtime turn_id 必须晚于初审，不得复用旧轮")
+    return pair
 
 
 def models_verified(state: dict) -> bool:
     """Recheck both distinct reviewers against their stored native evidence anchors."""
     reviews = state.get("reviews") or {}
-    if set(reviews) != set(REVIEWER_LANES):
+    if (not isinstance(reviews, dict) or set(reviews) != set(REVIEWER_LANES)
+        or any(not isinstance(r, dict) or not isinstance(r.get("peer"), str)
+               or not r["peer"] for r in reviews.values())):
         return False
     peers = {r.get("peer") for r in reviews.values()}
     cross = state.get("cross") or []
+    if (not isinstance(cross, list)
+        or any(not isinstance(c, dict) or not isinstance(c.get("slug"), str)
+               or not c["slug"] for c in cross)):
+        return False
     if len(peers) != 2 or not all(peers) or {c.get("slug") for c in cross} != peers:
         return False
     # Cross is an append-only audit history. A fresh verified submission can
     # supersede a legacy one; a later unverified submission must downgrade it.
     latest = {c.get("slug"): c for c in cross}
     try:
-        return all(c.get("model_evidence") == _model_pair(state, c.get("slug"), c.get("turn"))
+        return all(c.get("model_evidence") == _model_pair(
+                       state, c.get("slug"), c.get("turn"), c.get("native_report"))
                    for c in latest.values())
     except ReviewError:
         return False
@@ -1137,6 +1228,7 @@ def cmd_freeze(args: argparse.Namespace) -> None:
                 "peer": glm_slug,
                 "turn": glm_fm.get("turn"),
                 "outcome": glm_fm.get("outcome"),
+                "native_report": _capture_native_report(native_root, glm_slug, glm_fm.get("turn")),
             },
             "k3": {
                 "path": str(k3_path),
@@ -1144,6 +1236,7 @@ def cmd_freeze(args: argparse.Namespace) -> None:
                 "peer": k3_slug,
                 "turn": k3_fm.get("turn"),
                 "outcome": k3_fm.get("outcome"),
+                "native_report": _capture_native_report(native_root, k3_slug, k3_fm.get("turn")),
             },
         }
         state["verdicts"] = verdicts
@@ -1300,6 +1393,11 @@ def _validated_state_or_fail(state: object, rd: Path) -> dict:
                     "state-shape-invalid",
                     f"state.cross 元素非对象: {rd}",
                 )
+            for field in ("slug", "sha256"):
+                if field in c and (not isinstance(c[field], str) or not c[field].strip()):
+                    raise fail("state-shape-invalid", f"state.cross.{field} 非非空字符串: {rd}")
+            if "turn" in c and _positive_report_turn(c["turn"]) is None:
+                raise fail("state-shape-invalid", f"state.cross.turn 非正轮次: {rd}")
     return state
 
 
@@ -1765,8 +1863,10 @@ def cmd_cross(args: argparse.Namespace) -> None:
         # Optional early rejection at collection; final acceptance always
         # requires both initial/cross pairs to retain verifiable model anchors.
         model_evidence = None
+        native_report = None
         if args.require_model_evidence:
-            model_evidence = _model_pair(state, slug, fm.get("turn"))
+            native_report = _capture_native_report(native_root, slug, fm.get("turn"))
+            model_evidence = _model_pair(state, slug, fm.get("turn"), native_report)
         state.setdefault("cross", []).append(
             {
                 "slug": slug,
@@ -1774,6 +1874,7 @@ def cmd_cross(args: argparse.Namespace) -> None:
                 "turn": fm.get("turn"),
                 "refuted": refutations,
                 **({"model_evidence": model_evidence} if model_evidence else {}),
+                **({"native_report": native_report} if native_report else {}),
             }
         )
         save_state(review_dir, state)
@@ -1791,7 +1892,12 @@ def cmd_cross(args: argparse.Namespace) -> None:
 
 
 def cross_completed_slugs(state: dict) -> set[str]:
-    return {c.get("slug") for c in state.get("cross", []) if c.get("slug")}
+    cross = state.get("cross", [])
+    if (not isinstance(cross, list)
+        or any(not isinstance(c, dict) or not isinstance(c.get("slug"), str)
+               or not c["slug"] for c in cross)):
+        return set()
+    return {c["slug"] for c in cross}
 
 
 def any_challenge_accepted(state: dict) -> bool:

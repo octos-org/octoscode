@@ -197,7 +197,7 @@ fn write_authority_at(root: &Path, slug: &str, turn: &str, outcome: &str, append
     std::fs::create_dir_all(&nd).unwrap();
     std::fs::write(
         nd.join(format!("result-{turn}.md")),
-        format!("---\nslug: {slug}\noutcome: {outcome}\nturn: {turn}\n---\nbody\n"),
+        format!("---\nslug: {slug}\noutcome: {outcome}\nturn: {turn}\nturn_id: {slug}-{turn}\n---\nbody\n"),
     )
     .unwrap();
     // v5: native 权威必须含 originator(master/session 发起者)与 goal 归属文件,
@@ -3207,6 +3207,13 @@ fn olp_review_runtime_authority_errored_outcome_rejected() {
     let (glm, k3, ev) = m2_evidence_baseline(&d, &h, "completed");
     let (ok0, so0, se0) = m2_freeze(&d, &h, &glm, &k3, &ev);
     assert!(ok0, "正向对照 completed 快照应采信: {so0} {se0}");
+    let frozen: serde_json::Value = serde_json::from_str(so0.trim()).unwrap();
+    assert!(frozen["reviews"]["glm"]["native_report"].is_null());
+    let (status_ok, status_out, _) = run(&["status", d.to_str().unwrap()]);
+    assert!(status_ok, "legacy snapshot remains readable: {status_out}");
+    let status: serde_json::Value = serde_json::from_str(status_out.trim()).unwrap();
+    assert_eq!(status["model_verified"], false);
+    assert_eq!(status["review_accepted"], false);
     // 独立目录负向: 快照 outcome=errored → peer-outcome-invalid。
     let t2 = TmpDir::new("m2-errored-neg");
     let d2 = t2.path().to_path_buf();
@@ -6238,5 +6245,73 @@ fn olp_review_model_gate_composes_with_live_cargo() {
     assert_eq!(
         v["review_accepted"], true,
         "valid resubmission restores acceptance: {so}"
+    );
+
+    // A COMPLETED GLM turn lost its native version/index writes. The
+    // actual cross is ledger turn3 but was persisted as result-2. Exercise
+    // the real CLI/native-authority path, not just model-helper rejection.
+    let cross_native = native_root(d).join("glm/result-2.md");
+    let before = std::fs::read_to_string(&cross_native).unwrap();
+    std::fs::write(
+        &cross_native,
+        before.replace("turn_id: glm-2", "turn_id: glm-3"),
+    )
+    .unwrap();
+    for (actual_model, should_accept) in [("k3-256k", false), ("glm-5.3", true)] {
+        let mut c = Command::new("python3");
+        c.arg("-B").arg("-c").arg(
+            "import sys;from pathlib import Path;sys.path.insert(0,sys.argv[1]);from olp_review_models import ledger;ledger(Path(sys.argv[2]),'glm',('glm-5.3','glm-5.3',sys.argv[3]))"
+        ).arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests"))
+            .arg(runtime.path()).arg(actual_model);
+        assert!(
+            run_deadline(&mut c, 30, "shifted synthetic ledger")
+                .status
+                .success()
+        );
+        let (ok, so, se) = run(&[
+            "cross",
+            d.to_str().unwrap(),
+            "--cross-report",
+            d.join("cross-glm.md").to_str().unwrap(),
+            "--cross-slug",
+            "glm",
+            "--native-root",
+            native_root(d).to_str().unwrap(),
+            "--require-model-evidence",
+        ]);
+        assert_eq!(ok, should_accept, "actual model={actual_model}: {so} {se}");
+        if !should_accept {
+            let error: serde_json::Value = serde_json::from_str(&so).unwrap();
+            assert_eq!(error["error"]["code"], "peer-model-mismatch", "{so}");
+        }
+        let (ok, so, se) = run(&["status", d.to_str().unwrap()]);
+        assert!(ok, "{so} {se}");
+        let status: serde_json::Value = serde_json::from_str(&so).unwrap();
+        assert_eq!(status["behavior_accepted"], true, "{so}");
+        assert_eq!(status["review_accepted"], should_accept, "{so}");
+    }
+    // Missing IDs are audit-compatible but cannot be silently inferred
+    // from the file ordinal, even when all actual models happen to match.
+    let native = std::fs::read_to_string(&cross_native).unwrap();
+    std::fs::write(&cross_native, native.replace("turn_id: glm-3\n", "")).unwrap();
+    let (ok, so, se) = run(&[
+        "cross",
+        d.to_str().unwrap(),
+        "--cross-report",
+        d.join("cross-glm.md").to_str().unwrap(),
+        "--cross-slug",
+        "glm",
+        "--native-root",
+        native_root(d).to_str().unwrap(),
+        "--require-model-evidence",
+    ]);
+    assert!(!ok, "legacy native ID must not verify: {so} {se}");
+    let error: serde_json::Value = serde_json::from_str(&so).unwrap();
+    assert_eq!(error["error"]["code"], "peer-model-unverified", "{so}");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("turn_id")
     );
 }

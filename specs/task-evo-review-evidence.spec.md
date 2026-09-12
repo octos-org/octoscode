@@ -683,6 +683,35 @@ Rule: review-regression — 前轮八反例回归数据集
 
 Rule: actual-model-evidence — 实际模型与行为证据同时满足才可验收
 
+场景: 原生报告写入丢失不得借用另一轮模型(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_model_gate_composes_with_live_cargo
+  假设 一个 completed 轮次的原生报告和索引写入丢失，后续 cross 文件编号为 2，
+    但原生 turn_id 指向 ledger 第 3 轮，真实 Cargo 行为证据已通过
+  当 带 --require-model-evidence 收录 cross
+  那么 第 3 轮模型错误时 peer-model-mismatch，不能借用第 2 轮正确模型；
+    第 3 轮模型正确时允许收录并核对其确切 ID；原生报告缺 turn_id 时
+    peer-model-unverified，提示升级 runtime 并在新上下文重做审查
+
+场景: 原生报告身份与冻结字节同时核验(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_models_require_runtime_evidence
+  假设 原生报告 path 和 SHA256 随初审冻结或 cross 收录保存
+  当 报告被改写/删除，或 ID 缺失/重复/不存在/属于别的 peer/复用初审/倒序
+  那么 model_verified=false，文件编号不得用来猜测 runtime turn_id；
+    仅编号错位但两个确切 ID 的模型与先后顺序正确时仍可核验
+
+场景: 损坏 cross 对象与字段不能触发 traceback(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_models_require_runtime_evidence
+  假设 cross 中出现非对象条目，或 slug 为数组/对象，turn 为数组/布尔/非十进制字符
+  当 status CLI 读取状态，或内部状态函数消费 cross
+  那么 CLI 返回 state-shape-invalid 结构化错误；内部模型与行为判定拒绝异常条目，
+    不因 AttributeError/TypeError/ValueError 崩溃
+
 场景: 原生 ledger 的双模型与逐轮锚定(critical)
   测试:
     包: octoscode

@@ -74,7 +74,7 @@ Scenario: 已具 GNU 能力的 PATH 直接可用
   Test:
     Package: octoscode
     Filter: already_gnu_path_is_used_without_brew_requirement
-  Given PATH 前置 stat/realpath 委托 shim（两平台可构造）
+  Given 宿主已有可委托的 GNU 工具，PATH 前置 stat/realpath 委托 shim（Darwin 缺 GNU 时 fixture 会响亮失败）
   When verify.sh -- stat -c '%s'
   Then 能力探测通过直接成功——不要求 brew
 
@@ -82,7 +82,7 @@ Scenario: 混合 PATH（GNU stat + BSD realpath）不满足能力门
   Test:
     Package: octoscode
     Filter: mixed_path_with_bsd_realpath_still_resolves_gnu
-  Given PATH 前置 GNU 形态 stat shim 与拒绝式 realpath stub（无其他 GNU 源在前）
+  Given 宿主已有可回落的 GNU 工具，PATH 前置 GNU 形态 stat shim 与拒绝式 realpath stub（无其他 GNU 源在前）
   When verify.sh -- realpath -m /etc/../etc/hosts
   Then 能力门不通过（realpath -m 亦是必检项）→ 回落解析后 realpath -m 正常归一输出
 

@@ -19,6 +19,9 @@
 #
 # Exit codes are REAL: the first failing step's status is propagated; nothing
 # is swallowed.
+# Passthrough propagation applies after a command starts. A failed exec
+# (for example a nonexistent executable) can exit 1 under this shell's
+# errexit handling; callers must not interpret that as a test failure.
 
 set -euo pipefail
 
