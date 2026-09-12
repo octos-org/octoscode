@@ -2185,9 +2185,9 @@ fn olp_review_k3_full_happy_path_accepted() {
     assert!(ok6);
     let v6: serde_json::Value = serde_json::from_str(so6.trim()).unwrap();
     assert_eq!(
-        v6["review_accepted"].as_bool(),
+        v6["behavior_accepted"].as_bool(),
         Some(true),
-        "双 cross 后应 accepted: {so6}"
+        "双 cross 后行为证据通过: {so6}"
     );
     assert_eq!(v6["verdicts"]["X"]["state"], "approve");
     // 初审原件不可变保留
@@ -2383,7 +2383,7 @@ fn olp_review_regression_dataset_classifies_four_prs() {
     assert!(oks);
     let vst: serde_json::Value = serde_json::from_str(sos.trim()).unwrap();
     assert_eq!(
-        vst["review_accepted"].as_bool(),
+        vst["behavior_accepted"].as_bool(),
         Some(true),
         "链路应收口: {sos}"
     );
@@ -3016,7 +3016,12 @@ fn olp_review_cross_refutation_reverts_flip() {
     let (ok5, so5, _) = run(&["status", d.to_str().unwrap()]);
     assert!(ok5);
     let v5: serde_json::Value = serde_json::from_str(so5.trim()).unwrap();
-    assert_eq!(v5["review_accepted"].as_bool(), Some(true), "{so5}");
+    assert_eq!(v5["behavior_accepted"].as_bool(), Some(true), "{so5}");
+    assert_eq!(
+        v5["review_accepted"].as_bool(),
+        Some(false),
+        "legacy reports lack model evidence: {so5}"
+    );
     assert_eq!(v5["verdicts"]["X"]["state"], "challenge-refuted");
 }
 
@@ -3114,7 +3119,12 @@ fn k3_rescue_reexecution_refutes_reproduced_failure() {
     let (ok5, so5, _) = run(&["status", d.to_str().unwrap()]);
     assert!(ok5);
     let v5: serde_json::Value = serde_json::from_str(so5.trim()).unwrap();
-    assert_eq!(v5["review_accepted"].as_bool(), Some(true), "{so5}");
+    assert_eq!(v5["behavior_accepted"].as_bool(), Some(true), "{so5}");
+    assert_eq!(
+        v5["review_accepted"].as_bool(),
+        Some(false),
+        "legacy reports lack model evidence: {so5}"
+    );
     assert_eq!(v5["verdicts"]["X"]["state"], "challenge-refuted");
 }
 
@@ -6049,4 +6059,148 @@ fn fixture_probe_writes_tracked_src() {
         300,
     );
     assert!(ok5, "还原 .git 后门应恢复: {_so5}");
+}
+
+/// Synthetic model-ledger unit fixtures run separately from live Cargo receipts.
+#[test]
+fn olp_review_models_require_runtime_evidence() {
+    let mut c = Command::new("python3");
+    c.arg("-B")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/olp_review_models.py"));
+    let out = run_deadline(&mut c, 60, "model gate unit fixtures");
+    assert!(
+        out.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// End-to-end acceptance uses a real live-Cargo execution, plus explicitly
+/// synthetic native/model fixtures. Missing model anchors cannot bypass it.
+#[test]
+fn olp_review_model_gate_composes_with_live_cargo() {
+    let (ft, repo, head) = make_cargo_fixture("model-live", FIXTURE_PASS_TEST);
+    let review = TmpDir::new("model-review");
+    let runtime = TmpDir::new("model-runtime");
+    let d = review.path();
+    let session = "fixture:local:tui#master";
+    let (ok, so, se) = run(&[
+        "init",
+        d.to_str().unwrap(),
+        "--repo",
+        repo.to_str().unwrap(),
+        "--base",
+        "0a174d95",
+        "--runtime",
+        runtime.path().to_str().unwrap(),
+        "--session",
+        session,
+        "--goal",
+        "goal_01",
+    ]);
+    assert!(ok, "{so} {se}");
+    for slug in ["glm", "k3"] {
+        write_authority(d, slug, "1", "completed");
+        std::fs::write(native_root(d).join(slug).join("originator"), session).unwrap();
+        write_review(d, &format!("{slug}.md"), "completed", "1", Some(&head));
+    }
+    let (ok, so, se) = run(&[
+        "freeze",
+        d.to_str().unwrap(),
+        "--glm-review",
+        d.join("glm.md").to_str().unwrap(),
+        "--k3-review",
+        d.join("k3.md").to_str().unwrap(),
+        "--glm-slug",
+        "glm",
+        "--k3-slug",
+        "k3",
+        "--native-root",
+        native_root(d).to_str().unwrap(),
+        "--head",
+        &head,
+    ]);
+    assert!(ok, "{so} {se}");
+    let (ok, so, se) = live_challenge(
+        d,
+        &repo,
+        "X",
+        "fixture_probe_pass",
+        "pass",
+        &ft.path().join("target"),
+    );
+    assert!(ok, "real Cargo execution failed: {so} {se}");
+    let mut c = Command::new("python3");
+    c.arg("-B").arg("-c").arg(
+        "import sys;from pathlib import Path;sys.path.insert(0,sys.argv[1]);from olp_review_models import ledger;ledger(Path(sys.argv[2]),'glm');ledger(Path(sys.argv[2]),'k3',('k3-256k','k3-256k'))"
+    ).arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests")).arg(runtime.path());
+    let out = run_deadline(&mut c, 30, "synthetic ledger fixture");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for slug in ["glm", "k3"] {
+        let cross = write_cross_structured(
+            d,
+            slug,
+            &format!("cross-{slug}.md"),
+            "2",
+            "completed",
+            r#"[{"id":"X","verdict":"accept"}]"#,
+        );
+        std::fs::write(native_root(d).join(slug).join("originator"), session).unwrap();
+        let (ok, so, se) = run(&[
+            "cross",
+            d.to_str().unwrap(),
+            "--cross-report",
+            cross.to_str().unwrap(),
+            "--cross-slug",
+            slug,
+            "--native-root",
+            native_root(d).to_str().unwrap(),
+            "--require-model-evidence",
+        ]);
+        assert!(ok, "{so} {se}");
+    }
+    let (ok, so, se) = run(&["status", d.to_str().unwrap()]);
+    assert!(ok, "{so} {se}");
+    let v: serde_json::Value = serde_json::from_str(&so).unwrap();
+    assert_eq!(v["review_accepted"], true, "{so}");
+    assert_eq!(v["behavior_accepted"], true, "{so}");
+    assert_eq!(v["model_verified"], true, "{so}");
+    let path = d.join("review-state.json");
+    let mut state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    state["cross"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("model_evidence");
+    std::fs::write(&path, serde_json::to_string(&state).unwrap()).unwrap();
+    let (ok, so, se) = run(&["status", d.to_str().unwrap()]);
+    assert!(ok, "{so} {se}");
+    let v: serde_json::Value = serde_json::from_str(&so).unwrap();
+    assert_eq!(v["behavior_accepted"], true, "{so}");
+    assert_eq!(v["review_accepted"], false, "missing model anchor: {so}");
+    // Resubmitting a valid completed cross supersedes the legacy audit row.
+    let (ok, so, se) = run(&[
+        "cross",
+        d.to_str().unwrap(),
+        "--cross-report",
+        d.join("cross-glm.md").to_str().unwrap(),
+        "--cross-slug",
+        "glm",
+        "--native-root",
+        native_root(d).to_str().unwrap(),
+        "--require-model-evidence",
+    ]);
+    assert!(ok, "{so} {se}");
+    let (ok, so, se) = run(&["status", d.to_str().unwrap()]);
+    assert!(ok, "{so} {se}");
+    let v: serde_json::Value = serde_json::from_str(&so).unwrap();
+    assert_eq!(
+        v["review_accepted"], true,
+        "valid resubmission restores acceptance: {so}"
+    );
 }

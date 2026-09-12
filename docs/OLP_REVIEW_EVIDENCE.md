@@ -151,11 +151,35 @@ python3 scripts/olp-review-evidence.py challenge <review_dir> \
 
 ## cross — 交叉互审
 
+**实际模型验收**: `cross --require-model-evidence` 从绑定 runtime 的
+`ui-protocol/<hex>/ledger-*.log` 读取原生 JSONL，核对初审和交叉审查各自
+的实际模型。hex 目录编码完整 peer session 与可选 NUL cwd scope；行内
+session 必须与该 peer 一致。模型来自 `token_cost_update.token_cost.model`，
+GLM/K3 lane 分别接受 `glm`/`glm-*` 与 `k3`/`k3-*`。
+
+报告 turn=N 映射到完整 ledger 中第 N 个 `turn_started`，必须有唯一
+`turn_completed` 终态；`response`/`stream_end` 是输出片段，不能证明完成。
+缺失或损坏的事件、序号缺口、多 cwd 流、失败/中断、模型错配均拒绝。
+收录时保存初审及 cross 的 session stream、具体 turn ID、轮次、模型与
+相关原始事件摘要；status 重新读取原始记录，逐项匹配这些锚点。
+
+`review_accepted` 现在始终要求原有行为证据门和双模型证据门同时通过。
+`behavior_accepted` 单独展示原有行为证据条件，`model_verified` 展示两个
+不同 reviewer 的初审与各自最新 cross 是否均核验通过。旧格式或不带模型证据的
+cross 仍可收录用于审计，但不能通过最终验收；删除模型锚点也不会退回
+旧的通过条件。需重新提交带 `--require-model-evidence` 的有效 cross。
+K3 配额错误等失败记录只能记为审查未完成。
+
+这是对受信本地 runtime 产物的一致性核验，并非提供商的密码学身份认证。
+ledger 不完整或归档被移走会降级为未验证，不猜测缺失轮次。已有 live Cargo
+入口继续独立核对源码、测试命中数、实际退出码与日志摘要；模型一致不能替代
+测试执行证据。
+
 ```bash
 python3 scripts/olp-review-evidence.py cross <review_dir> \
   --cross-report cross.md --cross-slug <slug> \
   --native-root <runtime>/data/peers --expect-claims X,Y,Z \
-  [--allow-operator-refute]
+  --require-model-evidence [--allow-operator-refute]
 ```
 
 前置: frozen + challenge 已接纳。cross 报告须含结构化 `cross_claims`

@@ -374,6 +374,155 @@ def _identity_file_matches(peer_dir: Path, name: str, expected: str) -> bool:
     return _wire_session_same_origin(got, expected)
 
 
+def _load_ledger_turns(runtime_root: Path, session: str | None, slug: str) -> list[dict]:
+    """Read one complete native peer stream; never infer a turn from output chunks.
+
+    Native ledger directories encode the peer session and optional cwd scope.
+    Sequence gaps, malformed rows, ambiguous streams and missing turn_started
+    records make report ordinal -> runtime turn mapping unverifiable.
+    """
+    if not isinstance(session, str) or not session or not isinstance(slug, str) or not slug:
+        return []
+    peer_session = session.split("#", 1)[0] + f"#peer-{slug}"
+    streams = []
+    try:
+        for directory in (runtime_root / "ui-protocol").iterdir():
+            if not directory.is_dir():
+                continue
+            try:
+                wire = bytes.fromhex(directory.name).decode("utf-8")
+            except (ValueError, UnicodeError):
+                continue
+            if _CWD_SUFFIX_RE.sub("", wire) != peer_session:
+                continue
+            logs = list(directory.glob("ledger-*.log"))
+            if logs:
+                streams.append((wire, logs))
+        if len(streams) != 1:
+            return []
+        wire, logs = streams[0]
+        rows = {}
+        for log in logs:
+            for line in log.read_text(encoding="utf-8").splitlines():
+                row = json.loads(line)
+                if not isinstance(row, dict):
+                    return []
+                seq = row.get("seq")
+                if type(seq) is not int or seq < 1 or seq in rows:
+                    return []
+                if not isinstance(row.get("event"), dict):
+                    return []
+                rows[seq] = row["event"]
+        if not rows or sorted(rows) != list(range(1, len(rows) + 1)):
+            return []
+        turns = {}
+        for seq in sorted(rows):
+            ev = rows[seq]
+            tid = ev.get("turn_id")
+            if tid is None:
+                md = ev.get("metadata")
+                if (ev.get("kind") in ("turn_started", "turn_completed", "turn_error", "turn_interrupted")
+                    or isinstance(md, dict) and md.get("kind") == "token_cost_update"):
+                    return []
+                continue  # envelope events may have no turn identity
+            if not isinstance(tid, str) or not tid:
+                return []
+            if ev.get("session_id") != peer_session:
+                return []
+            kind = ev.get("kind") if ev.get("record_kind") == "notification" else None
+            if tid not in turns:
+                if kind != "turn_started":
+                    return []
+                turns[tid] = {"turn_id": tid, "models": [], "terminal": None,
+                              "events": [], "stream": wire}
+            elif kind == "turn_started":
+                return []
+            turn = turns[tid]
+            md = ev.get("metadata")
+            is_model = (ev.get("record_kind") == "progress" and isinstance(md, dict)
+                        and md.get("kind") == "token_cost_update")
+            terminal = kind in ("turn_completed", "turn_error", "turn_interrupted")
+            if kind == "turn_started" or is_model or terminal:
+                if turn["terminal"] is not None:
+                    return []
+                turn["events"].append({"seq": seq, "event": ev})
+            if is_model:
+                tc = md.get("token_cost")
+                model = tc.get("model") if isinstance(tc, dict) else None
+                if not isinstance(model, str) or not model:
+                    return []
+                if model not in turn["models"]:
+                    turn["models"].append(model)
+            if terminal:
+                turn["terminal"] = kind
+        result = []
+        for ordinal, turn in enumerate(turns.values(), 1):
+            evidence = {"stream": wire, "events": turn.pop("events")}
+            turn["sha256"] = hashlib.sha256(
+                json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            result.append({"turn_no": ordinal, **turn})
+        return result
+    except (OSError, UnicodeError, ValueError):
+        return []
+
+
+def _verify_peer_model_from_ledger(runtime_root: Path, session: str | None,
+                                   slug: str, lane: str, report_turn: int) -> dict:
+    turns = _load_ledger_turns(runtime_root, session, slug)
+    if type(report_turn) is not int or not 1 <= report_turn <= len(turns):
+        raise fail("peer-model-unverified", f"{slug} turn={report_turn} 无完整 runtime 轮次证据")
+    turn = turns[report_turn - 1]
+    if turn["terminal"] != "turn_completed" or not turn["models"]:
+        raise fail("peer-model-unverified", f"{slug} turn={report_turn} 未完成或缺实际模型")
+    if lane not in REVIEWER_LANES or any(
+        not re.fullmatch(re.escape(lane) + r"(?:-[A-Za-z0-9][A-Za-z0-9._-]*)?", model)
+        for model in turn["models"]
+    ):
+        raise fail("peer-model-mismatch", f"{slug} lane={lane},实际模型={turn['models']}")
+    return {"model": turn["models"], "turn_id": turn["turn_id"],
+            "turn_no": report_turn, "stream": turn["stream"], "sha256": turn["sha256"]}
+
+
+def _model_pair(state: dict, slug: str, cross_turn: object) -> dict:
+    """Both the frozen initial review and its later cross must use the lane model."""
+    reviews = state.get("reviews") or {}
+    lane = next((lane for lane in REVIEWER_LANES
+                 if reviews.get(lane, {}).get("peer") == slug), None)
+    if lane is None or any(not isinstance(state.get(key), str) or not state[key]
+                           for key in ("runtime", "session")):
+        raise fail("peer-model-unverified", "缺 runtime/session/reviewer 绑定")
+    try:
+        first = int(str(reviews[lane].get("turn")))
+        later = int(str(cross_turn))
+    except (ValueError, TypeError):
+        raise fail("peer-model-unverified", "报告轮次无效")
+    if first < 1 or later <= first:
+        raise fail("peer-model-unverified", "cross 必须属于初审后的新轮次")
+    runtime = Path(state["runtime"])
+    return {"initial": _verify_peer_model_from_ledger(runtime, state["session"], slug, lane, first),
+            "cross": _verify_peer_model_from_ledger(runtime, state["session"], slug, lane, later)}
+
+
+def models_verified(state: dict) -> bool:
+    """Recheck both distinct reviewers against their stored native evidence anchors."""
+    reviews = state.get("reviews") or {}
+    if set(reviews) != set(REVIEWER_LANES):
+        return False
+    peers = {r.get("peer") for r in reviews.values()}
+    cross = state.get("cross") or []
+    if len(peers) != 2 or not all(peers) or {c.get("slug") for c in cross} != peers:
+        return False
+    # Cross is an append-only audit history. A fresh verified submission can
+    # supersede a legacy one; a later unverified submission must downgrade it.
+    latest = {c.get("slug"): c for c in cross}
+    try:
+        return all(c.get("model_evidence") == _model_pair(state, c.get("slug"), c.get("turn"))
+                   for c in latest.values())
+    except ReviewError:
+        return False
+
+
 def check_peer_validity(
     fm: dict,
     report_path: Path,
@@ -1611,12 +1760,18 @@ def cmd_cross(args: argparse.Namespace) -> None:
             }
             refutations.append(cid)
 
+        # Optional early rejection at collection; final acceptance always
+        # requires both initial/cross pairs to retain verifiable model anchors.
+        model_evidence = None
+        if args.require_model_evidence:
+            model_evidence = _model_pair(state, slug, fm.get("turn"))
         state.setdefault("cross", []).append(
             {
                 "slug": slug,
                 "sha256": fm["__sha256__"],
                 "turn": fm.get("turn"),
                 "refuted": refutations,
+                **({"model_evidence": model_evidence} if model_evidence else {}),
             }
         )
         save_state(review_dir, state)
@@ -1635,7 +1790,7 @@ def any_challenge_accepted(state: dict) -> bool:
     )
 
 
-def review_accepted(state: dict) -> bool:
+def behavior_accepted(state: dict) -> bool:
     """收口条件: 冻结 + ≥1 已接纳挑战 + 两个原 reviewer 各自新 native
     completed cross + 全部冻结 claim 有可核对证据(真实执行或有效反驳)。"""
     if not (state.get("frozen") and any_challenge_accepted(state)):
@@ -2571,6 +2726,10 @@ def cmd_classify(args: argparse.Namespace) -> None:
         )
 
 
+def review_accepted(state: dict) -> bool:
+    return behavior_accepted(state) and models_verified(state)
+
+
 def build_status(state: dict) -> dict:
     verdicts = {k: dict(v) for k, v in (state.get("verdicts") or {}).items()}
     # 两模型一致不能替代行为实验: 无本入口执行依据的 approve 逐 claim
@@ -2578,11 +2737,15 @@ def build_status(state: dict) -> dict:
     for c, v in verdicts.items():
         if v.get("state") == "approve" and v.get("reason") != "executed-probe-passed":
             verdicts[c] = {**v, "state": "pending-behavioral-evidence"}
+    model_verified = models_verified(state)
+    behavior_verified = behavior_accepted(state)
     return {
         "protocol": PROTOCOL,
         "frozen": state.get("frozen", False),
         "challenge_accepted": any_challenge_accepted(state),
-        "review_accepted": review_accepted(state),
+        "review_accepted": behavior_verified and model_verified,
+        "behavior_accepted": behavior_verified,
+        "model_verified": model_verified,
         "verdicts": verdicts,
         "cross": state.get("cross", []),
         "identity": {
@@ -2627,7 +2790,8 @@ def render_human(obj: dict) -> str:
         )
     lines.append(f"lifecycle: frozen={obj.get('frozen')} "
                  f"challenge_accepted={obj.get('challenge_accepted')} "
-                 f"review_accepted={obj.get('review_accepted')}")
+                 f"review_accepted={obj.get('review_accepted')} "
+                 f"model_verified={obj.get('model_verified')}")
     verdicts = obj.get("verdicts") or {}
     if verdicts:
         lines.append("verdicts:")
@@ -2713,6 +2877,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--expect-claims")
     sp.add_argument("--allow-operator-refute", action="store_true",
                     help="显式允许 operator-decision 型 refute(可审计人工裁决)")
+    sp.add_argument("--require-model-evidence", action="store_true",
+                    help="cross 收录前经 runtime ledger token_cost_update 核验 reviewer 实际模型(fail-closed)")
     sp.set_defaults(func=cmd_cross)
 
     sp = sub.add_parser("status")

@@ -677,3 +677,26 @@ Rule: review-regression — 前轮八反例回归数据集
     phase,drift 标记证明测试确已运行);untracked 不触发;CLI 早拒
     非 git 工作树,不误认父仓库 HEAD;git status 查询失败经门函数真实 I/O 返回
     rc=1 + tracked-source-modified(查询失败),不得当作 clean
+
+
+Rule: actual-model-evidence — 实际模型与行为证据同时满足才可验收
+
+场景: 原生 ledger 的双模型与逐轮锚定(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_models_require_runtime_evidence
+  假设 两个不同 reviewer 各有初审与 cross,且行为条件已满足
+  当 从完整原生 ledger 核对两轮 turn_started、turn_completed 和实际模型
+  那么 仅 GLM 与 K3 各自族匹配才 model_verified=true;
+    缺 peer/证据、旧轮、错模型、失败/中断、输出片段冒充终态、损坏序号、
+    异 session、多 cwd 流、证据变更/删除均使 review_accepted=false
+
+场景: 模型验收与真实 Cargo 执行组合(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_model_gate_composes_with_live_cargo
+  假设 冻结评审基于真实 Git fixture,生产 live Cargo adapter 实际运行精确测试
+  当 两个 reviewer 的模型 fixture 与 native completed 报告均被 cross 核验收录
+  那么 behavior_accepted/model_verified/review_accepted 均为 true;
+    删除模型证据锚后行为条件仍为 true,最终验收必须 false
+  注: 此自动测试的模型 ledger 是明确标记的合成 fixture,不是线上模型审查收据
