@@ -98,6 +98,7 @@ satisfies: [REQ-OLP-REVIEW-EVIDENCE]
 ### Allowed Changes(octoscode 仓库)
 - scripts/olp-review-*.py(含共享 helper)
 - tests/olp_review_evidence.rs
+- tests/olp_review_models.py
 - tests/olp_review_monitor.rs
 - tests/olp_watch_board.rs(仅限 clippy 基线 overly_complex_bool_expr 的
   非行为改变验证修复: `while !read(...).map(...).unwrap_or(false) || true` 改为
@@ -107,6 +108,7 @@ satisfies: [REQ-OLP-REVIEW-EVIDENCE]
 - specs/task-evo-review-evidence.spec.md
 - docs/OLP_REVIEW_EVIDENCE.md
 - docs/superpowers/plans/2026-09-09-review-evidence.md
+- docs/superpowers/plans/2026-09-12-model-review-followup.md
 - .octos/{progress.md, red-proof/, design-*.md, independent-*.md, cross-*.md,
   outer-feedback.md, loop.md, OUTER_LOOP_REVIEW.md, implementation-brief.md,
   baseline-*.log, baseline-summary.json, active-profile, octosfix/}
@@ -677,3 +679,73 @@ Rule: review-regression — 前轮八反例回归数据集
     phase,drift 标记证明测试确已运行);untracked 不触发;CLI 早拒
     非 git 工作树,不误认父仓库 HEAD;git status 查询失败经门函数真实 I/O 返回
     rc=1 + tracked-source-modified(查询失败),不得当作 clean
+
+
+Rule: actual-model-evidence — 实际模型与行为证据同时满足才可验收
+
+场景: 原生报告写入丢失不得借用另一轮模型(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_model_gate_composes_with_live_cargo
+  假设 一个 completed 轮次的原生报告和索引写入丢失，后续 cross 文件编号为 2，
+    但原生 turn_id 指向 ledger 第 3 轮，真实 Cargo 行为证据已通过
+  当 带 --require-model-evidence 收录 cross
+  那么 第 3 轮模型错误时 peer-model-mismatch，不能借用第 2 轮正确模型；
+    第 3 轮模型正确时允许收录并核对其确切 ID；原生报告缺 turn_id 时
+    peer-model-unverified，提示升级 runtime 并在新上下文重做审查
+
+场景: 原生报告身份与冻结字节同时核验(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_models_require_runtime_evidence
+  假设 原生报告 path 和 SHA256 随初审冻结或 cross 收录保存
+  当 报告被改写/删除，或 ID 缺失/重复/不存在/属于别的 peer/复用初审/倒序
+  那么 model_verified=false，文件编号不得用来猜测 runtime turn_id；
+    仅编号错位但两个确切 ID 的模型与先后顺序正确时仍可核验
+
+场景: 损坏 cross 对象与字段不能触发 traceback(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_models_require_runtime_evidence
+  假设 cross 中出现非对象条目，或 slug 为数组/对象，turn 为数组/布尔/非十进制字符
+  当 status CLI 读取状态，或内部状态函数消费 cross
+  那么 CLI 返回 state-shape-invalid 结构化错误；内部模型与行为判定拒绝异常条目，
+    不因 AttributeError/TypeError/ValueError 崩溃
+
+场景: 原生 ledger 的双模型与逐轮锚定(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_models_require_runtime_evidence
+  假设 两个不同 reviewer 各有初审与 cross,且行为条件已满足
+  当 从完整原生 ledger 核对两轮 turn_started、turn_completed 和实际模型
+  那么 仅 GLM 与 K3 各自族匹配才 model_verified=true;
+    缺 peer/证据、旧轮、错模型、失败/中断、输出片段冒充终态、损坏序号、
+    异 session、多 cwd 流、证据变更/删除均使 review_accepted=false
+
+场景: 模型验收与真实 Cargo 执行组合(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_model_gate_composes_with_live_cargo
+  假设 冻结评审基于真实 Git fixture,生产 live Cargo adapter 实际运行精确测试
+  当 两个 reviewer 的模型 fixture 与 native completed 报告均被 cross 核验收录
+  那么 behavior_accepted/model_verified/review_accepted 均为 true;
+    删除模型证据锚后行为条件仍为 true,最终验收必须 false
+  注: 此自动测试的模型 ledger 是明确标记的合成 fixture,不是线上模型审查收据
+
+场景: 模型日志切段保留与删除前段的恢复指引(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_models_require_runtime_evidence
+  假设 模型 fixture 的完整轮次分为两个 ledger 文件
+  当 两段保留时核验，随后删除含初审的第一段再核验
+  那么 两段完整时通过；前段缺失时拒绝将尾段首轮当成 turn 1，
+    peer-model-unverified 指引新建短 reviewer peer 并重做初审与 cross
+
+场景: 兼容 cross 收录明确警告且有效重提可恢复(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_model_gate_composes_with_live_cargo
+  假设 真实 Cargo 行为证据已经通过，模型 ledger 是明确标记的合成 fixture
+  当 不带 --require-model-evidence 收录，再带该参数重新提交有效 cross
+  那么 兼容收录返回可解析 JSON warnings 中的 model-evidence-not-verified，
+    stderr 提示参数且最终验收仍 false；有效重提无此警告，双 reviewer 完整后验收 true

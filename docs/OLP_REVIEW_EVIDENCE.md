@@ -151,11 +151,57 @@ python3 scripts/olp-review-evidence.py challenge <review_dir> \
 
 ## cross — 交叉互审
 
+**实际模型验收**: `cross --require-model-evidence` 从绑定 runtime 的
+`ui-protocol/<hex>/ledger-*.log` 读取原生 JSONL，核对初审和交叉审查各自
+的实际模型。hex 目录编码完整 peer session 与可选 NUL cwd scope；行内
+session 必须与该 peer 一致。模型来自 `token_cost_update.token_cost.model`，
+GLM/K3 lane 分别接受 `glm`/`glm-*` 与 `k3`/`k3-*`。
+
+报告 turn=N 只标识原生 `result-N.md`，不能用来选择 ledger 第 N 轮：
+一次原生报告/索引写入失败就可能使两种编号错位。原生 octos writer 必须在
+报告 frontmatter 写入真实 `turn_id`；freeze 保存初审原生报告的路径和 SHA256，
+带模型验证的 cross 收录也保存该轮原生报告的路径和 SHA256。每次验收都从
+这些未改变的原生字节读取 `turn_id`，匹配同一个 peer 的确切 ledger 轮次，
+并要求 cross 的 runtime 轮次晚于初审。报告中的自报 ID、文件计数和终态总数
+均不能替代这条绑定。确切 ID 对应轮次必须有唯一
+`turn_completed` 终态；`response`/`stream_end` 是输出片段，不能证明完成。
+缺失或损坏的事件、序号缺口、多 cwd 流、失败/中断、模型错配均拒绝。
+收录时保存初审及 cross 的 session stream、具体 turn ID、报告编号、ledger
+轮次、模型与相关原始事件摘要；status 重新读取原生报告与日志，逐项匹配锚点。
+原生报告被删除/改写，或 ID 缺失、重复、未知、复用或倒序，均不能验收。
+
+**升级兼容**：旧 runtime 生成的报告缺 `turn_id`，旧冻结状态缺原生报告绑定，
+均只能保留为审计材料。请升级 octos，在新评审上下文新建 reviewer peer，
+重做初审、freeze、挑战与 cross；不能从现有编号反推 ID，也不能给旧报告补写 ID。
+
+`review_accepted` 现在始终要求原有行为证据门和双模型证据门同时通过。
+`behavior_accepted` 单独展示原有行为证据条件，`model_verified` 展示两个
+不同 reviewer 的初审与各自最新 cross 是否均核验通过。旧格式或不带模型证据的
+cross 仍可收录用于审计，但不能通过最终验收；删除模型锚点也不会退回
+旧的通过条件。需重新提交带 `--require-model-evidence` 的有效 cross。
+兼容收录会在 JSON `warnings` 数组返回 `model-evidence-not-verified`，
+并在 stderr 提示补带参数；stdout JSON 保持可解析。带参数并核验通过的
+收录返回空 `warnings` 数组。收录成功不等于最终验收通过。
+K3 配额错误等失败记录只能记为审查未完成。
+
+这是对受信本地 runtime 产物的一致性核验，并非提供商的密码学身份认证。
+ledger 不完整或归档被移走会降级为未验证，不猜测缺失轮次。已有 live Cargo
+入口继续独立核对源码、测试命中数、实际退出码与日志摘要；模型一致不能替代
+测试执行证据。
+
+**reviewer 会话生命周期**：使用专用于本轮评审的短 peer 会话，初审与 cross
+必须在该 peer 的完整日志仍保留时验收。当前 octos 默认每段约 10 MiB、最多
+保留 5 段；仅切段不影响核验，删除最早一段后则失去本门要求的完整事件链。
+不要复用长时间运行的编码 peer 充当 reviewer。若前段已经丢失，在新的评审
+上下文新建 reviewer peers，重做初审、冻结、挑战和 cross；不得重编号剩余
+日志、沿用旧 cross 锚点，或把旧报告复制成新模型证据。原生 turn_id 解决报告
+对应关系，不能替代丢失的 ledger 事件；当前仍不接受连续尾段冒充完整日志。
+
 ```bash
 python3 scripts/olp-review-evidence.py cross <review_dir> \
   --cross-report cross.md --cross-slug <slug> \
   --native-root <runtime>/data/peers --expect-claims X,Y,Z \
-  [--allow-operator-refute]
+  --require-model-evidence [--allow-operator-refute]
 ```
 
 前置: frozen + challenge 已接纳。cross 报告须含结构化 `cross_claims`

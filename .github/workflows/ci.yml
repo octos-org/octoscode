@@ -30,7 +30,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --all --check
+      # 2026-09-12: route through the unified entry so the WHOLE test tree
+      # inherits PYTHONDONTWRITEBYTECODE=1 (and GNU tool resolution).
+      - run: scripts/verify.sh -- cargo fmt --all --check
 
   test:
     name: test
@@ -50,9 +52,9 @@ jobs:
       # --all-targets covers lib, bins, tests and benches, and compiles
       # everything clippy would — so a separate `cargo check` job would only
       # repeat this work.
-      - run: cargo test --all-targets
+      - run: scripts/verify.sh -- cargo test --all-targets
       # --all-targets skips doctests, so run them separately.
-      - run: cargo test --doc
+      - run: scripts/verify.sh -- cargo test --doc
 
   clippy:
     name: clippy
@@ -65,7 +67,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Gating, not reporting: the 5 warnings `main` carried are cleared in
       # this same PR, so the baseline is zero and any new one fails the build.
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: scripts/verify.sh -- cargo clippy --all-targets -- -D warnings
 
   # Aggregate gate for the `default-branch-protection` ruleset, whose required
   # status context is literally "CI required" (added to the ruleset on
