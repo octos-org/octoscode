@@ -2289,6 +2289,12 @@ impl Store {
                 {
                     return None;
                 }
+                // A staged archive/reopen must not ride the in-flight refresh
+                // into the backend behind this instruction's back: set updates
+                // the record in place under the SAME goal_id, so the identity
+                // gates on both sides would pass and the objective the user is
+                // defining right now would be archived instead.
+                self.supersede_pending_goal_transition(&session_id, "<objective>");
                 self.state.status = t!("status.setting_goal", objective = objective).into_owned();
                 Some(AppUiCommand::SetSessionGoal(
                     crate::model::SessionGoalSetParams {
@@ -2337,8 +2343,15 @@ impl Store {
                 profile_id,
                 crate::model::PendingGoalFollowUp::OperatorTransition {
                     action: crate::model::SessionGoalOperatorAction::Archive,
+                    // Locale-INVARIANT on purpose: unlike every other string
+                    // here, the reason is not shown to the operator who typed
+                    // it — it is written to the backend's durable goal ledger
+                    // and read later by other operators and agents whose
+                    // client locale is unrelated to this one. Localizing it
+                    // would make the same action read differently in a shared
+                    // record. An explicit `--reason` is passed through as-is.
                     reason: reason
-                        .unwrap_or_else(|| t!("status.goal_default_archive_reason").into_owned()),
+                        .unwrap_or_else(|| crate::model::GOAL_DEFAULT_ARCHIVE_REASON.to_owned()),
                 },
                 "archive",
             ),
@@ -2347,8 +2360,9 @@ impl Store {
                 profile_id,
                 crate::model::PendingGoalFollowUp::OperatorTransition {
                     action: crate::model::SessionGoalOperatorAction::Reopen,
+                    // Locale-invariant for the same reason as archive above.
                     reason: reason
-                        .unwrap_or_else(|| t!("status.goal_default_reopen_reason").into_owned()),
+                        .unwrap_or_else(|| crate::model::GOAL_DEFAULT_REOPEN_REASON.to_owned()),
                 },
                 "reopen",
             ),
@@ -2358,6 +2372,11 @@ impl Store {
                 {
                     return None;
                 }
+                // Discard at DISPATCH, not just in the GoalClear result arm:
+                // the refresh response arrives first and would consume the
+                // intent, firing the transition against a goal that is about
+                // to be (or already is) gone.
+                self.supersede_pending_goal_transition(&session_id, "clear");
                 self.state.status = t!("status.clearing_goal").into_owned();
                 Some(AppUiCommand::ClearSessionGoal(
                     crate::model::SessionGoalClearParams {
@@ -9165,6 +9184,58 @@ impl Store {
         }
     }
 
+    /// Take a staged transition for this session, if any. The caller owns
+    /// announcing why it went away — every path that resolves an intent
+    /// without running it must say so, or an irreversible `/goal archive`
+    /// looks like it succeeded.
+    fn take_pending_goal_transition_for(
+        &mut self,
+        session_id: &SessionKey,
+    ) -> Option<crate::model::PendingGoalTransition> {
+        if !self
+            .state
+            .pending_goal_transition
+            .as_ref()
+            .is_some_and(|pending| &pending.session_id == session_id)
+        {
+            return None;
+        }
+        self.state.pending_goal_transition.take()
+    }
+
+    /// A later instruction superseded a staged transition — drop it before
+    /// its refresh can carry it to the backend, and say so.
+    ///
+    /// The identity gate in [`Self::consume_pending_goal_transition`] cannot
+    /// catch this one. `session/goal/set` UPDATES the live record in place and
+    /// keeps the SAME `goal_id` (a fresh id is minted only when replacing a
+    /// `complete` goal), so after `/goal archive` → `/goal <new objective>`
+    /// the in-flight refresh answers with the staged id, both the client gate
+    /// and the backend's identity assertion pass, and the goal the operator
+    /// just redefined is irreversibly archived — the exact opposite of their
+    /// most recent instruction. `/goal clear` is the same shape: the refresh
+    /// response is consumed before the clear result lands, so the archive
+    /// reaches the backend after the goal is gone.
+    ///
+    /// Discard is the safe direction in both cases; the operator can always
+    /// re-issue against the current goal. Read-only `/goal` stays untouched.
+    fn supersede_pending_goal_transition(&mut self, session_id: &SessionKey, by: &str) {
+        let Some(abandoned) = self.take_pending_goal_transition_for(session_id) else {
+            return;
+        };
+        self.push_local_activity(
+            ActivityKind::Warning,
+            t!("status.local_slash_command").into_owned(),
+            t!(
+                "status.goal_transition_superseded",
+                verb = abandoned.verb,
+                by = by
+            )
+            .into_owned(),
+            None::<String>,
+        );
+    }
+
     /// M15-E reconnect-hydration: re-request the autonomy mirror from
     /// the backend after a session opens (or reopens). The TUI must
     /// never construct agent/goal/loop state from local config — this
@@ -9392,6 +9463,17 @@ impl Store {
                 // that window must carry it over or the text is lost.
                 let pending_turn_steers = self.state.pending_turn_steers.clone();
                 let retained_steers = self.state.retained_steers.clone();
+                // Deliberately NOT carried across the rebuild: a staged goal
+                // transition is armed for exactly one `session/goal/get`
+                // response, and a snapshot replay (reconnect, relaunch,
+                // session open/switch) means that request is not coming back
+                // in a form we can still trust. Restoring it would let an
+                // unrelated later refresh consume an intent the operator
+                // staged against a pre-replay world. Dropping it silently is
+                // the other failure: an irreversible `/goal archive` would
+                // just never happen, with no message. So take it here and
+                // announce it below, exactly like the error path does.
+                let replayed_away_goal_transition = self.state.pending_goal_transition.take();
 
                 let mut state = AppState::from_snapshot(snapshot);
                 if state.capabilities.is_none() {
@@ -9496,6 +9578,18 @@ impl Store {
                 state.background_completion_rows = self.state.background_completion_rows.clone();
                 state.prune_background_completion_rows();
                 self.state = state;
+                if let Some(abandoned) = replayed_away_goal_transition {
+                    self.push_local_activity(
+                        ActivityKind::Warning,
+                        t!("status.local_slash_command").into_owned(),
+                        t!(
+                            "status.goal_transition_dropped_by_replay",
+                            verb = abandoned.verb
+                        )
+                        .into_owned(),
+                        None::<String>,
+                    );
+                }
                 None
             }
             AppUiEvent::Protocol(notification) => self.apply_notification(notification),
@@ -40579,6 +40673,205 @@ now analyzing the bus module"
         );
     }
 
+    /// Stage `/goal archive` and return the store plus its session key, with
+    /// the refresh dispatched and the intent still pending.
+    fn store_with_staged_archive() -> (Store, SessionKey) {
+        let mut store = protocol_store_with_autonomy();
+        let session_id = SessionKey("local:test".into());
+        store.state.set_session_goal(
+            &session_id,
+            Some(identified_goal("goal-1", "first objective", "active")),
+            Some("user".into()),
+        );
+        store.state.composer = "/goal archive".into();
+        match store
+            .compose_command()
+            .expect("archive dispatches a refresh")
+        {
+            AppUiCommand::GetSessionGoal(_) => {}
+            other => panic!("expected GetSessionGoal, got {other:?}"),
+        }
+        assert!(store.state.pending_goal_transition.is_some());
+        (store, session_id)
+    }
+
+    fn goal_get_event(session_id: &SessionKey, goal_id: &str, status: &str) -> ClientEvent {
+        ClientEvent::Autonomy(crate::client_event::AutonomyClientEvent {
+            result: crate::client_event::AutonomyResult::GoalGet(
+                crate::model::SessionGoalGetResult {
+                    session_id: session_id.clone(),
+                    profile_id: Some("coding".into()),
+                    goal: Some(identified_goal(goal_id, "first objective", status)),
+                },
+            ),
+        })
+    }
+
+    /// [P1] `session/goal/set` UPDATES the live record in place and keeps the
+    /// SAME `goal_id` — a fresh id is minted only when replacing a `complete`
+    /// goal. So `/goal archive` followed immediately by `/goal <new objective>`
+    /// left the archive staged against an id that was still live: the client
+    /// identity gate matched, the backend identity assertion matched, and the
+    /// objective the operator had just redefined was irreversibly archived.
+    /// Redefining a goal means "keep working on this"; it must retire the
+    /// staged archive, not feed it.
+    #[test]
+    fn redefining_the_goal_supersedes_a_staged_archive() {
+        let (mut store, session_id) = store_with_staged_archive();
+
+        // The operator changes their mind and redefines the goal instead.
+        store.state.composer = "/goal a different objective".into();
+        match store.compose_command().expect("set dispatches") {
+            AppUiCommand::SetSessionGoal(_) => {}
+            other => panic!("expected SetSessionGoal, got {other:?}"),
+        }
+        assert!(
+            store.state.pending_goal_transition.is_none(),
+            "redefining the goal must retire the staged archive"
+        );
+
+        // The in-flight refresh lands afterwards, answering for the same
+        // (updated-in-place, same-id) goal. It must stay read-only.
+        let follow_up = store.apply_client_event(goal_get_event(&session_id, "goal-1", "active"));
+        assert!(
+            follow_up.is_none(),
+            "the superseded archive must not ride the refresh, got {follow_up:?}"
+        );
+    }
+
+    /// The abandonment must be announced, not silent: the operator typed an
+    /// irreversible verb and is owed the news that it did not run.
+    #[test]
+    fn superseding_a_staged_archive_tells_the_operator() {
+        let (mut store, _session_id) = store_with_staged_archive();
+        store.state.composer = "/goal a different objective".into();
+        store.compose_command().expect("set dispatches");
+        assert!(
+            store
+                .state
+                .activity
+                .iter()
+                .any(|item| item.status.contains("superseded")),
+            "expected a superseded warning, got: {:?}",
+            store
+                .state
+                .activity
+                .iter()
+                .map(|item| item.status.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// [P1] The clear path discarded the intent only in the `GoalClear` RESULT
+    /// arm, but the refresh response arrives FIRST and consumes it — so the
+    /// archive reached the backend after the goal was already gone (a
+    /// confusing "no goal is set" rejection under in-order processing, and a
+    /// misapplied archive if the backend ever answers concurrently). Discard
+    /// at dispatch instead.
+    #[test]
+    fn clearing_the_goal_supersedes_a_staged_archive_at_dispatch() {
+        let (mut store, session_id) = store_with_staged_archive();
+
+        store.state.composer = "/goal clear".into();
+        match store.compose_command().expect("clear dispatches") {
+            AppUiCommand::ClearSessionGoal(_) => {}
+            other => panic!("expected ClearSessionGoal, got {other:?}"),
+        }
+        assert!(
+            store.state.pending_goal_transition.is_none(),
+            "clear must retire the staged archive at dispatch, not at result"
+        );
+
+        let follow_up = store.apply_client_event(goal_get_event(&session_id, "goal-1", "active"));
+        assert!(
+            follow_up.is_none(),
+            "the refresh must not fire an archive against a goal being cleared, got {follow_up:?}"
+        );
+    }
+
+    /// [P1] A snapshot replay (reconnect, relaunch, session open/switch)
+    /// rebuilds the whole state from `from_snapshot`, and the preserve list
+    /// did not carry `pending_goal_transition` — so a staged archive vanished
+    /// with no message at all, unlike the error path which says so. Drop it
+    /// (restoring it would let a post-replay refresh consume an intent staged
+    /// against a pre-replay world) but drop it LOUDLY.
+    #[test]
+    fn a_snapshot_replay_abandons_a_staged_archive_loudly() {
+        let (mut store, session_id) = store_with_staged_archive();
+
+        store.apply_event(AppUiEvent::Snapshot(AppUiSnapshot {
+            sessions: vec![SessionView {
+                id: session_id.clone(),
+                title: "test".into(),
+                profile_id: Some("coding".into()),
+                messages: vec![],
+                tasks: vec![],
+                live_reply: None,
+            }],
+            selected_session: 0,
+            status: "replayed".into(),
+            target: None,
+            readonly: false,
+        }));
+
+        assert!(
+            store.state.pending_goal_transition.is_none(),
+            "a snapshot replay must not carry a staged transition across"
+        );
+        assert!(
+            store
+                .state
+                .activity
+                .iter()
+                .any(|item| item.status.contains("replayed")),
+            "the replay must announce the abandoned archive, got: {:?}",
+            store
+                .state
+                .activity
+                .iter()
+                .map(|item| item.status.clone())
+                .collect::<Vec<_>>()
+        );
+
+        // And a refresh landing after the replay stays read-only.
+        let follow_up = store.apply_client_event(goal_get_event(&session_id, "goal-1", "active"));
+        assert!(
+            follow_up.is_none(),
+            "a post-replay refresh must not fire the abandoned archive, got {follow_up:?}"
+        );
+    }
+
+    /// The `reason` is written to the backend's durable goal ledger, which
+    /// operators and agents on clients with unrelated locales read later — so
+    /// it must NOT vary with the archiving client's language. Sourcing it from
+    /// a `const` rather than the catalog is what guarantees that; this pins
+    /// the catalogs empty so a future "translate every user string" sweep
+    /// cannot quietly re-localize it. (Asserted by reading the files rather
+    /// than by flipping `set_locale`, which is process-global and would flake
+    /// every other test — same discipline as `i18n_tests`.)
+    #[test]
+    fn default_operator_reasons_are_not_localized() {
+        for path in ["locales/en.yml", "locales/zh.yml"] {
+            let catalog = std::fs::read_to_string(path).expect("locale file");
+            for key in ["goal_default_archive_reason", "goal_default_reopen_reason"] {
+                assert!(
+                    !catalog.contains(key),
+                    "{path} defines `{key}`: the operator-transition reason is a durable, \
+                     shared ledger value and must stay locale-invariant \
+                     (crate::model::GOAL_DEFAULT_ARCHIVE_REASON)"
+                );
+            }
+        }
+        assert_eq!(
+            crate::model::GOAL_DEFAULT_ARCHIVE_REASON,
+            "archived by operator from octoscode"
+        );
+        assert_eq!(
+            crate::model::GOAL_DEFAULT_REOPEN_REASON,
+            "reopened by operator from octoscode"
+        );
+    }
+
     #[test]
     fn goal_pause_without_cached_goal_records_status_and_returns_none() {
         let mut store = protocol_store_with_autonomy();
@@ -40849,10 +41142,7 @@ now analyzing the bus module"
             store.consume_pending_goal_transition(&session_id, Some(&goal_record("active")));
         match command.expect("operator transition dispatched") {
             AppUiCommand::OperatorTransitionSessionGoal(params) => {
-                assert!(
-                    !params.reason.trim().is_empty(),
-                    "a default reason must be substituted"
-                );
+                assert_eq!(params.reason, crate::model::GOAL_DEFAULT_ARCHIVE_REASON);
             }
             other => panic!("expected OperatorTransitionSessionGoal, got {other:?}"),
         }

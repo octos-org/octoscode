@@ -634,6 +634,17 @@ pub struct SessionGoalOperatorTransitionResult {
     pub transition_actor: Option<String>,
 }
 
+/// Default `reason` recorded when `/goal archive` is issued without
+/// `--reason`. Deliberately not a locale key: this string lands in the
+/// backend's durable goal ledger, which is read by operators and agents on
+/// other clients, so it must not vary with the archiving client's language.
+pub const GOAL_DEFAULT_ARCHIVE_REASON: &str = "archived by operator from octoscode";
+
+/// Default `reason` recorded when `/goal reopen` is issued without
+/// `--reason`. Locale-invariant for the same reason as
+/// [`GOAL_DEFAULT_ARCHIVE_REASON`].
+pub const GOAL_DEFAULT_REOPEN_REASON: &str = "reopened by operator from octoscode";
+
 /// Follow-up a staged goal transition emits once the fresh record lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingGoalFollowUp {
