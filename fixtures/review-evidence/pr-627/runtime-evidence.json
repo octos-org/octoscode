@@ -1,0 +1,67 @@
+{
+  "head": "fbb59c32f5f830c5a63e409de6dbe123bafeb922",
+  "goal": {
+    "pr": 627,
+    "goal_id": "goal_01",
+    "status": "complete",
+    "tokens_used": 53964547,
+    "peers": [
+      {
+        "slug": "pr627-glm",
+        "status": "closed",
+        "has_brief": true,
+        "result_versions": 1,
+        "name": "pr627-glm",
+        "model_lane": "review",
+        "stream_seq": 7473,
+        "active_thread": null,
+        "outcome_source": "result-1.md",
+        "outcome": "errored"
+      },
+      {
+        "slug": "pr627-glm-primary",
+        "status": "done",
+        "has_brief": true,
+        "result_versions": 4,
+        "name": "pr627-glm-primary",
+        "model_lane": null,
+        "stream_seq": 4964,
+        "active_thread": null,
+        "outcome_source": "result-4.md",
+        "outcome": "completed"
+      },
+      {
+        "slug": "pr627-k3",
+        "status": "done",
+        "has_brief": true,
+        "result_versions": 3,
+        "name": "pr627-k3",
+        "model_lane": "strong",
+        "stream_seq": 429,
+        "active_thread": null,
+        "outcome_source": "result-3.md",
+        "outcome": "completed"
+      }
+    ],
+    "artifacts": [
+      "independent-glm.md",
+      "independent-k3.md",
+      "cross-glm.md",
+      "cross-k3.md",
+      "result.md"
+    ],
+    "events_seen": 12,
+    "ack_sentry_pid": 95510,
+    "ack_sentry_running": true
+  },
+  "native_goal_events": [
+    {
+      "kind": "goal_transition",
+      "goal_id": "goal_01",
+      "detail": "goal transitioned to `complete`",
+      "ts": "2026-09-09T03:22:23.316122+00:00"
+    }
+  ],
+  "observed_at": "2026-09-09T03:24:26.401665+00:00",
+  "tracked_worktree_clean": true
+}

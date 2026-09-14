@@ -1467,6 +1467,7 @@ status:
   creating_local_profile: "正在创建本地单人档案"
   onboarding_provider_route_incomplete: "引导供应商线路不完整"
   onboarding_provider_selection_incomplete: "引导供应商选择不完整"
+  onboarding_profile_unresolved: "尚未选定档案——请先在「档案」步骤创建，或用 --profile-id <id> 重新启动，然后再保存供应商"
   onboarding_api_key_empty_onboard: "引导 API 密钥为空；请使用 /onboard key <secret>"
   onboarding_api_key_empty_provider: "引导 API 密钥为空；请使用 /provider key <secret>"
   onboarding_loading_catalog: "正在加载提供商目录以检查密钥要求——加载完成后请重试"

@@ -1,0 +1,142 @@
+   Compiling octoscode v0.3.0-rc.10 (/private/tmp/octoloop-codex-20260909/combined)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 45.39s
+     Running unittests src/lib.rs (target/debug/deps/octoscode-3107b0dea26f3ccf)
+
+running 8 tests
+test store::tests::outer_review_627_cancelled_archive_must_not_replay_after_reconnect ... 
+thread 'store::tests::outer_review_627_cancelled_archive_must_not_replay_after_reconnect' (265745203) panicked at /private/tmp/octoloop-codex-20260909/store-repros.rs:46:5:
+Reconnect replayed cancelled archive: Some(OperatorTransitionSessionGoal(SessionGoalOperatorTransitionParams { session_id: SessionKey("local:test"), profile_id: Some("coding"), goal_id: "goal_01", action: Archive, reason: "archived by operator from octoscode" }))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test store::tests::outer_review_627_failed_archive_must_not_replay_on_new_goal ... 
+thread 'store::tests::outer_review_627_failed_archive_must_not_replay_on_new_goal' (265745204) panicked at /private/tmp/octoloop-codex-20260909/store-repros.rs:31:5:
+Read-only goal query replayed cancelled operator intent: Some(OperatorTransitionSessionGoal(SessionGoalOperatorTransitionParams { session_id: SessionKey("local:test"), profile_id: Some("coding"), goal_id: "new-goal", action: Archive, reason: "archived by operator from octoscode" }))
+FAILED
+test store::tests::outer_review_628_active_turn_rejection_must_render ... 
+thread 'store::tests::outer_review_628_active_turn_rejection_must_render' (265745205) panicked at /private/tmp/octoloop-codex-20260909/store-repros.rs:73:5:
+Active-turn filter hides rejection: "/goal archive --reason requires text after the flag"
+• active request                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+◜ Working                                                                                                               
+┌Composer  Enter send | Shift+Enter / Ctrl+J newline | Tab agents  ●───────────────────────────────────────────────────┐
+│                                                                                                                      │
+│ ›  Ask Octos to change code...                                                                                       │
+│                                                                                                                      │
+└ app-ui snapshot ─────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ state ◜ Working (0s | Esc interrupt | /stop to close) | approval gated | coding | working | Tab agents | Ctrl+O expand 
+FAILED
+test store::tests::outer_review_628_idle_rejection_must_render_beyond_status_bar ... 
+thread 'store::tests::outer_review_628_idle_rejection_must_render_beyond_status_bar' (265745206) panicked at /private/tmp/octoloop-codex-20260909/store-repros.rs:59:5:
+Warning absent from actual rendered transcript. reason="/goal archive --reason requires text after the flag"
+▌ old request                                                                                                           
+                                                                                                                        
+• old answer                                                                                                            
+                                                                                                                        
+• Agent task completed (1 action(s))                                                                                    
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+┌Composer  Enter send | Shift+Enter / Ctrl+J newline | Tab agents  ●───────────────────────────────────────────────────┐
+│                                                                                                                      │
+│ ›  Ask Octos to change code...                                                                                       │
+│                                                                                                                      │
+└ .../example.test/ui-protocol ────────────────────────────────────────────────────────────────────────────────────────┘
+ state · Idle  | approval gated | coding | idle | Tab agents | Ctrl+O expand                                            
+FAILED
+test store::tests::outer_review_628_repeat_rejection_must_keep_specific_reason ... 
+thread 'store::tests::outer_review_628_repeat_rejection_must_keep_specific_reason' (265745207) panicked at /private/tmp/octoloop-codex-20260909/store-repros.rs:84:5:
+assertion `left == right` failed: Repeated parse error lost its explicit reason
+  left: "command is unavailable"
+ right: "/goal archive --reason requires text after the flag"
+FAILED
+test store::tests::outer_review_629_runtime_main_list_must_not_enable_invalid_save ... 
+thread 'store::tests::outer_review_629_runtime_main_list_must_not_enable_invalid_save' (265745208) panicked at /private/tmp/octoloop-codex-20260909/store-repros.rs:101:5:
+Runtime-only _main profile passed save gate: Some(ProfileLlmUpsert(ProfileLlmUpsertParams { profile_id: Some("_main"), selection: LlmSelectionConfig { family_id: "moonshot", model_id: "kimi-k2.5", route: LlmRouteConfig { route_id: "autodl", label: None, base_url: Some("https://example.test/v1"), api_key_env: Some("AUTODL_API_KEY"), api_type: Some("openai") }, model_hints: None, cost_per_m: None, strong: None }, api_key: Some("********"), set_primary: true }))
+FAILED
+test transport::tests::outer_review_630_no_first_frame_must_retry_after_grace ... 
+thread 'transport::tests::outer_review_630_no_first_frame_must_retry_after_grace' (265745209) panicked at /private/tmp/octoloop-codex-20260909/transport-repros.rs:46:5:
+assertion `left == right` failed: Expired startup grace must allow the second capabilities request without needing an unrelated first frame
+  left: 1
+ right: 2
+FAILED
+test transport::tests::outer_review_630_queued_success_must_survive_retry_deadline ... 
+thread 'transport::tests::outer_review_630_queued_success_must_survive_retry_deadline' (265745230) panicked at /private/tmp/octoloop-codex-20260909/transport-repros.rs:68:5:
+A valid first response queued before polling was discarded when retry removed its request id
+FAILED
+
+failures:
+
+failures:
+    store::tests::outer_review_627_cancelled_archive_must_not_replay_after_reconnect
+    store::tests::outer_review_627_failed_archive_must_not_replay_on_new_goal
+    store::tests::outer_review_628_active_turn_rejection_must_render
+    store::tests::outer_review_628_idle_rejection_must_render_beyond_status_bar
+    store::tests::outer_review_628_repeat_rejection_must_keep_specific_reason
+    store::tests::outer_review_629_runtime_main_list_must_not_enable_invalid_save
+    transport::tests::outer_review_630_no_first_frame_must_retry_after_grace
+    transport::tests::outer_review_630_queued_success_must_survive_retry_deadline
+
+test result: FAILED. 0 passed; 8 failed; 0 ignored; 0 measured; 2094 filtered out; finished in 0.76s
+
+error: test failed, to rerun pass `--lib`

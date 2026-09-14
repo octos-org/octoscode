@@ -23,17 +23,25 @@ done
 if [ -n "$OUT" ]; then
     OUT_REAL="$(realpath -m "$OUT")"
     OUT_DIR="$(dirname "$OUT_REAL")"
-    mkdir -p "$OUT_DIR"
-    TARGET_REPO="$(git -C "$OUT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+    # 44-r1: git -C needs an existing directory — walk up to the nearest
+    # existing ancestor so a not-yet-created specs/drafts/ subdir still
+    # resolves its owning repo.
+    PROBE="$OUT_DIR"
+    while [ ! -d "$PROBE" ]; do
+        PROBE="$(dirname "$PROBE")"
+    done
+    TARGET_REPO="$(git -C "$PROBE" rev-parse --show-toplevel 2>/dev/null || true)"
     if [ -n "$TARGET_REPO" ]; then
         case "$OUT_REAL" in
             "$TARGET_REPO"/specs/drafts/*) : ;;
-            "$TARGET_REPO"/specs/*)
+            *)
                 echo "refusing to write outside specs/drafts/" >&2
                 exit 2
                 ;;
         esac
     fi
+    # mkdir only after the guard: a rejected path must leave nothing behind.
+    mkdir -p "$OUT_DIR"
 fi
 
 python3 -B - "$SRC" "$OUT" "$(dirname "$0")" <<'PY'

@@ -1,0 +1,18 @@
+{
+  "worktree": "/Users/zhangalex/.local/tmp/octoloop-evolution-20260909/verify-octoscode",
+  "base": "0a174d95ddec2b123adb3498432e29eb13affb81",
+  "source": "/Users/zhangalex/Work/Projects/FW/octoscode/.octos/reviews/pr-627-630-20260909/evidence/store-repros.rs",
+  "probe": "/Users/zhangalex/.local/tmp/octoloop-evolution-20260909/residual-629-repro.rs",
+  "probe_sha256": "172d25638df5af31b8e8915663148e5ef1abe12c837c63f86c4c1f6f4fba8a86",
+  "original_store_sha256": "65697a81acbfe2ad35d184a0bf89deb211eea3a0cf9644935889d40743fba4e9",
+  "modified_store_sha256": "825d3ac99cee956a91cc24c330c685e946c0144073ae31a50bee732216983029",
+  "pane": "w7:p1",
+  "pr_head": "9bcf4099c2719cd8ee63090a1849a2c6f3766999",
+  "pr_modified_store_sha256": "e296401322bd807768968b5a53a08a7e67a37799ce94f1bdaa0a4a03fa521ae6",
+  "base_exit": 101,
+  "head_exit": 101,
+  "classification": "existing/residual: same original production event probe fails at BASE and PR HEAD",
+  "verification_slot_clean": true,
+  "base_log_sha256": "86c806aa9f90dccc9e7ceea64408bac3839f6ee0e99991d81764cefbe5719ad9",
+  "head_log_sha256": "46a71bf778d034de9ef9bf4292aa62f2469a6581d9c91c8d75782c96cffb52c3"
+}

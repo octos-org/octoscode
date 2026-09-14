@@ -196,6 +196,105 @@ fn olp_evo_skeleton_refuses_out_into_specs_root() {
     let _ = std::fs::remove_dir_all(&outside);
 }
 
+/// Scenario: 骨架拒绝写入仓库内非 specs 路径,且不留下空目录
+#[test]
+fn olp_evo_skeleton_refuses_in_repo_non_specs_path_and_leaves_no_dir() {
+    let flaw = repo_root().join("knowledge/context/evolution/FLAW-001.md");
+    // nested under a not-yet-created subdir so the "no empty dir left
+    // behind" half is observable
+    let dir = repo_root()
+        .join("src")
+        .join(format!("skel-guard-{}", std::process::id()));
+    // clean slate: a leftover from a run against a regressed script must
+    // not poison this run's assertions
+    let _ = std::fs::remove_dir_all(&dir);
+    let bad_out = dir.join("x.md");
+    let out = run(
+        &skeleton(),
+        &[&flaw.to_string_lossy(), "--out", &bad_out.to_string_lossy()],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("refusing to write outside specs/drafts/"),
+        "{stderr}"
+    );
+    assert!(!bad_out.exists());
+    assert!(!dir.exists(), "rejected --out must not mkdir: {dir:?}");
+}
+
+/// Scenario: 骨架允许 specs/drafts/ 下尚未存在的嵌套子目录并创建之
+#[test]
+fn olp_evo_skeleton_allows_nested_specs_drafts_and_creates_dirs() {
+    let flaw = repo_root().join("knowledge/context/evolution/FLAW-001.md");
+    let dir = repo_root()
+        .join("specs/drafts")
+        .join(format!("skel-{}", std::process::id()))
+        .join("nested");
+    let out_file = dir.join("x.md");
+    let out = run(
+        &skeleton(),
+        &[
+            &flaw.to_string_lossy(),
+            "--out",
+            &out_file.to_string_lossy(),
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let written = std::fs::read_to_string(&out_file).unwrap();
+    assert!(written.contains("spec: task"), "{written}");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+}
+
+/// Scenario: 骨架允许写到仓库外路径(不得被 guard 误伤)
+#[test]
+fn olp_evo_skeleton_allows_out_outside_repo() {
+    let flaw = repo_root().join("knowledge/context/evolution/FLAW-001.md");
+    let dir = std::env::temp_dir().join(format!("skel-ext-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let out_file = dir.join("nested").join("x.md");
+    let out = run(
+        &skeleton(),
+        &[
+            &flaw.to_string_lossy(),
+            "--out",
+            &out_file.to_string_lossy(),
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let written = std::fs::read_to_string(&out_file).unwrap();
+    assert!(written.contains("spec: task"), "{written}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Scenario: specs/drafts/../ 逃逸经 realpath 归一化后仍被拒绝
+#[test]
+fn olp_evo_skeleton_refuses_dotdot_escape_from_drafts() {
+    let flaw = repo_root().join("knowledge/context/evolution/FLAW-001.md");
+    let name = format!("skel-escape-{}.md", std::process::id());
+    let bad_out = repo_root().join("specs/drafts").join("..").join(&name);
+    let out = run(
+        &skeleton(),
+        &[&flaw.to_string_lossy(), "--out", &bad_out.to_string_lossy()],
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("refusing to write outside specs/drafts/"),
+        "{stderr}"
+    );
+    // realpath -m normalizes the `..` away — assert the resolved location
+    assert!(!repo_root().join("specs").join(&name).exists());
+}
+
 /// README kind 候选 section in place.
 #[test]
 fn olp_evo_readme_lists_kind_candidates() {

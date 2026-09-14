@@ -67,6 +67,27 @@ const AGENT_TERMINAL_LINGER: std::time::Duration = std::time::Duration::from_sec
 /// surface froze on "Testing connection…" with every edit and re-dispatch
 /// blocked. Generous: a real `profile/llm/test` does one provider roundtrip.
 const PROVIDER_PENDING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// The server's RUNTIME profile identity when no profile is scoped
+/// (`MAIN_PROFILE_ID` on the server side). It is a valid thing to run under and
+/// to report in `profile/llm/list`, but NOT a persistable profile: the server's
+/// own slug validator accepts only `[a-z0-9-]`, so the leading underscore makes
+/// every write naming it fail with an opaque `-32603`. Treat it as "no profile
+/// to save into" at any persistence boundary.
+const MAIN_RUNTIME_PROFILE_ID: &str = "_main";
+
+/// True when `profile_id` is one the server's profile store can actually
+/// persist. Mirrors its slug rule — lowercase ASCII, digits and hyphens only —
+/// which is what rejects [`MAIN_RUNTIME_PROFILE_ID`] and any other
+/// underscore-prefixed runtime identity. An id failing this can be run under
+/// but never saved into, so a write naming it is refused client-side with an
+/// actionable message instead of an opaque `-32603` from the server.
+fn is_persistable_profile_id(profile_id: &str) -> bool {
+    !profile_id.is_empty()
+        && profile_id != MAIN_RUNTIME_PROFILE_ID
+        && profile_id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
 /// How long a staged-submit FIFO gate stays authoritative without its
 /// turn/started or terminal arriving. Past this, `submit_next_pending_if_idle`
 /// treats the marker as stale (the in-flight turn/start died in some way the
@@ -2510,6 +2531,19 @@ impl Store {
             .and_then(|session| session.profile_id.clone())
     }
 
+    /// Profile to stamp on a freshly created [`SessionView`] for `session_id`
+    /// when no server-supplied `active_profile_id` is available (the resume /
+    /// hydrate paths). A profiled key (`{profile}:{channel}:{chat}`) carries
+    /// its own immutable profile dimension — that IS the session's profile,
+    /// regardless of which session is currently active; only profile-less
+    /// keys fall back to the active session's profile.
+    fn profile_stamp_for_session_key(&self, session_id: &SessionKey) -> Option<String> {
+        session_id
+            .profile_id()
+            .map(str::to_owned)
+            .or_else(|| self.active_session_profile_id())
+    }
+
     /// Returns the cached goal record IFF the goal is in a state the
     /// staged `follow_up` is allowed to transition from. Returns
     /// `Err(status)` when a goal is cached but not in a transitionable
@@ -3283,7 +3317,7 @@ impl Store {
         {
             self.state.switch_selected_session(index);
         } else {
-            let profile_id = self.active_session_profile_id();
+            let profile_id = self.profile_stamp_for_session_key(&session_id);
             self.state.sessions.push(SessionView {
                 id: session_id.clone(),
                 title: session_id.0.clone(),
@@ -4954,6 +4988,38 @@ impl Store {
         Some(AppUiCommand::ProfileLlmFetchModels(params))
     }
 
+    /// Gate every provider SAVE on a resolved profile id.
+    ///
+    /// `profile_id` is `skip_serializing_if = "Option::is_none"`, so an
+    /// unresolved profile drops the field off the wire entirely. The server
+    /// then defaults it to `MAIN_PROFILE_ID` (`_main`) — an id its own profile
+    /// store cannot persist, because the slug validator accepts only
+    /// `[a-z0-9-]` and the leading underscore fails it. The save comes back as
+    /// `-32603 … profile ID must contain only lowercase letters, digits, and
+    /// hyphens`, which names nothing the operator can act on, and onboarding is
+    /// stuck: "Continue to Workspace" is gated on a saved provider.
+    ///
+    /// Test/fetch_models deliberately are NOT gated: they never reach the
+    /// profile store, so they work unscoped and are useful before a profile
+    /// exists.
+    ///
+    /// Presence is NOT sufficient. `profile/llm/list` reports the server's
+    /// RUNTIME identity, so a response naming `_main` seeds the onboarding
+    /// cache and `current_profile_for_onboarding` starts returning
+    /// `Some("_main")`. That is a real thing to run under but not a persistable
+    /// profile, and a write naming it fails the same slug validator as the
+    /// omitted-field case. Gate on persistability at the write boundary.
+    fn onboarding_profile_id_is_resolved(&mut self, profile_id: Option<&str>) -> bool {
+        if profile_id.is_some_and(is_persistable_profile_id) {
+            return true;
+        }
+        let message = t!("status.onboarding_profile_unresolved").into_owned();
+        self.state.onboarding.last_message = Some(message.clone());
+        self.state.status = message;
+        self.refresh_active_menu_if_open();
+        false
+    }
+
     fn onboarding_save_provider_command(&mut self) -> Option<AppUiCommand> {
         // Route on the PERSISTENT lane intent: bare `/research add` sets
         // `research_lane_intent`, which survives staged-input edits (unlike the
@@ -4979,6 +5045,9 @@ impl Store {
             self.state.status = t!("status.onboarding_provider_selection_incomplete").into_owned();
             return None;
         };
+        if !self.onboarding_profile_id_is_resolved(params.profile_id.as_deref()) {
+            return None;
+        }
         if let OnboardingKeyGate::Blocked(command) =
             self.onboarding_require_api_key("status.onboarding_api_key_empty_onboard")
         {
@@ -5058,6 +5127,12 @@ impl Store {
             self.state.status = t!("status.onboarding_provider_selection_incomplete").into_owned();
             return None;
         };
+        // `profile/sub_providers/upsert` resolves its profile through the same
+        // server-side `_main` default and ends in the same `save_with_merge`,
+        // so an unresolved profile fails identically here.
+        if !self.onboarding_profile_id_is_resolved(params.profile_id.as_deref()) {
+            return None;
+        }
         // Pop the picker so the wizard beneath shows the pending save spinner.
         self.close_menu();
         self.state.onboarding.last_message = Some(t!("status.saving_provider").into_owned());
@@ -5088,6 +5163,9 @@ impl Store {
             self.state.status = t!("status.onboarding_fallback_selection_incomplete").into_owned();
             return None;
         };
+        if !self.onboarding_profile_id_is_resolved(params.profile_id.as_deref()) {
+            return None;
+        }
         if let OnboardingKeyGate::Blocked(command) =
             self.onboarding_require_api_key("status.onboarding_api_key_empty_provider")
         {
@@ -10652,15 +10730,29 @@ impl Store {
         session: &SessionKey,
         turn: TurnId,
     ) -> Option<AppUiCommand> {
+        // The stale reply answers the in-flight hydrate (dispatch is deduped
+        // per session, so at most one is outstanding), but this branch
+        // early-returns before `apply_session_hydrate_result` clears its
+        // marker — release it here. While it stays armed, the refresh below
+        // (and every later hydrate on this connection) is dedup-rejected and
+        // the session strands until an unrelated path clears the set.
+        self.state.hydrate_in_flight.remove(session);
         let command = self.hydrate_session_state_command(session)?;
         let epoch = self.state.connection_epoch;
         self.state
             .stale_hydrate_refreshes
             .retain(|(_, _, recorded_epoch)| *recorded_epoch == epoch);
-        self.state
+        if !self
+            .state
             .stale_hydrate_refreshes
             .insert((session.clone(), turn, epoch))
-            .then_some(command)
+        {
+            // The once-guard already fired for this turn: drop the duplicate
+            // refresh and the marker it just armed.
+            self.state.hydrate_in_flight.remove(session);
+            return None;
+        }
+        Some(command)
     }
 
     fn apply_session_hydrate_result(
@@ -10760,7 +10852,7 @@ impl Store {
                     self.state.sessions.push(SessionView {
                         id: session_id.clone(),
                         title: session_id.0.clone(),
-                        profile_id: self.active_session_profile_id(),
+                        profile_id: self.profile_stamp_for_session_key(&session_id),
                         messages,
                         tasks: Vec::new(),
                         live_reply: None,
@@ -21513,6 +21605,176 @@ now analyzing the bus module"
         );
     }
 
+    /// `/resume` into a session created under a DIFFERENT profile must not
+    /// inherit the outgoing session's profile: a profiled session key
+    /// (`{profile}:{channel}:{chat}`) carries its own immutable profile
+    /// dimension, so the placeholder SessionView is stamped from the key —
+    /// not from the active session being switched away from.
+    #[test]
+    fn resume_stamps_the_resumed_sessions_own_profile() {
+        let mut store = store_with_empty_session(); // active profile: "coding"
+
+        let command = store
+            .dispatch_local_action(
+                LocalAction::ResumeSession("glm:local:tui#research".into()),
+                None,
+            )
+            .into_command();
+
+        assert!(
+            matches!(command, Some(AppUiCommand::HydrateSession(_))),
+            "resume dispatches a hydrate"
+        );
+        let resumed = store
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == SessionKey("glm:local:tui#research".into()))
+            .expect("placeholder session was created");
+        assert_eq!(
+            resumed.profile_id.as_deref(),
+            Some("glm"),
+            "a profiled key stamps its OWN profile, not the outgoing session's"
+        );
+    }
+
+    /// A profile-LESS resumed key (`{channel}:{chat}`) has no profile dimension
+    /// to stamp from — the placeholder keeps the historical fallback: the
+    /// active session's profile.
+    #[test]
+    fn resume_profile_less_key_falls_back_to_active_profile() {
+        let mut store = store_with_empty_session(); // active profile: "coding"
+
+        store.dispatch_local_action(LocalAction::ResumeSession("local:other".into()), None);
+
+        let resumed = store
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == SessionKey("local:other".into()))
+            .expect("placeholder session was created");
+        assert_eq!(resumed.profile_id.as_deref(), Some("coding"));
+    }
+
+    /// The hydrate find-or-create branch (a hydrate result for a session with
+    /// no local SessionView) stamps the same key-derived profile as the
+    /// `/resume` placeholder — both are resume-side creations without a
+    /// server `active_profile_id`.
+    #[test]
+    fn hydrate_find_or_create_stamps_profile_from_the_key() {
+        use crate::client_event::ClientEvent;
+        let mut store = store_with_empty_session(); // active profile: "coding"
+        let session_id = SessionKey("glm:local:tui#research".into());
+
+        store.apply_client_event(ClientEvent::SessionHydrate(SessionHydrateResult {
+            session_id: session_id.clone(),
+            cursor: octos_core::ui_protocol::UiCursor {
+                stream: session_id.0.clone(),
+                seq: 1,
+            },
+            context: None,
+            context_state: None,
+            messages: Some(vec![]),
+            threads: None,
+            turns: None,
+            pending_approvals: None,
+            pending_questions: None,
+            replayed_envelopes: None,
+            replayed_tool_envelopes: None,
+        }));
+
+        let created = store
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .expect("hydrate find-or-created the session");
+        assert_eq!(created.profile_id.as_deref(), Some("glm"));
+    }
+
+    /// Wire-level end-to-end of the issue scenario: `/resume` into a session
+    /// created under a DIFFERENT profile, the server answers with a
+    /// `session/hydrate` result (parsed from its raw JSON wire shape — the
+    /// resume path never gets a `session/opened` with `active_profile_id`),
+    /// and the effective profile resolver must then report the RESUMED
+    /// session's own profile, not the launch profile.
+    #[test]
+    fn resume_end_to_end_effective_profile_follows_the_resumed_session() {
+        use crate::client_event::ClientEvent;
+        let mut store = store_with_empty_session(); // launch profile: "coding"
+
+        let command = store
+            .dispatch_local_action(
+                LocalAction::ResumeSession("glm:local:tui#research".into()),
+                None,
+            )
+            .into_command();
+        let Some(AppUiCommand::HydrateSession(params)) = command else {
+            panic!("resume dispatches a hydrate");
+        };
+
+        // The server's wire answer carries no profile field — only the key.
+        let hydrate: SessionHydrateResult = serde_json::from_value(serde_json::json!({
+            "session_id": params.session_id,
+            "cursor": { "stream": params.session_id.0, "seq": 1 },
+            "messages": [],
+        }))
+        .expect("wire-shaped hydrate parses");
+        store.apply_client_event(ClientEvent::SessionHydrate(hydrate));
+
+        assert_eq!(
+            store
+                .state
+                .active_session()
+                .map(|session| session.id.0.as_str()),
+            Some("glm:local:tui#research"),
+            "focus is on the resumed session"
+        );
+        assert_eq!(
+            store.active_profile_id().as_deref(),
+            Some("glm"),
+            "the effective profile follows the RESUMED session's own profile"
+        );
+    }
+
+    /// The key-derived stamp rides `SessionKey`'s profile/channel parse, so
+    /// pin the tricky shapes at THIS integration point (core has its own
+    /// parser tests, but a parser drift there must fail here, not silently
+    /// mislabel a resumed session): colon chat ids (Matrix rooms) with and
+    /// without a profile dimension, and the synthetic `_main` profile prefix.
+    #[test]
+    fn resume_profile_stamp_handles_colon_chat_ids_and_main_prefix() {
+        // Each resume switches focus (and with it the active-profile
+        // fallback), so every case gets its own store.
+        let stamp_after_resume = |id: &str| {
+            let mut store = store_with_empty_session(); // active profile: "coding"
+            store.dispatch_local_action(LocalAction::ResumeSession(id.into()), None);
+            store
+                .state
+                .sessions
+                .iter()
+                .find(|session| session.id == SessionKey(id.into()))
+                .unwrap_or_else(|| panic!("placeholder exists for {id}"))
+                .profile_id
+                .clone()
+        };
+        assert_eq!(
+            stamp_after_resume("weather:matrix:!room:localhost").as_deref(),
+            Some("weather"),
+            "profiled colon-chat key stamps its own profile"
+        );
+        assert_eq!(
+            stamp_after_resume("matrix:!room:elsewhere").as_deref(),
+            Some("coding"),
+            "unprofiled colon-chat key keeps the active-profile fallback"
+        );
+        assert_eq!(
+            stamp_after_resume("_main:local:tui").as_deref(),
+            Some("_main"),
+            "the synthetic main-profile prefix stamps `_main`, like session/opened does"
+        );
+    }
+
     /// `/statusline` and `/title` picks apply NOTHING (the checkboxes are
     /// build-time constants; no Space/reorder handling exists), so their
     /// statuses must say so explicitly — mirroring SaveKeymap — instead of
@@ -24738,6 +25000,142 @@ now analyzing the bus module"
         );
         assert!(!format!("{params:?}").contains("sk-test-secret"));
         assert!(!format!("{:?}", store.state.onboarding).contains("sk-test-secret"));
+    }
+
+    /// Regression: with no profile resolvable anywhere, the wizard used to
+    /// dispatch an upsert whose `profile_id` was omitted from the wire. The
+    /// server defaults that to `MAIN_PROFILE_ID` (`_main`), whose underscore
+    /// its own profile-id slug validator rejects, so the save came back as an
+    /// opaque `-32603 … profile ID must contain only lowercase letters, digits,
+    /// and hyphens` — and onboarding could never leave the provider step.
+    #[test]
+    fn onboarding_save_refuses_to_dispatch_without_a_resolved_profile() {
+        let mut store =
+            protocol_store_with_methods(&[crate::model::APPUI_METHOD_PROFILE_LLM_UPSERT]);
+        store.state.sessions[0].profile_id = None;
+        assert!(
+            store.current_profile_for_onboarding().is_none(),
+            "test fixture must have no resolvable profile"
+        );
+
+        store.state.composer =
+            "/onboard select moonshot kimi-k2.5 autodl https://example.test/v1 AUTODL_API_KEY"
+                .into();
+        assert!(store.compose_command().is_none());
+        store.state.composer = "/onboard key sk-test-secret".into();
+        assert!(store.compose_command().is_none());
+
+        store.state.composer = "/onboard save".into();
+        assert!(
+            store.compose_command().is_none(),
+            "save must not dispatch an upsert with no profile id"
+        );
+        assert_eq!(
+            store.state.status,
+            t!("status.onboarding_profile_unresolved").into_owned()
+        );
+        assert!(
+            store.state.onboarding.provider_pending.is_none(),
+            "a refused save must not leave the wizard spinning"
+        );
+    }
+
+    /// The fallback (`/provider add-fallback`) save shares the dispatch shape,
+    /// and therefore the same failure.
+    #[test]
+    fn provider_fallback_save_refuses_to_dispatch_without_a_resolved_profile() {
+        let mut store =
+            protocol_store_with_methods(&[crate::model::APPUI_METHOD_PROFILE_LLM_UPSERT]);
+        store.state.sessions[0].profile_id = None;
+
+        store.state.composer =
+            "/provider select minimax MiniMax-M2.5-highspeed wisemodel https://example.test/v1 WISEMODEL_API_KEY"
+                .into();
+        assert!(store.compose_command().is_none());
+        store.state.composer = "/provider key sk-fallback-secret".into();
+        assert!(store.compose_command().is_none());
+
+        store.state.composer = "/provider add-fallback".into();
+        assert!(
+            store.compose_command().is_none(),
+            "fallback save must not dispatch an upsert with no profile id"
+        );
+        assert_eq!(
+            store.state.status,
+            t!("status.onboarding_profile_unresolved").into_owned()
+        );
+        assert!(store.state.onboarding.provider_pending.is_none());
+    }
+
+    /// Residual scope gap on the `Some(_)` guard: a `profile/llm/list`
+    /// response naming the server's RUNTIME profile (`_main`) seeds
+    /// `profile_llm_state`, so `current_profile_for_onboarding` starts
+    /// returning `Some("_main")`. A present-but-unpersistable id then passed
+    /// the guard and the upsert reached the same invalid-slug boundary the
+    /// omitted-field case did — `_main` fails the server's `[a-z0-9-]` slug
+    /// validator either way. Unlike the test-result path, this one needs no
+    /// non-empty provider state to seed.
+    #[test]
+    fn onboarding_save_refuses_a_runtime_only_profile_id_from_the_list_response() {
+        let mut store =
+            protocol_store_with_methods(&[crate::model::APPUI_METHOD_PROFILE_LLM_UPSERT]);
+        store.state.sessions[0].profile_id = None;
+        assert!(store.current_profile_for_onboarding().is_none());
+
+        store.apply_client_event(ClientEvent::ProfileLlmList(ProfileLlmListClientEvent {
+            result: crate::model::ProfileLlmListResult {
+                profile_id: Some(MAIN_RUNTIME_PROFILE_ID.into()),
+                primary: None,
+                fallbacks: Vec::new(),
+                llm: None,
+                runtime_policy_stamp: None,
+            },
+            message: "Loaded profile LLM settings".into(),
+        }));
+        assert_eq!(
+            store.current_profile_for_onboarding().as_deref(),
+            Some(MAIN_RUNTIME_PROFILE_ID),
+            "the list response seeds the runtime id as the onboarding profile"
+        );
+
+        store.state.composer =
+            "/onboard select moonshot kimi-k2.5 autodl https://example.test/v1 AUTODL_API_KEY"
+                .into();
+        assert!(store.compose_command().is_none());
+        store.state.composer = "/onboard key sk-test-secret".into();
+        assert!(store.compose_command().is_none());
+
+        store.state.composer = "/onboard save".into();
+        assert!(
+            store.compose_command().is_none(),
+            "a runtime-only profile id must not be persisted"
+        );
+        assert_eq!(
+            store.state.status,
+            t!("status.onboarding_profile_unresolved").into_owned()
+        );
+        assert!(store.state.onboarding.provider_pending.is_none());
+    }
+
+    #[test]
+    fn persistable_profile_id_rejects_runtime_and_malformed_slugs() {
+        for ok in ["alan", "coding", "agent-1", "a", "x9"] {
+            assert!(is_persistable_profile_id(ok), "{ok} is a persistable slug");
+        }
+        for bad in [
+            "",                      // no id at all
+            MAIN_RUNTIME_PROFILE_ID, // runtime identity, not a profile
+            "_other",                // any underscore-prefixed runtime id
+            "Alan",                  // uppercase fails the server slug rule
+            "has space",
+            "has_underscore",
+            "dot.ted",
+        ] {
+            assert!(
+                !is_persistable_profile_id(bad),
+                "{bad:?} must not reach the write boundary"
+            );
+        }
     }
 
     #[test]
@@ -44718,6 +45116,77 @@ now analyzing the bus module"
             "Fresh canonical answer."
         );
         assert_eq!(store.state.sessions[0].messages[0].media, ["answer.png"]);
+    }
+
+    #[test]
+    fn stale_hydrate_reply_after_dispatch_releases_in_flight_marker() {
+        let mut store = store_with_empty_session();
+        store.state.capabilities = Some(hydrate_capabilities());
+        let session = store.state.sessions[0].id.clone();
+        let turn = TurnId::new();
+        for (seq, payload) in [
+            PayloadV2::UserMessage {
+                text: "actual prompt".into(),
+                files: Vec::new(),
+            },
+            PayloadV2::AssistantPersisted {
+                text: "Actual completed answer.".into(),
+                assistant_segment_id: "segment-1".into(),
+                meta: octos_core::ui_protocol::MessageMeta {
+                    message_id: "actual-message".into(),
+                    persisted_at: chrono::Utc::now(),
+                    media: Vec::new(),
+                },
+            },
+            PayloadV2::TurnTerminal {
+                outcome: octos_core::ui_protocol::TurnTerminalOutcome::Completed,
+                error: None,
+                token_usage: None,
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            store.apply_event(AppUiEvent::Protocol(envelope_v2_notification(
+                session.clone(),
+                seq as u64 + 1,
+                &turn.0.to_string(),
+                payload,
+            )));
+        }
+        // Production order: a hydrate is dispatched first (resume, open,
+        // phantom probe), arming the in-flight marker that dedupes every
+        // later producer — the test above applies the reply directly and
+        // never exercises this ordering.
+        let dispatched = store.hydrate_session_state_command(&session);
+        assert!(matches!(dispatched, Some(AppUiCommand::HydrateSession(_))));
+        assert!(store.state.hydrate_in_flight.contains(&session));
+        let snapshot = |state: &str| {
+            serde_json::from_value(serde_json::json!({
+            "session_id": session, "cursor": {"stream": "different-noncomparable-scope", "seq": 1000},
+            "messages": [], "turns": [{"turn_id": turn, "state": state}],
+        }))
+            .unwrap()
+        };
+        // The delayed reply still calls the completed turn active: the stale
+        // branch must release the answered hydrate's marker and emit the
+        // one-shot refresh instead of being dedup-rejected by it.
+        let command = store.apply_client_event(ClientEvent::SessionHydrate(snapshot("active")));
+        assert!(matches!(command, Some(AppUiCommand::HydrateSession(_))));
+        assert!(
+            store.state.hydrate_in_flight.contains(&session),
+            "the refresh dispatch re-arms the marker"
+        );
+        assert_eq!(store.state.stale_hydrate_refreshes.len(), 1);
+        // The once-guard still holds: a second stale reply for the same turn
+        // emits nothing, and it just answered the in-flight refresh — the
+        // marker must not strand.
+        assert!(
+            store
+                .apply_client_event(ClientEvent::SessionHydrate(snapshot("active")))
+                .is_none()
+        );
+        assert!(!store.state.hydrate_in_flight.contains(&session));
     }
 
     #[test]

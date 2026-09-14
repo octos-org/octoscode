@@ -1,0 +1,19 @@
+   Compiling octoscode v0.3.0-rc.10 (/Users/zhangalex/.local/tmp/octoloop-evolution-20260909/verify-octoscode)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.86s
+     Running unittests src/lib.rs (/Users/zhangalex/Work/Projects/FW/octoscode/target/debug/deps/octoscode-3107b0dea26f3ccf)
+
+running 1 test
+test store::tests::outer_review_629_runtime_main_list_must_not_enable_invalid_save ... 
+thread 'store::tests::outer_review_629_runtime_main_list_must_not_enable_invalid_save' (267596583) panicked at /Users/zhangalex/.local/tmp/octoloop-evolution-20260909/residual-629-repro.rs:15:5:
+Runtime-only _main profile passed save gate: Some(ProfileLlmUpsert(ProfileLlmUpsertParams { profile_id: Some("_main"), selection: LlmSelectionConfig { family_id: "moonshot", model_id: "kimi-k2.5", route: LlmRouteConfig { route_id: "autodl", label: None, base_url: Some("https://example.test/v1"), api_key_env: Some("AUTODL_API_KEY"), api_type: Some("openai") }, model_hints: None, cost_per_m: None, strong: None }, api_key: Some("********"), set_primary: true }))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    store::tests::outer_review_629_runtime_main_list_must_not_enable_invalid_save
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2081 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--lib`

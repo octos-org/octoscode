@@ -705,6 +705,7 @@ status:
   creating_local_profile: "Creating local solo profile"
   onboarding_provider_route_incomplete: "Onboarding provider route is incomplete"
   onboarding_provider_selection_incomplete: "Onboarding provider selection is incomplete"
+  onboarding_profile_unresolved: "No profile selected — create one in the Profile step, or relaunch with --profile-id <id>, then save the provider"
   onboarding_api_key_empty_onboard: "Onboarding API key is empty; use /onboard key <secret>"
   onboarding_api_key_empty_provider: "Onboarding API key is empty; use /provider key <secret>"
   onboarding_loading_catalog: "Loading the provider catalog to check key requirements — retry once it loads"

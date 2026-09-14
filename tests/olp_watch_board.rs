@@ -408,11 +408,12 @@ fn olp_watch_board_harvest_survives_burst_hits() {
     // fixed 15s window flakes. Wait for the FIRST signal with a 60s
     // budget instead.
     let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    while !std::fs::read_to_string(&board)
-        .map(|_| true)
-        .unwrap_or(false)
-        || true
-    {
+    // Housekeeping (spec Allowed Changes, non-behavioral): the old loop
+    // condition `!read(...).map(...).unwrap_or(false) || true` tripped clippy's
+    // overly_complex_bool_expr baseline error. Semantics were "always true",
+    // i.e. poll until the wall-clock deadline — keep exactly that duration
+    // and the original assertions below.
+    while std::time::Instant::now() <= deadline {
         // (just wait on the wall clock; output is drained after kill)
         if std::time::Instant::now() > deadline {
             break;

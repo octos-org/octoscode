@@ -1,0 +1,30 @@
+   Compiling octoscode v0.3.0-rc.10 (/Users/zhangalex/.local/tmp/octoloop-evolution-20260909/octoscode-behavior-review)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.42s
+     Running tests/olp_review_evidence.rs (/Users/zhangalex/Work/Projects/FW/octoscode/target/debug/deps/olp_review_evidence-090e7289e7aa9ff5)
+
+running 3 tests
+test olp_review_outer_probe_freeze_requires_native_authority ... FAILED
+test olp_review_outer_probe_missing_frozen_review_rejected ... FAILED
+test olp_review_outer_probe_unrelated_false_command_rejected ... ok
+
+failures:
+
+---- olp_review_outer_probe_freeze_requires_native_authority stdout ----
+
+thread 'olp_review_outer_probe_freeze_requires_native_authority' (267726825) panicked at tests/olp_review_evidence.rs:735:5:
+无外部权威时 freeze 不得成功(外层反例1)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- olp_review_outer_probe_missing_frozen_review_rejected stdout ----
+
+thread 'olp_review_outer_probe_missing_frozen_review_rejected' (267726826) panicked at tests/olp_review_evidence.rs:806:5:
+冻结后删除初审文件,status 不得 ok(外层反例3)
+
+
+failures:
+    olp_review_outer_probe_freeze_requires_native_authority
+    olp_review_outer_probe_missing_frozen_review_rejected
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.17s
+
+error: test failed, to rerun pass `--test olp_review_evidence`
