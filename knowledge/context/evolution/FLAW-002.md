@@ -4,12 +4,14 @@ id: FLAW-002
 title: "goal_create 把 archived 当未完成拒绝,准入判定只认 complete"
 repo: octos-org/octos
 layers: [Lifecycle, Verification]
-status: filed
+status: closed
 severity: S2
 recurrence: 1
 fingerprint: lifecycle/goal-create-admission-rejects-archived
 issue: https://github.com/octos-org/octos/issues/2237
 cards: []
+pr: https://github.com/octos-org/octos/pull/2241
+merged: 2026-09-04 (17487501)
 filed: 2026-09-04
 ---
 
@@ -51,3 +53,7 @@ L14333 映射为 `GroupStatus::Completed`。判定写的是"是否 complete",语
 ## 异议
 
 (第二外环署名批注,只追加)
+
+## 结案
+
+- 2026-09-04:issue 经维护者 triage 接受,按 SDD 契约修复并合并(https://github.com/octos-org/octos/pull/2241,main 17487501);验收=契约 6/6 lifecycle + 主审隔离复验 + CI 矩阵。观察窗:后续两个完成的 goal 内同指纹卡片应为 0。

@@ -3,9 +3,109 @@
 //! unchanged. `use super::*` reaches the app module's remaining items.
 use super::*;
 
+pub(super) fn activity_navigator_kind_label(kind: ActivityNavigatorRowKind) -> String {
+    let key = match kind {
+        ActivityNavigatorRowKind::Session => "app.activity_navigator.kind.session",
+        ActivityNavigatorRowKind::Message => "app.activity_navigator.kind.message",
+        ActivityNavigatorRowKind::Orchestration => "app.activity_navigator.kind.orchestration",
+        ActivityNavigatorRowKind::Task => "app.activity_navigator.kind.task",
+        ActivityNavigatorRowKind::FileChange => "app.activity_navigator.kind.change",
+        ActivityNavigatorRowKind::Activity => "app.activity_navigator.kind.activity",
+        ActivityNavigatorRowKind::Approval => "app.activity_navigator.kind.approval",
+    };
+    t!(key).into_owned()
+}
+
+pub(super) fn activity_navigator_status_label(status: ActivityNavigatorStatus) -> String {
+    let key = match status {
+        ActivityNavigatorStatus::Running => "app.activity_navigator.status.running",
+        ActivityNavigatorStatus::Blocked => "app.activity_navigator.status.blocked",
+        ActivityNavigatorStatus::Failed => "app.activity_navigator.status.failed",
+        ActivityNavigatorStatus::Done => "app.activity_navigator.status.done",
+    };
+    t!(key).into_owned()
+}
+
+pub(super) fn activity_navigator_filter_label(filter: ActivityNavigatorFilter) -> String {
+    let key = match filter {
+        ActivityNavigatorFilter::All => "app.activity_navigator.filter.all",
+        ActivityNavigatorFilter::Running => "app.activity_navigator.filter.running",
+        ActivityNavigatorFilter::Blocked => "app.activity_navigator.filter.blocked",
+        ActivityNavigatorFilter::Failed => "app.activity_navigator.filter.failed",
+        ActivityNavigatorFilter::Done => "app.activity_navigator.filter.done",
+    };
+    t!(key).into_owned()
+}
+
+fn activity_navigator_run_state_label(state: &SessionRunState) -> String {
+    let key = match state {
+        SessionRunState::Idle => "app.activity_navigator.run_state.idle",
+        SessionRunState::InProgress => "app.activity_navigator.run_state.running",
+        SessionRunState::Blocked { .. } => "app.activity_navigator.run_state.blocked",
+        SessionRunState::Success => "app.activity_navigator.run_state.done",
+        SessionRunState::Error { .. } => "app.activity_navigator.run_state.error",
+    };
+    t!(key).into_owned()
+}
+
+fn activity_navigator_activity_kind_label(kind: ActivityKind) -> String {
+    let key = match kind {
+        ActivityKind::Tool => "app.activity_navigator.value.tool",
+        ActivityKind::Progress => "app.activity_navigator.value.progress",
+        ActivityKind::Report => "app.activity_navigator.value.report",
+        ActivityKind::Approval => "app.activity_navigator.value.approval",
+        ActivityKind::Warning => "app.activity_navigator.value.warning",
+        ActivityKind::Error => "app.activity_navigator.value.error",
+    };
+    t!(key).into_owned()
+}
+
+fn activity_navigator_value_label(value: &str) -> String {
+    let locale = rust_i18n::locale();
+    activity_navigator_value_label_for_locale(value, locale.as_ref())
+}
+
+pub(super) fn activity_navigator_value_label_for_locale(value: &str, locale: &str) -> String {
+    // English is also the protocol/source language. Preserve its exact value
+    // so localization never canonicalizes user-visible wire data (for example
+    // changing the existing `modify` operation to `modified`).
+    if !locale.starts_with("zh") {
+        return value.to_string();
+    }
+    let key = match value.to_ascii_lowercase().as_str() {
+        "active" => "app.activity_navigator.value.active",
+        "pending" => "app.activity_navigator.value.pending",
+        "running" => "app.activity_navigator.value.running",
+        "completed" | "complete" | "done" => "app.activity_navigator.value.done",
+        "failed" => "app.activity_navigator.value.failed",
+        "cancelled" | "canceled" => "app.activity_navigator.value.cancelled",
+        "interrupted" => "app.activity_navigator.value.interrupted",
+        "unknown" => "app.activity_navigator.value.unknown",
+        "user" => "app.activity_navigator.value.user",
+        "assistant" => "app.activity_navigator.value.assistant",
+        "system" => "app.activity_navigator.value.system",
+        "tool" => "app.activity_navigator.value.tool",
+        "add" | "added" | "create" | "created" => "app.activity_navigator.value.added",
+        "modify" | "modified" | "update" | "updated" => "app.activity_navigator.value.modified",
+        "delete" | "deleted" | "remove" | "removed" => "app.activity_navigator.value.deleted",
+        "rename" | "renamed" => "app.activity_navigator.value.renamed",
+        _ => return value.to_string(),
+    };
+    t!(key, locale = "zh").into_owned()
+}
+
+fn activity_navigator_field(key: &str, value: impl std::fmt::Display) -> String {
+    t!(
+        "app.activity_navigator.field",
+        label = t!(key),
+        value = value
+    )
+    .into_owned()
+}
+
 pub(super) fn activity_finalization_key(item: &ActivityItem, ordinal: usize) -> String {
-    if let Some(tool_call_id) = item.tool_call_id.as_deref() {
-        return format!("tool:{tool_call_id}");
+    if let Some(identity) = item.stable_activity_identity() {
+        return identity;
     }
     if let Some(turn_id) = item.turn_id.as_ref() {
         return format!(
@@ -96,18 +196,25 @@ pub(super) fn activity_navigator_all_rows(app: &AppState) -> Vec<ActivityNavigat
                 ActivityNavigatorRowKind::Orchestration,
                 ActivityNavigatorStatus::Running,
                 session.title.clone(),
-                "orchestration active".to_string(),
+                t!("app.activity_navigator.orchestration_active").into_owned(),
                 vec![
-                    format!("session: {}", session.id.0),
-                    format!(
-                        "phase: {}",
-                        orchestration.phase.as_deref().unwrap_or("active")
+                    activity_navigator_field("app.activity_navigator.label.session", &session.id.0),
+                    activity_navigator_field(
+                        "app.activity_navigator.label.phase",
+                        orchestration.phase.clone().unwrap_or_else(|| {
+                            t!("app.activity_navigator.value.active").into_owned()
+                        }),
                     ),
-                    format!("running agents: {}", orchestration.running_agents),
-                    format!(
-                        "pending continuations: {}",
-                        orchestration.pending_continuations
-                    ),
+                    t!(
+                        "app.activity_navigator.running_agents",
+                        count = orchestration.running_agents
+                    )
+                    .into_owned(),
+                    t!(
+                        "app.activity_navigator.pending_continuations",
+                        count = orchestration.pending_continuations
+                    )
+                    .into_owned(),
                 ],
                 ActivityNavigatorRowLinks {
                     session_id: Some(session.id.clone()),
@@ -162,24 +269,39 @@ pub(super) fn activity_navigator_session_order(app: &AppState) -> Vec<usize> {
 pub(super) fn activity_navigator_run_state_row(app: &AppState) -> Option<ActivityNavigatorRow> {
     let (status, title) = match &app.run_state {
         SessionRunState::Idle => return None,
-        SessionRunState::InProgress => (ActivityNavigatorStatus::Running, "session running"),
-        SessionRunState::Blocked { .. } => (ActivityNavigatorStatus::Blocked, "session blocked"),
-        SessionRunState::Success => (ActivityNavigatorStatus::Done, "session done"),
-        SessionRunState::Error { .. } => (ActivityNavigatorStatus::Failed, "session error"),
+        SessionRunState::InProgress => (
+            ActivityNavigatorStatus::Running,
+            t!("app.activity_navigator.session_running"),
+        ),
+        SessionRunState::Blocked { .. } => (
+            ActivityNavigatorStatus::Blocked,
+            t!("app.activity_navigator.session_blocked"),
+        ),
+        SessionRunState::Success => (
+            ActivityNavigatorStatus::Done,
+            t!("app.activity_navigator.session_done"),
+        ),
+        SessionRunState::Error { .. } => (
+            ActivityNavigatorStatus::Failed,
+            t!("app.activity_navigator.session_error"),
+        ),
     };
     let session = app.active_session();
     let detail = app.run_state.detail().unwrap_or(app.status.as_str());
     Some(activity_navigator_row(
         ActivityNavigatorRowKind::Session,
         status,
-        title.to_string(),
+        title.into_owned(),
         session
             .map(|session| session.title.clone())
-            .unwrap_or_else(|| "no active session".to_string()),
+            .unwrap_or_else(|| t!("app.activity_navigator.no_active_session").into_owned()),
         vec![
-            format!("state: {}", app.run_state.label()),
-            format!("status: {}", app.status),
-            format!("detail: {detail}"),
+            activity_navigator_field(
+                "app.activity_navigator.label.state",
+                activity_navigator_run_state_label(&app.run_state),
+            ),
+            activity_navigator_field("app.activity_navigator.label.status", &app.status),
+            activity_navigator_field("app.activity_navigator.label.detail", detail),
         ],
         ActivityNavigatorRowLinks {
             session_id: session.map(|session| session.id.clone()),
@@ -195,14 +317,14 @@ pub(super) fn activity_navigator_approval_row(app: &AppState) -> Option<Activity
         ActivityNavigatorRowKind::Approval,
         ActivityNavigatorStatus::Blocked,
         approval.title.clone(),
-        "approval required".to_string(),
+        t!("app.activity_navigator.approval_required").into_owned(),
         vec![
-            format!("tool: {}", approval.tool_name),
-            format!(
-                "kind: {}",
-                approval.approval_kind.as_deref().unwrap_or("unknown")
+            activity_navigator_field("app.activity_navigator.label.tool", &approval.tool_name),
+            activity_navigator_field(
+                "app.activity_navigator.label.kind",
+                approval.approval_kind.as_deref().unwrap_or("unknown"),
             ),
-            format!("body: {}", approval.body),
+            activity_navigator_field("app.activity_navigator.label.body", &approval.body),
         ],
         ActivityNavigatorRowLinks {
             session_id: session.map(|session| session.id.clone()),
@@ -221,10 +343,17 @@ pub(super) fn activity_navigator_question_row(app: &AppState) -> Option<Activity
         ActivityNavigatorRowKind::Approval,
         ActivityNavigatorStatus::Blocked,
         question.title.clone(),
-        "question pending".to_string(),
+        t!("app.activity_navigator.question_pending").into_owned(),
         vec![
-            format!("question id: {}", question.question_id.0),
-            format!("questions: {}", question.questions.len()),
+            activity_navigator_field(
+                "app.activity_navigator.label.question_id",
+                question.question_id.0,
+            ),
+            t!(
+                "app.activity_navigator.questions",
+                count = question.questions.len()
+            )
+            .into_owned(),
         ],
         ActivityNavigatorRowLinks {
             session_id: session.map(|session| session.id.clone()),
@@ -239,37 +368,48 @@ pub(super) fn activity_navigator_message_row(
     message: &Message,
 ) -> ActivityNavigatorRow {
     let role = message.role.as_str();
+    let role_label = activity_navigator_value_label(role);
     let content = message.content.trim();
     let title = if content.is_empty() {
-        format!("{role}: empty message")
+        t!("app.activity_navigator.empty_message", role = &role_label).into_owned()
     } else {
-        format!(
-            "{role}: {}",
-            truncate_terminal_line(&content.replace('\n', " "), 80)
+        t!(
+            "app.activity_navigator.message_title",
+            role = &role_label,
+            preview = truncate_terminal_line(&content.replace('\n', " "), 80)
         )
+        .into_owned()
     };
     let mut detail = vec![
-        format!("session: {}", session.id.0),
-        format!("message: {}", idx + 1),
-        format!("role: {role}"),
+        activity_navigator_field("app.activity_navigator.label.session", &session.id.0),
+        activity_navigator_field("app.activity_navigator.label.message", idx + 1),
+        activity_navigator_field("app.activity_navigator.label.role", &role_label),
     ];
     if !content.is_empty() {
-        detail.push("content:".to_string());
+        detail.push(t!("app.activity_navigator.content_heading").into_owned());
         detail.extend(content.lines().take(10).map(|line| format!("  {line}")));
     }
     if let Some(reasoning) = message.reasoning_content.as_deref() {
-        detail.push("reasoning:".to_string());
+        detail.push(t!("app.activity_navigator.reasoning_heading").into_owned());
         detail.extend(reasoning.lines().take(6).map(|line| format!("  {line}")));
     }
     if let Some(tool_call_id) = message.tool_call_id.as_deref() {
-        detail.push(format!("tool call: {tool_call_id}"));
+        detail.push(activity_navigator_field(
+            "app.activity_navigator.label.tool_call",
+            tool_call_id,
+        ));
     }
 
     activity_navigator_row(
         ActivityNavigatorRowKind::Message,
         ActivityNavigatorStatus::Done,
         title,
-        format!("{} · message {}", session.title, idx + 1),
+        t!(
+            "app.activity_navigator.message_subtitle",
+            session = &session.title,
+            number = idx + 1
+        )
+        .into_owned(),
         detail,
         ActivityNavigatorRowLinks {
             session_id: Some(session.id.clone()),
@@ -288,15 +428,21 @@ pub(super) fn activity_navigator_task_row(
         TaskRuntimeState::Failed | TaskRuntimeState::Cancelled => ActivityNavigatorStatus::Failed,
     };
     let mut detail = vec![
-        format!("session: {}", session.id.0),
-        format!("task: {}", task.id.0),
-        format!("state: {}", task_state_label(task.state)),
+        activity_navigator_field("app.activity_navigator.label.session", &session.id.0),
+        activity_navigator_field("app.activity_navigator.label.task", task.id.0),
+        activity_navigator_field(
+            "app.activity_navigator.label.state",
+            activity_navigator_value_label(task_state_label(task.state)),
+        ),
     ];
     if let Some(runtime_detail) = task.runtime_detail.as_ref() {
-        detail.push(format!("detail: {runtime_detail}"));
+        detail.push(activity_navigator_field(
+            "app.activity_navigator.label.detail",
+            runtime_detail,
+        ));
     }
     if !task.output_tail.trim().is_empty() {
-        detail.push("output tail:".to_string());
+        detail.push(t!("app.activity_navigator.output_tail_heading").into_owned());
         detail.extend(
             task.output_tail
                 .lines()
@@ -309,7 +455,11 @@ pub(super) fn activity_navigator_task_row(
         ActivityNavigatorRowKind::Task,
         status,
         task.title.clone(),
-        format!("{} · {}", session.title, task_state_label(task.state)),
+        format!(
+            "{} · {}",
+            session.title,
+            activity_navigator_value_label(task_state_label(task.state))
+        ),
         detail,
         ActivityNavigatorRowLinks {
             session_id: Some(session.id.clone()),
@@ -331,25 +481,37 @@ pub(super) fn activity_navigator_activity_row(
     let status = activity_navigator_activity_status(item);
     let turn_id = archived_turn_id.or_else(|| item.turn_id.as_ref().map(|turn| turn.0.to_string()));
     let mut detail = vec![
-        format!("session: {}", session.id.0),
-        format!("kind: {}", item.kind.label()),
-        format!("status: {}", item.status),
+        activity_navigator_field("app.activity_navigator.label.session", &session.id.0),
+        activity_navigator_field(
+            "app.activity_navigator.label.kind",
+            activity_navigator_activity_kind_label(item.kind),
+        ),
+        activity_navigator_field("app.activity_navigator.label.status", &item.status),
     ];
     if let Some(turn_id) = turn_id.as_ref() {
-        detail.push(format!("turn: {turn_id}"));
+        detail.push(activity_navigator_field(
+            "app.activity_navigator.label.turn",
+            turn_id,
+        ));
     }
     if let Some(tool_call_id) = item.tool_call_id.as_ref() {
-        detail.push(format!("tool call: {tool_call_id}"));
+        detail.push(activity_navigator_field(
+            "app.activity_navigator.label.tool_call",
+            tool_call_id,
+        ));
     }
     if let Some(item_detail) = item.detail.as_ref() {
-        detail.push(format!("detail: {item_detail}"));
+        detail.push(activity_navigator_field(
+            "app.activity_navigator.label.detail",
+            item_detail,
+        ));
     }
     if let Some(output) = item
         .output_preview
         .as_ref()
         .filter(|output| !output.is_empty())
     {
-        detail.push("output preview:".to_string());
+        detail.push(t!("app.activity_navigator.output_preview_heading").into_owned());
         detail.extend(output.lines().take(8).map(|line| format!("  {line}")));
     }
 
@@ -377,23 +539,32 @@ pub(super) fn activity_navigator_file_change_row(
     let turn_id = archived_turn_id.or_else(|| item.turn_id.as_ref().map(|turn| turn.0.to_string()));
     let badge = diff_file_type_badge(&mutation.path);
     let preview = if mutation.preview_ready {
-        "diff preview ready"
+        t!("app.activity_navigator.diff_preview_ready")
     } else {
-        "diff preview pending"
+        t!("app.activity_navigator.diff_preview_pending")
     };
     let mut detail = vec![
-        format!("session: {}", session.id.0),
-        format!("file: {}", mutation.path),
-        format!("type: {badge}"),
-        format!("operation: {}", mutation.operation),
-        format!("preview: {preview}"),
-        format!("status: {}", item.status),
+        activity_navigator_field("app.activity_navigator.label.session", &session.id.0),
+        activity_navigator_field("app.activity_navigator.label.file", &mutation.path),
+        activity_navigator_field("app.activity_navigator.label.type", badge),
+        activity_navigator_field(
+            "app.activity_navigator.label.operation",
+            activity_navigator_value_label(&mutation.operation),
+        ),
+        activity_navigator_field("app.activity_navigator.label.preview", &preview),
+        activity_navigator_field("app.activity_navigator.label.status", &item.status),
     ];
     if let Some(turn_id) = turn_id.as_ref() {
-        detail.push(format!("turn: {turn_id}"));
+        detail.push(activity_navigator_field(
+            "app.activity_navigator.label.turn",
+            turn_id,
+        ));
     }
     if let Some(item_detail) = item.detail.as_ref() {
-        detail.push(format!("detail: {item_detail}"));
+        detail.push(activity_navigator_field(
+            "app.activity_navigator.label.detail",
+            item_detail,
+        ));
     }
 
     activity_navigator_row(
@@ -401,10 +572,13 @@ pub(super) fn activity_navigator_file_change_row(
         status,
         format!(
             "{badge} {} {}",
-            mutation.operation,
+            activity_navigator_value_label(&mutation.operation),
             compact_file_path(&mutation.path)
         ),
-        format!("{badge} · {} · {preview}", mutation.operation),
+        format!(
+            "{badge} · {} · {preview}",
+            activity_navigator_value_label(&mutation.operation)
+        ),
         detail,
         ActivityNavigatorRowLinks {
             session_id: Some(session.id.clone()),

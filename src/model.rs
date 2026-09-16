@@ -28,6 +28,30 @@ pub type LiveReply = AppUiLiveReply;
 pub type SessionView = AppUiSession;
 pub type TaskView = AppUiTask;
 
+/// Client-side ownership for a typed canonical background message ID. The
+/// shared core Message has no canonical-ID field; bind it to its current row,
+/// never to equal text elsewhere or to an unrelated event sequence domain.
+#[derive(Debug, Clone)]
+pub(crate) struct BackgroundCompletionRow {
+    pub(crate) index: usize,
+    pub(crate) signature: Value,
+}
+
+impl BackgroundCompletionRow {
+    pub(crate) fn new(index: usize, message: &Message) -> Self {
+        Self {
+            index,
+            signature: serde_json::to_value(message).expect("Message is JSON serializable"),
+        }
+    }
+
+    pub(crate) fn owns(&self, messages: &[Message]) -> bool {
+        messages.get(self.index).is_some_and(|message| {
+            serde_json::to_value(message).is_ok_and(|value| value == self.signature)
+        })
+    }
+}
+
 /// One canonical `projection.envelope.v2` assistant content segment within a
 /// live turn. The transcript still accumulates its bytes in [`LiveReply`] so
 /// the legacy and v2 paths share the same commit/render lifecycle; this record
@@ -37,6 +61,16 @@ pub(crate) struct V2AssistantSegment {
     pub(crate) id: String,
     pub(crate) start_offset: usize,
     pub(crate) finalized: bool,
+}
+
+/// Projection lane that first produced assistant content for a live turn.
+/// During mixed-version rollout the server can emit the same turn over both
+/// envelope generations; one lane must own the reply or their differently
+/// timed persisted rows rewrite text already flushed to native scrollback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssistantProjectionLane {
+    V1,
+    V2,
 }
 
 pub const APPUI_METHOD_CONFIG_CAPABILITIES_LIST: &str = "config/capabilities/list";
@@ -203,6 +237,12 @@ pub const APPUI_FEATURE_TASK_ARTIFACTS_V1: &str = "harness.task_artifacts.v1";
 /// compact-context status surface and never invent a generation number
 /// from local heuristics.
 pub const APPUI_FEATURE_CONTEXT_LIFECYCLE_V1: &str = "context.lifecycle.v1";
+
+/// Additive OUP semantic-boundary/cache diagnostics. This is negotiated
+/// separately from the generic lifecycle stream so an older server can keep
+/// sending lifecycle counters without the client interpreting unknown cache
+/// policy fields.
+pub const APPUI_FEATURE_CONTEXT_SEMANTIC_CACHE_V1: &str = "context.semantic_cache.v1";
 
 /// M16-G2 notification methods. The TUI listens for these to bump the
 /// compact-context status surface; it must not call them as RPC.
@@ -1158,6 +1198,10 @@ pub struct ModelSelectResult {
     pub selected: ModelStatus,
     #[serde(default)]
     pub applied: bool,
+    /// The selection was persisted, but the currently running profile is
+    /// startup-pinned and cannot use it until the backend restarts.
+    #[serde(default)]
+    pub restart_required: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_policy_stamp: Option<RuntimePolicyStamp>,
 }
@@ -1701,6 +1745,32 @@ pub struct ContextNormalizationSummary {
     pub truncated_count: usize,
 }
 
+/// Additive OUP cache/semantic-boundary diagnostics carried inside
+/// `context_state`. The pinned `octos-core` predates these optional fields, so
+/// the transport extracts them from the raw JSON frame before the vendored
+/// decoder discards unknown fields. They are display-only: Octos remains the
+/// sole owner of cache epochs, invalidation, and boundary policy.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextCacheDiagnostics {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_epoch_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_cache_invalidation_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_head_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_head_kind: Option<String>,
+}
+
+impl ContextCacheDiagnostics {
+    pub fn is_empty(&self) -> bool {
+        self.cache_epoch_id.is_none()
+            && self.last_cache_invalidation_reason.is_none()
+            && self.semantic_head_id.is_none()
+            && self.semantic_head_kind.is_none()
+    }
+}
+
 /// M16-G2 per-session lifecycle ledger. Holds the latest context
 /// state plus the most recent compaction/normalization summaries. The
 /// TUI renders these in a bounded status surface (NOT chat history).
@@ -1709,6 +1779,9 @@ pub struct SessionContextLifecycle {
     pub state: Option<ContextLifecycleState>,
     pub last_compaction: Option<ContextCompactionSummary>,
     pub last_normalization: Option<ContextNormalizationSummary>,
+    /// Optional display-only diagnostics from newer OUP servers. `None` keeps
+    /// old-server behavior byte-for-byte and hides the `/context` cache pane.
+    pub cache_diagnostics: Option<ContextCacheDiagnostics>,
 }
 
 impl SessionContextLifecycle {
@@ -2741,7 +2814,7 @@ impl OnboardingWizardState {
             return Err(OnboardingLocalProfileRecovery {
                 kind: OnboardingLocalProfileErrorKind::InvalidField,
                 focus_field: OnboardingLocalProfileField::RequestedId,
-                message: "Name this profile first. Use /onboard profile-name <id>.".into(),
+                message: t!("onboarding.validation.profile_name_required").into_owned(),
             });
         }
         Ok(())
@@ -3087,14 +3160,14 @@ impl OnboardingWizardState {
             return Err(OnboardingLocalProfileRecovery {
                 kind: OnboardingLocalProfileErrorKind::InvalidField,
                 focus_field: OnboardingLocalProfileField::Name,
-                message: "Display name is required. Use /onboard name <display name>.".into(),
+                message: t!("onboarding.validation.display_name_required").into_owned(),
             });
         }
         if name.chars().count() > 128 {
             return Err(OnboardingLocalProfileRecovery {
                 kind: OnboardingLocalProfileErrorKind::InvalidField,
                 focus_field: OnboardingLocalProfileField::Name,
-                message: "Display name must be 128 characters or fewer.".into(),
+                message: t!("onboarding.validation.display_name_too_long").into_owned(),
             });
         }
 
@@ -3103,14 +3176,14 @@ impl OnboardingWizardState {
             return Err(OnboardingLocalProfileRecovery {
                 kind: OnboardingLocalProfileErrorKind::InvalidField,
                 focus_field: OnboardingLocalProfileField::Username,
-                message: "Username is required. Use /onboard username <handle>.".into(),
+                message: t!("onboarding.validation.username_required").into_owned(),
             });
         }
         if username.len() > 64 {
             return Err(OnboardingLocalProfileRecovery {
                 kind: OnboardingLocalProfileErrorKind::InvalidField,
                 focus_field: OnboardingLocalProfileField::Username,
-                message: "Username must be 64 characters or fewer.".into(),
+                message: t!("onboarding.validation.username_too_long").into_owned(),
             });
         }
         if username
@@ -3120,7 +3193,7 @@ impl OnboardingWizardState {
             return Err(OnboardingLocalProfileRecovery {
                 kind: OnboardingLocalProfileErrorKind::InvalidField,
                 focus_field: OnboardingLocalProfileField::Username,
-                message: "Username must be ASCII without whitespace or control characters.".into(),
+                message: t!("onboarding.validation.username_invalid_chars").into_owned(),
             });
         }
 
@@ -3129,16 +3202,14 @@ impl OnboardingWizardState {
             return Err(OnboardingLocalProfileRecovery {
                 kind: OnboardingLocalProfileErrorKind::InvalidField,
                 focus_field: OnboardingLocalProfileField::Email,
-                message: "Email is required by the backend. Use /onboard email <address>.".into(),
+                message: t!("onboarding.validation.email_required").into_owned(),
             });
         }
         if !looks_like_email(email) {
             return Err(OnboardingLocalProfileRecovery {
                 kind: OnboardingLocalProfileErrorKind::InvalidField,
                 focus_field: OnboardingLocalProfileField::Email,
-                message:
-                    "Email must contain a non-empty local-part and domain (e.g. ada@example.com)."
-                        .into(),
+                message: t!("onboarding.validation.email_invalid").into_owned(),
             });
         }
 
@@ -3172,9 +3243,12 @@ impl OnboardingWizardState {
                 // existing-owner collision (username, email metadata,
                 // or owner id), with the reason in the message. Keep
                 // that reason rather than hard-coding "username taken".
-                message: format!(
-                    "Local profile collision for '{collided_username}': {server_reason}. Edit the fields with /onboard name|username|email and try again."
-                ),
+                message: t!(
+                    "onboarding.validation.profile_collision",
+                    username = collided_username,
+                    reason = server_reason
+                )
+                .into_owned(),
             },
             "profile_local_unsupported" => OnboardingLocalProfileRecovery {
                 kind: OnboardingLocalProfileErrorKind::Unsupported,
@@ -3185,29 +3259,34 @@ impl OnboardingWizardState {
                 // returning `profile_local_unsupported` despite
                 // advertising the method is misconfigured, not a
                 // signal that the user can fall back to OTP locally.
-                message: "This server returned profile_local_unsupported for profile/local/create. The backend is misconfigured — restart the server with local solo onboarding enabled, or connect to a backend that fully supports it."
-                    .into(),
+                message: t!("onboarding.validation.local_profile_unsupported").into_owned(),
             },
             "profile_local_invalid_name" => OnboardingLocalProfileRecovery {
                 kind: OnboardingLocalProfileErrorKind::InvalidParams,
                 focus_field: OnboardingLocalProfileField::Name,
-                message: format!(
-                    "Server rejected the display name: {server_reason}. Edit it with /onboard name <display name>."
-                ),
+                message: t!(
+                    "onboarding.validation.server_rejected_name",
+                    reason = server_reason
+                )
+                .into_owned(),
             },
             "profile_local_invalid_username" => OnboardingLocalProfileRecovery {
                 kind: OnboardingLocalProfileErrorKind::InvalidParams,
                 focus_field: OnboardingLocalProfileField::Username,
-                message: format!(
-                    "Server rejected the username: {server_reason}. Edit it with /onboard username <handle>."
-                ),
+                message: t!(
+                    "onboarding.validation.server_rejected_username",
+                    reason = server_reason
+                )
+                .into_owned(),
             },
             "profile_local_invalid_email" => OnboardingLocalProfileRecovery {
                 kind: OnboardingLocalProfileErrorKind::InvalidParams,
                 focus_field: OnboardingLocalProfileField::Email,
-                message: format!(
-                    "Server rejected the email: {server_reason}. Edit it with /onboard email <address>."
-                ),
+                message: t!(
+                    "onboarding.validation.server_rejected_email",
+                    reason = server_reason
+                )
+                .into_owned(),
             },
             "invalid_params" => OnboardingLocalProfileRecovery {
                 kind: OnboardingLocalProfileErrorKind::InvalidParams,
@@ -3215,14 +3294,20 @@ impl OnboardingWizardState {
                 // which field is at fault; default to username because
                 // collision is the highest-prior real-world cause.
                 focus_field: OnboardingLocalProfileField::Username,
-                message: format!(
-                    "Server rejected the profile fields as invalid: {server_reason}. Edit them with /onboard name|username|email."
-                ),
+                message: t!(
+                    "onboarding.validation.server_rejected_fields",
+                    reason = server_reason
+                )
+                .into_owned(),
             },
             _ => OnboardingLocalProfileRecovery {
                 kind: OnboardingLocalProfileErrorKind::InvalidParams,
                 focus_field: OnboardingLocalProfileField::Username,
-                message: format!("profile/local/create failed: {server_reason}"),
+                message: t!(
+                    "onboarding.validation.local_profile_create_failed",
+                    reason = server_reason
+                )
+                .into_owned(),
             },
         };
         self.local_profile_create_pending = false;
@@ -4634,6 +4719,35 @@ pub struct AppState {
             std::collections::VecDeque<TurnId>,
         ),
     >,
+    /// Connection epoch: bumped by `ClientEvent::BackendConnectionEpoch` each
+    /// time the stdio transport connects a REPLACEMENT child. `live_reply`
+    /// latches are stamped with the epoch current at bind time
+    /// (`live_reply_epochs`), so the relaunch reconcile can fail the dead
+    /// child's turns while sparing a turn the new child itself started before
+    /// its scoped `session/open` landed (a resumed durable continuation).
+    pub connection_epoch: u64,
+    /// Per-session connection-epoch stamp of the currently latched
+    /// `live_reply`. A session with no stamp counts as OLDER than any bumped
+    /// epoch, so a reply restored without one is reconciled like a dead-child
+    /// latch. One entry per session ever latched; stale entries for a session
+    /// whose reply was consumed are harmless (the reconcile only reads the
+    /// stamp of a session that currently holds a `live_reply`).
+    pub live_reply_epochs: std::collections::HashMap<SessionKey, u64>,
+    /// Turn ids whose terminal was an ERROR (not a user interrupt), per
+    /// session. A live-reply coverage archived for such a turn must never
+    /// dedup a LATER turn's committed reply on direct-prefix evidence alone:
+    /// the errored turn's committed row is its failure card (which does not
+    /// start with the flushed prefix, so the coverage survives), and a later
+    /// reply that happens to share that prefix would otherwise be silently
+    /// skipped as "already flushed". Bounded per session exactly like
+    /// [`AppState::completed_turns`].
+    pub errored_turns: std::collections::HashMap<
+        SessionKey,
+        (
+            std::collections::HashSet<TurnId>,
+            std::collections::VecDeque<TurnId>,
+        ),
+    >,
     /// Latest retry/backoff status per session — the `UiRetryBackoff` carried
     /// on `metadata.retry` progress updates that the TUI previously ignored.
     /// Drives the "retrying (attempt N)" surface in the harness status row.
@@ -4895,11 +5009,18 @@ pub struct AppState {
     /// fresh segment without overwriting a prior persisted one.
     pub(crate) v2_live_assistant_segments:
         std::collections::HashMap<(SessionKey, TurnId), Vec<V2AssistantSegment>>,
+    /// First assistant-content projection observed per live turn. A parallel
+    /// v1/v2 projection is duplicate delivery, not a second answer segment.
+    pub(crate) assistant_projection_lanes:
+        std::collections::HashMap<(SessionKey, TurnId), AssistantProjectionLane>,
     /// Maps the string turn id carried by v2 envelopes to the typed local
     /// [`TurnId`] used by the established live-reply lifecycle. V2 permits
     /// non-UUID wire ids during compatibility projection, so the map lets the
     /// reducer retain stable identity without weakening the existing model.
     pub(crate) v2_turn_ids: std::collections::HashMap<(SessionKey, String), TurnId>,
+    /// One automatic retry per contradicted terminal/session/connection epoch.
+    /// Repeated stale hydrate replies must not create a self-sustaining RPC loop.
+    pub(crate) stale_hydrate_refreshes: std::collections::HashSet<(SessionKey, TurnId, u64)>,
     /// Accumulated streamed reasoning fragments per active turn (legacy
     /// `ReasoningDelta` path). `commit_live_reply` moves them onto the committed
     /// message's `reasoning_content`, which the transcript renders as a separate
@@ -5105,6 +5226,11 @@ pub struct AppState {
     /// its thread. Hydrate re-runs on every reconnect; without this
     /// ledger each re-run would duplicate the per-action rows.
     pub applied_hydrate_tool_envelopes: std::collections::HashSet<(String, String, u64)>,
+    /// Retained background rows only, not an ever-seen receipt cache. Hydrate
+    /// rebuilds one session; snapshots retain exact unchanged row ownership;
+    /// optimistic inserts/removals shift positions structurally.
+    pub(crate) background_completion_rows:
+        std::collections::HashMap<(SessionKey, String), BackgroundCompletionRow>,
     pub turn_activity_summaries: Vec<TurnActivitySummary>,
     /// Wall-clock starts of in-flight turns, keyed by (session, turn). The
     /// committed per-turn status report reads its duration here — the global
@@ -5522,6 +5648,9 @@ impl ActivityKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActivityItem {
     pub kind: ActivityKind,
+    /// Optional identity supplied by a typed durable event, never inferred
+    /// from title/body. Background completion uses its canonical message ID.
+    pub canonical_activity_id: Option<String>,
     pub title: String,
     pub status: String,
     pub detail: Option<String>,
@@ -5556,6 +5685,7 @@ impl ActivityItem {
     pub fn new(kind: ActivityKind, title: impl Into<String>, status: impl Into<String>) -> Self {
         Self {
             kind,
+            canonical_activity_id: None,
             title: title.into(),
             status: status.into(),
             detail: None,
@@ -5588,6 +5718,21 @@ impl ActivityItem {
     pub fn with_tool_call(mut self, tool_call_id: impl Into<String>) -> Self {
         self.tool_call_id = Some(tool_call_id.into());
         self
+    }
+
+    pub fn with_canonical_activity_id(mut self, id: impl Into<String>) -> Self {
+        let id = id.into();
+        self.canonical_activity_id = (!id.is_empty()).then_some(id);
+        self
+    }
+
+    pub(crate) fn stable_activity_identity(&self) -> Option<String> {
+        if let Some(id) = self.canonical_activity_id.as_ref() {
+            return Some(format!("{}:canonical:{id}", self.kind.label()));
+        }
+        (self.kind == ActivityKind::Tool)
+            .then(|| self.tool_call_id.as_ref().map(|id| format!("tool:{id}")))
+            .flatten()
     }
 
     /// Stamp the owning session. Used only on the projection-envelope
@@ -6907,14 +7052,26 @@ impl AppState {
             return false;
         };
 
+        self.record_live_reply_segment_boundary_at(session_id, turn_id, len)
+    }
+
+    pub(crate) fn record_live_reply_segment_boundary_at(
+        &mut self,
+        session_id: &SessionKey,
+        turn_id: &TurnId,
+        offset: usize,
+    ) -> bool {
+        if offset == 0 {
+            return false;
+        }
         let boundaries = self
             .live_reply_segment_boundaries
             .entry((session_id.clone(), turn_id.clone()))
             .or_default();
-        if boundaries.last().copied() == Some(len) {
+        let Err(index) = boundaries.binary_search(&offset) else {
             return false;
-        }
-        boundaries.push(len);
+        };
+        boundaries.insert(index, offset);
         if boundaries.len() > Self::MAX_LIVE_REPLY_SEGMENT_BOUNDARIES {
             let excess = boundaries.len() - Self::MAX_LIVE_REPLY_SEGMENT_BOUNDARIES;
             boundaries.drain(0..excess);
@@ -6978,6 +7135,9 @@ impl AppState {
             session_usage: std::collections::HashMap::new(),
             session_context_window: std::collections::HashMap::new(),
             completed_turns: std::collections::HashMap::new(),
+            connection_epoch: 0,
+            live_reply_epochs: std::collections::HashMap::new(),
+            errored_turns: std::collections::HashMap::new(),
             session_retry: std::collections::HashMap::new(),
             session_status_word: std::collections::HashMap::new(),
             session_reasoning_effort: std::collections::HashMap::new(),
@@ -7030,7 +7190,9 @@ impl AppState {
             turn_prompt_anchors: Vec::new(),
             live_reply_segment_boundaries: std::collections::HashMap::new(),
             v2_live_assistant_segments: std::collections::HashMap::new(),
+            assistant_projection_lanes: std::collections::HashMap::new(),
             v2_turn_ids: std::collections::HashMap::new(),
+            stale_hydrate_refreshes: std::collections::HashSet::new(),
             live_reasoning: std::collections::HashMap::new(),
             live_compaction: std::collections::HashMap::new(),
             background_activity: std::collections::HashMap::new(),
@@ -7074,6 +7236,7 @@ impl AppState {
             activity: Vec::new(),
             turn_activity_logs: Vec::new(),
             applied_hydrate_tool_envelopes: std::collections::HashSet::new(),
+            background_completion_rows: std::collections::HashMap::new(),
             turn_activity_summaries: Vec::new(),
             turn_started_at: std::collections::HashMap::new(),
             btw_asides: std::collections::HashMap::new(),
@@ -7502,25 +7665,65 @@ impl AppState {
         // over/under-compensates at ordinary chunk boundaries).
     }
 
-    /// Enqueue a pending reconnect hydration command. Bounded — extra
-    /// commands beyond a small cap are dropped to keep the queue O(1) —
-    /// fresh hydration on the next reconnect is cheap.
-    ///
-    /// OUTER_LOOP_REVIEW #20 (ymote P1): evicting a queued
-    /// `HydrateSession` without clearing its `hydrate_in_flight` marker
-    /// latches the session out of hydration until a backend relaunch — the
-    /// marker was set at construction time but only answered/error/relaunch
-    /// paths cleared it. Release the evicted command's marker here.
+    /// Enqueue a pending reconnect hydration command. Bounded — at the cap the
+    /// oldest NON-`session/open` entry is evicted to keep the queue O(1) (fresh
+    /// hydration on the next reconnect is cheap). A `session/open` is never
+    /// evicted: the local tab switch pushes it to the FRONT so it precedes the
+    /// restored staged `turn/start`, and losing it would let that submit go
+    /// out with no preceding open — an unscoped affinity. When every entry is
+    /// an open, the incoming command is dropped and the drop surfaced in the
+    /// status line instead (the bounded-error pattern of the transport's
+    /// `protocol_barrier_queue_full`).
     pub fn enqueue_autonomy_hydration(&mut self, command: AppUiCommand) {
         const MAX_PENDING_HYDRATION: usize = 16;
         if self.pending_autonomy_hydration.len() >= MAX_PENDING_HYDRATION {
+            let evictable = self
+                .pending_autonomy_hydration
+                .iter()
+                .position(|queued| !matches!(queued, AppUiCommand::OpenSession(_)));
+            match evictable {
+                Some(index) => {
+                    if let Some(AppUiCommand::HydrateSession(params)) =
+                        self.pending_autonomy_hydration.remove(index)
+                    {
+                        self.hydrate_in_flight.remove(&params.session_id);
+                    }
+                }
+                None => {
+                    if let AppUiCommand::HydrateSession(params) = &command {
+                        self.hydrate_in_flight.remove(&params.session_id);
+                    }
+                    self.status =
+                        t!("status.hydration_queue_full", method = command.method()).into_owned();
+                    return;
+                }
+            }
+        }
+        self.pending_autonomy_hydration.push_back(command);
+    }
+
+    /// Queue a locally generated `session/open` at the FRONT of the hydration
+    /// queue so it precedes any follow-up for that session. Only the LATEST
+    /// local switch matters: an earlier queued open (A→B→C inside one input
+    /// batch) is dropped, otherwise the opens leave in reverse order and the
+    /// server's final affinity ends on the wrong session while the UI shows
+    /// the other. The queue stays bounded through the same eviction rule as
+    /// [`Self::enqueue_autonomy_hydration`].
+    pub fn enqueue_local_session_open_front(&mut self, open: AppUiCommand) {
+        const MAX_PENDING_HYDRATION: usize = 16;
+        debug_assert!(matches!(open, AppUiCommand::OpenSession(_)));
+        self.pending_autonomy_hydration
+            .retain(|queued| !matches!(queued, AppUiCommand::OpenSession(_)));
+        while self.pending_autonomy_hydration.len() >= MAX_PENDING_HYDRATION {
+            // Drop the tail follow-up and release its request marker so a
+            // later reconnect can hydrate that session again.
             if let Some(AppUiCommand::HydrateSession(params)) =
-                self.pending_autonomy_hydration.pop_front()
+                self.pending_autonomy_hydration.pop_back()
             {
                 self.hydrate_in_flight.remove(&params.session_id);
             }
         }
-        self.pending_autonomy_hydration.push_back(command);
+        self.pending_autonomy_hydration.push_front(open);
     }
 
     /// Dequeue the next pending hydration command. Returns `None` when
@@ -7620,6 +7823,35 @@ impl AppState {
         }
     }
 
+    /// Reconcile a cached `/model` catalog with server-reported runtime truth.
+    /// If the effective model is not in the old catalog, invalidate it so the
+    /// next menu open refetches instead of presenting stale choices.
+    pub fn reconcile_model_catalog_with_effective(
+        &mut self,
+        session_id: &SessionKey,
+        effective: &ModelStatus,
+    ) {
+        let Some(index) = self
+            .session_model_catalogs
+            .iter()
+            .position(|catalog| &catalog.session_id == session_id)
+        else {
+            return;
+        };
+        let contains_effective = self.session_model_catalogs[index]
+            .models
+            .iter()
+            .any(|model| model.model == effective.model && model.provider == effective.provider);
+        if contains_effective {
+            for model in &mut self.session_model_catalogs[index].models {
+                model.selected =
+                    model.model == effective.model && model.provider == effective.provider;
+            }
+        } else {
+            self.session_model_catalogs.remove(index);
+        }
+    }
+
     pub fn mcp_catalog_for(&self, session_id: &SessionKey) -> Option<&SessionMcpCatalog> {
         self.session_mcp_catalogs
             .iter()
@@ -7691,7 +7923,13 @@ impl AppState {
     }
 
     pub fn set_capabilities(&mut self, capabilities: UiProtocolCapabilities) {
-        self.capabilities = Some(CapabilitySet::from(&capabilities));
+        let capabilities = CapabilitySet::from(&capabilities);
+        if !capabilities.supports_feature(APPUI_FEATURE_CONTEXT_SEMANTIC_CACHE_V1) {
+            for entry in &mut self.context_lifecycle {
+                entry.ledger.cache_diagnostics = None;
+            }
+        }
+        self.capabilities = Some(capabilities);
     }
 
     pub fn apply_pane_snapshot(&mut self, panes: UiPaneSnapshot) {
@@ -7846,6 +8084,58 @@ impl AppState {
             .is_some_and(|(turns, _)| turns.contains(turn_id))
     }
 
+    /// Record that a turn reached an ERROR terminal (see
+    /// [`AppState::errored_turns`]). Bounded FIFO per session, mirroring
+    /// [`Self::mark_turn_completed`].
+    pub fn mark_turn_errored(&mut self, session_id: &SessionKey, turn_id: &TurnId) {
+        let (set, queue) = self.errored_turns.entry(session_id.clone()).or_default();
+        if set.insert(turn_id.clone()) {
+            queue.push_back(turn_id.clone());
+            while queue.len() > Self::COMPLETED_TURNS_CAP {
+                if let Some(evicted) = queue.pop_front() {
+                    set.remove(&evicted);
+                }
+            }
+        }
+    }
+
+    /// True when `turn_id` reached an error terminal in this session.
+    pub fn is_turn_errored(&self, session_id: &SessionKey, turn_id: &TurnId) -> bool {
+        self.errored_turns
+            .get(session_id)
+            .is_some_and(|(turns, _)| turns.contains(turn_id))
+    }
+
+    /// [`Self::is_turn_errored`] keyed by the string ids a live-reply coverage
+    /// carries (`SessionKey.0` and the turn id's display form).
+    pub fn is_turn_errored_by_wire_ids(&self, session_id: &str, turn_id: &str) -> bool {
+        self.errored_turns
+            .get(&SessionKey(session_id.to_owned()))
+            .is_some_and(|(turns, _)| turns.iter().any(|turn| turn.0.to_string() == turn_id))
+    }
+
+    /// Stamp the session's currently latched `live_reply` with the connection
+    /// epoch in force right now (see [`AppState::connection_epoch`]).
+    pub fn stamp_live_reply_epoch(&mut self, session_id: &SessionKey) {
+        self.live_reply_epochs
+            .insert(session_id.clone(), self.connection_epoch);
+    }
+
+    /// A replacement backend child connected: every latch stamped before now
+    /// belongs to a process that no longer exists.
+    pub fn bump_connection_epoch(&mut self) {
+        self.connection_epoch = self.connection_epoch.wrapping_add(1);
+    }
+
+    /// True when the session's latched `live_reply` was bound under an OLDER
+    /// connection epoch than the current one — by a backend child that has
+    /// since been replaced — or was never stamped at all.
+    pub fn live_reply_latched_under_dead_connection(&self, session_id: &SessionKey) -> bool {
+        self.live_reply_epochs
+            .get(session_id)
+            .is_none_or(|epoch| *epoch < self.connection_epoch)
+    }
+
     pub fn record_submitted_user_prompt(
         &mut self,
         session_id: SessionKey,
@@ -7892,11 +8182,24 @@ impl AppState {
             let excess = self.optimistic_user_messages.len() - MAX_OPTIMISTIC_USER_MESSAGES;
             self.optimistic_user_messages.drain(0..excess);
         }
-        self.restore_optimistic_user_messages_inner(false);
+        self.restore_optimistic_user_messages_inner(false, None, &[]);
     }
 
     pub fn restore_optimistic_user_messages(&mut self) {
-        self.restore_optimistic_user_messages_inner(true);
+        self.restore_optimistic_user_messages_inner(true, None, &[]);
+    }
+
+    /// A hydrate only replaces one session. Other sessions still contain local
+    /// optimistic rows, not canonical confirmation. Preserve the original full
+    /// message (including attachments) when this session's snapshot predates it.
+    /// Return the actual insertion indices, in order, so canonical projection
+    /// owners can be rebased structurally before their anchors are installed.
+    pub fn restore_hydrated_optimistic_user_messages(
+        &mut self,
+        session_id: &SessionKey,
+        previous_messages: &[Message],
+    ) -> Vec<usize> {
+        self.restore_optimistic_user_messages_inner(true, Some(session_id), previous_messages)
     }
 
     /// `drop_confirmed`: when an optimistic row is already present, drop its
@@ -7904,9 +8207,19 @@ impl AppState {
     /// rows — the echo already happened) or keep it (a sibling submit merely
     /// re-ran the restore; the row is still OUR optimistic insert awaiting
     /// its own echo, which must still be able to promote it).
-    fn restore_optimistic_user_messages_inner(&mut self, drop_confirmed: bool) {
+    fn restore_optimistic_user_messages_inner(
+        &mut self,
+        drop_confirmed: bool,
+        session_scope: Option<&SessionKey>,
+        previous_messages: &[Message],
+    ) -> Vec<usize> {
         let mut retained = Vec::new();
+        let mut inserted_indices = Vec::new();
         for optimistic in self.optimistic_user_messages.clone() {
+            if session_scope.is_some_and(|scope| scope != &optimistic.session_id) {
+                retained.push(optimistic);
+                continue;
+            }
             let Some(session) = self
                 .sessions
                 .iter_mut()
@@ -7929,12 +8242,25 @@ impl AppState {
             }
 
             let insert_at = optimistic.anchor_index.min(session.messages.len());
-            session
-                .messages
-                .insert(insert_at, Message::user(optimistic.content.clone()));
+            let message = previous_messages
+                .iter()
+                .filter(|message| {
+                    message.role.as_str() == "user" && message.content == optimistic.content
+                })
+                .nth(optimistic.prior_matching_user_count)
+                .cloned()
+                .unwrap_or_else(|| Message::user(optimistic.content.clone()));
+            session.messages.insert(insert_at, message);
+            inserted_indices.push(insert_at);
+            for ((owner_session, _), owner) in &mut self.background_completion_rows {
+                if owner_session == &session.id && owner.index >= insert_at {
+                    owner.index += 1;
+                }
+            }
             retained.push(optimistic);
         }
         self.optimistic_user_messages = retained;
+        inserted_indices
     }
 
     /// The user prompt that started `turn_id` in `session_id`. Used to restore
@@ -8124,7 +8450,34 @@ impl AppState {
             })
         {
             session.messages.remove(row);
+            self.background_completion_row_removed(session_id, row);
         }
+    }
+
+    pub(crate) fn prune_background_completion_rows(&mut self) {
+        self.background_completion_rows
+            .retain(|(session_id, _), owner| {
+                self.sessions
+                    .iter()
+                    .find(|session| &session.id == session_id)
+                    .is_some_and(|session| owner.owns(&session.messages))
+            });
+    }
+
+    fn background_completion_row_removed(&mut self, session_id: &SessionKey, index: usize) {
+        self.background_completion_rows
+            .retain(|(owner_session, _), owner| {
+                if owner_session != session_id {
+                    return true;
+                }
+                if owner.index == index {
+                    return false;
+                }
+                if owner.index > index {
+                    owner.index -= 1;
+                }
+                true
+            });
     }
 
     /// Put a transport-dead staged submit's prompt back at the FRONT of its
@@ -8205,6 +8558,7 @@ impl AppState {
             })
         {
             session.messages.remove(row);
+            self.background_completion_row_removed(session_id, row);
         }
     }
 
@@ -8358,6 +8712,52 @@ impl AppState {
         true
     }
 
+    /// Install an anchor whose session, turn and projected user index were
+    /// proven by canonical hydrate metadata. Text is bookkeeping, not an
+    /// ownership search. Rebind existing logs too: replay dedup can mean no
+    /// new tool row is available to recapture an earlier unanchored log.
+    pub fn restore_hydrated_turn_prompt_anchor(
+        &mut self,
+        session_id: &SessionKey,
+        turn_id: &TurnId,
+        index: usize,
+    ) {
+        let Some(session) = self
+            .sessions
+            .iter()
+            .find(|session| &session.id == session_id)
+        else {
+            return;
+        };
+        let Some(message) = session
+            .messages
+            .get(index)
+            .filter(|row| row.role == octos_core::MessageRole::User)
+        else {
+            return;
+        };
+        let content = message.content.clone();
+        let prior_matching_user_count = session.messages[..index]
+            .iter()
+            .filter(|row| row.role == octos_core::MessageRole::User && row.content == content)
+            .count();
+        self.remember_turn_prompt_anchor(TurnPromptAnchor {
+            session_id: session_id.clone(),
+            turn_id: turn_id.clone(),
+            content: content.clone(),
+            anchor_index: index,
+            prior_matching_user_count,
+        });
+        for log in self
+            .turn_activity_logs
+            .iter_mut()
+            .filter(|log| &log.session_id == session_id && &log.turn_id == turn_id)
+        {
+            log.anchor_index = Some(index);
+            log.request = Some(content.clone());
+        }
+    }
+
     fn remember_turn_prompt_anchor(&mut self, anchor: TurnPromptAnchor) {
         if let Some(existing) = self.turn_prompt_anchors.iter_mut().find(|existing| {
             existing.session_id == anchor.session_id && existing.turn_id == anchor.turn_id
@@ -8389,14 +8789,23 @@ impl AppState {
     /// caller MUST only invoke this for a turn that is genuinely terminal — never
     /// the session's currently-active/live turn.
     ///
+    /// Explicitly attributed items must belong to this session as well as the
+    /// turn. Legacy items without session attribution retain their turn-only
+    /// behavior; a sibling session's same turn ID is never adopted or settled.
     /// Returns the number of items flipped (callers may ignore it).
-    pub fn reconcile_terminal_turn_running_activity(&mut self, turn_id: &TurnId) -> usize {
+    pub fn reconcile_terminal_turn_running_activity(
+        &mut self,
+        session_id: &SessionKey,
+        turn_id: &TurnId,
+    ) -> usize {
         let mut flipped = 0;
-        for item in self
-            .activity
-            .iter_mut()
-            .filter(|item| item.turn_id.as_ref() == Some(turn_id))
-        {
+        for item in self.activity.iter_mut().filter(|item| {
+            item.turn_id.as_ref() == Some(turn_id)
+                && item
+                    .session_id
+                    .as_ref()
+                    .is_none_or(|owner| owner == session_id)
+        }) {
             if activity_status_is_running(&item.status) {
                 item.status = ACTIVITY_STATUS_INTERRUPTED.to_string();
                 flipped += 1;
@@ -8410,23 +8819,31 @@ impl AppState {
         session_id: &SessionKey,
         turn_id: &TurnId,
     ) -> bool {
-        if !self
-            .activity
-            .iter()
-            .any(|item| item.turn_id.as_ref() == Some(turn_id))
-        {
+        if !self.activity.iter().any(|item| {
+            item.turn_id.as_ref() == Some(turn_id)
+                && item
+                    .session_id
+                    .as_ref()
+                    .is_none_or(|owner| owner == session_id)
+        }) {
             return false;
         }
 
         // The turn is now terminal — heal any stranded running item in the LIVE
         // activity before archiving (shared with the hydrate path), so both the
         // captured log and any residual live row read as not-running.
-        self.reconcile_terminal_turn_running_activity(turn_id);
+        self.reconcile_terminal_turn_running_activity(session_id, turn_id);
 
         let items = self
             .activity
             .iter()
-            .filter(|item| item.turn_id.as_ref() == Some(turn_id))
+            .filter(|item| {
+                item.turn_id.as_ref() == Some(turn_id)
+                    && item
+                        .session_id
+                        .as_ref()
+                        .is_none_or(|owner| owner == session_id)
+            })
             .cloned()
             .collect::<Vec<_>>();
 
@@ -8459,7 +8876,28 @@ impl AppState {
             .iter_mut()
             .find(|existing| &existing.session_id == session_id && &existing.turn_id == turn_id)
         {
-            *existing = log;
+            // A background completion can arrive after the foreground turn
+            // was already archived. Retain that invocation and append late
+            // rows; recapturing a residual Progress must not replace Spawn.
+            // Only typed identities coalesce: ordinary repeated progress is
+            // distinct, even with equal text or a shared originating call ID.
+            for item in log.items {
+                let already_owned = item.stable_activity_identity().is_some_and(|id| {
+                    existing
+                        .items
+                        .iter()
+                        .any(|old| old.stable_activity_identity().as_ref() == Some(&id))
+                });
+                if !already_owned {
+                    existing.items.push(item);
+                }
+            }
+            if existing.request.is_none() {
+                existing.request = log.request;
+            }
+            if existing.anchor_index.is_none() {
+                existing.anchor_index = log.anchor_index;
+            }
         } else {
             self.turn_activity_logs.push(log);
         }
@@ -8470,8 +8908,13 @@ impl AppState {
             self.turn_activity_logs.drain(0..excess);
         }
 
-        self.activity
-            .retain(|item| item.turn_id.as_ref() != Some(turn_id));
+        self.activity.retain(|item| {
+            item.turn_id.as_ref() != Some(turn_id)
+                || item
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|owner| owner != session_id)
+        });
         true
     }
 
@@ -9493,13 +9936,14 @@ impl AppState {
 
     pub fn update_tool_activity(
         &mut self,
-        tool_call_id: &str,
+        scope: (&SessionKey, Option<&TurnId>, &str),
         status: impl Into<String>,
         detail: Option<String>,
         output_preview: Option<String>,
         success: Option<bool>,
         duration_ms: Option<u64>,
     ) {
+        let (session_id, turn_id, tool_call_id) = scope;
         let status = status.into();
         // Tool output previews carry raw ANSI/control bytes from dev servers
         // and CLIs; sanitize at this shared chokepoint (agent tools AND the
@@ -9508,12 +9952,12 @@ impl AppState {
         let output_preview = output_preview
             .map(|preview| crate::sanitize::strip_terminal_controls(&preview).into_owned());
         let mut updated: Option<Option<SessionKey>> = None;
-        if let Some(item) = self
-            .activity
-            .iter_mut()
-            .rev()
-            .find(|item| item.tool_call_id.as_deref() == Some(tool_call_id))
-        {
+        if let Some(item) = self.activity.iter_mut().rev().find(|item| {
+            item.kind == ActivityKind::Tool
+                && item.session_id.as_ref() == Some(session_id)
+                && item.turn_id.as_ref() == turn_id
+                && item.tool_call_id.as_deref() == Some(tool_call_id)
+        }) {
             item.status = status;
             if detail.is_some() {
                 item.detail = detail;
@@ -9975,55 +10419,42 @@ impl AppState {
             return;
         }
         let large = paste_should_collapse(text);
-        let cursor = self.composer_cursor_index();
-        self.insert_composer_text(text);
 
-        // Small "paste" that is really typed input: some terminals (bracketed
-        // paste over SSH/tmux, or fast IME bursts) deliver quick keystrokes as a
-        // Paste event. When that lands while a real paste is collapsed, treating
-        // the tiny fragment as another paste keeps `composer_pasted` set and the
-        // chip stays collapsed — the typed text is swallowed into the `[paste]`
-        // block (its char count ticks up) but never echoes. A fragment below the
-        // paste threshold is not a paste worth boxing: union it but CLEAR the
-        // paste flag so the composer re-opens inline and the text echoes.
-        if !large && self.composer_pasted {
-            if let Some(mut existing) = self.composer_paste_span.take() {
+        // Small paste events have the same presentation semantics as typing.
+        // This also covers terminals that report a quick typed/IME fragment as
+        // `Event::Paste`: keep a live paste span so the fragment can render
+        // beside a huge chip instead of disappearing inside its count.
+        if !large {
+            self.insert_composer_text(text);
+            return;
+        }
+
+        let cursor = self.composer_cursor_index();
+        self.composer.insert_str(cursor, text);
+        self.composer_cursor = Some(cursor + text.len());
+
+        // Record the pasted byte range; a second paste while collapsed unions
+        // with the existing span (the chip presents them as one block), shifting
+        // it when the insertion landed before/inside it.
+        let inserted = cursor..cursor + text.len();
+        let span = match self
+            .composer_paste_span
+            .take()
+            .filter(|_| self.composer_pasted)
+        {
+            Some(mut existing) => {
                 if cursor <= existing.start {
                     existing.start += text.len();
                     existing.end += text.len();
                 } else if cursor < existing.end {
                     existing.end += text.len();
                 }
-                self.composer_paste_span = Some(existing);
+                existing.start.min(inserted.start)..existing.end.max(inserted.end)
             }
-            self.composer_pasted = false;
-            return;
-        }
-
-        if large {
-            // Record the pasted byte range; a second paste while collapsed
-            // unions with the existing span (the chip presents them as one
-            // block), shifting it when the insertion landed before/inside it.
-            let inserted = cursor..cursor + text.len();
-            let span = match self
-                .composer_paste_span
-                .take()
-                .filter(|_| self.composer_pasted)
-            {
-                Some(mut existing) => {
-                    if cursor <= existing.start {
-                        existing.start += text.len();
-                        existing.end += text.len();
-                    } else if cursor < existing.end {
-                        existing.end += text.len();
-                    }
-                    existing.start.min(inserted.start)..existing.end.max(inserted.end)
-                }
-                None => inserted,
-            };
-            self.composer_paste_span = Some(span);
-            self.composer_pasted = true;
-        }
+            None => inserted,
+        };
+        self.composer_paste_span = Some(span);
+        self.composer_pasted = true;
     }
 
     pub fn composer_cursor_index(&self) -> usize {
@@ -10034,19 +10465,48 @@ impl AppState {
         if text.is_empty() {
             return;
         }
-        let cursor = self.composer_cursor_index();
+
+        let mut cursor = self.composer_cursor_index();
+        let collapsed = composer_should_collapse(&self.composer, self.composer_pasted);
+        let mut paste_span = self.composer_paste_span.take().filter(|span| {
+            span.start < span.end
+                && span.end <= self.composer.len()
+                && self.composer.is_char_boundary(span.start)
+                && self.composer.is_char_boundary(span.end)
+                && paste_should_collapse(&self.composer[span.clone()])
+        });
+
+        // A caret inside an atomic chip is rendered at the chip's end. Insert
+        // there as well, so the new text is visible after the chip rather than
+        // silently becoming part of its hidden byte range. If the paste is
+        // currently inline, an edit inside it intentionally drops the span.
+        if let Some(span) = paste_span.as_ref()
+            && cursor > span.start
+            && cursor < span.end
+        {
+            if collapsed {
+                cursor = span.end;
+            } else {
+                paste_span = None;
+            }
+        }
+
         self.composer.insert_str(cursor, text);
         self.composer_cursor = Some(cursor + text.len());
+        self.composer_pasted = false;
+
+        if let Some(span) = paste_span.as_mut()
+            && cursor <= span.start
+        {
+            span.start += text.len();
+            span.end += text.len();
+        }
+        self.composer_paste_span = paste_span;
     }
 
     pub fn insert_composer_char(&mut self, ch: char) {
-        // Typing edits the composer → it's no longer an unedited paste; show it
-        // inline (editable) rather than a collapsed `[paste]` block.
-        self.composer_pasted = false;
-        self.composer_paste_span = None;
-        let cursor = self.composer_cursor_index();
-        self.composer.insert(cursor, ch);
-        self.composer_cursor = Some(cursor + ch.len_utf8());
+        let mut encoded = [0; 4];
+        self.insert_composer_text(ch.encode_utf8(&mut encoded));
     }
 
     /// Atomic collapsed-paste delete (#380/#382/#383): when the composer is
@@ -10532,6 +10992,15 @@ fn paste_should_collapse(text: &str) -> bool {
         || text.lines().count().max(1) >= PASTE_COLLAPSE_LINE_THRESHOLD
 }
 
+fn composer_should_collapse(text: &str, from_paste: bool) -> bool {
+    if from_paste {
+        paste_should_collapse(text)
+    } else {
+        text.lines().count().max(1) >= TYPED_COLLAPSE_LINE_THRESHOLD
+            || text.chars().count() >= TYPED_COLLAPSE_CHAR_THRESHOLD
+    }
+}
+
 fn composer_presentation_for_text(
     text: &str,
     from_paste: bool,
@@ -10544,19 +11013,11 @@ fn composer_presentation_for_text(
         return ComposerPresentation::Empty;
     }
 
-    let char_count = text.chars().count();
-    let line_count = text.lines().count().max(1);
     // Pastes collapse aggressively; anything else only when huge (typed input is
     // never collapsed at the low paste thresholds). Note this decision is made
     // over the WHOLE draft — narrowing the chip below never changes WHETHER the
     // composer collapses, only which bytes the chip stands for.
-    let should_collapse = if from_paste {
-        paste_should_collapse(text)
-    } else {
-        line_count >= TYPED_COLLAPSE_LINE_THRESHOLD || char_count >= TYPED_COLLAPSE_CHAR_THRESHOLD
-    };
-
-    if !should_collapse {
+    if !composer_should_collapse(text, from_paste) {
         return ComposerPresentation::Inline(text.to_string());
     }
 
@@ -11599,6 +12060,202 @@ mod tests {
         assert_eq!(state.transcript_scroll, 8);
     }
 
+    /// P2-19: at the hydration-queue cap, overflow must never evict a
+    /// `session/open` — the local tab switch pushes it to the FRONT so it
+    /// precedes the restored staged `turn/start` (the unscoped-affinity
+    /// ordering the scoped-open barrier exists to prevent). Evicting it lets
+    /// the submit go out with no preceding open. The oldest NON-open entry is
+    /// evicted instead.
+    /// Two local switches inside one input batch (key auto-repeat in the
+    /// sessions pane) used to leave `[Open(C), Open(B)]` at the queue front:
+    /// the transport then opened C, then B, and the server's final affinity
+    /// (and the reconnect target) ended on B while the UI showed C. Only the
+    /// LATEST local open may remain, at the front, and the cap still holds.
+    #[test]
+    fn rapid_local_switches_queue_only_the_latest_session_open_first() {
+        use octos_core::ui_protocol::SessionOpenParams;
+        let open = |id: &str| {
+            AppUiCommand::OpenSession(SessionOpenParams {
+                session_id: SessionKey(id.into()),
+                topic: None,
+                profile_id: None,
+                cwd: None,
+                sandbox: None,
+                after: None,
+            })
+        };
+        let mut state = AppState::new(Vec::new(), 0, "ready".into(), None, false);
+        for _ in 0..16 {
+            state.enqueue_autonomy_hydration(AppUiCommand::ListSessions(SessionListParams {
+                cwd: None,
+            }));
+        }
+        state.enqueue_local_session_open_front(open("local:b"));
+        state.enqueue_local_session_open_front(open("local:c"));
+
+        let opens = state
+            .pending_autonomy_hydration
+            .iter()
+            .filter_map(|command| match command {
+                AppUiCommand::OpenSession(params) => Some(params.session_id.0.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            opens,
+            vec!["local:c".to_string()],
+            "only the latest switch survives"
+        );
+        assert!(
+            matches!(
+                state.pending_autonomy_hydration.front(),
+                Some(AppUiCommand::OpenSession(params)) if params.session_id.0 == "local:c"
+            ),
+            "the latest open leads the queue"
+        );
+        assert!(
+            state.pending_autonomy_hydration.len() <= 16,
+            "the local-open path must respect the queue cap, got {}",
+            state.pending_autonomy_hydration.len()
+        );
+    }
+
+    #[test]
+    fn hydration_queue_overflow_never_evicts_a_session_open() {
+        use octos_core::ui_protocol::SessionOpenParams;
+        let session_id = SessionKey("local:switch".into());
+        let mut state = AppState::new(Vec::new(), 0, "ready".into(), None, false);
+        for _ in 0..15 {
+            state.enqueue_autonomy_hydration(AppUiCommand::ListSessions(SessionListParams {
+                cwd: None,
+            }));
+        }
+        state
+            .pending_autonomy_hydration
+            .push_front(AppUiCommand::OpenSession(SessionOpenParams {
+                session_id: session_id.clone(),
+                topic: None,
+                profile_id: None,
+                cwd: None,
+                sandbox: None,
+                after: None,
+            }));
+        assert_eq!(
+            state.pending_autonomy_hydration.len(),
+            16,
+            "precondition: the queue sits exactly at its cap"
+        );
+
+        state.enqueue_autonomy_hydration(AppUiCommand::SubmitPrompt(TurnStartParams {
+            tool_context: None,
+            session_id: session_id.clone(),
+            turn_id: TurnId::new(),
+            input: vec![InputItem::Text {
+                text: "continue".into(),
+            }],
+            media: Vec::new(),
+            topic: None,
+            rewrite_for: None,
+            reasoning_effort: None,
+            live_video: false,
+        }));
+
+        assert!(
+            matches!(
+                state.pending_autonomy_hydration.front(),
+                Some(AppUiCommand::OpenSession(params)) if params.session_id == session_id
+            ),
+            "the tab-switch open must survive at the front, got {:?}",
+            state.pending_autonomy_hydration.front()
+        );
+        assert!(
+            matches!(
+                state.pending_autonomy_hydration.back(),
+                Some(AppUiCommand::SubmitPrompt(_))
+            ),
+            "the staged submit queues BEHIND the open"
+        );
+        assert_eq!(
+            state.pending_autonomy_hydration.len(),
+            16,
+            "still bounded: the oldest non-open entry was evicted"
+        );
+    }
+
+    /// When every queued entry is a `session/open`, the incoming command is
+    /// dropped — and the drop surfaced in the status line — rather than any
+    /// open being evicted.
+    #[test]
+    fn hydration_queue_full_of_opens_drops_the_incoming_command_and_reports_it() {
+        use octos_core::ui_protocol::SessionOpenParams;
+        let mut state = AppState::new(Vec::new(), 0, "ready".into(), None, false);
+        for index in 0..16 {
+            state.enqueue_autonomy_hydration(AppUiCommand::OpenSession(SessionOpenParams {
+                session_id: SessionKey(format!("local:{index}")),
+                topic: None,
+                profile_id: None,
+                cwd: None,
+                sandbox: None,
+                after: None,
+            }));
+        }
+        let dropped_session = SessionKey("local:dropped".into());
+        state.hydrate_in_flight.insert(dropped_session.clone());
+        let dropped = AppUiCommand::HydrateSession(SessionHydrateParams {
+            session_id: dropped_session.clone(),
+            after: None,
+            include: Vec::new(),
+        });
+        let method = dropped.method().to_string();
+
+        state.enqueue_autonomy_hydration(dropped);
+
+        assert!(!state.hydrate_in_flight.contains(&dropped_session));
+        assert_eq!(state.pending_autonomy_hydration.len(), 16);
+        assert!(
+            state
+                .pending_autonomy_hydration
+                .iter()
+                .all(|command| matches!(command, AppUiCommand::OpenSession(_))),
+            "no session/open may be evicted"
+        );
+        assert_eq!(
+            state.status,
+            t!("status.hydration_queue_full", method = method).into_owned(),
+            "the dropped command is surfaced"
+        );
+    }
+
+    #[test]
+    fn local_session_open_eviction_clears_hydrate_in_flight() {
+        use octos_core::ui_protocol::SessionOpenParams;
+        let mut state = AppState::new(Vec::new(), 0, "ready".into(), None, false);
+        for index in 0..16 {
+            let session_id = SessionKey(format!("local:{index}"));
+            state.hydrate_in_flight.insert(session_id.clone());
+            state.enqueue_autonomy_hydration(AppUiCommand::HydrateSession(SessionHydrateParams {
+                session_id,
+                after: None,
+                include: Vec::new(),
+            }));
+        }
+        state.enqueue_local_session_open_front(AppUiCommand::OpenSession(SessionOpenParams {
+            session_id: SessionKey("local:active".into()),
+            topic: None,
+            profile_id: None,
+            cwd: None,
+            sandbox: None,
+            after: None,
+        }));
+        assert_eq!(state.pending_autonomy_hydration.len(), 16);
+        assert!(
+            !state
+                .hydrate_in_flight
+                .contains(&SessionKey("local:15".into()))
+        );
+        assert_eq!(state.hydrate_in_flight.len(), 15);
+    }
+
     /// `completed_turns` grows on EVERY terminal for the life of the session;
     /// without a cap a long-running session retains every turn id ever seen.
     /// Mirror `finalized_by_switch`'s bounded FIFO: oldest ids evict first and
@@ -12623,6 +13280,38 @@ mod tests {
         )
     }
 
+    /// A paste beyond the typed-content safety threshold remains collapsed
+    /// after editing, but newly typed text must render outside the paste chip.
+    #[test]
+    fn typed_text_after_huge_paste_stays_visible_outside_the_chip() {
+        let mut state = paste_test_state();
+        let block = (1..=40)
+            .map(|i| format!("pasted line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        state.insert_pasted_text(&block);
+
+        state.insert_composer_char('x');
+        state.insert_composer_char('y');
+
+        assert_eq!(state.composer, format!("{block}xy"));
+        assert_eq!(state.composer_paste_span, Some(0..block.len()));
+        let ComposerPresentation::Collapsed(collapse) = state.composer_presentation() else {
+            panic!("40 pasted lines should remain collapsed after typing");
+        };
+        assert_eq!(
+            &collapse.display[collapse.chip.end..],
+            "xy",
+            "typed text must echo after the collapsed paste chip"
+        );
+        assert_eq!(
+            collapse.summary,
+            format!("40 lines · {} chars", block.chars().count()),
+            "the chip count must continue to describe only the pasted text"
+        );
+        assert_eq!(collapse.cursor, collapse.display.len());
+    }
+
     /// A large paste followed by a SMALL paste event must not destroy the draft.
     ///
     /// `insert_pasted_text` clears `composer_pasted` for a small fragment (so a
@@ -12652,7 +13341,8 @@ mod tests {
             false,
         );
 
-        state.insert_composer_text("before ");
+        state.insert_composer_text("before  after");
+        state.composer_cursor = Some("before ".len());
         // 40 lines: above BOTH the paste thresholds and the 32-line typed one,
         // so it stays Collapsed even once `composer_pasted` is cleared.
         let block = (1..=40)
@@ -12660,7 +13350,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         state.insert_pasted_text(&block);
-        state.insert_composer_text(" after");
+        assert!(state.composer_pasted, "large paste sets the flag");
         assert!(state.composer_paste_span.is_some(), "span recorded");
 
         // A tiny fragment delivered as a Paste event (fast IME burst, or

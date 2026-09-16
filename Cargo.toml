@@ -1,6 +1,6 @@
 [package]
 name = "octoscode"
-version = "0.3.0-rc.9"
+version = "0.3.0-rc.10"
 edition = "2024"
 rust-version = "1.85.0"
 license = "Apache-2.0"
@@ -21,7 +21,7 @@ path = "src/main.rs"
 # Pin the exact commit behind the matching octos release tag recorded in
 # `backend_ensure`, so source builds and auto-provisioned binaries share one
 # protocol revision.
-octos-core = { git = "https://github.com/octos-org/octos", rev = "f049d8704f8239c9eac2d910206f566c7bdda684" }
+octos-core = { git = "https://github.com/octos-org/octos", rev = "d51601dff70cb27318ac7b3bd95e1c018132b756" }
 # Startup splash animation engine (specs/task-startup-splash.spec). Git dep +
 # optional local patch, same pattern as octos-core above. ttfx itself only
 # depends on clap + terminal_size.

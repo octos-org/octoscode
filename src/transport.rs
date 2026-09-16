@@ -27,7 +27,6 @@ use octos_core::ui_protocol::{
     UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1, UI_PROTOCOL_FEATURE_PLAN_TODOS_V1,
     UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2, UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1,
     UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1, UI_PROTOCOL_FEATURE_USER_QUESTION_V1,
-    UI_PROTOCOL_V1,
 };
 use octos_core::{Message, SessionKey, TaskId};
 use serde_json::Value;
@@ -51,29 +50,30 @@ use crate::{
     client_event::{
         AuthLogoutClientEvent, AuthMeClientEvent, AuthSendCodeClientEvent, AuthStatusClientEvent,
         AuthVerifyClientEvent, AutonomyClientEvent, AutonomyResult, CapabilitiesClientEvent,
-        ClientEvent, LocalShellResultEvent, McpConfigListClientEvent, McpConfigMutationClientEvent,
-        McpStatusClientEvent, ModelListClientEvent, ModelSelectClientEvent,
-        PermissionProfileClientEvent, ProfileLlmCatalogClientEvent, ProfileLlmListClientEvent,
-        ProfileLlmMutationClientEvent, ProfileLocalCreateClientEvent, ProfileSkillsListClientEvent,
+        ClientEvent, ContextLifecycleClientEvent, LocalShellResultEvent, McpConfigListClientEvent,
+        McpConfigMutationClientEvent, McpStatusClientEvent, ModelListClientEvent,
+        ModelSelectClientEvent, PermissionProfileClientEvent, ProfileLlmCatalogClientEvent,
+        ProfileLlmListClientEvent, ProfileLlmMutationClientEvent, ProfileLlmMutationKind,
+        ProfileLocalCreateClientEvent, ProfileSkillsListClientEvent,
         ProfileSkillsMutationClientEvent, ProfileSkillsRegistrySearchClientEvent,
-        SessionBtwClientEvent, SessionStatusClientEvent, SubProvidersListClientEvent,
-        SubProvidersMutationClientEvent, ToolConfigListClientEvent, ToolConfigMutationClientEvent,
-        ToolStatusClientEvent,
+        SessionBtwClientEvent, SessionHydrateContextClientEvent, SessionStatusClientEvent,
+        SubProvidersListClientEvent, SubProvidersMutationClientEvent, ToolConfigListClientEvent,
+        ToolConfigMutationClientEvent, ToolStatusClientEvent,
     },
     model::{
         AppUiAuthToken, AppUiCommand, AuthLogoutResult, AuthMeResult, AuthSendCodeResult,
         AuthStatusResult, AuthVerifyResult, ConfigCapabilitiesListParams,
-        ConfigCapabilitiesListResult, DiffPreview, DiffPreviewFile, DiffPreviewGetResult,
-        DiffPreviewHunk, DiffPreviewLine, McpConfigEntry, McpConfigListResult,
-        McpConfigMutationResult, McpStatus, McpStatusListResult, McpStatusSummary, ModelListResult,
-        ModelSelectResult, ModelStatus, ProfileLlmCatalogResult, ProfileLlmListParams,
-        ProfileLlmListResult, ProfileLlmMutationResult, ProfileLocalCreateResult,
-        ProfileSkillEntry, ProfileSkillRegistryPackage, ProfileSkillsListResult,
-        ProfileSkillsMutationResult, ProfileSkillsRegistrySearchResult, ReviewStartResult,
-        RuntimeHealthStatus, RuntimePolicyMcpServer, RuntimePolicyStamp, SessionStatusReadResult,
-        SubProvidersListResult, SubProvidersMutationResult, ToolConfigEntry, ToolConfigListResult,
-        ToolConfigMutationResult, ToolPolicyDenial, ToolStatus, ToolStatusListResult,
-        ToolStatusSummary, auth_me_email, auth_me_profile_id,
+        ConfigCapabilitiesListResult, ContextCacheDiagnostics, DiffPreview, DiffPreviewFile,
+        DiffPreviewGetResult, DiffPreviewHunk, DiffPreviewLine, McpConfigEntry,
+        McpConfigListResult, McpConfigMutationResult, McpStatus, McpStatusListResult,
+        McpStatusSummary, ModelListResult, ModelSelectResult, ModelStatus, ProfileLlmCatalogResult,
+        ProfileLlmListParams, ProfileLlmListResult, ProfileLlmMutationResult,
+        ProfileLocalCreateResult, ProfileSkillEntry, ProfileSkillRegistryPackage,
+        ProfileSkillsListResult, ProfileSkillsMutationResult, ProfileSkillsRegistrySearchResult,
+        ReviewStartResult, RuntimeHealthStatus, RuntimePolicyMcpServer, RuntimePolicyStamp,
+        SessionStatusReadResult, SubProvidersListResult, SubProvidersMutationResult,
+        ToolConfigEntry, ToolConfigListResult, ToolConfigMutationResult, ToolPolicyDenial,
+        ToolStatus, ToolStatusListResult, ToolStatusSummary, auth_me_email, auth_me_profile_id,
     },
 };
 
@@ -82,6 +82,22 @@ use crate::{
 // ahead of rendering so stdio stdout does not back up into the backend writer.
 const PROTOCOL_TRANSPORT_QUEUE_CAPACITY: usize = 4096;
 const MAX_PENDING_REQUESTS: usize = 256;
+const APPUI_METHOD_CLIENT_HELLO: &str = "client_hello";
+/// A scoped open is a correctness barrier, not an unbounded wait. On timeout
+/// queued commands are failed explicitly and the connection is recycled so a
+/// later user action can retry the remembered scoped open safely.
+const SESSION_OPEN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+/// `client_hello` is a compatibility negotiation. A server that predates it
+/// falls back to its stdio defaults after this bounded wait.
+const CLIENT_HELLO_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
+/// A freshly spawned stdio child serves nothing until its bootstrap finishes
+/// (profile store, plugin verification, ledger recovery: ~10-15 s on a cold
+/// instance dir). Until the child has produced its FIRST frame, the hello and
+/// scoped-open barriers wait this long instead of their steady-state
+/// deadlines; a child that exits early still fails fast through the reader.
+/// Once any frame arrives the barrier clocks restart with the normal
+/// deadlines, so a wedged server is still bounded.
+const STDIO_CHILD_STARTUP_GRACE: Duration = Duration::from_secs(90);
 
 // ---------------------------------------------------------------------------
 // Pre-send error message contract (blackboard #28a)
@@ -235,6 +251,20 @@ impl AppUiEndpoint {
     }
 }
 
+/// Preserve locally-known hydrate attribution even when no RPC was admitted
+/// (size gates and commands waiting behind a scoped-open barrier).
+fn command_error_event(command: &AppUiCommand, code: &str, message: String) -> ClientEvent {
+    if let AppUiCommand::HydrateSession(params) = command {
+        ClientEvent::HydrateError(crate::client_event::HydrateErrorClientEvent {
+            session_id: params.session_id.clone(),
+            code: code.to_owned(),
+            message,
+        })
+    } else {
+        app_error(code, message).into()
+    }
+}
+
 pub trait AppUiBackend {
     fn bootstrap(&mut self) -> Result<AppUiSnapshot>;
     fn send(&mut self, command: AppUiCommand) -> Result<()>;
@@ -328,6 +358,9 @@ pub struct ProtocolAppUiBackend {
     /// selection back to it (and, with no launch `--session`, never re-opened
     /// the current session at all). Falls back to the launch session when
     /// nothing has been opened yet.
+    ///
+    /// An `OpenSession` is only a CANDIDATE here until its scoped
+    /// `session/opened` lands; see [`Self::confirmed_reopen_session`].
     reopen_session: Option<SessionOpenParams>,
     /// OUTER_LOOP_REVIEW #27: endpoint mode (WS to a remote `octos serve`)
     /// reconnects the TRANSPORT but never replays the session bootstrap the
@@ -340,7 +373,43 @@ pub struct ProtocolAppUiBackend {
     /// disconnect means its result died with the old connection); cleared
     /// when the result lands.
     pending_launch_resolve: Option<crate::model::LaunchResolveParams>,
+    /// The most recent reopen target the server actually CONFIRMED (a
+    /// matching `session/opened` through the scoped-open barrier). Hydrating
+    /// a known session may select that already-confirmed scope. When the server
+    /// definitively rejects an open, `reopen_session` reverts to this so a
+    /// reconnect never retries a session the server refused.
+    confirmed_reopen_session: Option<SessionOpenParams>,
+    /// A connection multiplexes the master and peer subscriptions. Remember
+    /// every confirmed scope, not only the last open (often an automatic peer
+    /// subscription), so a replacement cannot receive work for an unopened
+    /// master. The most recent target still reopens last.
+    confirmed_session_scopes: Vec<SessionOpenParams>,
+    /// Remaining scopes in this connection's serial reconnect handshake.
+    /// Deferred work and relaunch reconciliation wait for the whole set.
+    reconnect_session_scopes: VecDeque<AppUiCommand>,
+    /// A replacement stdio child has accepted its transport, but has not yet
+    /// confirmed the scoped `session/open`. Session-bound follow-ups must wait
+    /// here; OUP handles requests concurrently, so wire order alone does not
+    /// prevent a `turn/start` from establishing an unscoped affinity first.
+    reconnect_open_barrier: Option<SessionOpenBarrier>,
+    /// A rejected open leaves the requested workspace unconfirmed. Keep the
+    /// healthy transport usable for correction, but fail session-bound work
+    /// closed until an explicit/reconnect open succeeds (including TTL retries).
+    session_open_required: bool,
+    deferred_until_reconnect_open: VecDeque<AppUiCommand>,
+    sending_reconnect_open: bool,
+    /// A replacement stdio child is connected, but the store must not clear
+    /// dead-child turn state until that child's scoped session reopen lands.
+    /// Startup recovery can emit process-wide continuation notifications
+    /// before `session/open`; reconciling at connect time lets one of those
+    /// turns re-latch after the clear and then lose its terminal when the
+    /// subscription switches to the scoped stream.
+    backend_relaunch_reconcile_pending: bool,
+    client_hello_barrier: Option<RequestBarrier>,
     refresh_capabilities_on_reconnect: bool,
+    /// The current stdio child has written at least one frame, i.e. its
+    /// bootstrap is over and the steady-state barrier deadlines apply.
+    stdio_child_served_frame: bool,
     queue: VecDeque<ClientEvent>,
     protocol: ProtocolExchange,
 }
@@ -349,6 +418,18 @@ pub struct ProtocolAppUiBackend {
 enum ProtocolConnectionState {
     Disconnected,
     Connected,
+}
+
+#[derive(Debug, Clone)]
+struct RequestBarrier {
+    request_id: String,
+    started_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct SessionOpenBarrier {
+    request: RequestBarrier,
+    session_id: SessionKey,
 }
 
 /// Delay before the first reconnect retry; doubles per consecutive failure.
@@ -606,6 +687,30 @@ impl ProtocolExchange {
         Ok(request)
     }
 
+    fn build_client_hello_request(
+        &mut self,
+        supported_features: Vec<String>,
+    ) -> RpcRequest<serde_json::Value> {
+        let request_id = self.next_request_id();
+        self.pending_requests.insert(
+            request_id.clone(),
+            PendingRequest {
+                method: APPUI_METHOD_CLIENT_HELLO.to_owned(),
+                select_session: None,
+                hydrate_session: None,
+            },
+        );
+        RpcRequest::new(
+            request_id,
+            APPUI_METHOD_CLIENT_HELLO,
+            serde_json::json!({
+                "transport": "stdio",
+                "supported_features": supported_features,
+                "client": { "name": "octoscode" },
+            }),
+        )
+    }
+
     fn command_with_resume_cursor(&self, command: AppUiCommand) -> AppUiCommand {
         let AppUiCommand::OpenSession(mut params) = command else {
             return command;
@@ -620,8 +725,10 @@ impl ProtocolExchange {
 
     fn decode_rpc_text(&mut self, text: &str) -> Result<Option<ClientEvent>> {
         let event = rpc_text_to_app_event_with_pending(text, &mut self.pending_requests)?;
-        if let Some(ClientEvent::App(event)) = &event {
-            self.record_event_state(event);
+        match &event {
+            Some(ClientEvent::App(event)) => self.record_event_state(event),
+            Some(ClientEvent::ContextLifecycle(event)) => self.record_event_state(&event.event),
+            _ => {}
         }
         Ok(event)
     }
@@ -996,10 +1103,10 @@ impl StdioTransportDriver {
                 // --data-dir launches, remote launches, or when opted out via
                 // OCTOSCODE_SHARED_INSTANCE. Re-spawns (reconnects) resolve to
                 // the same dir, so a reconnect re-attaches, not forks.
-                if let Some(instance_dir) = crate::profiles::instance_data_dir_for_launch(
-                    Some(&self.command),
-                    &std::env::current_dir().unwrap_or_default(),
-                ) {
+                let process_cwd = std::env::current_dir().unwrap_or_default();
+                if let Some(instance_dir) =
+                    crate::profiles::instance_data_dir_for_launch(Some(&self.command), &process_cwd)
+                {
                     command.env("OCTOS_INSTANCE_DATA_DIR", &instance_dir);
                 }
                 command
@@ -1600,6 +1707,16 @@ impl ProtocolAppUiBackend {
             fatal_error: None,
             reopen_session: None,
             pending_launch_resolve: None,
+            confirmed_reopen_session: None,
+            confirmed_session_scopes: Vec::new(),
+            reconnect_session_scopes: VecDeque::new(),
+            reconnect_open_barrier: None,
+            session_open_required: false,
+            deferred_until_reconnect_open: VecDeque::new(),
+            sending_reconnect_open: false,
+            backend_relaunch_reconcile_pending: false,
+            client_hello_barrier: None,
+            stdio_child_served_frame: false,
             refresh_capabilities_on_reconnect: false,
             queue: VecDeque::new(),
             protocol: ProtocolExchange::default(),
@@ -1656,10 +1773,10 @@ impl ProtocolAppUiBackend {
         self.ensure_driver()?;
         // Compute the reconnect reopen target BEFORE borrowing `driver` mutably
         // (and before `mark_connected` clears `disconnected_status_reported`).
-        let reopen_command = if self.disconnected_status_reported {
-            self.reopen_session_open_command()
+        let mut reopen_commands = if self.disconnected_status_reported {
+            self.reopen_session_open_commands()
         } else {
-            None
+            VecDeque::new()
         };
         let runtime = self
             .runtime
@@ -1674,9 +1791,15 @@ impl ProtocolAppUiBackend {
             self.reconnect.record_failure(now);
             return Err(err);
         }
+        let reconnected_stdio_child = driver.is_stdio_child();
+        // A new child (or socket) has not served anything yet.
+        self.stdio_child_served_frame = false;
         self.reconnect.record_success(now);
         let endpoint = driver.label().to_string();
         self.mark_connected(&endpoint);
+        if reconnected_stdio_child {
+            self.start_stdio_client_hello()?;
+        }
         self.refresh_capabilities_after_reconnect()?;
         // #27: replay the session bootstrap BEFORE the session reopen — the
         // store's launch/resolve went out on the now-dead connection, its
@@ -1687,13 +1810,48 @@ impl ProtocolAppUiBackend {
         // `reopen_command.is_some()` marks a REAL reconnect (it is computed
         // only when a disconnect was reported) — replay the cached bootstrap
         // only then, never on the first connect of `bootstrap` itself.
-        if reopen_command.is_some()
+        if !reopen_commands.is_empty()
             && let Some(params) = self.pending_launch_resolve.clone()
         {
             self.send(AppUiCommand::LaunchResolve(params))?;
         }
-        if let Some(command) = reopen_command {
-            self.send(command)?;
+        if let Some(command) = reopen_commands.pop_front() {
+            self.reconnect_session_scopes = reopen_commands;
+            self.sending_reconnect_open = true;
+            let result = self.send(command);
+            self.sending_reconnect_open = false;
+            result?;
+        } else {
+            // No session scope exists to establish. Reconcile immediately;
+            // the scoped path queues this only after its `session/opened`.
+            self.queue_pending_backend_relaunch_reconcile();
+        }
+        Ok(())
+    }
+
+    fn start_stdio_client_hello(&mut self) -> Result<()> {
+        let request = self
+            .protocol
+            .build_client_hello_request(appui_feature_tokens_for(old_server_features_requested()));
+        let request_id = request.id.clone();
+        let text = serde_json::to_string(&request)
+            .wrap_err("failed to encode stdio client_hello request")?;
+        self.client_hello_barrier = Some(RequestBarrier {
+            request_id: request_id.clone(),
+            started_at: Instant::now(),
+        });
+        let send_result = self
+            .driver
+            .as_mut()
+            .ok_or_else(|| eyre!("UI protocol transport driver is not initialized"))?
+            .send_text(text);
+        if let Err(err) = send_result {
+            self.client_hello_barrier = None;
+            self.protocol.pending_requests.remove(&request_id);
+            self.mark_disconnected(
+                "UI protocol disconnected during stdio feature negotiation; reconnect will retry.",
+            );
+            return Err(err).wrap_err("failed to send stdio client_hello request");
         }
         Ok(())
     }
@@ -1717,18 +1875,31 @@ impl ProtocolAppUiBackend {
                 })
                 .into(),
             );
-            // A stdio reconnect spawned a NEW child process: no turn can be
-            // in flight there, but the app may still show one as live from
-            // the dead child (its terminal event died with the process).
-            // Tell the store to reconcile, or the composer queues every
-            // subsequent prompt behind the phantom turn.
+            // A stdio reconnect spawned a NEW child process: none of the old
+            // client's turns can still be in flight there, but the app may
+            // still show one as live from the dead child. The new daemon may
+            // also emit its own recovered continuation before scoped reopen,
+            // so latch the reconcile here and deliver it only after scope is
+            // established (or immediately when there is no reopen target).
             if self
                 .driver
                 .as_ref()
                 .is_some_and(ProtocolTransportDriver::is_stdio_child)
             {
-                self.queue.push_back(ClientEvent::BackendRelaunched);
+                self.backend_relaunch_reconcile_pending = true;
+                // Stamp the connection epoch BEFORE any frame of the
+                // replacement child can be read (`next_event` drains this
+                // queue first), so the store can tell the dead child's
+                // latched turns from turns the new child starts itself
+                // (a resumed continuation announced before the scoped open).
+                self.queue.push_back(ClientEvent::BackendConnectionEpoch);
             }
+        }
+    }
+
+    fn queue_pending_backend_relaunch_reconcile(&mut self) {
+        if std::mem::take(&mut self.backend_relaunch_reconcile_pending) {
+            self.queue.push_back(ClientEvent::BackendRelaunched);
         }
     }
 
@@ -1768,6 +1939,28 @@ impl ProtocolAppUiBackend {
         // reconnect schedule forward.
         self.reconnect.record_disconnect(Instant::now());
         self.refresh_capabilities_on_reconnect = true;
+        self.client_hello_barrier = None;
+        self.reconnect_open_barrier = None;
+        self.reconnect_session_scopes.clear();
+        // A command deferred behind this connection's barriers never crosses
+        // to the replacement child: it has no pending entry (so it would be
+        // flushed silently after the NEXT scoped open, on top of the store's
+        // own relaunch re-stage — a duplicate `turn/start`) or, worse, it
+        // would ride an unrelated child. Cancel it explicitly like a timed-out
+        // barrier does; the store re-stages a dead `turn/start` from its gate.
+        for command in self.deferred_until_reconnect_open.drain(..) {
+            self.queue.push_back(
+                command_error_event(
+                    &command,
+                    "request_cancelled",
+                    format!(
+                        "{} request cancelled because the connection was lost before the scoped session opened: {message}",
+                        command.method()
+                    ),
+                )
+                ,
+            );
+        }
         let cancelled_requests = self.protocol.cancel_pending_requests(&message);
 
         let should_report = self.connection_state != ProtocolConnectionState::Disconnected
@@ -1820,36 +2013,102 @@ impl ProtocolAppUiBackend {
     /// Both `OpenSession` (initial launch open, explicit open) and
     /// `HydrateSession` (the `/resume` path — store.rs returns a
     /// `HydrateSession`, never an `OpenSession`) mark the session the user has
-    /// switched their attention to. The reconnect always re-subscribes via
-    /// `OpenSession`, so a recorded `HydrateSession` is stored as an
-    /// `OpenSession` carrying the launch profile/cwd (a hydrate request does not
-    /// carry them; the server keys an existing session on its id).
+    /// switched their attention to. Hydration has no scope authority: for a
+    /// known session it reuses the full confirmed open, including sandbox
+    /// narrowing. `send` scopes an unknown hydrate through an explicit open
+    /// barrier before it reaches this helper.
     ///
     /// The resume cursor is reset — `command_with_resume_cursor` refills it from
     /// `session_cursors` at reopen time so we resume from the latest seq rather
     /// than a stale one captured here.
     ///
-    /// Known gap: a purely-local session-pane tab-switch to an already-loaded
-    /// session sends no command, so the transport cannot observe it here; a
-    /// reconnect then reopens the last EXPLICITLY opened/resumed session. The
-    /// reported wedge (/resume then backend restart) is covered.
+    /// Purely-local session-pane switches are surfaced by the store as an
+    /// explicit `OpenSession`, so this target also follows tab navigation.
+    ///
+    /// An `OpenSession` becomes only the CANDIDATE: it is promoted to
+    /// [`Self::confirmed_reopen_session`] when its scoped `session/opened`
+    /// lands, and reverted to the previous confirmed target if the server
+    /// rejects it. A `HydrateSession` must never invent a confirmed scope from
+    /// launch defaults or overwrite the restrictions of an existing one.
     fn record_reopen_target(&mut self, command: &AppUiCommand) {
         let params = match command {
             AppUiCommand::OpenSession(params) => SessionOpenParams {
                 after: None,
                 ..params.clone()
             },
-            AppUiCommand::HydrateSession(params) => SessionOpenParams {
-                session_id: params.session_id.clone(),
-                topic: None,
-                profile_id: self.launch.profile_id.clone(),
-                cwd: self.launch.cwd.clone(),
-                sandbox: None,
-                after: None,
-            },
+            AppUiCommand::HydrateSession(params) => {
+                let Some(params) = self
+                    .confirmed_session_scopes
+                    .iter()
+                    .find(|scope| scope.session_id == params.session_id)
+                    .cloned()
+                else {
+                    return;
+                };
+                self.confirmed_reopen_session = Some(params.clone());
+                params
+            }
             _ => return,
         };
         self.reopen_session = Some(params);
+    }
+
+    fn open_before_unknown_hydrate(&self, command: &AppUiCommand) -> Option<AppUiCommand> {
+        let AppUiCommand::HydrateSession(params) = command else {
+            return None;
+        };
+        if self
+            .confirmed_session_scopes
+            .iter()
+            .any(|scope| scope.session_id == params.session_id)
+        {
+            return None;
+        }
+        Some(AppUiCommand::OpenSession(SessionOpenParams {
+            session_id: params.session_id.clone(),
+            topic: None,
+            profile_id: self.launch.profile_id.clone(),
+            cwd: self
+                .protocol
+                .session_workspace_roots
+                .get(&params.session_id)
+                .cloned()
+                .or_else(|| self.launch.cwd.clone()),
+            sandbox: None,
+            after: None,
+        }))
+    }
+
+    fn remember_confirmed_session_scope(&mut self, params: SessionOpenParams) {
+        self.confirmed_session_scopes
+            .retain(|known| known.session_id != params.session_id);
+        self.confirmed_session_scopes.push(params);
+    }
+
+    fn reopen_session_open_commands(&self) -> VecDeque<AppUiCommand> {
+        let current = self.reopen_session_open_command();
+        let current_session = current.as_ref().and_then(|command| match command {
+            AppUiCommand::OpenSession(params) => Some(&params.session_id),
+            _ => None,
+        });
+        let mut commands: VecDeque<_> = self
+            .confirmed_session_scopes
+            .iter()
+            .filter(|params| Some(&params.session_id) != current_session)
+            .map(|params| {
+                let mut params = params.clone();
+                if let Some(root) = self
+                    .protocol
+                    .session_workspace_roots
+                    .get(&params.session_id)
+                {
+                    params.cwd = Some(root.clone());
+                }
+                AppUiCommand::OpenSession(params)
+            })
+            .collect();
+        commands.extend(current);
+        commands
     }
 
     /// The session to re-open after a reconnect: the most recently opened
@@ -1901,7 +2160,31 @@ impl ProtocolAppUiBackend {
         command: AppUiCommand,
     ) -> Result<RpcRequest<serde_json::Value>> {
         let command = self.fill_session_list_cwd(command);
+        let command = self.fill_session_open_cwd(command);
         self.protocol.build_tracked_request(command)
+    }
+
+    /// Scope an outgoing `session/open` that carries no `cwd` to the session's
+    /// server-confirmed workspace root, when one was captured from an earlier
+    /// `session/opened` (#476). The store's local tab-switch open takes its
+    /// cwd only from the per-session runtime status, which may not exist yet;
+    /// a cwd-less open would let the server rescope the session to its
+    /// default workspace. Mirrors [`Self::fill_session_list_cwd`]: only fills
+    /// when the caller left `cwd` unset (an explicit cwd — reconnect reopen,
+    /// launch open, a test — is preserved) and leaves it absent when no root
+    /// is known, so the server fallback is unchanged.
+    fn fill_session_open_cwd(&self, command: AppUiCommand) -> AppUiCommand {
+        let AppUiCommand::OpenSession(mut params) = command else {
+            return command;
+        };
+        if params.cwd.is_none() {
+            params.cwd = self
+                .protocol
+                .session_workspace_roots
+                .get(&params.session_id)
+                .cloned();
+        }
+        AppUiCommand::OpenSession(params)
     }
 
     /// Stamp the launch workspace cwd onto an outgoing `session/list` request
@@ -1933,7 +2216,266 @@ impl ProtocolAppUiBackend {
     }
 
     fn decode_rpc_text(&mut self, text: &str) -> Result<Option<ClientEvent>> {
-        self.protocol.decode_rpc_text(text)
+        let response_request = response_request_id(text).and_then(|request_id| {
+            self.protocol
+                .pending_requests
+                .get(&request_id)
+                .cloned()
+                .map(|pending| (request_id, pending))
+        });
+        let event = self.protocol.decode_rpc_text(text)?;
+        let Some((request_id, pending)) = response_request else {
+            return Ok(event);
+        };
+
+        if pending.method == APPUI_METHOD_CLIENT_HELLO
+            && self
+                .client_hello_barrier
+                .as_ref()
+                .is_some_and(|barrier| barrier.request_id == request_id)
+        {
+            self.client_hello_barrier = None;
+            self.protocol.pending_requests.remove(&request_id);
+            let negotiated = matches!(event, Some(ClientEvent::Capabilities(_)));
+            if !negotiated {
+                self.queue.push_back(
+                    AppUiEvent::Status(AppUiStatus {
+                        message: "Server does not support stdio client feature negotiation; using legacy defaults."
+                            .into(),
+                    })
+                    .into(),
+                );
+            }
+            self.flush_deferred_after_protocol_barrier();
+            return if negotiated {
+                Ok(event)
+            } else {
+                Ok(self.queue.pop_front())
+            };
+        }
+
+        if pending.method == methods::SESSION_OPEN
+            && self
+                .reconnect_open_barrier
+                .as_ref()
+                .is_some_and(|barrier| barrier.request.request_id == request_id)
+        {
+            let expected_session = self
+                .reconnect_open_barrier
+                .as_ref()
+                .map(|barrier| barrier.session_id.clone());
+            let opened_session = opened_session_from_client_event(event.as_ref());
+            if opened_session == expected_session {
+                self.reconnect_open_barrier = None;
+                self.session_open_required = false;
+                // The server confirmed this scope: promote the candidate so a
+                // later rejected open has a known-good target to fall back to.
+                self.confirmed_reopen_session = self.reopen_session.clone();
+                if let Some(params) = self.confirmed_reopen_session.clone() {
+                    self.remember_confirmed_session_scope(params);
+                }
+                // Queue the clear BEFORE releasing deferred session commands.
+                // `next_event` drains this queue before reading their replies,
+                // so the store sees: stray startup events -> session/opened ->
+                // relaunch reconcile -> any newly submitted scoped turn.
+                if let Some(command) = self.reconnect_session_scopes.pop_front() {
+                    self.sending_reconnect_open = true;
+                    let result = self.send(command);
+                    self.sending_reconnect_open = false;
+                    result?;
+                } else {
+                    self.queue_pending_backend_relaunch_reconcile();
+                    self.flush_deferred_after_protocol_barrier();
+                }
+            } else if response_is_rpc_error(text) {
+                // The transport is healthy, but the requested scope was NOT
+                // established. Keep global discovery/corrective opens usable;
+                // reject scoped follow-ups rather than letting turn/start
+                // establish an unscoped affinity. A queued corrective open
+                // re-arms the barrier before its own follow-ups are sent.
+                self.reconnect_open_barrier = None;
+                self.session_open_required = true;
+                self.reconnect_session_scopes.clear();
+                self.reopen_session = self.confirmed_reopen_session.clone();
+                self.queue_pending_backend_relaunch_reconcile();
+                self.flush_deferred_after_protocol_barrier();
+            } else {
+                // Ambiguous: a success response that did not name the expected
+                // session (mismatched id, malformed `opened`). The server may
+                // have scoped the connection to something we did not ask for,
+                // so tearing the transport down and reopening the remembered
+                // session is the only way back to a known scope.
+                self.fail_session_open_barrier(format!(
+                    "session/open request {request_id} did not return the expected scoped session"
+                ));
+            }
+        }
+        Ok(event)
+    }
+
+    fn defer_until_protocol_barrier(
+        &mut self,
+        command: AppUiCommand,
+        waiting_on: &str,
+    ) -> Result<()> {
+        if self.deferred_until_reconnect_open.len() >= MAX_PENDING_REQUESTS {
+            self.queue.push_back(
+                command_error_event(&command,
+                    "protocol_barrier_queue_full",
+                    format!(
+                        "{waiting_on} is still pending; refusing to queue {} after {MAX_PENDING_REQUESTS} deferred request(s)",
+                        command.method()
+                    ),
+                ),
+            );
+        } else {
+            self.deferred_until_reconnect_open.push_back(command);
+        }
+        Ok(())
+    }
+
+    fn flush_deferred_after_protocol_barrier(&mut self) {
+        while let Some(command) = self.deferred_until_reconnect_open.pop_front() {
+            if let Err(error) = self.send(command.clone()) {
+                self.deferred_until_reconnect_open.push_front(command);
+                self.queue.push_back(
+                    AppUiEvent::Error(AppUiError {
+                        code: "reconnect_followup_deferred".into(),
+                        message: format!(
+                            "session reopened, but a deferred follow-up is still waiting: {error:#}"
+                        ),
+                    })
+                    .into(),
+                );
+                break;
+            }
+            if self.client_hello_barrier.is_some() || self.reconnect_open_barrier.is_some() {
+                break;
+            }
+        }
+    }
+
+    fn reject_command_without_confirmed_open(&mut self, command: AppUiCommand) {
+        let message = format!(
+            "{} was not sent because session/open was rejected; open the intended session successfully before retrying",
+            command.method()
+        );
+        if matches!(command, AppUiCommand::HydrateSession(_)) {
+            self.queue.push_back(command_error_event(
+                &command,
+                "session_open_rejected",
+                message,
+            ));
+            return;
+        }
+        let event = match command {
+            // A generic request_cancelled automatically re-stages turn/start
+            // in the store. Use its typed terminal to settle exactly this
+            // submission, retain its prompt/error, and avoid a retry loop.
+            AppUiCommand::SubmitPrompt(params) => AppUiEvent::Protocol(UiNotification::TurnError(
+                octos_core::ui_protocol::TurnErrorEvent {
+                    token_usage: None,
+                    partial_result: None,
+                    session_id: params.session_id,
+                    topic: params.topic,
+                    turn_id: params.turn_id,
+                    code: "session_open_rejected".into(),
+                    message,
+                },
+            )),
+            _ => app_error("session_open_rejected", message),
+        };
+        self.queue.push_back(event.into());
+    }
+
+    /// Tear down the scoped-open barrier when scope establishment is
+    /// AMBIGUOUS — a success response naming a different session, a malformed
+    /// `opened`, or no response at all (timeout). A definite RPC rejection is
+    /// NOT routed here (see `decode_rpc_text`): the server answered on a live
+    /// connection, so the transport stays up but scoped work fails closed.
+    fn fail_session_open_barrier(&mut self, reason: String) {
+        let request_id = self
+            .reconnect_open_barrier
+            .take()
+            .map(|barrier| barrier.request.request_id);
+        if let Some(request_id) = request_id {
+            self.protocol.pending_requests.remove(&request_id);
+        }
+        for command in self.deferred_until_reconnect_open.drain(..) {
+            self.queue.push_back(command_error_event(
+                &command,
+                "request_cancelled",
+                format!(
+                    "{} request cancelled because the scoped session did not open: {reason}",
+                    command.method()
+                ),
+            ));
+        }
+        self.mark_disconnected(format!(
+            "UI protocol scope establishment failed: {reason}; reconnect will retry the remembered session."
+        ));
+    }
+
+    /// The first frame from a connection ends its startup grace: restart the
+    /// clocks of any armed barrier so the steady-state deadlines count from
+    /// the moment the server is demonstrably serving, not from spawn.
+    fn note_connection_served_frame(&mut self) {
+        if self.stdio_child_served_frame {
+            return;
+        }
+        self.stdio_child_served_frame = true;
+        let now = Instant::now();
+        if let Some(barrier) = self.client_hello_barrier.as_mut() {
+            barrier.started_at = now;
+        }
+        if let Some(barrier) = self.reconnect_open_barrier.as_mut() {
+            barrier.request.started_at = now;
+        }
+    }
+
+    /// True while a stdio child is connected but has not produced a frame:
+    /// its bootstrap is still running and barrier deadlines use the startup
+    /// grace instead of the steady-state values.
+    fn stdio_child_startup_pending(&self) -> bool {
+        self.driver
+            .as_ref()
+            .is_some_and(ProtocolTransportDriver::is_stdio_child)
+            && !self.stdio_child_served_frame
+    }
+
+    fn check_protocol_barrier_timeouts(&mut self) {
+        let now = Instant::now();
+        let startup_pending = self.stdio_child_startup_pending();
+        let hello_deadline = if startup_pending {
+            STDIO_CHILD_STARTUP_GRACE
+        } else {
+            CLIENT_HELLO_RESPONSE_TIMEOUT
+        };
+        let open_deadline = if startup_pending {
+            STDIO_CHILD_STARTUP_GRACE
+        } else {
+            SESSION_OPEN_RESPONSE_TIMEOUT
+        };
+        if self.client_hello_barrier.as_ref().is_some_and(|barrier| {
+            now.saturating_duration_since(barrier.started_at) >= hello_deadline
+        }) {
+            if let Some(barrier) = self.client_hello_barrier.take() {
+                self.protocol.pending_requests.remove(&barrier.request_id);
+            }
+            self.queue.push_back(
+                AppUiEvent::Status(AppUiStatus {
+                    message: "Stdio feature negotiation timed out; using legacy server defaults."
+                        .into(),
+                })
+                .into(),
+            );
+            self.flush_deferred_after_protocol_barrier();
+        }
+        if self.reconnect_open_barrier.as_ref().is_some_and(|barrier| {
+            now.saturating_duration_since(barrier.request.started_at) >= open_deadline
+        }) {
+            self.fail_session_open_barrier("session/open response timed out".into());
+        }
     }
 
     fn readonly_allows_command(command: &AppUiCommand) -> bool {
@@ -2030,6 +2572,7 @@ impl ProtocolAppUiBackend {
                     ))
                 ) {
                     self.reconnect.record_frame();
+                    self.note_connection_served_frame();
                 }
                 Ok(event)
             }
@@ -2273,6 +2816,7 @@ impl AppUiBackend for ProtocolAppUiBackend {
     }
 
     fn send(&mut self, command: AppUiCommand) -> Result<()> {
+        self.check_protocol_barrier_timeouts();
         // `!`-bang local exec is a client-local action, not a backend turn:
         // intercept it before the readonly gate and before any JSON-RPC
         // encoding. The real event loop consumes it first because only that
@@ -2335,6 +2879,74 @@ impl AppUiBackend for ProtocolAppUiBackend {
             return Ok(());
         }
 
+        // Reject intrinsically oversized requests before connecting or
+        // opening a scope. The final tracked-wire gate below still checks
+        // the actual request after reconnect can change cursors/identifiers.
+        let preview_id = format!("tui-{}", self.protocol.next_request_id.saturating_add(1));
+        let preview_command =
+            self.fill_session_open_cwd(self.fill_session_list_cwd(command.clone()));
+        let preview = rpc_request_from_command(preview_id.clone(), preview_command)?;
+        let preview_bytes = serde_json::to_vec(&preview)
+            .wrap_err("failed to encode JSON-RPC request preflight")?
+            .len();
+        if preview_bytes > MAX_TEXT_FRAME_BYTES {
+            self.queue.push_back(command_error_event(
+                &command,
+                "frame_too_large",
+                frame_too_large_message(command.method(), &preview_id, preview_bytes),
+            ));
+            return Ok(());
+        }
+
+        // A fresh stdio connection first negotiates its feature set through
+        // the server-supported `client_hello` RPC. Hold all public commands
+        // until that response (or compatibility fallback) so concurrent OUP
+        // handlers cannot observe a pre-negotiation session/open.
+        self.ensure_connected()?;
+        if self.client_hello_barrier.is_some() {
+            self.defer_until_protocol_barrier(command, "stdio client feature negotiation")?;
+            return Ok(());
+        }
+
+        // Every session/open — reconnect-generated or locally selected — is a
+        // scoped affinity barrier. Wire order is insufficient because OUP
+        // dispatches requests concurrently.
+        let may_cross_reconnect_barrier = self.sending_reconnect_open
+            || matches!(command, AppUiCommand::ListConfigCapabilities(_));
+        if self.reconnect_open_barrier.is_some() && !may_cross_reconnect_barrier {
+            self.defer_until_protocol_barrier(command, "session/open")?;
+            return Ok(());
+        }
+
+        if self.session_open_required
+            && !matches!(
+                command,
+                AppUiCommand::OpenSession(_)
+                    | AppUiCommand::ListSessions(_)
+                    | AppUiCommand::ListConfigCapabilities(_)
+                    | AppUiCommand::LaunchResolve(_)
+            )
+            && !command.method().starts_with("profile/")
+            && !command.method().starts_with("auth/")
+        {
+            self.reject_command_without_confirmed_open(command);
+            return Ok(());
+        }
+
+        if let Some(open) = self.open_before_unknown_hydrate(&command) {
+            self.send(open)?;
+            if self.reconnect_open_barrier.is_some()
+                && self.deferred_until_reconnect_open.len() < MAX_PENDING_REQUESTS
+            {
+                // This expands the current FIFO item in place: hydration must
+                // still precede the commands that were queued after it.
+                self.deferred_until_reconnect_open.push_front(command);
+            } else {
+                self.reject_command_without_confirmed_open(command);
+            }
+            return Ok(());
+        }
+
         // Record the reconnect reopen target AFTER the readonly/pending-cap
         // gates (so a genuinely-rejected command never becomes the reopen
         // target) and before `build_tracked_request` consumes `command`.
@@ -2346,6 +2958,10 @@ impl AppUiBackend for ProtocolAppUiBackend {
             self.pending_launch_resolve = Some(params.clone());
         }
 
+        let opening_session = match &command {
+            AppUiCommand::OpenSession(params) => Some(params.session_id.clone()),
+            _ => None,
+        };
         let request = self.build_tracked_request(command)?;
         let request_id = request.id.clone();
         let method = request.method.clone();
@@ -2375,6 +2991,16 @@ impl AppUiBackend for ProtocolAppUiBackend {
             };
             self.queue.push_back(event);
             return Ok(());
+        }
+
+        if let Some(session_id) = opening_session {
+            self.reconnect_open_barrier = Some(SessionOpenBarrier {
+                request: RequestBarrier {
+                    request_id: request_id.clone(),
+                    started_at: Instant::now(),
+                },
+                session_id,
+            });
         }
 
         if let Err(err) = self.send_text(text) {
@@ -2412,6 +3038,7 @@ impl AppUiBackend for ProtocolAppUiBackend {
     }
 
     fn next_event(&mut self) -> Result<Option<ClientEvent>> {
+        self.check_protocol_barrier_timeouts();
         let event = if let Some(event) = self.queue.pop_front() {
             Some(event)
         } else {
@@ -2469,24 +3096,26 @@ pub(crate) fn install_local_shell_parent_signal_shield() -> std::io::Result<()> 
     static INSTALL_ERROR: OnceLock<Option<String>> = OnceLock::new();
     let error = INSTALL_ERROR.get_or_init(|| {
         let intercepted = Arc::new(AtomicBool::new(false));
-        signal_hook::flag::register(
+        let sigint_error = signal_hook::flag::register(
             signal_hook::consts::signal::SIGINT,
             Arc::clone(&intercepted),
         )
         .err()
-        .map(|err| format!("failed to shield parent from SIGINT: {err}"))
-        .or_else(|| {
-            #[cfg(not(windows))]
-            {
-                signal_hook::flag::register(signal_hook::consts::signal::SIGQUIT, intercepted)
-                    .err()
-                    .map(|err| format!("failed to shield parent from SIGQUIT: {err}"))
-            }
-            #[cfg(windows)]
-            {
-                None
-            }
-        })
+        .map(|err| format!("failed to shield parent from SIGINT: {err}"));
+        if sigint_error.is_some() {
+            return sigint_error;
+        }
+
+        #[cfg(not(windows))]
+        {
+            signal_hook::flag::register(signal_hook::consts::signal::SIGQUIT, intercepted)
+                .err()
+                .map(|err| format!("failed to shield parent from SIGQUIT: {err}"))
+        }
+        #[cfg(windows)]
+        {
+            None
+        }
     });
 
     match error {
@@ -2614,21 +3243,49 @@ fn websocket_request(
 /// must hide those controls and never probe `review/start`, `task/list`,
 /// or `task/artifact/*`.
 fn appui_feature_header_value() -> String {
-    let old_server = std::env::var("OCTOSCODE_OLD_SERVER_FEATURES").as_deref() == Ok("1");
-    appui_feature_header_for(old_server)
+    appui_feature_header_for(old_server_features_requested())
+}
+
+fn old_server_features_requested() -> bool {
+    std::env::var("OCTOSCODE_OLD_SERVER_FEATURES").as_deref() == Ok("1")
 }
 
 fn appui_feature_header_for(old_server: bool) -> String {
+    appui_feature_tokens_for(old_server).join(", ")
+}
+
+fn appui_feature_tokens_for(old_server: bool) -> Vec<String> {
+    let baseline = [
+        UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1,
+        UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1,
+        UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1,
+        UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1,
+        UI_PROTOCOL_FEATURE_USER_QUESTION_V1,
+    ];
     if old_server {
-        return format!(
-            "{UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1}, {UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1}, {UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1}, {UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1}, {UI_PROTOCOL_FEATURE_USER_QUESTION_V1}"
-        );
+        return baseline.into_iter().map(str::to_owned).collect();
     }
-    format!(
-        "{UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1}, {UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1}, {UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1}, {UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1}, {UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1}, {UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1}, {UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1}, {UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1}, {UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1}, {UI_PROTOCOL_FEATURE_USER_QUESTION_V1}, {UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1}, {UI_PROTOCOL_FEATURE_PLAN_TODOS_V1}, {}, {UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2}, {}",
+    [
+        UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1,
+        UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1,
+        UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1,
+        UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1,
+        UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1,
+        UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1,
+        UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1,
+        UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1,
+        UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1,
+        UI_PROTOCOL_FEATURE_USER_QUESTION_V1,
+        UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1,
+        UI_PROTOCOL_FEATURE_PLAN_TODOS_V1,
         crate::model::APPUI_FEATURE_BACKGROUND_ACTIVITY_V1,
-        crate::model::APPUI_FEATURE_TURN_STEER_DROPPED_V1
-    )
+        UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2,
+        crate::model::APPUI_FEATURE_TURN_STEER_DROPPED_V1,
+        crate::model::APPUI_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 fn protocol_snapshot_from_launch(launch: &AppUiLaunch, endpoint: &str) -> AppUiSnapshot {
@@ -2639,14 +3296,11 @@ fn protocol_snapshot_from_launch(launch: &AppUiLaunch, endpoint: &str) -> AppUiS
             id: session_id,
             title: "Protocol session".into(),
             profile_id: launch.profile_id.clone(),
-            messages: vec![Message::system(if launch.readonly {
-                format!("Read-only {UI_PROTOCOL_V1} session; mutating commands disabled")
-            } else {
-                format!(
-                    "Connected to {UI_PROTOCOL_V1} over {}",
-                    protocol_transport_description(endpoint)
-                )
-            })],
+            // Connection/read-only state belongs to snapshot.status below,
+            // not canonical conversation history. An invisible local system
+            // placeholder shifts the committed prefix and makes the first
+            // hydrate re-flush a user prompt already in native scrollback.
+            messages: Vec::new(),
             tasks: vec![],
             live_reply: None,
         })
@@ -2708,14 +3362,6 @@ fn is_secret_env_name(name: &str) -> bool {
         || upper.contains("API_KEY")
 }
 
-fn protocol_transport_description(endpoint: &str) -> &'static str {
-    if is_websocket_url(endpoint) {
-        "WebSocket"
-    } else {
-        "stdio"
-    }
-}
-
 fn tui_capabilities() -> UiProtocolCapabilities {
     let mut capabilities = UiProtocolCapabilities::first_server_slice();
     if !capabilities
@@ -2726,6 +3372,11 @@ fn tui_capabilities() -> UiProtocolCapabilities {
         capabilities
             .supported_features
             .push(UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2.into());
+    }
+    if !capabilities.supports_feature(crate::model::APPUI_FEATURE_CONTEXT_SEMANTIC_CACHE_V1) {
+        capabilities
+            .supported_features
+            .push(crate::model::APPUI_FEATURE_CONTEXT_SEMANTIC_CACHE_V1.into());
     }
     for method in [
         crate::model::APPUI_METHOD_CONFIG_CAPABILITIES_LIST,
@@ -2978,7 +3629,7 @@ fn rpc_value_to_app_event(
                 params,
             )));
         }
-        return Ok(Some(notification_to_app_event(method, params).into()));
+        return Ok(Some(notification_to_client_event(method, params)));
     }
 
     if has_result || has_error || has_id {
@@ -3065,6 +3716,20 @@ fn success_response_to_app_event(
     };
 
     match pending_request.method.as_str() {
+        APPUI_METHOD_CLIENT_HELLO => {
+            match serde_json::from_value::<ConfigCapabilitiesListResult>(result) {
+                Ok(result) => Ok(Some(capabilities_event(result))),
+                Err(err) => Ok(Some(
+                    app_error(
+                        "invalid_result",
+                        format!(
+                            "failed to decode UI protocol result for {APPUI_METHOD_CLIENT_HELLO}: {err}"
+                        ),
+                    )
+                    .into(),
+                )),
+            }
+        }
         crate::model::APPUI_METHOD_CONFIG_CAPABILITIES_LIST => {
             match serde_json::from_value::<ConfigCapabilitiesListResult>(result) {
                 Ok(result) => Ok(Some(capabilities_event(result))),
@@ -3080,21 +3745,53 @@ fn success_response_to_app_event(
                 )),
             }
         }
-        methods::SESSION_OPEN => match serde_json::from_value::<SessionOpenResult>(result) {
-            Ok(result) => Ok(Some(
-                AppUiEvent::Protocol(UiNotification::SessionOpened(result.opened)).into(),
-            )),
-            Err(err) => Ok(Some(
-                app_error(
-                    "invalid_result",
-                    format!(
-                        "failed to decode UI protocol result for {}: {err}",
-                        methods::SESSION_OPEN
-                    ),
-                )
-                .into(),
-            )),
-        },
+        methods::SESSION_OPEN => {
+            let diagnostics = context_cache_diagnostics_from_context_state(
+                result
+                    .get("opened")
+                    .and_then(|opened| opened.get("context_state")),
+            );
+            let semantic_cache_advertised = result
+                .get("opened")
+                .and_then(|opened| opened.get("capabilities"))
+                .and_then(|capabilities| capabilities.get("supported_features"))
+                .and_then(Value::as_array)
+                .map(|features| {
+                    features.iter().any(|feature| {
+                        feature.as_str()
+                            == Some(crate::model::APPUI_FEATURE_CONTEXT_SEMANTIC_CACHE_V1)
+                    })
+                });
+            match serde_json::from_value::<SessionOpenResult>(result) {
+                Ok(result) => {
+                    let session_id = result.opened.session_id.clone();
+                    let has_context_state = result.opened.context_state.is_some();
+                    let event = AppUiEvent::Protocol(UiNotification::SessionOpened(result.opened));
+                    if has_context_state {
+                        Ok(Some(ClientEvent::ContextLifecycle(
+                            ContextLifecycleClientEvent {
+                                event: Box::new(event),
+                                session_id,
+                                diagnostics,
+                                semantic_cache_advertised,
+                            },
+                        )))
+                    } else {
+                        Ok(Some(event.into()))
+                    }
+                }
+                Err(err) => Ok(Some(
+                    app_error(
+                        "invalid_result",
+                        format!(
+                            "failed to decode UI protocol result for {}: {err}",
+                            methods::SESSION_OPEN
+                        ),
+                    )
+                    .into(),
+                )),
+            }
+        }
         crate::model::APPUI_METHOD_SESSION_STATUS_READ => {
             match serde_json::from_value::<SessionStatusReadResult>(result) {
                 Ok(result) => Ok(Some(session_status_event(result))),
@@ -3267,11 +3964,11 @@ fn success_response_to_app_event(
                 )),
             }
         }
-        crate::model::APPUI_METHOD_PROFILE_LLM_UPSERT
+        method @ (crate::model::APPUI_METHOD_PROFILE_LLM_UPSERT
         | crate::model::APPUI_METHOD_PROFILE_LLM_DELETE
-        | crate::model::APPUI_METHOD_PROFILE_LLM_TEST => {
+        | crate::model::APPUI_METHOD_PROFILE_LLM_TEST) => {
             match serde_json::from_value::<ProfileLlmMutationResult>(result) {
-                Ok(result) => Ok(Some(profile_llm_mutation_event(result))),
+                Ok(result) => Ok(Some(profile_llm_mutation_event(method, result))),
                 Err(err) => Ok(Some(
                     app_error(
                         "invalid_result",
@@ -3460,24 +4157,34 @@ fn success_response_to_app_event(
                 ))),
             }
         }
-        methods::SESSION_HYDRATE => match serde_json::from_value::<SessionHydrateResult>(result) {
-            Ok(result) => Ok(Some(ClientEvent::SessionHydrate(result))),
-            Err(err) => {
-                // #22b-r1: decode failure is attributable LOCALLY via the
-                // pending entry — release only that session's marker.
-                let message = invalid_result_message(methods::SESSION_HYDRATE, &err);
-                Ok(Some(match pending_request.hydrate_session.clone() {
-                    Some(session_id) => {
-                        ClientEvent::HydrateError(crate::client_event::HydrateErrorClientEvent {
-                            session_id,
-                            code: "invalid_result".into(),
-                            message,
-                        })
-                    }
-                    None => app_error("invalid_result", message).into(),
-                }))
+        methods::SESSION_HYDRATE => {
+            let diagnostics =
+                context_cache_diagnostics_from_context_state(result.get("context_state"));
+            match serde_json::from_value::<SessionHydrateResult>(result) {
+                Ok(result) if result.context_state.is_some() => Ok(Some(
+                    ClientEvent::SessionHydrateContext(SessionHydrateContextClientEvent {
+                        result,
+                        diagnostics,
+                    }),
+                )),
+                Ok(result) => Ok(Some(ClientEvent::SessionHydrate(result))),
+                Err(err) => {
+                    // #22b-r1: decode failure is attributable LOCALLY via the
+                    // pending entry — release only that session's marker.
+                    let message = invalid_result_message(methods::SESSION_HYDRATE, &err);
+                    Ok(Some(match pending_request.hydrate_session.clone() {
+                        Some(session_id) => ClientEvent::HydrateError(
+                            crate::client_event::HydrateErrorClientEvent {
+                                session_id,
+                                code: "invalid_result".into(),
+                                message,
+                            },
+                        ),
+                        None => app_error("invalid_result", message).into(),
+                    }))
+                }
             }
-        },
+        }
         methods::SESSION_LIST => match serde_json::from_value::<SessionListResult>(result) {
             Ok(result) => Ok(Some(ClientEvent::SessionList(result))),
             Err(err) => Ok(Some(autonomy_decode_error(methods::SESSION_LIST, err))),
@@ -3870,7 +4577,9 @@ fn model_select_event(
     result: ModelSelectResult,
     initiating_session: Option<SessionKey>,
 ) -> ClientEvent {
-    let prefix = if result.applied {
+    let prefix = if result.restart_required && result.applied {
+        "Model saved; restart required"
+    } else if result.applied {
         "Model selected"
     } else {
         "Model unchanged"
@@ -3905,7 +4614,13 @@ fn profile_llm_list_event(result: ProfileLlmListResult) -> ClientEvent {
     })
 }
 
-fn profile_llm_mutation_event(result: ProfileLlmMutationResult) -> ClientEvent {
+fn profile_llm_mutation_event(method: &str, result: ProfileLlmMutationResult) -> ClientEvent {
+    let kind = match method {
+        crate::model::APPUI_METHOD_PROFILE_LLM_UPSERT => ProfileLlmMutationKind::Upsert,
+        crate::model::APPUI_METHOD_PROFILE_LLM_DELETE => ProfileLlmMutationKind::Delete,
+        crate::model::APPUI_METHOD_PROFILE_LLM_TEST => ProfileLlmMutationKind::Test,
+        _ => unreachable!("not a profile/llm mutation method: {method}"),
+    };
     let count = result.models().len();
     let message = match (
         result.applied,
@@ -3917,7 +4632,11 @@ fn profile_llm_mutation_event(result: ProfileLlmMutationResult) -> ClientEvent {
         (false, None, Some(error)) => format!("Provider operation failed: {error}"),
         _ => format!("Provider profile updated: {count} configured provider(s)"),
     };
-    ClientEvent::ProfileLlmMutation(ProfileLlmMutationClientEvent { message, result })
+    ClientEvent::ProfileLlmMutation(ProfileLlmMutationClientEvent {
+        kind,
+        message,
+        result,
+    })
 }
 
 fn snapshot_list_event(result: crate::model::SnapshotListResult) -> ClientEvent {
@@ -4382,6 +5101,42 @@ fn response_id(
     }
 }
 
+fn response_request_id(text: &str) -> Option<String> {
+    let frame = serde_json::from_str::<Value>(text).ok()?;
+    let frame = frame.as_object()?;
+    (frame.contains_key("result") || frame.contains_key("error"))
+        .then(|| response_id(frame).ok().flatten())
+        .flatten()
+}
+
+/// True for a JSON-RPC response frame that carries an `error` member (and no
+/// `result`): the server DEFINITELY rejected the request, as opposed to a
+/// success response whose shape could not be interpreted.
+fn response_is_rpc_error(text: &str) -> bool {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|frame| {
+            frame
+                .as_object()
+                .map(|frame| frame.contains_key("error") && !frame.contains_key("result"))
+        })
+        .unwrap_or(false)
+}
+
+fn opened_session_from_client_event(event: Option<&ClientEvent>) -> Option<SessionKey> {
+    let app_event = match event? {
+        ClientEvent::App(event) => event.as_ref(),
+        ClientEvent::ContextLifecycle(event) => event.event.as_ref(),
+        _ => return None,
+    };
+    match app_event {
+        AppUiEvent::Protocol(UiNotification::SessionOpened(opened)) => {
+            Some(opened.session_id.clone())
+        }
+        _ => None,
+    }
+}
+
 /// octos#1801 v3: decodes the durable `peer/staged` notification into the
 /// typed [`ClientEvent::PeerStaged`] via the tui-local
 /// [`crate::model::PeerStagedParams`] mirror (the vendored octos-core rev has
@@ -4456,6 +5211,91 @@ fn notification_to_app_event(method: &str, params: Value) -> AppUiEvent {
             ),
         ),
     }
+}
+
+/// Decode a notification through the pinned protocol crate, while retaining
+/// additive semantic-cache fields that this OctosCode revision does not yet
+/// know about. Lifecycle notifications always use the wrapper, including for
+/// an old server with no fields, so a new lifecycle generation can atomically
+/// clear diagnostics from the prior generation.
+fn notification_to_client_event(method: &str, params: Value) -> ClientEvent {
+    let diagnostics = context_cache_diagnostics_from_params(method, &params);
+    let event = notification_to_app_event(method, params);
+    let session_id = match &event {
+        AppUiEvent::Protocol(UiNotification::ContextCompactionStarted(event)) => {
+            Some(event.session_id.clone())
+        }
+        AppUiEvent::Protocol(UiNotification::ContextCompactionCompleted(event)) => {
+            Some(event.session_id.clone())
+        }
+        AppUiEvent::Protocol(UiNotification::ContextNormalizationReported(event)) => {
+            Some(event.session_id.clone())
+        }
+        _ => None,
+    };
+
+    match session_id {
+        Some(session_id) => ClientEvent::ContextLifecycle(ContextLifecycleClientEvent {
+            event: Box::new(event),
+            session_id,
+            diagnostics,
+            semantic_cache_advertised: None,
+        }),
+        None => event.into(),
+    }
+}
+
+fn context_cache_diagnostics_from_params(
+    method: &str,
+    params: &Value,
+) -> Option<ContextCacheDiagnostics> {
+    if !matches!(
+        method,
+        methods::CONTEXT_COMPACTION_STARTED
+            | methods::CONTEXT_COMPACTION_COMPLETED
+            | methods::CONTEXT_NORMALIZATION_REPORTED
+    ) {
+        return None;
+    }
+
+    context_cache_diagnostics_from_context_state(params.get("context_state"))
+}
+
+fn context_cache_diagnostics_from_context_state(
+    context_state: Option<&Value>,
+) -> Option<ContextCacheDiagnostics> {
+    let context_state = context_state?;
+    let diagnostics = ContextCacheDiagnostics {
+        cache_epoch_id: bounded_context_diagnostic(context_state, "cache_epoch_id"),
+        last_cache_invalidation_reason: bounded_context_diagnostic(
+            context_state,
+            "last_cache_invalidation_reason",
+        ),
+        semantic_head_id: bounded_context_diagnostic(context_state, "semantic_head_id"),
+        semantic_head_kind: bounded_context_diagnostic(context_state, "semantic_head_kind"),
+    };
+    (!diagnostics.is_empty()).then_some(diagnostics)
+}
+
+/// Diagnostic fields are untrusted wire labels. Strip terminal control
+/// sequences at ingestion and bound them independently so a valid protocol
+/// frame cannot turn the `/context` pane into an unbounded allocation.
+fn bounded_context_diagnostic(context_state: &Value, key: &str) -> Option<String> {
+    const MAX_DIAGNOSTIC_CHARS: usize = 256;
+
+    let raw = context_state.get(key)?.as_str()?;
+    let sanitized = crate::sanitize::strip_terminal_controls(raw);
+    let normalized = sanitized.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    let mut chars = normalized.chars();
+    let bounded: String = chars.by_ref().take(MAX_DIAGNOSTIC_CHARS).collect();
+    Some(if chars.next().is_some() {
+        format!("{bounded}…")
+    } else {
+        bounded
+    })
 }
 
 fn rpc_error_code(error: &Value) -> String {
@@ -4866,6 +5706,7 @@ impl AppUiBackend for MockAppUiBackend {
                         session_id: params.session_id.clone(),
                         selected,
                         applied: true,
+                        restart_required: false,
                         runtime_policy_stamp: None,
                     },
                     Some(params.session_id),
@@ -4898,17 +5739,29 @@ impl AppUiBackend for MockAppUiBackend {
                         session_id: initiating.clone(),
                         selected,
                         applied: true,
+                        restart_required: false,
                         runtime_policy_stamp: None,
                     },
                     Some(initiating),
                 ));
                 Ok(())
             }
-            AppUiCommand::ProfileLlmUpsert(_)
+            command @ (AppUiCommand::ProfileLlmUpsert(_)
             | AppUiCommand::ProfileLlmDelete(_)
-            | AppUiCommand::ProfileLlmTest(_) => {
-                self.queue
-                    .push_back(profile_llm_mutation_event(ProfileLlmMutationResult {
+            | AppUiCommand::ProfileLlmTest(_)) => {
+                let method = match command {
+                    AppUiCommand::ProfileLlmUpsert(_) => {
+                        crate::model::APPUI_METHOD_PROFILE_LLM_UPSERT
+                    }
+                    AppUiCommand::ProfileLlmDelete(_) => {
+                        crate::model::APPUI_METHOD_PROFILE_LLM_DELETE
+                    }
+                    AppUiCommand::ProfileLlmTest(_) => crate::model::APPUI_METHOD_PROFILE_LLM_TEST,
+                    _ => unreachable!(),
+                };
+                self.queue.push_back(profile_llm_mutation_event(
+                    method,
+                    ProfileLlmMutationResult {
                         profile_id: Some(self.profile_id()),
                         primary: mock_profile_llm_list().primary,
                         fallbacks: mock_profile_llm_list().fallbacks,
@@ -4917,7 +5770,8 @@ impl AppUiBackend for MockAppUiBackend {
                         runtime_policy_stamp: None,
                         message: None,
                         error: None,
-                    }));
+                    },
+                ));
                 Ok(())
             }
             AppUiCommand::AuthStatus(_) => {
@@ -5874,9 +6728,9 @@ mod tests {
         ApprovalDecision, ApprovalRespondParams, ApprovalScopesListParams, DiffPreviewGetParams,
         InputItem, PermissionNetworkPolicy, PermissionProfileListParams, PermissionProfileMode,
         PermissionProfileSetParams, PermissionProfileUpdate, PreviewId, SessionHydrateParams,
-        SessionOpenParams, TaskArtifactReadParams, TaskCancelParams, TaskListParams,
-        TaskOutputReadParams, TaskRestartFromNodeParams, ThreadGraphGetParams, TurnInterruptParams,
-        TurnLifecycleState, TurnStartParams, TurnStateGetParams, UiCursor,
+        SessionListParams, SessionOpenParams, TaskArtifactReadParams, TaskCancelParams,
+        TaskListParams, TaskOutputReadParams, TaskRestartFromNodeParams, ThreadGraphGetParams,
+        TurnInterruptParams, TurnLifecycleState, TurnStartParams, TurnStateGetParams, UiCursor,
     };
     use serde_json::json;
     use std::{
@@ -5928,12 +6782,17 @@ mod tests {
         assert!(modern.contains(UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1));
         assert!(modern.contains(UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1));
         assert!(modern.contains(UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2));
+        assert!(modern.contains(crate::model::APPUI_FEATURE_CONTEXT_SEMANTIC_CACHE_V1));
         // Modern advertises the plan/todo checklist so the server streams
         // `plan/updated`; old-server mode drops it.
         assert!(modern.contains(UI_PROTOCOL_FEATURE_PLAN_TODOS_V1));
         assert!(!appui_feature_header_for(true).contains(UI_PROTOCOL_FEATURE_PLAN_TODOS_V1));
         assert!(
             !appui_feature_header_for(true).contains(UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2)
+        );
+        assert!(
+            !appui_feature_header_for(true)
+                .contains(crate::model::APPUI_FEATURE_CONTEXT_SEMANTIC_CACHE_V1)
         );
 
         // Old-server mode drops autonomy/agent-control/goal/loop/task-control
@@ -5955,6 +6814,11 @@ mod tests {
         assert!(
             tui_capabilities().supports_feature(UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2),
             "the TUI capability response must opt into canonical v2 envelopes"
+        );
+        assert!(
+            tui_capabilities()
+                .supports_feature(crate::model::APPUI_FEATURE_CONTEXT_SEMANTIC_CACHE_V1),
+            "the TUI capability response must request semantic-cache diagnostics"
         );
     }
 
@@ -6249,6 +7113,11 @@ mod tests {
                     };
                     let frame: Value = serde_json::from_str(&text).expect("request is JSON");
                     let method = frame["method"].as_str().expect("method");
+                    // Simulate a LOST launch/resolve response, not an
+                    // acknowledged one (acknowledgement disarms replay).
+                    if method == "launch/resolve" {
+                        break;
+                    }
                     let result = match method {
                         "config/capabilities/list" => json!({ "capabilities": tui_capabilities() }),
                         // LaunchResolveResult: decision is the bare snake_case
@@ -8869,6 +9738,190 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_notification_retains_additive_cache_diagnostics() {
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "method": methods::CONTEXT_NORMALIZATION_REPORTED,
+            "params": {
+                "session_id": "local:test",
+                "context_state": {
+                    "session_id": "local:test",
+                    "thread_id": "thread-1",
+                    "generation": 7,
+                    "transcript_hash": "sha256:transcript",
+                    "item_count": 12,
+                    "token_estimate": 5000,
+                    "recovery_state": "healthy",
+                    "cache_epoch_id": "sha256:epoch-7",
+                    "last_cache_invalidation_reason": "compaction_installed",
+                    "semantic_head_id": "semblk_000012",
+                    "semantic_head_kind": "tool_interaction"
+                },
+                "normalization": {
+                    "generation": 7,
+                    "input_transcript_hash": "sha256:transcript",
+                    "output_prompt_hash": "sha256:prompt",
+                    "model_capability_id": "openai/gpt-5",
+                    "prompt_message_count": 12,
+                    "token_estimate": 5000,
+                    "repaired_count": 0,
+                    "dropped_count": 0,
+                    "synthetic_count": 0,
+                    "truncated_count": 0
+                }
+            }
+        })
+        .to_string();
+
+        let event = rpc_text_to_app_event(&frame)
+            .expect("frame decodes")
+            .expect("notification yields event");
+        let ClientEvent::ContextLifecycle(event) = event else {
+            panic!("expected lifecycle wrapper");
+        };
+        assert_eq!(event.session_id.0, "local:test");
+        let diagnostics = event.diagnostics.expect("semantic diagnostics");
+        assert_eq!(
+            diagnostics.cache_epoch_id.as_deref(),
+            Some("sha256:epoch-7")
+        );
+        assert_eq!(
+            diagnostics.last_cache_invalidation_reason.as_deref(),
+            Some("compaction_installed")
+        );
+        assert_eq!(
+            diagnostics.semantic_head_id.as_deref(),
+            Some("semblk_000012")
+        );
+        assert_eq!(
+            diagnostics.semantic_head_kind.as_deref(),
+            Some("tool_interaction")
+        );
+        assert!(matches!(
+            *event.event,
+            AppUiEvent::Protocol(UiNotification::ContextNormalizationReported(_))
+        ));
+    }
+
+    #[test]
+    fn compaction_started_and_completed_retain_cache_diagnostics() {
+        let context_state = json!({
+            "session_id": "local:test",
+            "thread_id": "thread-1",
+            "generation": 7,
+            "transcript_hash": "sha256:transcript",
+            "item_count": 12,
+            "token_estimate": 5000,
+            "recovery_state": "healthy",
+            "cache_epoch_id": "sha256:epoch-7",
+            "semantic_head_id": "semblk_000012",
+            "semantic_head_kind": "tool_interaction"
+        });
+        let started = json!({
+            "jsonrpc": "2.0",
+            "method": methods::CONTEXT_COMPACTION_STARTED,
+            "params": {
+                "session_id": "local:test",
+                "context_state": context_state.clone(),
+                "trigger": "token_budget",
+                "threshold_tokens": 8000
+            }
+        });
+        let completed = json!({
+            "jsonrpc": "2.0",
+            "method": methods::CONTEXT_COMPACTION_COMPLETED,
+            "params": {
+                "session_id": "local:test",
+                "context_state": context_state,
+                "compaction": {
+                    "compaction_id": "comp-7",
+                    "checkpoint_id": "chk-7",
+                    "status": "applied",
+                    "policy_id": "default",
+                    "trigger": "token_budget",
+                    "input_generation": 6,
+                    "output_generation": 7,
+                    "input_transcript_hash": "sha256:old",
+                    "replacement_transcript_hash": "sha256:transcript",
+                    "installed_transcript_hash": "sha256:transcript",
+                    "input_item_count": 30,
+                    "retained_count": 12,
+                    "dropped_count": 18,
+                    "summary_item_id": "sum-7",
+                    "token_estimate_before": 11000,
+                    "token_estimate_after": 5000,
+                    "error": null
+                }
+            }
+        });
+
+        for (frame, started_expected) in [(started, true), (completed, false)] {
+            let event = rpc_text_to_app_event(&frame.to_string())
+                .expect("frame decodes")
+                .expect("notification yields event");
+            let ClientEvent::ContextLifecycle(event) = event else {
+                panic!("expected lifecycle wrapper");
+            };
+            let diagnostics = event.diagnostics.expect("semantic diagnostics");
+            assert_eq!(
+                diagnostics.cache_epoch_id.as_deref(),
+                Some("sha256:epoch-7")
+            );
+            assert_eq!(
+                matches!(
+                    *event.event,
+                    AppUiEvent::Protocol(UiNotification::ContextCompactionStarted(_))
+                ),
+                started_expected
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_lifecycle_notification_carries_an_explicit_empty_diagnostic_snapshot() {
+        let mut fixture: Value =
+            serde_json::from_str(include_str!("../fixtures/m16_context_lifecycle.json"))
+                .expect("fixture parses");
+        let event = fixture["events"].as_array_mut().expect("events").remove(0);
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "method": event["method"].clone(),
+            "params": event["params"].clone(),
+        })
+        .to_string();
+
+        let event = rpc_text_to_app_event(&frame)
+            .expect("frame decodes")
+            .expect("notification yields event");
+        let ClientEvent::ContextLifecycle(event) = event else {
+            panic!("lifecycle frames must carry an atomic diagnostic snapshot");
+        };
+        assert!(event.diagnostics.is_none());
+    }
+
+    #[test]
+    fn context_diagnostic_wire_labels_are_sanitized_and_bounded() {
+        let long_epoch = format!("\u{1b}[2J{}", "e".repeat(400));
+        let params = json!({
+            "context_state": {
+                "cache_epoch_id": long_epoch,
+                "semantic_head_kind": "tool\u{1b}[31m\ninteraction"
+            }
+        });
+
+        let diagnostics =
+            context_cache_diagnostics_from_params(methods::CONTEXT_COMPACTION_STARTED, &params)
+                .expect("diagnostics retained");
+        let epoch = diagnostics.cache_epoch_id.expect("epoch");
+        assert!(!epoch.contains('\u{1b}'));
+        assert_eq!(epoch.chars().count(), 257, "256 chars plus ellipsis");
+        assert_eq!(
+            diagnostics.semantic_head_kind.as_deref(),
+            Some("tool interaction")
+        );
+    }
+
+    #[test]
     fn progress_notification_maps_to_app_progress_event() {
         let frame = json!({
             "jsonrpc": "2.0",
@@ -9540,6 +10593,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn protocol_preserves_profile_llm_delete_kind() {
+        let mut exchange = ProtocolExchange::default();
+        let request = exchange
+            .build_tracked_request(AppUiCommand::ProfileLlmDelete(
+                crate::model::ProfileLlmDeleteParams {
+                    profile_id: Some("coding".into()),
+                    family_id: "moonshot-coding".into(),
+                    model_id: "k3".into(),
+                    route_id: "official".into(),
+                },
+            ))
+            .expect("request builds");
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": request.id,
+            "result": {
+                "profile_id": "coding",
+                "primary": null,
+                "fallbacks": [],
+                "applied": true
+            }
+        });
+
+        let event = exchange
+            .decode_rpc_text(&response.to_string())
+            .expect("response decodes")
+            .expect("delete result yields an event");
+        let ClientEvent::ProfileLlmMutation(event) = event else {
+            panic!("expected profile LLM mutation event");
+        };
+        assert_eq!(event.kind, ProfileLlmMutationKind::Delete);
+    }
+
     /// `profile/llm/fetch_models` responses must produce an event: this arm
     /// was missing, so the result was silently dropped and onboarding's
     /// "Fetch models" button appeared dead against a real backend (the mock
@@ -10146,6 +11233,53 @@ mod tests {
         event
     }
 
+    #[test]
+    fn scoped_barrier_failures_keep_deferred_hydrate_attributed() {
+        for fail_scope in [false, true] {
+            let mut backend = ProtocolAppUiBackend::new(AppUiLaunch::default());
+            backend
+                .deferred_until_reconnect_open
+                .push_back(hydrate_command("local:held"));
+            if fail_scope {
+                backend.fail_session_open_barrier("fixture malformed open".into());
+            } else {
+                backend.mark_disconnected("fixture child lost");
+            }
+            let errors: Vec<_> = backend
+                .queue
+                .into_iter()
+                .filter_map(|event| match event {
+                    ClientEvent::HydrateError(error) => Some(error),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(errors.len(), 1);
+            assert_eq!(errors[0].session_id, SessionKey("local:held".into()));
+            assert_eq!(errors[0].code, "request_cancelled");
+        }
+    }
+
+    #[test]
+    fn delivered_launch_resolve_disarms_bootstrap_replay() {
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch::default());
+        backend.pending_launch_resolve = Some(crate::model::LaunchResolveParams {
+            cwd: "/repo".into(),
+            profile_id: None,
+        });
+        backend.queue.push_back(ClientEvent::LaunchResolve(
+            crate::model::LaunchResolveResult {
+                decision: crate::model::LaunchDecisionKind::Resume,
+                resolved_profile: None,
+                existing_profiles: vec![],
+            },
+        ));
+        assert!(matches!(
+            backend.next_event().unwrap(),
+            Some(ClientEvent::LaunchResolve(_))
+        ));
+        assert!(backend.pending_launch_resolve.is_none());
+    }
+
     /// Seam 1: pending-cap refusal (send-time, pre-wire).
     #[test]
     fn hydrate_pending_cap_refusal_emits_attributed_error() {
@@ -10274,6 +11408,16 @@ mod tests {
             ..AppUiLaunch::default()
         });
         backend.bootstrap().expect("bootstrap over live socket");
+        // This seam tests a hydrate writer failure in an ALREADY opened
+        // scope; unknown-scope hydration has a separate session/open gate.
+        backend.remember_confirmed_session_scope(SessionOpenParams {
+            session_id: SessionKey("local:hydrate-send".into()),
+            topic: None,
+            profile_id: None,
+            cwd: None,
+            sandbox: None,
+            after: None,
+        });
         // Let the writer task observe the close before we send.
         thread::sleep(Duration::from_millis(200));
 
@@ -11208,6 +12352,59 @@ mod tests {
     }
 
     #[test]
+    fn model_select_restart_required_is_preserved_and_reported_as_pending() {
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch {
+            endpoint: Some(AppUiEndpoint::websocket(
+                "wss://example.test/ui-protocol",
+                None,
+            )),
+            ..AppUiLaunch::default()
+        });
+        let initiating_session = SessionKey("local:test".into());
+        let request = backend
+            .build_tracked_request(AppUiCommand::ProfileLlmSelect(
+                crate::model::ProfileLlmSelectParams {
+                    profile_id: Some("dev".into()),
+                    session_id: Some(initiating_session.clone()),
+                    family_id: "deepseek".into(),
+                    model_id: "deepseek-chat".into(),
+                    route_id: "official".into(),
+                },
+            ))
+            .expect("model select request builds");
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "id": request.id,
+            "result": {
+                "session_id": "dev:local:tui#coding",
+                "selected": {
+                    "model": "deepseek-chat",
+                    "provider": "deepseek",
+                    "selected": true,
+                    "available": true
+                },
+                "applied": true,
+                "restart_required": true
+            }
+        })
+        .to_string();
+
+        let event = backend
+            .decode_rpc_text(&frame)
+            .expect("model select response decodes")
+            .expect("model select event");
+        let ClientEvent::ModelSelect(event) = event else {
+            panic!("expected model select event");
+        };
+        assert!(event.result.restart_required);
+        assert_eq!(event.initiating_session, Some(initiating_session));
+        assert_eq!(
+            event.message,
+            "Model saved; restart required: deepseek / deepseek-chat"
+        );
+    }
+
+    #[test]
     fn protocol_backend_maps_interrupt_success_to_cancel_status() {
         let mut backend = ProtocolAppUiBackend::new(AppUiLaunch {
             endpoint: Some(AppUiEndpoint::websocket(
@@ -11397,6 +12594,66 @@ mod tests {
         assert_eq!(request.params, json!({}));
     }
 
+    /// P2-20: a locally generated `session/open` (the tab switch) can carry
+    /// `cwd: None` when no runtime status was captured for the session; the
+    /// server would then rescope it to its default workspace (#476). The
+    /// transport is the one place that knows the server-confirmed workspace
+    /// root, so it fills the cwd from `session_workspace_roots` — and leaves
+    /// it absent when nothing was captured (server fallback unchanged).
+    #[test]
+    fn local_session_open_without_cwd_is_scoped_to_the_captured_workspace_root() {
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch {
+            endpoint: Some(AppUiEndpoint::websocket(
+                "wss://example.test/ui-protocol",
+                None,
+            )),
+            cwd: None,
+            ..AppUiLaunch::default()
+        });
+        backend.protocol.session_workspace_roots.insert(
+            SessionKey("local:known".into()),
+            "/confirmed/workspace".into(),
+        );
+        let open = |session_id: &str, cwd: Option<&str>| {
+            AppUiCommand::OpenSession(SessionOpenParams {
+                session_id: SessionKey(session_id.into()),
+                topic: None,
+                profile_id: Some("dev".into()),
+                cwd: cwd.map(str::to_owned),
+                sandbox: None,
+                after: None,
+            })
+        };
+
+        let request = backend
+            .build_tracked_request(open("local:known", None))
+            .expect("request builds");
+        assert_eq!(request.method, methods::SESSION_OPEN);
+        assert_eq!(
+            request.params["cwd"],
+            json!("/confirmed/workspace"),
+            "a cwd-less local open is scoped to the captured workspace root"
+        );
+
+        let request = backend
+            .build_tracked_request(open("local:unknown", None))
+            .expect("request builds");
+        assert!(
+            request.params.get("cwd").is_none_or(Value::is_null),
+            "no captured root: cwd stays absent for the server fallback, got {:?}",
+            request.params
+        );
+
+        let request = backend
+            .build_tracked_request(open("local:known", Some("/explicit")))
+            .expect("request builds");
+        assert_eq!(
+            request.params["cwd"],
+            json!("/explicit"),
+            "an explicit cwd is never overridden"
+        );
+    }
+
     #[test]
     fn protocol_backend_captures_cursor_and_reuses_it_on_session_open() {
         let session_id = SessionKey("local:test".into());
@@ -11499,11 +12756,8 @@ mod tests {
 
         assert_eq!(snapshot.sessions[0].id.0, "session-123");
         assert!(snapshot.status.contains("read-only"));
-        assert!(
-            snapshot.sessions[0].messages[0]
-                .content
-                .contains("mutating commands disabled")
-        );
+        assert!(snapshot.readonly);
+        assert!(snapshot.sessions[0].messages.is_empty());
         assert!(backend.is_connected());
         assert_eq!(backend.connection_state, ProtocolConnectionState::Connected);
 
@@ -11703,18 +12957,1402 @@ mod tests {
             "an explicitly opened session reopens under its own workspace"
         );
 
-        // 3. `/resume` emits a HydrateSession, which has no cwd of its own. It
-        //    must inherit the launch cwd — otherwise a respawn after /resume
-        //    reopens unscoped, which is the reported failure.
-        backend.record_reopen_target(&AppUiCommand::HydrateSession(SessionHydrateParams {
+        // 3. Unknown `/resume` hydration has no scope authority. Its explicit
+        //    open carries the launch cwd before hydration may be sent.
+        let hydrate = AppUiCommand::HydrateSession(SessionHydrateParams {
             session_id: SessionKey("local:hydrated".into()),
             after: None,
             include: vec!["messages".into(), "turns".into()],
-        }));
+        });
+        backend.record_reopen_target(&hydrate);
+        assert_eq!(expect_reopen(&backend).cwd.as_deref(), Some("/tmp/other"));
+        let open = backend
+            .open_before_unknown_hydrate(&hydrate)
+            .expect("unknown resume needs scope");
+        backend.record_reopen_target(&open);
         assert_eq!(
             expect_reopen(&backend).cwd.as_deref(),
             Some("/tmp/workspace"),
-            "a hydrate-sourced reopen must inherit the launch workspace cwd"
+            "the explicit open preceding unknown hydration must carry the launch workspace cwd"
+        );
+    }
+
+    /// Real stdio-process regression for the soak failure: after a child dies,
+    /// the replacement accepts requests concurrently. A restored/background
+    /// turn must not cross the transport until the scoped `session/open`
+    /// response has landed.
+    #[cfg(unix)]
+    #[test]
+    fn stdio_reconnect_waits_for_scoped_open_before_releasing_background_continuation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let marker = temp.path().join("sequence.log");
+        let fixture = temp.path().join("stdio-fixture.sh");
+        std::fs::write(
+            &fixture,
+            r#"#!/bin/sh
+marker="$1"
+scope_marker="${marker}.scoped"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"method":"client_hello"'*)
+      printf 'HELLO:%s\n' "$line" >> "$marker"
+      printf '{"jsonrpc":"2.0","id":"%s","result":{"type":"server_hello","capabilities":{"version":{"protocol":"octos-ui/v1alpha1","schema_version":1,"jsonrpc":"2.0"},"capabilities_schema_version":2,"supported_methods":["session/open"],"supported_notifications":[],"supported_features":[]}}}\n' "$id"
+      ;;
+    *'"method":"session/open"'*)
+      printf 'OPEN:%s\n' "$line" >> "$marker"
+      # A freshly spawned Octos process can resume a durable/background
+      # continuation before this client's workspace-scoped open is confirmed.
+      # The client may observe its start, but must clear it only AFTER OPENED;
+      # otherwise the subscription switch can hide its later terminal.
+      printf '{"jsonrpc":"2.0","method":"turn/started","params":{"session_id":"local:reconnect","turn_id":"01a06669-b4bd-7280-9243-7a3326ee354c","timestamp":"2026-09-03T08:36:38.717287Z"}}\n'
+      (
+        sleep 0.1
+        : > "$scope_marker"
+        printf 'OPENED\n' >> "$marker"
+        printf '{"jsonrpc":"2.0","id":"%s","result":{"opened":{"session_id":"local:reconnect","active_profile_id":"dev","workspace_root":"/confirmed/workspace","cursor":{"stream":"local:reconnect\\u0000~cwd-scope","seq":1}}}}\n' "$id"
+      ) &
+      ;;
+    *'"method":"turn/start"'*)
+      if [ -f "$scope_marker" ]; then
+        printf 'TURN_SCOPED:%s\n' "$line" >> "$marker"
+      else
+        printf 'TURN_UNSCOPED:%s\n' "$line" >> "$marker"
+      fi
+      ;;
+  esac
+done
+"#,
+        )
+        .expect("write fixture");
+
+        let session_id = SessionKey("local:reconnect".into());
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch {
+            endpoint: Some(AppUiEndpoint::stdio(format!(
+                "sh {} {}",
+                fixture.display(),
+                marker.display()
+            ))),
+            session_id: Some(session_id.clone()),
+            profile_id: Some("dev".into()),
+            cwd: Some(workspace.display().to_string()),
+            ..AppUiLaunch::default()
+        });
+        // Model the state immediately after the original child disconnect was
+        // observed. The next send launches the replacement and must reopen.
+        backend.disconnected_status_reported = true;
+        backend.refresh_capabilities_on_reconnect = true;
+        backend
+            .send(AppUiCommand::SubmitPrompt(TurnStartParams {
+                tool_context: None,
+                session_id: session_id.clone(),
+                turn_id: TurnId::new(),
+                input: vec![InputItem::Text {
+                    text: "background continuation".into(),
+                }],
+                media: Vec::new(),
+                topic: None,
+                rewrite_for: None,
+                reasoning_effort: None,
+                live_video: false,
+            }))
+            .expect("replacement launch + deferred submit");
+
+        assert!(backend.client_hello_barrier.is_some());
+        assert_eq!(backend.deferred_until_reconnect_open.len(), 3);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut reconnect_events = Vec::new();
+        while Instant::now() < deadline {
+            if let Some(event) = backend.next_event().expect("poll fixture") {
+                match event {
+                    ClientEvent::BackendRelaunched => {
+                        reconnect_events.push("reconciled");
+                    }
+                    ClientEvent::BackendConnectionEpoch => {
+                        reconnect_events.push("epoch");
+                    }
+                    ClientEvent::App(event)
+                        if matches!(
+                            event.as_ref(),
+                            AppUiEvent::Protocol(UiNotification::TurnStarted(_))
+                        ) =>
+                    {
+                        reconnect_events.push("startup-turn");
+                    }
+                    ClientEvent::App(event)
+                        if matches!(
+                            event.as_ref(),
+                            AppUiEvent::Protocol(UiNotification::SessionOpened(_))
+                        ) =>
+                    {
+                        reconnect_events.push("opened");
+                    }
+                    _ => {}
+                }
+                if reconnect_events.contains(&"opened") && reconnect_events.contains(&"reconciled")
+                {
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        let startup_turn = reconnect_events
+            .iter()
+            .position(|event| *event == "startup-turn");
+        let opened_event = reconnect_events.iter().position(|event| *event == "opened");
+        let reconciled = reconnect_events
+            .iter()
+            .position(|event| *event == "reconciled");
+        assert!(
+            startup_turn.is_some()
+                && opened_event.is_some()
+                && reconciled.is_some()
+                && startup_turn < opened_event
+                && opened_event < reconciled,
+            "dead-child state must be reconciled after the scoped reopen clears any startup turn; events={reconnect_events:?}"
+        );
+        // P1-3: the connection-epoch marker must reach the store BEFORE any
+        // event from the new child, so the store can stamp the new child's
+        // startup turn as current-epoch and the reconcile spares it.
+        let epoch = reconnect_events.iter().position(|event| *event == "epoch");
+        assert!(
+            epoch.is_some() && epoch < startup_turn,
+            "the connection epoch marker must precede the new child's startup turn; events={reconnect_events:?}"
+        );
+        assert!(backend.reconnect_open_barrier.is_none());
+        assert!(backend.deferred_until_reconnect_open.is_empty());
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let sequence = loop {
+            let sequence = std::fs::read_to_string(&marker).unwrap_or_default();
+            if sequence.contains("TURN_SCOPED:")
+                || sequence.contains("TURN_UNSCOPED:")
+                || Instant::now() >= deadline
+            {
+                break sequence;
+            }
+            thread::sleep(Duration::from_millis(5));
+        };
+        let opened = sequence.lines().position(|line| line == "OPENED");
+        let turn = sequence
+            .lines()
+            .position(|line| line.starts_with("TURN_SCOPED:"));
+        assert!(
+            sequence.contains(&format!("\"cwd\":\"{}\"", workspace.display())),
+            "replacement session/open retains the workspace cwd; sequence={sequence}"
+        );
+        assert!(
+            opened.is_some() && turn.is_some() && opened < turn,
+            "background continuation must follow scoped session/opened; sequence={sequence}"
+        );
+        assert!(
+            !sequence.contains("TURN_UNSCOPED:"),
+            "a continuation must never establish unscoped affinity; sequence={sequence}"
+        );
+        assert!(sequence.contains("HELLO:"));
+        assert!(
+            sequence.contains(crate::model::APPUI_FEATURE_CONTEXT_SEMANTIC_CACHE_V1),
+            "stdio client_hello must request the production feature set; sequence={sequence}"
+        );
+    }
+
+    /// P31/P32 real-soak regression: the peer subscription is the most recent
+    /// open, but a cold replacement also needs the master's scoped affinity.
+    #[cfg(unix)]
+    #[test]
+    fn stdio_reconnect_reopens_master_and_peer_before_releasing_either_turn() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("sequence.log");
+        let fixture = temp.path().join("multiplex-reconnect.sh");
+        std::fs::write(
+            &fixture,
+            r#"#!/bin/sh
+marker="$1"
+printf 'BOOT\n' >> "$marker"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  session=$(printf '%s' "$line" | sed -n 's/.*"session_id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"method":"client_hello"'*)
+      printf '{"jsonrpc":"2.0","id":"%s","result":{"type":"server_hello","capabilities":{"version":{"protocol":"octos-ui/v1alpha1","schema_version":1,"jsonrpc":"2.0"},"capabilities_schema_version":2,"supported_methods":["session/open","turn/start"],"supported_notifications":[],"supported_features":[]}}}\n' "$id"
+      ;;
+    *'"method":"session/open"'*)
+      printf 'OPEN:%s\n' "$line" >> "$marker"
+      cwd=$(printf '%s' "$line" | sed -n 's/.*"cwd":"\([^"]*\)".*/\1/p')
+      profile=$(printf '%s' "$line" | sed -n 's/.*"profile_id":"\([^"]*\)".*/\1/p')
+      (
+        sleep 0.05
+        printf 'ACK:%s\n' "$session" >> "$marker"
+        printf '{"jsonrpc":"2.0","id":"%s","result":{"opened":{"session_id":"%s","active_profile_id":"%s","workspace_root":"%s","cursor":{"stream":"%s\\u0000~cwd-scoped","seq":42}}}}\n' "$id" "$session" "$profile" "$cwd" "$session"
+      ) &
+      ;;
+    *'"method":"session/hydrate"'*)
+      printf '{"jsonrpc":"2.0","id":"%s","result":{"session_id":"%s","cursor":{"stream":"%s\\u0000~cwd-scoped","seq":42},"messages":[]}}\n' "$id" "$session" "$session"
+      ;;
+    *'"method":"turn/start"'*)
+      printf 'TURN:%s\n' "$session" >> "$marker"
+      ;;
+  esac
+done
+wait
+"#,
+        )
+        .expect("write fixture");
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch {
+            endpoint: Some(AppUiEndpoint::stdio(format!(
+                "sh {} {}",
+                fixture.display(),
+                marker.display()
+            ))),
+            session_id: Some(SessionKey("local:master".into())),
+            profile_id: Some("dev".into()),
+            cwd: Some("/workspace/master".into()),
+            ..AppUiLaunch::default()
+        });
+        for (session, cwd) in [
+            ("local:master", "/workspace/master"),
+            ("local:peer", "/workspace/peer"),
+        ] {
+            backend
+                .send(AppUiCommand::OpenSession(SessionOpenParams {
+                    session_id: SessionKey(session.into()),
+                    topic: None,
+                    profile_id: Some(
+                        if session == "local:master" {
+                            "restricted"
+                        } else {
+                            "dev"
+                        }
+                        .into(),
+                    ),
+                    cwd: Some(cwd.into()),
+                    sandbox: (session == "local:master").then(|| {
+                        octos_core::ui_protocol::SessionSandboxParams {
+                            enabled: Some(true),
+                            network_access: Some(false),
+                            read_allow_paths: vec!["/workspace/master".into()],
+                        }
+                    }),
+                    after: None,
+                }))
+                .expect("open original scoped session");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let event = backend.next_event().expect("poll original child");
+                if opened_session_from_client_event(event.as_ref())
+                    == Some(SessionKey(session.into()))
+                {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "original open did not finish");
+                thread::sleep(Duration::from_millis(5));
+            }
+            backend
+                .send(AppUiCommand::HydrateSession(SessionHydrateParams {
+                    session_id: SessionKey(session.into()),
+                    after: None,
+                    include: vec!["messages".into()],
+                }))
+                .expect("normal hydrate preserves confirmed scope");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !matches!(
+                backend.next_event().expect("poll hydrate"),
+                Some(ClientEvent::SessionHydrate(_))
+            ) {
+                assert!(Instant::now() < deadline, "hydrate did not finish");
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        assert_eq!(reopen_target(&backend), "local:peer");
+        backend.mark_disconnected("test-owned child cold restart");
+        for session in ["local:master", "local:peer"] {
+            backend
+                .send(AppUiCommand::SubmitPrompt(TurnStartParams {
+                    tool_context: None,
+                    session_id: SessionKey(session.into()),
+                    turn_id: TurnId::new(),
+                    input: vec![InputItem::Text {
+                        text: "continue".into(),
+                    }],
+                    media: Vec::new(),
+                    topic: None,
+                    rewrite_for: None,
+                    reasoning_effort: None,
+                    live_video: false,
+                }))
+                .expect("defer replacement-child turn");
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut opened_before_reconcile = Vec::new();
+        let mut reconciled = false;
+        let sequence = loop {
+            if let Some(event) = backend.next_event().expect("poll replacement") {
+                if let Some(session) = opened_session_from_client_event(Some(&event)) {
+                    assert!(
+                        !reconciled,
+                        "every scope must precede relaunch reconciliation"
+                    );
+                    opened_before_reconcile.push(session.0);
+                }
+                if matches!(event, ClientEvent::BackendRelaunched) {
+                    reconciled = true;
+                }
+            }
+            let sequence = std::fs::read_to_string(&marker).unwrap_or_default();
+            if sequence.matches("TURN:").count() == 2 && reconciled {
+                break sequence;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "replacement turns did not finish: {sequence}"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(opened_before_reconcile, ["local:master", "local:peer"]);
+        let replacement = sequence.rsplit("BOOT\n").next().expect("replacement log");
+        let lines: Vec<_> = replacement.lines().collect();
+        let first_turn = lines
+            .iter()
+            .position(|line| line.starts_with("TURN:"))
+            .unwrap();
+        for session in ["local:master", "local:peer"] {
+            let ack = lines
+                .iter()
+                .position(|line| *line == format!("ACK:{session}"));
+            assert!(
+                ack.is_some_and(|index| index < first_turn),
+                "both scoped ACKs must precede either turn: {replacement}"
+            );
+            let request = lines
+                .iter()
+                .filter_map(|line| line.strip_prefix("OPEN:"))
+                .map(|line| serde_json::from_str::<Value>(line).expect("open request"))
+                .find(|request| request["params"]["session_id"] == session)
+                .expect("each session reopens");
+            let suffix = session.strip_prefix("local:").unwrap();
+            assert_eq!(request["params"]["cwd"], format!("/workspace/{suffix}"));
+            if session == "local:master" {
+                assert_eq!(request["params"]["profile_id"], "restricted");
+                assert_eq!(request["params"]["sandbox"]["enabled"], true);
+                assert_eq!(request["params"]["sandbox"]["network_access"], false);
+                assert_eq!(
+                    request["params"]["sandbox"]["read_allow_paths"],
+                    json!(["/workspace/master"])
+                );
+            }
+            assert_eq!(request["params"]["after"]["seq"], 42);
+            assert_eq!(
+                request["params"]["after"]["stream"],
+                format!("{session}\0~cwd-scoped")
+            );
+        }
+        assert!(backend.reconnect_open_barrier.is_none());
+        assert!(backend.deferred_until_reconnect_open.is_empty());
+    }
+
+    #[test]
+    fn failed_unknown_hydrate_never_poisoned_confirmed_reopen_scopes() {
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch::default());
+        let request_id = arm_session_open_barrier(&mut backend, "local:confirmed");
+        backend.decode_rpc_text(&json!({
+            "jsonrpc": "2.0", "id": request_id,
+            "result": {"opened": {"session_id": "local:confirmed", "active_profile_id": "dev", "workspace_root": "/workspace"}}
+        }).to_string()).expect("confirm original scope");
+        let before = backend.confirmed_session_scopes.clone();
+        let hydrate = AppUiCommand::HydrateSession(SessionHydrateParams {
+            session_id: SessionKey("local:unknown".into()),
+            after: None,
+            include: vec!["messages".into()],
+        });
+        backend.record_reopen_target(&hydrate);
+        assert_eq!(
+            backend.confirmed_session_scopes, before,
+            "sending hydrate is not scope confirmation"
+        );
+        assert_eq!(reopen_target(&backend), "local:confirmed");
+        let request = backend
+            .build_tracked_request(hydrate)
+            .expect("hydrate request");
+        backend
+            .decode_rpc_text(
+                &json!({
+                    "jsonrpc": "2.0", "id": request.id,
+                    "error": {"code": -32602, "message": "unknown session"}
+                })
+                .to_string(),
+            )
+            .expect("hydrate failure");
+        assert_eq!(backend.confirmed_session_scopes, before);
+        assert_eq!(reopen_target(&backend), "local:confirmed");
+    }
+
+    #[test]
+    fn unknown_resume_hydrate_waits_for_explicit_scoped_open() {
+        let server = spawn_protocol_capture_server(2, true).expect("capture server");
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch {
+            endpoint: Some(AppUiEndpoint::websocket(server.endpoint.clone(), None)),
+            profile_id: Some("coding".into()),
+            cwd: Some("/workspace/resume".into()),
+            ..AppUiLaunch::default()
+        });
+        backend
+            .send(AppUiCommand::HydrateSession(SessionHydrateParams {
+                session_id: SessionKey("local:resumed".into()),
+                after: None,
+                include: vec!["messages".into()],
+            }))
+            .expect("resume request");
+        let open = server.recv_json();
+        assert_eq!(open["method"], methods::SESSION_OPEN);
+        assert_eq!(open["params"]["session_id"], "local:resumed");
+        assert_eq!(open["params"]["profile_id"], "coding");
+        assert_eq!(open["params"]["cwd"], "/workspace/resume");
+        assert!(
+            backend.confirmed_session_scopes.is_empty(),
+            "an in-flight open is not confirmed"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while backend.reconnect_open_barrier.is_some() {
+            backend.next_event().expect("poll scoped open");
+            assert!(Instant::now() < deadline, "scope was not confirmed");
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(server.recv_json()["method"], methods::SESSION_HYDRATE);
+        assert_eq!(reopen_target(&backend), "local:resumed");
+        assert_eq!(backend.confirmed_session_scopes.len(), 1);
+        server.join();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejected_mid_multiplex_reopen_fails_closed_until_corrective_open() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("sequence.log");
+        let fixture = temp.path().join("rejected-multiplex.sh");
+        std::fs::write(&fixture, r#"#!/bin/sh
+marker="$1"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  session=$(printf '%s' "$line" | sed -n 's/.*"session_id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"method":"client_hello"'*)
+      printf '{"jsonrpc":"2.0","id":"%s","result":{"type":"server_hello","capabilities":{"version":{"protocol":"octos-ui/v1alpha1","schema_version":1,"jsonrpc":"2.0"},"capabilities_schema_version":2,"supported_methods":["session/open","turn/start"],"supported_notifications":[],"supported_features":[]}}}\n' "$id"
+      ;;
+    *'"method":"session/open"'*)
+      printf 'OPEN:%s\n' "$session" >> "$marker"
+      case "$line" in
+        *'"cwd":"/corrected"'*) reject=no ;;
+        *'"session_id":"local:peer"'*) reject=yes ;;
+        *) reject=no ;;
+      esac
+      if [ "$reject" = yes ]; then
+        printf 'REJECTED\n' >> "$marker"
+        printf '{"jsonrpc":"2.0","id":"%s","error":{"code":-32602,"message":"scope rejected"}}\n' "$id"
+      else
+        (
+          sleep 0.05
+          printf 'ACK:%s\n' "$session" >> "$marker"
+          printf '{"jsonrpc":"2.0","id":"%s","result":{"opened":{"session_id":"%s","active_profile_id":"dev","workspace_root":"/workspace"}}}\n' "$id" "$session"
+        ) &
+      fi
+      ;;
+    *'"method":"turn/start"'*) printf 'TURN:%s\n' "$session" >> "$marker" ;;
+  esac
+done
+wait
+"#).expect("fixture");
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch {
+            endpoint: Some(AppUiEndpoint::stdio(format!(
+                "sh {} {}",
+                fixture.display(),
+                marker.display()
+            ))),
+            ..AppUiLaunch::default()
+        });
+        for session in ["local:master", "local:peer", "local:later"] {
+            let request_id = arm_session_open_barrier(&mut backend, session);
+            backend.decode_rpc_text(&json!({
+                "jsonrpc": "2.0", "id": request_id,
+                "result": {"opened": {"session_id": session, "active_profile_id": "dev", "workspace_root": "/workspace"}}
+            }).to_string()).expect("prior confirmed scope");
+        }
+        backend.disconnected_status_reported = true;
+        let prompt = |session: &str| {
+            AppUiCommand::SubmitPrompt(TurnStartParams {
+                tool_context: None,
+                session_id: SessionKey(session.into()),
+                turn_id: TurnId::new(),
+                input: vec![InputItem::Text {
+                    text: "scoped work".into(),
+                }],
+                media: Vec::new(),
+                topic: None,
+                rewrite_for: None,
+                reasoning_effort: None,
+                live_video: false,
+            })
+        };
+        backend.send(prompt("local:master")).expect("defer master");
+        backend.send(prompt("local:peer")).expect("defer peer");
+        let mut rejected = 0;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while rejected < 2 {
+            if let Some(ClientEvent::App(event)) = backend.next_event().expect("poll rejection")
+                && matches!(event.as_ref(), AppUiEvent::Protocol(UiNotification::TurnError(error)) if error.code == "session_open_rejected")
+            {
+                rejected += 1;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "both turns must be explicitly rejected"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(backend.is_connected());
+        assert!(backend.session_open_required);
+        assert!(backend.reconnect_session_scopes.is_empty());
+        let sequence = std::fs::read_to_string(&marker).expect("sequence");
+        assert!(!sequence.contains("TURN:"), "{sequence}");
+        assert!(
+            !sequence.contains("OPEN:local:later"),
+            "failed batch must not continue: {sequence}"
+        );
+        backend
+            .send(AppUiCommand::OpenSession(SessionOpenParams {
+                session_id: SessionKey("local:peer".into()),
+                topic: None,
+                profile_id: Some("dev".into()),
+                cwd: Some("/corrected".into()),
+                sandbox: None,
+                after: None,
+            }))
+            .expect("corrective open");
+        backend
+            .send(prompt("local:peer"))
+            .expect("defer corrected turn");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            backend.next_event().expect("poll correction");
+            let sequence = std::fs::read_to_string(&marker).expect("sequence");
+            if sequence.contains("TURN:") {
+                assert_eq!(sequence.matches("TURN:").count(), 1, "{sequence}");
+                assert!(
+                    sequence
+                        .find("ACK:local:peer")
+                        .expect("corrective open ACK")
+                        < sequence
+                            .find("TURN:local:peer")
+                            .expect("corrected peer turn"),
+                    "{sequence}"
+                );
+                break;
+            }
+            assert!(Instant::now() < deadline, "corrected turn was not sent");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn backend_with_pending_open_barrier() -> (ProtocolAppUiBackend, String) {
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch::default());
+        let session_id = SessionKey("local:barrier".into());
+        let request = backend
+            .build_tracked_request(AppUiCommand::OpenSession(SessionOpenParams {
+                session_id: session_id.clone(),
+                topic: None,
+                profile_id: Some("dev".into()),
+                cwd: Some("/workspace".into()),
+                sandbox: None,
+                after: None,
+            }))
+            .expect("open request");
+        let request_id = request.id;
+        backend.reconnect_open_barrier = Some(SessionOpenBarrier {
+            request: RequestBarrier {
+                request_id: request_id.clone(),
+                started_at: Instant::now(),
+            },
+            session_id,
+        });
+        backend
+            .deferred_until_reconnect_open
+            .push_back(AppUiCommand::ListSessions(SessionListParams { cwd: None }));
+        (backend, request_id)
+    }
+
+    /// Arm the scoped-open barrier for `session_id` exactly the way `send`
+    /// does, minus the wire: record the reopen candidate and build the tracked
+    /// request so a response can correlate. Returns the request id.
+    fn arm_session_open_barrier(backend: &mut ProtocolAppUiBackend, session_id: &str) -> String {
+        let session_id = SessionKey(session_id.into());
+        let command = AppUiCommand::OpenSession(SessionOpenParams {
+            session_id: session_id.clone(),
+            topic: None,
+            profile_id: Some("dev".into()),
+            cwd: Some("/workspace".into()),
+            sandbox: None,
+            after: None,
+        });
+        backend.record_reopen_target(&command);
+        let request = backend
+            .build_tracked_request(command)
+            .expect("open request");
+        backend.reconnect_open_barrier = Some(SessionOpenBarrier {
+            request: RequestBarrier {
+                request_id: request.id.clone(),
+                started_at: Instant::now(),
+            },
+            session_id,
+        });
+        request.id
+    }
+
+    fn reopen_target(backend: &ProtocolAppUiBackend) -> String {
+        match backend
+            .reopen_session_open_command()
+            .expect("a reopen target must exist")
+        {
+            AppUiCommand::OpenSession(params) => params.session_id.0,
+            other => panic!("reopen must be an OpenSession, got {other:?}"),
+        }
+    }
+
+    fn queued_error_codes(backend: &ProtocolAppUiBackend) -> Vec<String> {
+        backend
+            .queue
+            .iter()
+            .filter_map(|event| match event {
+                ClientEvent::App(event) => match event.as_ref() {
+                    AppUiEvent::Error(error) => Some(error.code.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// P1-4: a `session/open` the server DEFINITELY rejects (an RPC error
+    /// response) on a healthy connection is an ordinary error, not a failed
+    /// scope establishment. The barrier releases, nothing is cancelled, the
+    /// connection stays up, and the reconnect reopen target reverts to the
+    /// last session the server actually CONFIRMED — otherwise every reconnect
+    /// retried the refused session at the backoff cap forever, with the
+    /// user's corrective open deferred behind the re-armed barrier and
+    /// cancelled on the next failure.
+    #[test]
+    fn rejected_session_open_reverts_reopen_target_to_last_confirmed_session() {
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch {
+            endpoint: Some(AppUiEndpoint::websocket(
+                "wss://example.test/ui-protocol",
+                None,
+            )),
+            profile_id: Some("dev".into()),
+            session_id: Some(SessionKey("local:launch".into())),
+            cwd: Some("/tmp/workspace".into()),
+            ..AppUiLaunch::default()
+        });
+
+        // The server confirmed session A through the barrier.
+        let open_a = arm_session_open_barrier(&mut backend, "local:a");
+        let opened = json!({
+            "jsonrpc": "2.0",
+            "id": open_a,
+            "result": { "opened": { "session_id": "local:a", "active_profile_id": "dev", "workspace_root": "/workspace" } }
+        });
+        let event = backend
+            .decode_rpc_text(&opened.to_string())
+            .expect("opened decodes")
+            .expect("opened event");
+        assert_eq!(
+            opened_session_from_client_event(Some(&event)),
+            Some(SessionKey("local:a".into()))
+        );
+        assert!(backend.reconnect_open_barrier.is_none());
+        assert_eq!(reopen_target(&backend), "local:a");
+
+        // The user then opens B, which the server rejects outright.
+        let open_b = arm_session_open_barrier(&mut backend, "local:b");
+        assert_eq!(
+            reopen_target(&backend),
+            "local:b",
+            "precondition: the in-flight open is the reopen candidate"
+        );
+        let rejected = json!({
+            "jsonrpc": "2.0",
+            "id": open_b,
+            "error": { "code": -32602, "message": "bad scope" }
+        });
+        let event = backend
+            .decode_rpc_text(&rejected.to_string())
+            .expect("error decodes")
+            .expect("error event");
+
+        assert!(
+            matches!(event, ClientEvent::App(ref event) if matches!(event.as_ref(), AppUiEvent::Error(_))),
+            "the rejection surfaces as an ordinary error event"
+        );
+        assert!(
+            backend.reconnect_open_barrier.is_none(),
+            "a definite rejection releases the barrier"
+        );
+        assert_eq!(
+            reopen_target(&backend),
+            "local:a",
+            "the reopen target reverts to the last CONFIRMED session, never the refused one"
+        );
+        assert!(
+            backend.protocol.pending_requests.is_empty(),
+            "the rejected request is no longer pending"
+        );
+        assert!(
+            queued_error_codes(&backend).is_empty(),
+            "nothing is cancelled on a healthy connection, got {:?}",
+            queued_error_codes(&backend)
+        );
+        assert!(
+            !backend.queue.iter().any(|event| matches!(
+                event,
+                ClientEvent::App(event)
+                    if matches!(event.as_ref(), AppUiEvent::Status(status) if status.message.contains("scope establishment failed"))
+            )),
+            "a rejected open must not disconnect the healthy transport"
+        );
+    }
+
+    #[test]
+    fn malformed_session_open_success_fails_deferred_commands_instead_of_wedging() {
+        let (mut backend, request_id) = backend_with_pending_open_barrier();
+        let frame = json!({ "jsonrpc": "2.0", "id": request_id, "result": {} });
+        let _ = backend
+            .decode_rpc_text(&frame.to_string())
+            .expect("malformed result becomes an event");
+        assert!(backend.reconnect_open_barrier.is_none());
+        assert!(backend.deferred_until_reconnect_open.is_empty());
+    }
+
+    #[test]
+    fn timed_out_session_open_fails_deferred_commands_instead_of_wedging() {
+        let (mut backend, _) = backend_with_pending_open_barrier();
+        backend
+            .reconnect_open_barrier
+            .as_mut()
+            .expect("barrier")
+            .request
+            .started_at = Instant::now() - SESSION_OPEN_RESPONSE_TIMEOUT - Duration::from_millis(1);
+        backend.check_protocol_barrier_timeouts();
+        assert!(backend.reconnect_open_barrier.is_none());
+        assert!(backend.deferred_until_reconnect_open.is_empty());
+    }
+
+    /// Real stdio child that boots slowly (as `octos serve --stdio` does on a
+    /// cold instance dir: profile store, plugin verification, ledger recovery
+    /// take 10-15 s). Before the startup grace, the 3 s hello barrier expired
+    /// into "legacy defaults" and the 10 s scoped-open barrier recycled the
+    /// child while it was still booting; the deferred `turn/start` was
+    /// cancelled and never reached any child. With the grace, both barriers
+    /// wait for the child's first frame and the prompt lands exactly once.
+    #[cfg(unix)]
+    #[test]
+    fn stdio_child_startup_grace_keeps_barriers_armed_until_the_first_frame() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("sequence.log");
+        let fixture = temp.path().join("stdio-slow-boot.sh");
+        std::fs::write(
+            &fixture,
+            r#"#!/bin/sh
+marker="$1"
+# Bootstrap: nothing is read or written for longer than the steady-state
+# hello barrier (3 s).
+sleep 4
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"method":"client_hello"'*)
+      printf 'HELLO\n' >> "$marker"
+      printf '{"jsonrpc":"2.0","id":"%s","result":{"type":"server_hello","capabilities":{"version":{"protocol":"octos-ui/v1alpha1","schema_version":1,"jsonrpc":"2.0"},"capabilities_schema_version":2,"supported_methods":["session/open","turn/start"],"supported_notifications":[],"supported_features":[]}}}\n' "$id"
+      ;;
+    *'"method":"session/open"'*)
+      printf 'OPEN\n' >> "$marker"
+      printf '{"jsonrpc":"2.0","id":"%s","result":{"opened":{"session_id":"local:slow","active_profile_id":"dev","workspace_root":"/confirmed/workspace"}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf 'TURN:%s\n' "$line" >> "$marker"
+      printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"
+      ;;
+  esac
+done
+"#,
+        )
+        .expect("write fixture");
+
+        let session_id = SessionKey("local:slow".into());
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch {
+            endpoint: Some(AppUiEndpoint::stdio(format!(
+                "sh {} {}",
+                fixture.display(),
+                marker.display()
+            ))),
+            session_id: Some(session_id.clone()),
+            profile_id: Some("dev".into()),
+            cwd: Some("/tmp/workspace".into()),
+            ..AppUiLaunch::default()
+        });
+        // State right after the previous child's death was observed: the next
+        // send spawns the replacement and must reopen behind the hello.
+        backend.disconnected_status_reported = true;
+        backend.refresh_capabilities_on_reconnect = true;
+        backend
+            .send(AppUiCommand::SubmitPrompt(TurnStartParams {
+                tool_context: None,
+                session_id: session_id.clone(),
+                turn_id: TurnId::new(),
+                input: vec![InputItem::Text {
+                    text: "prompt typed during the daemon restart".into(),
+                }],
+                media: Vec::new(),
+                topic: None,
+                rewrite_for: None,
+                reasoning_effort: None,
+                live_video: false,
+            }))
+            .expect("replacement launch + deferred submit");
+        assert!(backend.client_hello_barrier.is_some());
+        assert!(backend.stdio_child_startup_pending());
+
+        let deadline = Instant::now() + Duration::from_secs(12);
+        let mut statuses = Vec::new();
+        let mut cancelled = 0usize;
+        let mut opened = false;
+        while Instant::now() < deadline {
+            if let Some(ClientEvent::App(event)) = backend.next_event().expect("poll fixture") {
+                match event.as_ref() {
+                    AppUiEvent::Status(status) => statuses.push(status.message.clone()),
+                    AppUiEvent::Error(error) if error.code == "request_cancelled" => {
+                        cancelled += 1;
+                    }
+                    AppUiEvent::Protocol(UiNotification::SessionOpened(_)) => opened = true,
+                    _ => {}
+                }
+            }
+            let log = std::fs::read_to_string(&marker).unwrap_or_default();
+            if opened && log.contains("TURN:") {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let log = std::fs::read_to_string(&marker).unwrap_or_default();
+        assert!(
+            !statuses
+                .iter()
+                .any(|status| status.contains("negotiation timed out")),
+            "a booting child must not be mistaken for a pre-hello server; statuses={statuses:?}"
+        );
+        assert_eq!(
+            cancelled, 0,
+            "nothing may be cancelled while the child boots"
+        );
+        assert_eq!(
+            log.matches("TURN:").count(),
+            1,
+            "the deferred turn/start must reach the slow child exactly once; log={log}"
+        );
+        assert!(log.contains("prompt typed during the daemon restart"));
+        assert!(backend.client_hello_barrier.is_none());
+        assert!(backend.reconnect_open_barrier.is_none());
+        assert!(backend.deferred_until_reconnect_open.is_empty());
+        assert!(!backend.stdio_child_startup_pending());
+    }
+
+    /// A child that dies while commands are deferred behind its barriers
+    /// must cancel them explicitly (`request_cancelled`, so the store can
+    /// re-stage a dead `turn/start` from its gate) instead of flushing them
+    /// to the NEXT child after its scoped open — which duplicated the prompt
+    /// on top of the store's own relaunch re-stage.
+    #[cfg(unix)]
+    #[test]
+    fn child_death_during_barrier_cancels_deferred_commands_instead_of_flushing_to_next_child() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("sequence.log");
+        let fixture = temp.path().join("stdio-dies-once.sh");
+        std::fs::write(
+            &fixture,
+            r#"#!/bin/sh
+marker="$1"
+if [ ! -f "$marker.first" ]; then
+  : > "$marker.first"
+  # First child: read the hello, then die without answering it.
+  IFS= read -r line
+  printf 'FIRST_DIED\n' >> "$marker"
+  exit 0
+fi
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"method":"client_hello"'*)
+      printf '{"jsonrpc":"2.0","id":"%s","result":{"type":"server_hello","capabilities":{"version":{"protocol":"octos-ui/v1alpha1","schema_version":1,"jsonrpc":"2.0"},"capabilities_schema_version":2,"supported_methods":["session/open","turn/start"],"supported_notifications":[],"supported_features":[]}}}\n' "$id"
+      ;;
+    *'"method":"session/open"'*)
+      printf 'OPEN\n' >> "$marker"
+      printf '{"jsonrpc":"2.0","id":"%s","result":{"opened":{"session_id":"local:dies","active_profile_id":"dev","workspace_root":"/confirmed/workspace"}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf 'TURN:%s\n' "$line" >> "$marker"
+      printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"
+      ;;
+  esac
+done
+"#,
+        )
+        .expect("write fixture");
+
+        let session_id = SessionKey("local:dies".into());
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch {
+            endpoint: Some(AppUiEndpoint::stdio(format!(
+                "sh {} {}",
+                fixture.display(),
+                marker.display()
+            ))),
+            session_id: Some(session_id.clone()),
+            profile_id: Some("dev".into()),
+            cwd: Some("/tmp/workspace".into()),
+            ..AppUiLaunch::default()
+        });
+        backend.disconnected_status_reported = true;
+        backend.refresh_capabilities_on_reconnect = true;
+        backend
+            .send(AppUiCommand::SubmitPrompt(TurnStartParams {
+                tool_context: None,
+                session_id: session_id.clone(),
+                turn_id: TurnId::new(),
+                input: vec![InputItem::Text {
+                    text: "deferred behind the dying child".into(),
+                }],
+                media: Vec::new(),
+                topic: None,
+                rewrite_for: None,
+                reasoning_effort: None,
+                live_video: false,
+            }))
+            .expect("first child launch + deferred submit");
+        assert!(backend.client_hello_barrier.is_some());
+
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut cancelled_turn_starts = 0usize;
+        let mut opened = false;
+        while Instant::now() < deadline {
+            if let Some(ClientEvent::App(event)) = backend.next_event().expect("poll fixture") {
+                match event.as_ref() {
+                    AppUiEvent::Error(error)
+                        if error.code == "request_cancelled"
+                            && error.message.starts_with("turn/start") =>
+                    {
+                        cancelled_turn_starts += 1;
+                    }
+                    AppUiEvent::Protocol(UiNotification::SessionOpened(_)) => opened = true,
+                    _ => {}
+                }
+            }
+            if opened {
+                // Give a wrongly flushed command time to hit the marker.
+                thread::sleep(Duration::from_millis(200));
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let log = std::fs::read_to_string(&marker).unwrap_or_default();
+        assert!(
+            log.contains("FIRST_DIED"),
+            "fixture did not run its dying phase: {log}"
+        );
+        assert!(
+            opened,
+            "the replacement child must reopen the session; log={log}"
+        );
+        assert_eq!(
+            cancelled_turn_starts, 1,
+            "the deferred turn/start must be cancelled exactly once so the store re-stages it"
+        );
+        assert_eq!(
+            log.matches("TURN:").count(),
+            0,
+            "a command deferred on the dead child must not ride the replacement child; log={log}"
+        );
+        assert!(backend.deferred_until_reconnect_open.is_empty());
+    }
+
+    /// P1-4 against a real stdio child: a rejected `session/open` on a
+    /// HEALTHY connection must not tear the transport down. Pre-barrier a
+    /// rejected open was just an error event on a live connection; the
+    /// scoped-open barrier turned it into `fail_session_open_barrier` —
+    /// cancelling every deferred user command as `request_cancelled`, killing
+    /// the healthy child, and retrying the refused session on every reconnect.
+    #[cfg(unix)]
+    #[test]
+    fn session_open_rpc_error_keeps_connection_but_requires_scope_before_turns() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("sequence.log");
+        let fixture = temp.path().join("stdio-fixture.sh");
+        std::fs::write(
+            &fixture,
+            r#"#!/bin/sh
+marker="$1"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"method":"client_hello"'*)
+      printf '{"jsonrpc":"2.0","id":"%s","result":{"type":"server_hello","capabilities":{"version":{"protocol":"octos-ui/v1alpha1","schema_version":1,"jsonrpc":"2.0"},"capabilities_schema_version":2,"supported_methods":["session/open","session/list"],"supported_notifications":[],"supported_features":[]}}}\n' "$id"
+      ;;
+    *'"method":"session/open"'*'"session_id":"local:rejected"'*)
+      printf 'OPEN_REJECTED\n' >> "$marker"
+      printf '{"jsonrpc":"2.0","id":"%s","error":{"code":-32602,"message":"session scope rejected"}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf 'TURN\n' >> "$marker"
+      ;;
+    *'"method":"session/open"'*)
+      printf 'OPEN_OK\n' >> "$marker"
+      printf '{"jsonrpc":"2.0","id":"%s","result":{"opened":{"session_id":"local:launch","active_profile_id":"dev","workspace_root":"/confirmed/workspace"}}}\n' "$id"
+      ;;
+    *'"method":"session/list"'*)
+      printf 'LIST\n' >> "$marker"
+      ;;
+  esac
+done
+"#,
+        )
+        .expect("write fixture");
+
+        fn poll_until(
+            backend: &mut ProtocolAppUiBackend,
+            seen: &mut Vec<ClientEvent>,
+            done: impl Fn(&ClientEvent) -> bool,
+        ) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                if let Some(event) = backend.next_event().expect("poll fixture") {
+                    let finished = done(&event);
+                    seen.push(event);
+                    if finished {
+                        return true;
+                    }
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            false
+        }
+
+        let launch_session = SessionKey("local:launch".into());
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch {
+            endpoint: Some(AppUiEndpoint::stdio(format!(
+                "sh {} {}",
+                fixture.display(),
+                marker.display()
+            ))),
+            session_id: Some(launch_session.clone()),
+            profile_id: Some("dev".into()),
+            cwd: Some(temp.path().display().to_string()),
+            ..AppUiLaunch::default()
+        });
+        // Model the state right after an earlier disconnect was observed: the
+        // next send launches the child and reopens the launch session.
+        backend.disconnected_status_reported = true;
+        backend.refresh_capabilities_on_reconnect = true;
+        backend
+            .send(AppUiCommand::ListSessions(SessionListParams { cwd: None }))
+            .expect("child launch + deferred list");
+
+        let mut seen = Vec::new();
+        assert!(
+            poll_until(&mut backend, &mut seen, |event| {
+                opened_session_from_client_event(Some(event)).as_ref() == Some(&launch_session)
+            }),
+            "the launch session must reopen first; events={seen:?}"
+        );
+        assert!(backend.is_connected());
+        assert!(backend.reconnect_open_barrier.is_none());
+        assert!(
+            backend.deferred_until_reconnect_open.is_empty(),
+            "the confirmed reopen releases the deferred list"
+        );
+
+        let prompt = || {
+            AppUiCommand::SubmitPrompt(TurnStartParams {
+                tool_context: None,
+                session_id: SessionKey("local:rejected".into()),
+                turn_id: TurnId::new(),
+                input: vec![InputItem::Text {
+                    text: "must not run unscoped".into(),
+                }],
+                media: Vec::new(),
+                topic: None,
+                rewrite_for: None,
+                reasoning_effort: None,
+                live_video: false,
+            })
+        };
+        // Healthy connection; the user now opens a session the server refuses,
+        // with a follow-up command queued behind the barrier.
+        backend
+            .send(AppUiCommand::OpenSession(SessionOpenParams {
+                session_id: SessionKey("local:rejected".into()),
+                topic: None,
+                profile_id: Some("dev".into()),
+                cwd: None,
+                sandbox: None,
+                after: None,
+            }))
+            .expect("open sends");
+        assert!(
+            backend.reconnect_open_barrier.is_some(),
+            "every open arms the scoped barrier"
+        );
+        backend
+            .send(AppUiCommand::ListSessions(SessionListParams { cwd: None }))
+            .expect("list defers behind the barrier");
+        backend.send(prompt()).expect("submit defers");
+        assert_eq!(backend.deferred_until_reconnect_open.len(), 2);
+
+        let mut seen = Vec::new();
+        assert!(
+            poll_until(&mut backend, &mut seen, |event| matches!(
+                event,
+                ClientEvent::App(event)
+                    if matches!(event.as_ref(), AppUiEvent::Error(error) if error.message.contains("session scope rejected"))
+            )),
+            "the rejection must surface as an error event; events={seen:?}"
+        );
+
+        assert!(
+            backend.is_connected(),
+            "a rejected open must not tear down the healthy connection"
+        );
+        assert!(
+            backend.reconnect_open_barrier.is_none(),
+            "the barrier releases on a definite rejection"
+        );
+        assert!(
+            backend.deferred_until_reconnect_open.is_empty(),
+            "deferred commands are either safely sent or explicitly rejected"
+        );
+        while let Some(event) = backend.next_event().expect("drain") {
+            seen.push(event);
+        }
+        assert!(
+            !seen.iter().any(|event| matches!(
+                event,
+                ClientEvent::App(event)
+                    if matches!(event.as_ref(), AppUiEvent::Error(error) if error.code == "request_cancelled")
+            )),
+            "no turn/start may use the automatically retried request_cancelled code; events={seen:?}"
+        );
+        let rejected_turns = |events: &[ClientEvent]| {
+            events.iter().filter(|event| matches!(
+            event,
+            ClientEvent::App(event)
+                if matches!(event.as_ref(), AppUiEvent::Protocol(UiNotification::TurnError(error))
+                    if error.code == "session_open_rejected")
+        )).count()
+        };
+        assert_eq!(
+            rejected_turns(&seen),
+            1,
+            "deferred turn must fail closed: {seen:?}"
+        );
+        backend
+            .send(prompt())
+            .expect("later submit rejected locally");
+        while let Some(event) = backend.next_event().expect("drain") {
+            seen.push(event);
+        }
+        assert_eq!(
+            rejected_turns(&seen),
+            2,
+            "later submits still require a successful scoped open"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let sequence = loop {
+            let sequence = std::fs::read_to_string(&marker).unwrap_or_default();
+            if sequence.lines().filter(|line| *line == "LIST").count() >= 2
+                || Instant::now() >= deadline
+            {
+                break sequence;
+            }
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(
+            sequence.lines().filter(|line| *line == "LIST").count(),
+            2,
+            "the deferred session/list must reach the child after the rejection; sequence={sequence}"
+        );
+        assert_eq!(
+            sequence.lines().filter(|line| *line == "OPEN_OK").count(),
+            1,
+            "no reconnect reopen may follow a rejected open; sequence={sequence}"
+        );
+        assert_eq!(
+            reopen_target(&backend),
+            launch_session.0,
+            "a later reconnect must reopen the confirmed session, never the refused one"
+        );
+        assert!(
+            !sequence.lines().any(|line| line == "TURN"),
+            "no rejected-scope turn reaches the wire: {sequence}"
+        );
+        backend
+            .send(AppUiCommand::OpenSession(SessionOpenParams {
+                session_id: launch_session.clone(),
+                topic: None,
+                profile_id: Some("dev".into()),
+                cwd: None,
+                sandbox: None,
+                after: None,
+            }))
+            .expect("corrective open allowed");
+        let mut corrected = prompt();
+        if let AppUiCommand::SubmitPrompt(params) = &mut corrected {
+            params.session_id = launch_session.clone();
+        }
+        backend.send(corrected).expect("corrected submit defers");
+        assert!(poll_until(&mut backend, &mut seen, |event| {
+            opened_session_from_client_event(Some(event)).as_ref() == Some(&launch_session)
+        }));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let sequence = std::fs::read_to_string(&marker).expect("read sequence");
+            if sequence.lines().any(|line| line == "TURN") {
+                assert_eq!(sequence.lines().filter(|line| *line == "TURN").count(), 1);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "corrective open must release submit: {sequence}"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn stdio_client_hello_uses_modern_or_old_server_feature_tokens() {
+        let mut exchange = ProtocolExchange::default();
+        let modern = exchange.build_client_hello_request(appui_feature_tokens_for(false));
+        assert_eq!(modern.method, APPUI_METHOD_CLIENT_HELLO);
+        assert_eq!(modern.params["transport"], "stdio");
+        assert!(
+            modern.params["supported_features"]
+                .as_array()
+                .expect("feature list")
+                .iter()
+                .any(|feature| feature == crate::model::APPUI_FEATURE_CONTEXT_SEMANTIC_CACHE_V1)
+        );
+        let legacy = exchange.build_client_hello_request(appui_feature_tokens_for(true));
+        assert!(
+            !legacy.params["supported_features"]
+                .as_array()
+                .expect("feature list")
+                .iter()
+                .any(|feature| feature == crate::model::APPUI_FEATURE_CONTEXT_SEMANTIC_CACHE_V1)
+        );
+    }
+
+    #[test]
+    fn unsupported_client_hello_falls_back_without_leaving_a_barrier() {
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch::default());
+        let request = backend
+            .protocol
+            .build_client_hello_request(appui_feature_tokens_for(false));
+        backend.client_hello_barrier = Some(RequestBarrier {
+            request_id: request.id.clone(),
+            started_at: Instant::now(),
+        });
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "id": request.id,
+            "error": { "code": -32601, "message": "method not found" }
+        });
+
+        let event = backend
+            .decode_rpc_text(&frame.to_string())
+            .expect("fallback decodes")
+            .expect("fallback status");
+
+        assert!(backend.client_hello_barrier.is_none());
+        assert!(
+            matches!(event, ClientEvent::App(ref event) if matches!(event.as_ref(), AppUiEvent::Status(_)))
+        );
+    }
+
+    #[test]
+    fn open_and_hydrate_responses_retain_raw_semantic_cache_diagnostics() {
+        let mut exchange = ProtocolExchange::default();
+        let open = exchange
+            .build_tracked_request(AppUiCommand::OpenSession(SessionOpenParams {
+                session_id: SessionKey("local:context".into()),
+                topic: None,
+                profile_id: None,
+                cwd: None,
+                sandbox: None,
+                after: None,
+            }))
+            .expect("open request");
+        let context_state = json!({
+            "session_id": "local:context", "generation": 7,
+            "transcript_hash": "sha256:t", "item_count": 3,
+            "token_estimate": 42, "recovery_state": "healthy",
+            "cache_epoch_id": "sha256:epoch-7", "semantic_head_kind": "tool_interaction"
+        });
+        let open_frame = json!({
+            "jsonrpc": "2.0", "id": open.id,
+            "result": { "opened": { "session_id": "local:context", "context_state": context_state } }
+        });
+        let ClientEvent::ContextLifecycle(opened) = exchange
+            .decode_rpc_text(&open_frame.to_string())
+            .expect("decode")
+            .expect("event")
+        else {
+            panic!("context-wrapped open")
+        };
+        assert_eq!(
+            opened.diagnostics.and_then(|d| d.cache_epoch_id).as_deref(),
+            Some("sha256:epoch-7")
+        );
+
+        let hydrate = exchange
+            .build_tracked_request(AppUiCommand::HydrateSession(SessionHydrateParams {
+                session_id: SessionKey("local:context".into()),
+                after: None,
+                include: vec!["context".into()],
+            }))
+            .expect("hydrate request");
+        let hydrate_frame = json!({
+            "jsonrpc": "2.0", "id": hydrate.id,
+            "result": {
+                "session_id": "local:context",
+                "cursor": { "stream": "local:context", "seq": 1 },
+                "context_state": {
+                    "session_id": "local:context", "generation": 8,
+                    "transcript_hash": "sha256:t2", "item_count": 4,
+                    "token_estimate": 44, "recovery_state": "healthy",
+                    "cache_epoch_id": "sha256:epoch-8"
+                }
+            }
+        });
+        let ClientEvent::SessionHydrateContext(hydrated) = exchange
+            .decode_rpc_text(&hydrate_frame.to_string())
+            .expect("decode")
+            .expect("event")
+        else {
+            panic!("context-wrapped hydrate")
+        };
+        assert_eq!(hydrated.result.context_state.expect("state").generation, 8);
+        assert_eq!(
+            hydrated
+                .diagnostics
+                .and_then(|d| d.cache_epoch_id)
+                .as_deref(),
+            Some("sha256:epoch-8")
         );
     }
 
@@ -11871,16 +14509,21 @@ mod tests {
             "the stored reopen resets the cursor; command_with_resume_cursor refills it at send time"
         );
 
-        // /resume emits a HydrateSession (NOT an OpenSession); it must also
-        // update the reopen target, else a reconnect after /resume reopens the
-        // stale prior session (codex P1). The reopen is re-expressed as an
-        // OpenSession carrying the launch profile/cwd.
+        // /resume emits hydration, which must establish an unknown scope via
+        // explicit open before updating the reopen target. Hydration alone
+        // cannot manufacture a confirmed profile/sandbox.
         let hydrated_session = SessionKey("local:hydrated".into());
-        backend.record_reopen_target(&AppUiCommand::HydrateSession(SessionHydrateParams {
+        let hydrate = AppUiCommand::HydrateSession(SessionHydrateParams {
             session_id: hydrated_session.clone(),
             after: None,
             include: vec!["messages".into(), "turns".into()],
-        }));
+        });
+        backend.record_reopen_target(&hydrate);
+        assert_eq!(reopen_target(&backend), resumed_session.0);
+        let open = backend
+            .open_before_unknown_hydrate(&hydrate)
+            .expect("unknown resume needs scope");
+        backend.record_reopen_target(&open);
         let reopen = backend
             .reopen_session_open_command()
             .expect("a HydrateSession updates the reopen target");
@@ -11896,6 +14539,64 @@ mod tests {
             Some("coding"),
             "a hydrate-sourced reopen carries the launch profile (hydrate has none)"
         );
+    }
+
+    #[test]
+    fn protocol_bootstrap_delayed_hydrate_keeps_native_prompt_once() {
+        use crate::viewport::ScrollbackTracker;
+        const PROMPT: &str = "LOCALPARENTROUND1 create and gather one peer";
+        let session = SessionKey("bootstrap-hydrate".into());
+        let launch = AppUiLaunch {
+            session_id: Some(session.clone()),
+            ..Default::default()
+        };
+        let mut store = crate::store::Store::from_snapshot(protocol_snapshot_from_launch(
+            &launch,
+            "stdio-test",
+        ));
+        let palette = crate::theme::Palette::for_theme(crate::cli::ThemeName::Codex);
+        let mut tracker = ScrollbackTracker::new();
+        let mut visible = String::new();
+        let flush = |store: &mut crate::store::Store,
+                     tracker: &mut ScrollbackTracker,
+                     visible: &mut String| {
+            if let Some(scope) = store.state.take_transcript_reflush_request() {
+                match scope {
+                    crate::model::TranscriptReflushScope::WithLive => tracker.mark_flushed_stale(),
+                    crate::model::TranscriptReflushScope::CommittedOnly => {
+                        tracker.mark_committed_flush_stale()
+                    }
+                }
+            }
+            for line in tracker.sync(&store.state, palette, 210).lines_to_insert {
+                for span in line.spans {
+                    visible.push_str(&span.content);
+                }
+                visible.push('\n');
+            }
+        };
+        flush(&mut store, &mut tracker, &mut visible);
+        store.state.composer = PROMPT.into();
+        let Some(AppUiCommand::SubmitPrompt(submit)) = store.compose_command() else {
+            panic!("submit");
+        };
+        flush(&mut store, &mut tracker, &mut visible);
+        for _ in 0..2 {
+            store.apply_client_event(ClientEvent::SessionHydrate(
+                serde_json::from_value(json!({
+                    "session_id": session, "cursor": {"stream": session.0, "seq": 1},
+                    "messages": [], "turns": [{"turn_id": submit.turn_id, "state": "active"}],
+                }))
+                .unwrap(),
+            ));
+            flush(&mut store, &mut tracker, &mut visible);
+        }
+        assert_eq!(
+            visible.matches(PROMPT).count(),
+            1,
+            "bootstrap → submit → delayed hydrate: {visible}"
+        );
+        assert_eq!(store.state.sessions[0].messages.len(), 1);
     }
 
     #[test]
@@ -11920,6 +14621,8 @@ mod tests {
         assert!(snapshot.readonly);
         assert_eq!(snapshot.sessions[0].id.0, "session-123");
         assert_eq!(snapshot.sessions[0].profile_id.as_deref(), Some("coding"));
+        assert!(snapshot.sessions[0].messages.is_empty());
+        assert!(snapshot.status.contains("read-only"));
     }
 
     #[test]

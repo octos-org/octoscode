@@ -33,6 +33,7 @@ estimate: 0.5d
 ## 边界
 
 ### Allowed Changes
+- src/event_loop.rs
 - src/menu/providers.rs
 - locales/en.yml
 - locales/zh.yml
@@ -92,3 +93,23 @@ estimate: 0.5d
   假设 onboarding 向导在首启自动打开
   当 用户按下 Esc
   那么 向导保持打开（防误触卡死的既有决策不回归）
+
+场景: 从 onboarding 全屏层退出时清理此前隐藏的 inline 界面
+  测试: onboarding_alt_screen_exit_clears_the_saved_inline_viewport
+  假设 launch/resolve 等待期间已经绘制过 Composer 和状态栏
+  并且 onboarding 随后进入 alternate screen
+  当 用户从 onboarding 直接退出进程
+  那么 先恢复 normal screen，再从保存的 inline viewport 顶部向下清除
+  并且 shell prompt 不会落入上一轮 Composer 框中
+
+场景: onboarding 是首帧时保留安装输出
+  测试: onboarding_alt_screen_exit_preserves_normal_screen_without_an_inline_frame
+  假设进入 alternate screen 前保存的 inline viewport 为空
+  当 用户从 onboarding 直接退出进程
+  那么 只恢复 normal screen，不清除 shell 拥有的首次安装输出
+
+场景: 普通 inline 退出继续清理当前界面
+  测试: inline_exit_still_clears_the_live_inline_viewport
+  假设 当前没有 alternate-screen overlay
+  当 用户退出进程
+  那么 从 live inline viewport 顶部向下清除，不回归既有退出清理

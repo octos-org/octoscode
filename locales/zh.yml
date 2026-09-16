@@ -55,6 +55,8 @@ app:
     action_next: "Enter = 下一问题 | Esc = 隐藏"
     action_dismiss: "Esc = 关闭（无可提交答案）"
   activity:
+    title: "活动"
+    no_matches: "没有匹配的活动记录"
     orchestrating: "编排中……"
     re_entering: "重新进入（继续中）……"
     finished_errors: "智能体任务完成（有错误）"
@@ -72,6 +74,105 @@ app:
     turn_label: "回合 %{id}"
     more_lines_hidden: "... 还有 %{count} 行已隐藏（%{action}）"
     expanded_hint: "已展开（Ctrl+O 折叠）"
+  activity_navigator:
+    navigator_suffix: "导航"
+    search_active: "搜索*："
+    query_label: "查询："
+    empty_query: "（空）"
+    counts: "全部 %{all} | 变更 %{changes} | 运行中 %{running} | 已阻塞 %{blocked} | 失败 %{failed} | 完成 %{done}"
+    filter_label: "  筛选：%{filter}"
+    filter_label_compact: "筛选：%{filter}"
+    query_filter: "查询：%{query}  筛选：%{filter}"
+    results: "结果"
+    detail: "详情"
+    no_selected: "未选择活动"
+    orchestration_active: "编排进行中"
+    running_agents: "运行中的智能体：%{count}"
+    pending_continuations: "待继续任务：%{count}"
+    session_running: "会话运行中"
+    session_blocked: "会话已阻塞"
+    session_done: "会话已完成"
+    session_error: "会话出错"
+    no_active_session: "无活动会话"
+    approval_required: "需要审批"
+    question_pending: "问题待回答"
+    questions: "问题数：%{count}"
+    empty_message: "%{role}：空消息"
+    message_title: "%{role}：%{preview}"
+    message_subtitle: "%{session} · 第 %{number} 条消息"
+    content_heading: "内容："
+    reasoning_heading: "推理："
+    output_tail_heading: "输出末尾："
+    output_preview_heading: "输出预览："
+    diff_preview_ready: "差异预览已就绪"
+    diff_preview_pending: "差异预览待生成"
+    field: "%{label}：%{value}"
+    kind:
+      session: "会话"
+      message: "消息"
+      orchestration: "编排"
+      task: "任务"
+      change: "变更"
+      activity: "活动"
+      approval: "审批"
+    status:
+      running: "运行中"
+      blocked: "已阻塞"
+      failed: "失败"
+      done: "完成"
+    filter:
+      all: "全部"
+      running: "运行中"
+      blocked: "已阻塞"
+      failed: "失败"
+      done: "完成"
+    run_state:
+      idle: "空闲"
+      running: "运行中"
+      blocked: "已阻塞"
+      done: "完成"
+      error: "错误"
+    value:
+      active: "活动"
+      pending: "等待中"
+      running: "运行中"
+      done: "完成"
+      failed: "失败"
+      cancelled: "已取消"
+      interrupted: "已中断"
+      unknown: "未知"
+      user: "用户"
+      assistant: "助手"
+      system: "系统"
+      tool: "工具"
+      progress: "进度"
+      report: "报告"
+      approval: "审批"
+      warning: "警告"
+      error: "错误"
+      added: "新增"
+      modified: "修改"
+      deleted: "删除"
+      renamed: "重命名"
+    label:
+      session: "会话"
+      phase: "阶段"
+      state: "状态"
+      status: "状态说明"
+      detail: "详情"
+      tool: "工具"
+      kind: "类型"
+      body: "内容"
+      question_id: "问题 ID"
+      message: "消息"
+      role: "角色"
+      tool_call: "工具调用"
+      task: "任务"
+      turn: "轮次"
+      file: "文件"
+      type: "类型"
+      operation: "操作"
+      preview: "预览"
   diff:
     title: "差异预览"
     inline_patch: "内联补丁"
@@ -281,6 +382,22 @@ app:
     justification: "理由"
 
 onboarding:
+  validation:
+    profile_name_required: "请先命名此档案。使用 /onboard profile-name <id>。"
+    display_name_required: "显示名称为必填项。使用 /onboard name <显示名称>。"
+    display_name_too_long: "显示名称不得超过 128 个字符。"
+    username_required: "用户名为必填项。使用 /onboard username <用户名>。"
+    username_too_long: "用户名不得超过 64 个字符。"
+    username_invalid_chars: "用户名必须为 ASCII，且不能包含空白或控制字符。"
+    email_required: "后端要求填写邮箱。使用 /onboard email <地址>。"
+    email_invalid: "邮箱必须包含非空的本地部分和域名（例如 ada@example.com）。"
+    profile_collision: "本地档案“%{username}”发生冲突：%{reason}。请使用 /onboard name|username|email 编辑字段后重试。"
+    local_profile_unsupported: "服务器对 profile/local/create 返回了 profile_local_unsupported。后端配置有误——请启用本地单人引导后重启服务器，或连接到完整支持该功能的后端。"
+    server_rejected_name: "服务器拒绝了显示名称：%{reason}。请使用 /onboard name <显示名称> 修改。"
+    server_rejected_username: "服务器拒绝了用户名：%{reason}。请使用 /onboard username <用户名> 修改。"
+    server_rejected_email: "服务器拒绝了邮箱：%{reason}。请使用 /onboard email <地址> 修改。"
+    server_rejected_fields: "服务器判定档案字段无效：%{reason}。请使用 /onboard name|username|email 修改。"
+    local_profile_create_failed: "profile/local/create 失败：%{reason}"
   welcome_title: "欢迎使用 Octos"
   value_saved: "%{value}（已保存）"
   value_suggested: "%{value}（建议）"
@@ -455,6 +572,8 @@ command:
   agents:
     desc: 查看或中断后端智能体
   aliases_label: 别名：
+  btw:
+    desc: 在当前回合继续运行时快速旁路提问。
   context:
     desc: 上下文窗口控制——立即压缩，并选择 LLM 或启发式摘要。
   copy:
@@ -493,6 +612,10 @@ command:
     desc: "把黑板上的同伴结果汇总进当前会话：/gather [all | <slug> …]。"
   research:
     desc: 管理研究模型通道（deep_research 的 cheap/strong 模型）。
+  resume:
+    desc: 切换到先前的会话并重新加载其对话记录。
+  rewind:
+    desc: 回到本会话中较早的一条消息，以便编辑并重新发送。
   onboard:
     desc: 打开设置向导以配置或重新配置您的档案、供应商、模型和工作区
   permissions:
@@ -538,6 +661,18 @@ lang:
   unknown: 未知语言 '%{value}'。可选：en、zh。
   usage: 当前语言：%{current}。用法：/lang <en|zh>。
 menu:
+  common:
+    no_status_supplied: "未提供状态"
+    local_offline: "本地/离线"
+    edit_as: "编辑为：%{command}"
+    test_named: "测试 %{name}"
+    delete_named: "删除 %{name}"
+  protocol:
+    uses_method: "使用 %{method}。"
+    requires_method: "需要 %{method}。"
+    method_not_advertised: "服务器未公布 Octos UI 方法 `%{method}`"
+    returned_no_items: "%{method} 未返回%{items}"
+    no_cached_result: "%{method} 已公布，但尚无缓存结果"
   loop_actions:
     gone: "循环 %{id} 已不存在——被删除或已过期。"
     no_target: 未选中任何循环。
@@ -697,6 +832,11 @@ menu:
     unavailable_no_session: 压缩需要已打开的 Octos UI 会话。
     unavailable_title: 压缩不可用
   context:
+    diagnostics:
+      cache_epoch: 缓存代次
+      last_invalidation: 最近失效原因
+      semantic_head: 语义头部
+      title: OUP 上下文缓存
     item:
       compact:
         desc: 立即总结较早的消息以释放上下文窗口。
@@ -735,6 +875,7 @@ menu:
     title: 费用
     unavailable_no_session: 用量统计需要一个打开的 Octos UI 会话。
     unavailable_title: 费用不可用
+    usage_totals: 任何用量汇总
   empty: 没有可用选项
   filter:
     placeholder: 筛选选项
@@ -831,6 +972,9 @@ menu:
     title: 登录
     unavailable_title: 登录不可用
   mcp:
+    configured_servers: 任何已配置服务器
+    session_servers: 当前会话的任何服务器
+    refresh_first: 请先刷新 MCP 配置
     item:
       cached:
         label: 服务器 MCP 配置
@@ -847,6 +991,8 @@ menu:
     title: MCP
     unavailable_title: MCP 不可用
   model:
+    profile_models: 此档案的任何模型
+    server_unavailable: 服务器报告此模型不可用
     footer: 回车 选择或刷新 | Esc 关闭
     item:
       add:
@@ -998,6 +1144,7 @@ menu:
       auth_refresh:
         label: 刷新认证状态
       auth_send:
+        desc: 使用向导中的邮箱调用 auth/send_code。
         label: 发送邮箱验证码
       auth_status:
         desc: 使用 /onboard email、/onboard send-code、/onboard code、/onboard verify 完成验证。
@@ -1132,10 +1279,28 @@ menu:
     title: 更新模型权限
     unavailable_no_session: 权限功能需要一个打开的 Octos UI 会话。
     unavailable_title: 权限不可用
+  resume:
+    title: "恢复会话"
+    subtitle: "切换到先前的会话并重新加载其对话记录。"
+    empty: "没有可恢复的先前会话"
+    loading: "正在加载会话……"
+    no_preview: "（无预览）"
+    message_count: "%{count} 条消息"
+    search: "搜索会话……"
+    footer: "Enter 恢复 · /resume <id> · Esc"
+  rewind:
+    title: "回退对话"
+    subtitle: "回到较早的一条消息，以便编辑并重新发送。"
+    empty: "本会话没有可回退的消息"
+    drop_count: "丢弃 %{count} 个回合"
+    search: "搜索消息……"
+    footer: "Enter 回退 · /rewind <n> · Esc"
   runtime_preview_title: 运行时
   search:
     label: "搜索 "
   skills:
+    installed_skills: 任何已安装技能
+    refresh_first: 请先刷新已安装技能
     item:
       cache_empty:
         label: 已安装技能未加载
@@ -1158,6 +1323,7 @@ menu:
     title: 技能
     unavailable_title: 技能不可用
   status:
+    requires_open_session: 服务器状态需要已打开的 Octos UI 会话
     item:
       capabilities:
         label: 能力
@@ -1251,6 +1417,9 @@ menu:
     subtitle: 选择终端标题组件。
     title: 终端标题
   tools:
+    configured_tools: 任何已配置工具
+    session_tools: 当前会话的任何工具
+    refresh_first: 请先刷新工具配置
     item:
       cached:
         label: 服务器工具配置
@@ -1274,6 +1443,42 @@ menu:
     unavailable_title: 工具设置不可用
   unavailable: 菜单不可用
 status:
+  peer_session_read_only: "同伴会话为只读——请从主会话使用 peer_send_input 引导同伴。"
+  statusline_save_not_wired: "状态栏布局保存功能尚未接通"
+  terminal_title_save_not_wired: "终端标题布局保存功能尚未接通"
+  resume_ambiguous: '“%{query}”匹配 %{count} 个会话（%{ids}）；请再多输入一些 id 以选定会话。'
+  resume_no_match: '没有先前会话匹配“%{query}”；请不带参数运行 /resume 进行浏览。'
+  resuming_session: "正在恢复 %{session}……"
+  resume_loaded: "已为 /resume 加载 %{count} 个先前会话。"
+  resume_parse_failed: "无法解析会话列表：%{error}"
+  rewind_active_turn: "请先完成或停止当前回合，再回退对话。"
+  rewind_no_active_session: "没有可回退的活动会话。"
+  rewind_wrong_session: "所选回退项属于另一会话——请重新打开 /rewind。"
+  rewind_transcript_changed: "对话记录已变化——请重新打开 /rewind。"
+  rewinding: "正在回退 %{count} 个回合……"
+  rewind_invalid_checkpoint: '/rewind 需要检查点编号，例如 /rewind 2（收到“%{value}”）。'
+  rewind_checkpoint_min: "/rewind 的检查点编号必须不小于 1。"
+  rewind_checkpoint_out_of_range: "/rewind %{checkpoint} 超出范围——本会话共有 %{count} 个检查点。"
+  rewind_complete: "已回退 %{count} 个回合——请编辑后重新发送"
+  turn_started_in: "已在 %{session} 中开始回合"
+  tool_failed: "工具失败：%{tool}"
+  tool_completed: "工具已完成：%{tool}"
+  warning_code_message: "警告 [%{code}]：%{message}"
+  router_status: "路由器 %{mode} 正在使用 %{provider}（%{session}）"
+  router_failover: "路由已故障转移到 %{provider}"
+  queue_empty: "队列为空"
+  queue_pending: "队列待处理：%{count}"
+  plan_updated: "计划已更新：%{count} 项中已完成 %{done} 项"
+  tool_lifecycle: "工具 %{state}：%{id}"
+  file_attached: "已附加文件：%{path}"
+  turn_interrupted_reason: "回合已中断：%{message}"
+  background_completion_persisted: "后台完成结果已持久化：%{id}"
+  session_event: "会话事件：%{kind}"
+  approval_auto_resolved: "审批已由范围策略自动处理（%{decision}）"
+  approval_decided: "审批已决定：%{decision}（%{detail}）"
+  approval_cancelled: "审批已取消：%{reason}"
+  task_output_cursor: "任务输出 @%{offset}"
+  paste_ignored_dialog_open: "对话框打开时已忽略粘贴内容"
   undo_no_session: "没有可撤销的活动会话。"
   peer_usage: "用法：/peer [--go] [--worktree] [--cwd <path>] [--n <2-8>] <brief>"
   peer_preparing: "正在准备同伴会话…"
@@ -1303,6 +1508,7 @@ status:
   question_asked: "提出问题：%{title}"
   turn_completed: "轮次已完成于 %{title}，序号 %{seq}"
   backend_relaunched_turn_lost: "后端进程已重启 — 进行中的回合已丢失；排队的消息将发送到新的后端。"
+  hydration_queue_full: "后续请求队列已满，已丢弃 %{method}。"
   turn_completed_stale: "已忽略 %{title} 中的过期完成轮次"
   edit_field_prompt: 编辑字段后按 Enter 确认
   keymap_save_not_wired: 快捷键保存尚未实现
@@ -1461,6 +1667,7 @@ status:
   creating_local_profile: "正在创建本地单人档案"
   onboarding_provider_route_incomplete: "引导供应商线路不完整"
   onboarding_provider_selection_incomplete: "引导供应商选择不完整"
+  onboarding_profile_unresolved: "尚未选定档案——请先在「档案」步骤创建，或用 --profile-id <id> 重新启动，然后再保存供应商"
   onboarding_api_key_empty_onboard: "引导 API 密钥为空；请使用 /onboard key <secret>"
   onboarding_api_key_empty_provider: "引导 API 密钥为空；请使用 /provider key <secret>"
   onboarding_loading_catalog: "正在加载提供商目录以检查密钥要求——加载完成后请重试"
@@ -1485,7 +1692,7 @@ status:
   path_not_directory: "路径 '%{target}' 不是目录"
   workspace_not_directory: "工作区 '%{target}' 不是目录"
   workspace_cannot_be_root: "工作区不能是文件系统根目录"
-  workspace_cannot_be_root_status: "工作区不能为 /；请暂存一个项目目录"
+  workspace_cannot_be_root_status: "工作区不能是文件系统根目录；请暂存一个项目目录"
   workspace_writable: "可写"
   workspace_read_only: "只读"
   workspace_has_toml: "（含 .octos-workspace.toml）"
@@ -1521,6 +1728,11 @@ status:
   doctor_no_transport: "未配置 Octos UI 传输"
   doctor_no_transport_recovery: "请使用 octoscode --stdio-command \"octos serve --stdio\" 或 octoscode --endpoint ws://<host>:<port>/api/ui-protocol/ws 重新启动。"
   onboarding_doctor_summary: "引导诊断 — %{summary}"
+  doctor_outcome:
+    pass: "通过"
+    warn: "警告"
+    fail: "失败"
+    skip: "跳过"
   ps_active_turn: "活动回合 %{id}"
   ps_idle: "空闲"
   ps_selected_task: "已选任务：%{title} [%{state}]"
@@ -1688,17 +1900,12 @@ status:
   recovery_search_restricted: "搜索/抓取受限；请申请供应商配置，或在明确的离线告知下继续"
   diff_hunk_prompt: "将选中的差异代码块用作下一个编码轮次的上下文。\nfile: %{path}\nstatus: %{status}\nhunk: %{hunk}\n```diff\n"
   summary_title: "会话摘要"
+  turn_missing_answer: "未收到最终助手回答。请重新打开会话查看持久化记录，或重试。"
+  turn_waiting_on_fleet: "%{total} 个 peer 中已落地 %{landed} 个 · 等待 %{peers}；舰队落地后主 agent 会自动继续。"
   summary_error_label: "错误"
   quota_card: "⏳ 额度已用完 — %{provider}\n  该提供商本计费周期的用量已达上限,本回合未能完成。\n  现在可以:\n   ▸ 购买加量或升级套餐%{link}\n   ▸ /model — 切换到其他已配置模型继续当前会话\n   ▸ 等额度刷新后重发这条消息(草稿会保留)"
   quota_card_provider_unknown: "当前提供商"
-  summary_completed_no_answer: "会话摘要\n- 结果：轮次已完成，但 TUI 未收到最终的助手回答。\n- 活动：已记录 %{count} 个操作。\n- 文件改动：%{files}。\n- 验证：%{validation}。\n- 风险 / 后续：请查看上方活动，若所需回答不完整，请继续该轮次。"
-  summary_partial_answer: "会话摘要\n- 结果：轮次已完成，但 TUI 仅收到部分实时回答。\n- 活动：已记录 %{count} 个操作。\n- 文件改动：%{files}。\n- 验证：%{validation}。\n- 风险 / 后续：服务器可能已持久化更完整的回答；若可见回答不完整，请继续。"
-  # octoscode#532：主 agent 的轮次在 peer 舰队仍在运行时结束——这是设计使然，
-  # 等最后一个 peer 落地后会自动唤醒并汇总，因此不能再用"未收到回答"的措辞。
-  summary_waiting_on_fleet: "会话摘要\n- 结果：轮次已结束，但 peer 舰队仍在运行。主 agent 并未停止——舰队全部落地后它会自动唤醒并汇总。\n- 舰队：%{total} 个 peer 中已落地 %{landed} 个 · 仍在等待 %{peers}。\n- 活动：已记录 %{count} 个操作。\n- 文件改动：%{files}。\n- 验证：%{validation}。\n- 风险 / 后续：无需操作——Alt+P 可查看 peer 面板；最后一个 peer 落地后主 agent 会汇报。"
   summary_failed: "会话摘要\n- 结果：轮次在产生最终回答前失败。\n- 错误：%{code}：%{message}\n- 活动：已记录 %{count} 个操作。\n- 失败：%{failed}。\n- 风险 / 后续：请修复上方错误，或用更具体的指令继续该轮次。"
-  summary_none_observed: "未观察到"
-  summary_not_reported: "未报告"
   summary_none_recorded: "未记录"
   # 用户主动中断（Esc/Ctrl+C）自己的轮次时的状态行与简短转录提示。刻意从简：
   # 用户主动停止不是失败，因此不显示真正错误才有的详细“会话摘要”卡片。

@@ -65,7 +65,7 @@ prefix_sha() { # path offset
 }
 
 json_get() { # json key -> value via python3 stdlib
-    python3 - "$1" "$2" <<'PY'
+    python3 -B - "$1" "$2" <<'PY'
 import json, sys
 try:
     d = json.loads(sys.argv[1])
@@ -117,12 +117,39 @@ harvest_board() { # realpath
             'ACK(blocked):'*|'ACK(blocked)：'*) trigger=ack_blocked; rest=$trimmed ;;
             'ACK(wontdo):'*|'ACK(wontdo)：'*) trigger=ack_wontdo; rest=$trimmed ;;
         esac
+        # #42a: SIGNED override / R2-record line forms (phase-1). A COPY of
+        # the line is stripped of leading `> ` (repeatable), `**` and
+        # whitespace, then matched against the signed line-start forms;
+        # the phase-0 ACK detection above is untouched.
+        local signed=${trimmed}
+        while :; do
+            case $signed in
+                '> '*) signed=${signed#'> '} ;;
+                '**'*) signed=${signed#'**'} ;;
+                *) break ;;
+            esac
+        done
+        signed=${signed#"${signed%%[![:space:]]*}"}
+        if [ -z "$trigger" ]; then
+            local re_override='^外环\([^)]+\)·改判\('
+            local re_r2='^外环\([^)]+\)·R2 记档\('
+            if [[ $signed =~ $re_override ]]; then
+                trigger=override
+            elif [[ $signed =~ $re_r2 ]]; then
+                trigger=r2_record
+            fi
+        fi
         if [ -n "$trigger" ]; then
             lsha=$(printf '%s' "$line" | sha256sum | cut -d' ' -f1)
             local kind=blocked
             [ "$trigger" = ack_wontdo ] && kind=wontdo
+            [ "$trigger" = override ] && kind=override
+            [ "$trigger" = r2_record ] && kind=r2
             ident="board:$rp#$entry#$kind#$lsha"
-            local symptom=${rest:0:200}
+            # signed forms report the ORIGINAL line (contract: symptom 取原行前 200 字符)
+            local symptom_base=${rest:-$trimmed}
+            case $trigger in override|r2_record) symptom_base=$trimmed ;; esac
+            local symptom=${symptom_base:0:200}
             add_candidate "$trigger" review "$rp" "$ident" "$line_no" "$line_off" "$(now_rfc3339)" "$symptom"
         fi
     done < "$BOARD"
@@ -134,7 +161,7 @@ harvest_events() { # realpath
     local rp=$1
     [ -z "$EVENTS" ] && return 0
     [ -f "$EVENTS" ] || { skip "$EVENTS"; return 0; }
-    OLP_EVO_HARVEST_TS="$HARVEST_TS" OLP_EVO_EVENTS_OUT="/tmp/.olp_evo_events_out.$$" python3 - "$EVENTS" "$rp" <<'PY' || true
+    OLP_EVO_HARVEST_TS="$HARVEST_TS" OLP_EVO_EVENTS_OUT="/tmp/.olp_evo_events_out.$$" python3 -B - "$EVENTS" "$rp" <<'PY' || true
 import hashlib, json, sys, datetime
 
 path, rp = sys.argv[1], sys.argv[2]
@@ -166,7 +193,7 @@ for i, line in enumerate(lines):
         continue
     kind = d.get("kind", "")
     trigger = None
-    if kind in ("escalation", "turn_error"):
+    if kind in ("escalation", "turn_error", "fallback_switch", "malformed_exhausted"):
         trigger = kind
     elif kind == "goal_transition":
         detail = d.get("detail", "")
@@ -237,7 +264,7 @@ print((r[: m.start()] if m else r)[:80])
 # this helper treated it as a path — the bare except swallowed the error,
 # so prev/dev/ino/prefix were never read and every rerun printed reset:).
 source_state() { # state_file source_key
-    python3 - "$1" "$2" <<'PY'
+    python3 -B - "$1" "$2" <<'PY'
 import json, sys
 try:
     with open(sys.argv[1]) as f:
@@ -424,13 +451,24 @@ fi
 
 # Fault injection (tests only): after appending all cards, before state.
 if [ "${OLP_EVO_TEST:-0}" = "1" ] && [ "${OLP_EVO_FAULT:-}" = "after-append" ] && [ -n "$APPEND_TEXT" ]; then
-    printf '%s' "$APPEND_TEXT" | "$(dirname "$0")/olp-board-append.sh" "$EVO_BOARD" >/dev/null 2>&1 || true
+    # 44-r1: harvest may be invoked from an installed watcher in an
+    # unrelated dir — locate the append helper next to the HARVEST script
+    # (i.e. the repo's scripts/) when the copy isn't beside us.
+    _append_sh="$(dirname "$0")/olp-board-append.sh"
+    if [ ! -f "$_append_sh" ]; then
+        _append_sh="$(pwd)/scripts/olp-board-append.sh"
+    fi
+    printf '%s' "$APPEND_TEXT" | "$_append_sh" "$EVO_BOARD" >/dev/null 2>&1 || true
     echo "fault-injected: after-append" >&2
     exit 70
 fi
 
 if [ -n "$APPEND_TEXT" ]; then
-    printf '%s' "$APPEND_TEXT" | "$(dirname "$0")/olp-board-append.sh" "$EVO_BOARD"
+    _append_sh="$(dirname "$0")/olp-board-append.sh"
+    if [ ! -f "$_append_sh" ]; then
+        _append_sh="$(pwd)/scripts/olp-board-append.sh"
+    fi
+    printf '%s' "$APPEND_TEXT" | "$_append_sh" "$EVO_BOARD"
 fi
 export OLP_EVO_BOARD="$EVO_BOARD"
 
@@ -457,7 +495,7 @@ effective_size() { # path
     echo "$size"
 }
 
-python3 - "$STATE_FILE" "$NEXT_ID" "$BOARD" "$BOARD_SIZE" "$EVENTS" "$EVENTS_SIZE" "$MCP_BOARD" "$MCP_SIZE" <<'PY'
+python3 -B - "$STATE_FILE" "$NEXT_ID" "$BOARD" "$BOARD_SIZE" "$EVENTS" "$EVENTS_SIZE" "$MCP_BOARD" "$MCP_SIZE" <<'PY'
 import hashlib, json, os, sys, tempfile
 
 state_path, next_id = sys.argv[1], int(sys.argv[2])

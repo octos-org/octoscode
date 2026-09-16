@@ -742,36 +742,110 @@ pub(super) fn push_live_reply_segment_separator(
     }
 }
 
-/// Render late archived activity for turns whose live activity rows were
-/// already streamed to scrollback. This handles the common race where the final
-/// assistant message commits first and `turn_activity_logs` catches up on a
-/// later frame.
+/// Append unseen activity and first footers for already-rendered archived turns.
+/// Handles both late log creation and additions to an existing old log without
+/// replaying the dialogue that originally anchored it.
 pub fn finalized_late_activity_lines_for_coverages(
     app: &AppState,
     palette: Palette,
     wrap_width: usize,
     live_coverages: &[LiveTurnFinalization],
+    before_message_index: usize,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let Some(session) = app.active_session() else {
         return lines;
     };
+    let anchored = anchored_turn_activity_logs(app, session);
     for log in app
         .turn_activity_logs
         .iter()
         .filter(|log| log.session_id == session.id)
     {
-        if let Some(coverage) = live_coverages
+        let empty = LiveTurnFinalization::new(&log.session_id, &log.turn_id);
+        let coverage = live_coverages
             .iter()
-            .find(|coverage| coverage.matches_turn(&log.session_id, &log.turn_id))
+            .find(|coverage| coverage.matches_turn(&log.session_id, &log.turn_id));
+        let render_index = anchored
+            .iter()
+            .find(|(_, anchored_log)| anchored_log.turn_id == log.turn_id)
+            .map(|(index, _)| *index);
+        // Legacy logs may have no message anchor while live coverage still
+        // proves their exact turn ownership. Preserve that path, but never
+        // invent an anchor for an otherwise unknown log.
+        if render_index.is_some_and(|index| index >= before_message_index)
+            || (render_index.is_none() && coverage.is_none())
         {
-            push_turn_activity_log_section_unflushed(
-                &mut lines, palette, log, app, coverage, wrap_width,
-            );
+            continue;
+        }
+        let coverage = coverage.unwrap_or(&empty);
+        let items = log
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(idx, item)| {
+                !coverage
+                    .activity_flushed_keys
+                    .contains(&activity_finalization_key(item, *idx))
+            })
+            .map(|(_, item)| item)
+            .collect::<Vec<_>>();
+        // A late activity update is its own appended group, not a replay of
+        // the old answer. Its first committed footer may also arrive late.
+        push_finalized_activity_items_section(
+            &mut lines,
+            palette,
+            app,
+            Some(&log.turn_id),
+            &items,
+            false,
+            wrap_width,
+        );
+        if !coverage.summary_flushed {
+            push_turn_summary_line(&mut lines, palette, app, &log.turn_id);
         }
     }
     strip_lines_background(&mut lines);
     lines
+}
+
+/// Archived activity ownership has the retained-log lifetime (32), not the
+/// eight-turn live reply cache. This contains identities only, no answer text.
+pub fn committed_activity_coverages(
+    app: &AppState,
+    prior_coverages: &[LiveTurnFinalization],
+) -> Vec<LiveTurnFinalization> {
+    let Some(session) = app.active_session() else {
+        return Vec::new();
+    };
+    let anchored = anchored_turn_activity_logs(app, session);
+    app.turn_activity_logs
+        .iter()
+        .filter(|log| {
+            log.session_id == session.id
+                && (anchored.iter().any(|(_, item)| item.turn_id == log.turn_id)
+                    || prior_coverages
+                        .iter()
+                        .any(|coverage| coverage.matches_turn(&log.session_id, &log.turn_id)))
+        })
+        .map(|log| {
+            let keys = log
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| !is_running_activity(item))
+                .map(|(idx, item)| activity_finalization_key(item, idx))
+                .collect::<Vec<_>>();
+            LiveTurnFinalization {
+                session_id: session.id.0.clone(),
+                turn_id: log.turn_id.0.to_string(),
+                activity_flushed_items: keys.len(),
+                activity_flushed_keys: keys,
+                summary_flushed: app.turn_summary_for(&log.turn_id).is_some(),
+                ..Default::default()
+            }
+        })
+        .collect()
 }
 
 pub fn committed_activity_keys_for_live_finalization(
@@ -787,6 +861,7 @@ pub fn committed_activity_keys_for_live_finalization(
             log.items
                 .iter()
                 .enumerate()
+                .filter(|(_, item)| !is_running_activity(item))
                 .map(|(idx, item)| activity_finalization_key(item, idx))
                 .collect()
         })
@@ -818,59 +893,26 @@ pub fn committed_messages_fingerprint(app: &AppState) -> CommittedFingerprint {
     let Some(session) = app.active_session() else {
         return CommittedFingerprint::default();
     };
-    let anchored_activity_logs = anchored_turn_activity_logs(app, session);
     CommittedFingerprint {
         session_id: session.id.0.clone(),
         message_count: session.messages.len(),
-        activity_log_count: anchored_activity_logs
-            .iter()
-            .filter(|(_, log)| !log.items.is_empty())
-            .count(),
-        // A cheap content hash of the committed messages so a hydrate that
-        // *replaces* history (same count, different content) is detected. It
-        // also covers archived activity logs, which can arrive after the
-        // corresponding assistant message was already flushed.
-        content_hash: committed_content_hash(session, &anchored_activity_logs),
+        message_prefix_hashes: {
+            use std::hash::{Hash, Hasher};
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            session
+                .messages
+                .iter()
+                .map(|message| {
+                    message.role.as_str().hash(&mut hash);
+                    message.content.hash(&mut hash);
+                    // Reasoning/media/correlation metadata can update the
+                    // inspector without rewriting immutable dialogue text.
+                    message.tool_call_id.hash(&mut hash);
+                    hash.finish()
+                })
+                .collect()
+        },
     }
-}
-
-pub(super) fn committed_content_hash(
-    session: &SessionView,
-    anchored_activity_logs: &[(usize, &TurnActivityLog)],
-) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for message in &session.messages {
-        message.role.as_str().hash(&mut hasher);
-        message.content.hash(&mut hasher);
-        // reasoning_content is NOT hashed: the /thinking display toggle applies
-        // to turns committed AFTER it flips (a terminal cannot retroactively
-        // redraw scrolled-off history — re-flushing would duplicate it). Past
-        // turns stay as flushed; the Tab inspector always shows full reasoning
-        // regardless of the toggle. So a reasoning change must not force a
-        // full re-flush of unchanged visible history.
-        message.tool_call_id.hash(&mut hasher);
-    }
-    for (render_index, log) in anchored_activity_logs {
-        if log.items.is_empty() {
-            continue;
-        }
-        render_index.hash(&mut hasher);
-        log.session_id.0.hash(&mut hasher);
-        log.turn_id.0.to_string().hash(&mut hasher);
-        log.request.hash(&mut hasher);
-        for item in &log.items {
-            item.kind.label().hash(&mut hasher);
-            item.title.hash(&mut hasher);
-            item.status.hash(&mut hasher);
-            item.detail.hash(&mut hasher);
-            item.output_preview.hash(&mut hasher);
-            item.success.hash(&mut hasher);
-            item.duration_ms.hash(&mut hasher);
-            item.tool_call_id.hash(&mut hasher);
-        }
-    }
-    hasher.finish()
 }
 
 pub(super) fn transcript_render_model(
@@ -1056,7 +1098,8 @@ pub(super) fn live_reply_coverage_matches_message(
     message: &Message,
     coverage: &LiveTurnFinalization,
 ) -> bool {
-    if coverage.reply_flushed_text.is_empty()
+    if coverage.session_id != session.id.0
+        || coverage.reply_flushed_text.is_empty()
         || message.role.as_str() != "assistant"
         || !message
             .content
@@ -1065,8 +1108,27 @@ pub(super) fn live_reply_coverage_matches_message(
         return false;
     }
 
+    if let Some(thread_id) = message.thread_id.as_deref() {
+        return live_coverage_matches_thread(app, session, coverage, thread_id);
+    }
+    // Legacy hydrate rows can lack identity. Their exact prompt anchor is the
+    // only remaining evidence; a common prefix alone cannot identify a turn.
     committed_reply_index_for_live_finalization(app, session, coverage)
-        .is_none_or(|reply_idx| reply_idx == message_idx)
+        .is_some_and(|reply_idx| reply_idx == message_idx)
+}
+
+fn live_coverage_matches_thread(
+    app: &AppState,
+    session: &SessionView,
+    coverage: &LiveTurnFinalization,
+    thread_id: &str,
+) -> bool {
+    coverage.session_id == session.id.0
+        && (thread_id == coverage.turn_id
+            || app
+                .v2_turn_ids
+                .get(&(session.id.clone(), thread_id.to_owned()))
+                .is_some_and(|turn| turn.0.to_string() == coverage.turn_id))
 }
 
 pub(super) fn committed_reply_index_for_live_finalization(
@@ -1074,6 +1136,14 @@ pub(super) fn committed_reply_index_for_live_finalization(
     session: &SessionView,
     coverage: &LiveTurnFinalization,
 ) -> Option<usize> {
+    if let Some(index) = session.messages.iter().position(|message| {
+        message.role.as_str() == "assistant"
+            && message.thread_id.as_deref().is_some_and(|thread_id| {
+                live_coverage_matches_thread(app, session, coverage, thread_id)
+            })
+    }) {
+        return Some(index);
+    }
     let prompt_idx = app
         .turn_prompt_anchors
         .iter()
@@ -1096,6 +1166,20 @@ pub(super) fn committed_reply_index_for_live_finalization(
                 .and_then(|log| log.anchor_index)
                 .filter(|idx| user_message_at(session, *idx))
         })?;
+
+    // A legacy row has no turn identity. If multiple turns share this user
+    // anchor, selecting its first assistant would steal another turn's prefix.
+    if app.turn_prompt_anchors.iter().any(|anchor| {
+        anchor.session_id == session.id
+            && anchor.turn_id.0.to_string() != coverage.turn_id
+            && resolve_turn_prompt_anchor_for_render(session, anchor) == Some(prompt_idx)
+    }) || app.turn_activity_logs.iter().any(|log| {
+        log.session_id == session.id
+            && log.turn_id.0.to_string() != coverage.turn_id
+            && log.anchor_index == Some(prompt_idx)
+    }) {
+        return None;
+    }
 
     let reply_idx = activity_log_render_index(session, prompt_idx);
     session
@@ -3093,9 +3177,11 @@ pub(super) fn push_turn_activity_log_section_unflushed(
         false,
         wrap_width,
     );
-    // The settling flush routes a still-covered log through this path, so emit
-    // the committed turn summary here too (a no-op until the turn completes).
-    push_turn_summary_line(lines, palette, app, &log.turn_id);
+    // The settling flush still owns its first footer. A previously committed
+    // log whose anchor moves into the new message range already rendered it.
+    if !coverage.summary_flushed {
+        push_turn_summary_line(lines, palette, app, &log.turn_id);
+    }
 }
 
 /// Emit the committed per-turn status report line for `turn_id`, if one was

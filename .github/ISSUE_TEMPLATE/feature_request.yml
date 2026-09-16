@@ -1,0 +1,54 @@
+name: Feature request
+description: Propose an improvement to octoscode
+title: "feat: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the user problem before proposing an implementation. Protocol and server behavior may need to be discussed in octos-org/octos first.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow or user need is not served today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed outcome
+      description: Describe observable behavior, not only an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include current workarounds and relevant tradeoffs.
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Expected scope
+      options:
+        - octoscode client only
+        - Shared Octos protocol or server change
+        - Documentation or developer tooling
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add mockups, examples, or links that clarify the request. Remove secrets and private data.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched for an existing issue or pull request covering this request.
+          required: true
+        - label: I have not included secrets or private data.
+          required: true

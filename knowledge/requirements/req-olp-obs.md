@@ -23,7 +23,10 @@ grep 人类日志"观测内环,三件套全部脆弱(实测踩坑:日志按进�
 [REQ-OLP-OBS-EVENTS] serve MUST 向 `<data_dir>/events.jsonl` 追加结构化
 事件行(字段:ts、kind、goal_id?、slug?、session?、model_lane?、detail),
 kind 至少覆盖 peer_staged、finding_recorded、escalation、goal_transition、
-steer_consumed、turn_error。
+steer_consumed、turn_error;阶段 2 修订(2026-09-05,REQ-OLP-EVO-P2)追加
+fallback_switch(模型车道 failover,`model_lane` 为切入车道)与
+malformed_exhausted(malformed tool-call 自纠预算耗尽,与同 turn 的
+turn_error 并存),发射点契约见 octos `specs/task-olp-obs-p2-producers.spec.md`。
 
 [REQ-OLP-OBS-ADDR] `octos` MUST 提供 `inbox path --session <key>` 查询
 命令,返回该 session 的 inbox 文件路径;外部消费者 MUST NOT 需要自行

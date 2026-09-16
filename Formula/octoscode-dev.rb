@@ -3,7 +3,7 @@
 # This is the DEV/prerelease sibling of Formula/octoscode.rb. It is rendered by
 # .github/workflows/publish-homebrew.yml on a PRERELEASE tag push (a tag with a
 # '-', e.g. v0.2.2-rc.15) into Formula/octoscode-dev.rb, filling the same
-# 0.3.0-rc.8/v0.3.0-rc.8/__SHA_*__ placeholders from that prerelease's assets. The
+# 0.3.0-rc.10/v0.3.0-rc.10/__SHA_*__ placeholders from that prerelease's assets. The
 # stable Formula/octoscode.rb is NEVER touched by a prerelease tag, so
 # `brew install octos-org/octoscode/octoscode` stays on the latest STABLE while
 # `brew install octos-org/octoscode/octoscode-dev` tracks the latest prerelease.
@@ -14,19 +14,19 @@
 class OctoscodeDev < Formula
   desc "Terminal UI client for the Octos UI Protocol (prerelease channel)"
   homepage "https://github.com/octos-org/octoscode"
-  version "0.3.0-rc.8"
+  version "0.3.0-rc.10"
   if OS.mac? && Hardware::CPU.arm?
-    url "https://github.com/octos-org/octoscode/releases/download/v0.3.0-rc.8/octoscode-aarch64-apple-darwin.tar.xz"
-    sha256 "9574a6feca5b13afd8894cd296638186f69ee9037f6aef5721309a60ec70f7c5"
+    url "https://github.com/octos-org/octoscode/releases/download/v0.3.0-rc.10/octoscode-aarch64-apple-darwin.tar.xz"
+    sha256 "41fc01eb0207b57518e759a70362416d249276b54042fbb36d66e9fd88bee706"
   end
   if OS.linux?
     if Hardware::CPU.arm?
-      url "https://github.com/octos-org/octoscode/releases/download/v0.3.0-rc.8/octoscode-aarch64-unknown-linux-gnu.tar.xz"
-      sha256 "7766dda111da2d02e2aa2674c08c7215590c1302d81a68366ea601f0ecf54829"
+      url "https://github.com/octos-org/octoscode/releases/download/v0.3.0-rc.10/octoscode-aarch64-unknown-linux-gnu.tar.xz"
+      sha256 "89937eccd493feb0c193c4d21861093bf6c446df7c2f22820078f40089b81e08"
     end
     if Hardware::CPU.intel?
-      url "https://github.com/octos-org/octoscode/releases/download/v0.3.0-rc.8/octoscode-x86_64-unknown-linux-gnu.tar.xz"
-      sha256 "bd7d988b0df93a772723fc01d09e3bcc64cf0a7596cb6049de26db989ebc9620"
+      url "https://github.com/octos-org/octoscode/releases/download/v0.3.0-rc.10/octoscode-x86_64-unknown-linux-gnu.tar.xz"
+      sha256 "2cf0124a8ada23f1633fc27d959bf103eb1f817a13362b079097ca670cadd63c"
     end
   end
   license "Apache-2.0"

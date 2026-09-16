@@ -2,5 +2,5 @@
 
 | FLAW | 结果 | 原因类 | 适用条件 | issue / PR |
 |---|---|---|---|---|
-| FLAW-001 | filed | Lifecycle/围栏缓存 | fenced peer 冷编译耗尽预算 | octos-org/octos#2236 |
-| FLAW-002 | filed | Lifecycle/验证准入 | archived goal 被当未完成拒绝 | octos-org/octos#2237 |
+| FLAW-001 | accepted | — | 围栏 peer 且 workspace 为 Cargo;仓库自带 .cargo/config.toml 时不覆盖 | octos #2236 / PR #2240 (e08c2715) |
+| FLAW-002 | accepted | — | goal 终态集合 complete|archived;active/blocked/paused/budget_limited 仍拒绝 | octos #2237 / PR #2241 (17487501) |

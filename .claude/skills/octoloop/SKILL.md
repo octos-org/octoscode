@@ -26,7 +26,7 @@ QUICKSTART 的发现命令为准。
 
 ## 模式 outer — 外环上岗(强模型审查员)
 
-收编自 /olp-outer(旧 skill 保留为薄转发)。上岗四步:
+收编自 /olp-outer(旧 skill 保留为薄转发)。上岗五步:
 
 1. **读规程**:`docs/OLP_OUTER_BOOT.md`(操作面)+
    `docs/OUTER_LOOP_PROTOCOL.md`(ACK 定式/多外环规则/预算档)
@@ -50,6 +50,25 @@ QUICKSTART 的发现命令为准。
    `scripts/olp-board-append.sh`,flock 原子)→ 立编号条目唤醒内环 →
    内环 ACK 后**隔离 worktree 独立复验** → 采认代推。安全红线见
    BOOT §5。
+5. **retro(进化环)**:①触发——战役收官,或进化黑板新卡 ≥ 10 张;
+   ②命令——`scripts/olp-evo-harvest.sh <repo> &&
+   scripts/olp-evo-retro.sh <repo>`(采集→简报,记录目录在
+   `knowledge/context/evolution/`);③处置——每次最多推进 3 条记录;
+   立案条件 hint ≥ 2 或主审目视跨 goal/跨条目复发,或 S1;issue 由
+   operator 发布或明示委托;④authority——未持 outer-duty 锁只读简报
+   不写记录;⑤采集哨只认带署名的行首定式
+   `> 外环(<署名>)·改判(作废 #N):` /
+   `> 外环(<署名>)·R2 记档(#N):`,纪律里的散文"R2 记档"不落卡。
+   ⑥阶段 2/3 工具面(全部只读或只写自家状态目录):监视器
+   `scripts/olp-watch-board.sh <板> <token> --harvest <repo>` 命中即采集并常驻
+   (不带 `--harvest` 仍一击退出);`scripts/olp-evo-metrics.sh <repo>
+   [--since EVO-NNNN] [--json] [--baseline <json>] [--stall <板>
+   --stall-threshold <分钟> [--now <ISO>]]` 窗口化诊断(非 KPI:含
+   `increase:/decrease:`、`stall:`、`fake_verified:`,不作红线);
+   `scripts/olp-evo-spec-skeleton.sh <FLAW-NNN.md>` 从记录直出契约骨架到
+   stdout(仓内只许写 `specs/drafts/`,主审补选择器后才入 `specs/`);
+   `scripts/olp-evo-index.sh <repo>` 生成 `knowledge/context/evolution/INDEX.md`;
+   回放基线 `fixtures/evolution/replay/`(合成夹具,实现 commit 不得改)。
 
 ## 模式 inner — 内环形态选型(执行侧)
 

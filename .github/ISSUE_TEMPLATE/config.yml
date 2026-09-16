@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security policy
+    url: https://github.com/octos-org/octoscode/security/policy
+    about: Read the private reporting process before sharing security details.
+  - name: Code of Conduct concern
+    url: https://github.com/octos-org/octoscode/issues/new?template=conduct_contact.yml
+    about: Request a private maintainer channel without posting incident details.
+  - name: Octos server issues
+    url: https://github.com/octos-org/octos/issues
+    about: Report defects that affect the server/runtime rather than this terminal client.

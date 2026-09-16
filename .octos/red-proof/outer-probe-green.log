@@ -1,0 +1,39 @@
+   Compiling octoscode v0.3.0-rc.10 (/Users/zhangalex/.local/tmp/octoloop-evolution-20260909/octoscode-behavior-review)
+warning: unused variable: `so2`
+   --> tests/olp_review_evidence.rs:590:15
+    |
+590 |     let (ok2, so2, _) = run(&[
+    |               ^^^ help: if this is intentional, prefix it with an underscore: `_so2`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `octoscode` (test "olp_review_evidence") generated 1 warning (run `cargo fix --test "olp_review_evidence" -p octoscode` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.94s
+     Running tests/olp_review_evidence.rs (/Users/zhangalex/Work/Projects/FW/octoscode/target/debug/deps/olp_review_evidence-090e7289e7aa9ff5)
+
+running 22 tests
+test olp_review_challenge_rejects_fabricated_cargo_log ... ok
+test olp_review_cross_requires_frozen_and_challenged ... ok
+test olp_review_agreement_without_evidence_stays_pending ... ok
+test olp_review_challenge_rejects_non_behavioral_evidence ... ok
+test olp_review_challenge_evidence_flips_verdict ... ok
+test olp_review_cross_refutation_reverts_flip ... ok
+test olp_review_approve_with_executed_evidence ... ok
+test olp_review_cross_requires_per_claim_verdicts ... ok
+test olp_review_freeze_records_identity ... ok
+test olp_review_freeze_requires_both_first_reviews ... ok
+test olp_review_regression_dataset_classifies_four_prs ... ok
+test olp_review_freeze_rejects_tampered_first_review ... ok
+test olp_review_imported_evidence_not_replayed ... ok
+test olp_review_outer_probe_native_slug_mismatch_rejected ... ok
+test olp_review_evidence_json_and_human_output ... ok
+test olp_review_rejects_claimed_completed_but_native_errored ... ok
+test olp_review_outer_probe_missing_frozen_review_rejected ... ok
+test olp_review_outer_probe_unrelated_false_command_rejected ... ok
+test olp_review_outer_probe_freeze_requires_native_authority ... ok
+test olp_review_rejects_pending_peer_as_first_review ... ok
+test olp_review_rejects_errored_cross_report ... ok
+test olp_review_rejects_head_mismatch_and_stale_turn ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.03s
+

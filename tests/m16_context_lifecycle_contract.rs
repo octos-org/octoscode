@@ -1,7 +1,8 @@
 use octos_core::SessionKey;
 use octoscode::model::{
-    APPUI_FEATURE_CONTEXT_LIFECYCLE_V1, APPUI_METHOD_CONTEXT_COMPACTION_COMPLETED,
-    APPUI_METHOD_CONTEXT_NORMALIZATION_REPORTED, ContextCompactionSummary, ContextLifecycleState,
+    APPUI_FEATURE_CONTEXT_LIFECYCLE_V1, APPUI_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,
+    APPUI_METHOD_CONTEXT_COMPACTION_COMPLETED, APPUI_METHOD_CONTEXT_NORMALIZATION_REPORTED,
+    ContextCacheDiagnostics, ContextCompactionSummary, ContextLifecycleState,
     ContextNormalizationSummary, SessionContextLifecycle,
 };
 use serde_json::Value;
@@ -13,6 +14,10 @@ use serde_json::Value;
 #[test]
 fn m16_capability_and_notification_constants_stay_on_spec() {
     assert_eq!(APPUI_FEATURE_CONTEXT_LIFECYCLE_V1, "context.lifecycle.v1");
+    assert_eq!(
+        APPUI_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,
+        "context.semantic_cache.v1"
+    );
     assert_eq!(
         APPUI_METHOD_CONTEXT_COMPACTION_COMPLETED,
         "context/compaction_completed"
@@ -168,4 +173,195 @@ fn recovery_state_label_appears_in_summary_when_not_healthy() {
     // Compaction segment must NOT appear when no compaction has been
     // observed yet.
     assert!(!summary.contains("compacted"), "summary={}", summary);
+}
+
+/// The semantic-cache extension is additive: an old context_state without the
+/// four fields decodes to an empty diagnostic mirror, while a new one retains
+/// every value. Neither case changes the existing lifecycle summary surface —
+/// and, driven through the real store + transcript render path, the four
+/// values land ONLY in the `/context` ledger, never in a transcript line.
+#[test]
+fn cache_diagnostics_are_optional_and_do_not_leak_into_lifecycle_summary() {
+    let legacy: ContextCacheDiagnostics =
+        serde_json::from_value(serde_json::json!({})).expect("legacy shape decodes");
+    assert!(legacy.is_empty());
+
+    let diagnostics: ContextCacheDiagnostics = serde_json::from_value(serde_json::json!({
+        "cache_epoch_id": "sha256:epoch",
+        "last_cache_invalidation_reason": "tool_schema_changed",
+        "semantic_head_id": "semblk_000004",
+        "semantic_head_kind": "tool_interaction"
+    }))
+    .expect("new additive shape decodes");
+    assert_eq!(diagnostics.cache_epoch_id.as_deref(), Some("sha256:epoch"));
+    assert_eq!(
+        diagnostics.last_cache_invalidation_reason.as_deref(),
+        Some("tool_schema_changed")
+    );
+
+    let mut ledger = SessionContextLifecycle {
+        cache_diagnostics: Some(diagnostics),
+        ..SessionContextLifecycle::default()
+    };
+    ledger.state = Some(ContextLifecycleState {
+        session_id: SessionKey("local:test".into()),
+        thread_id: None,
+        generation: 1,
+        transcript_hash: "sha256:transcript".into(),
+        item_count: 2,
+        token_estimate: 100,
+        recovery_state: "healthy".into(),
+        last_checkpoint_id: None,
+        last_compaction_id: None,
+    });
+    let summary = ledger.summary_line().expect("summary");
+    assert!(!summary.contains("sha256:epoch"));
+    assert!(!summary.contains("semblk_000004"));
+
+    // `summary_line()` never reads `cache_diagnostics`, so the two asserts
+    // above cannot fail on their own. Lock the contract against the REAL
+    // render path: apply a diagnostics-bearing lifecycle event through the
+    // store and check the rendered transcript against the `/context` ledger.
+    use octos_core::Message;
+    use octos_core::app_ui::AppUiEvent;
+    use octos_core::ui_protocol::{
+        ContextNormalizationReportedEvent, UiContextNormalizationReport, UiContextState,
+        UiNotification,
+    };
+    use octoscode::app::finalized_history_lines;
+    use octoscode::cli::ThemeName;
+    use octoscode::client_event::{ClientEvent, ContextLifecycleClientEvent};
+    use octoscode::model::{AppState, SessionView};
+    use octoscode::store::Store;
+    use octoscode::theme::Palette;
+
+    const CACHE_EPOCH: &str = "sha256:epoch-9";
+    const INVALIDATION_REASON: &str = "compaction_installed";
+    const SEMANTIC_HEAD_ID: &str = "semblk_000020";
+    const SEMANTIC_HEAD_KIND: &str = "assistant_final";
+
+    let session_id = SessionKey("local:test".into());
+    let mut store = Store {
+        state: AppState::new(
+            vec![SessionView {
+                id: session_id.clone(),
+                title: "test".into(),
+                profile_id: Some("coding".into()),
+                messages: vec![
+                    Message::user("compact the context"),
+                    Message::assistant("done, context compacted"),
+                ],
+                tasks: vec![],
+                live_reply: None,
+            }],
+            0,
+            "ready".into(),
+            None,
+            false,
+        ),
+    };
+    let event = AppUiEvent::Protocol(UiNotification::ContextNormalizationReported(
+        ContextNormalizationReportedEvent {
+            session_id: session_id.clone(),
+            context_state: UiContextState {
+                cache_epoch_id: None,
+                last_cache_invalidation_reason: None,
+                semantic_head_id: None,
+                semantic_head_kind: None,
+                session_id: session_id.clone(),
+                thread_id: None,
+                generation: 9,
+                transcript_hash: "sha256:transcript".into(),
+                item_count: 20,
+                token_estimate: 7200,
+                recovery_state: "healthy".into(),
+                last_checkpoint_id: None,
+                last_compaction_id: Some("comp-9".into()),
+            },
+            normalization: UiContextNormalizationReport {
+                generation: 9,
+                input_transcript_hash: "sha256:transcript".into(),
+                output_prompt_hash: "sha256:prompt".into(),
+                model_capability_id: "openai/gpt-5".into(),
+                prompt_message_count: 20,
+                token_estimate: 7200,
+                repaired_count: 0,
+                dropped_count: 0,
+                synthetic_count: 0,
+                truncated_count: 0,
+            },
+        },
+    ));
+    store.apply_client_event(ClientEvent::ContextLifecycle(ContextLifecycleClientEvent {
+        event: Box::new(event),
+        session_id: session_id.clone(),
+        diagnostics: Some(ContextCacheDiagnostics {
+            cache_epoch_id: Some(CACHE_EPOCH.into()),
+            last_cache_invalidation_reason: Some(INVALIDATION_REASON.into()),
+            semantic_head_id: Some(SEMANTIC_HEAD_ID.into()),
+            semantic_head_kind: Some(SEMANTIC_HEAD_KIND.into()),
+        }),
+        // The same response advertised the feature, so no separate
+        // capabilities negotiation is needed for the store to keep them.
+        semantic_cache_advertised: Some(true),
+    }));
+
+    let stored = store
+        .state
+        .context_lifecycle_for(&session_id)
+        .and_then(|ledger| ledger.cache_diagnostics.clone())
+        .expect("the /context ledger keeps the diagnostics");
+    assert_eq!(stored.cache_epoch_id.as_deref(), Some(CACHE_EPOCH));
+    assert_eq!(
+        stored.last_cache_invalidation_reason.as_deref(),
+        Some(INVALIDATION_REASON)
+    );
+    assert_eq!(stored.semantic_head_id.as_deref(), Some(SEMANTIC_HEAD_ID));
+    assert_eq!(
+        stored.semantic_head_kind.as_deref(),
+        Some(SEMANTIC_HEAD_KIND)
+    );
+
+    let transcript =
+        finalized_history_lines(&store.state, Palette::for_theme(ThemeName::Codex), 100)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    assert!(
+        transcript.contains("done, context compacted"),
+        "sanity: the real transcript rendered, got {transcript:?}"
+    );
+    for value in [
+        CACHE_EPOCH,
+        INVALIDATION_REASON,
+        SEMANTIC_HEAD_ID,
+        SEMANTIC_HEAD_KIND,
+    ] {
+        assert!(
+            !transcript.contains(value),
+            "diagnostic {value:?} must never enter a transcript line, got {transcript:?}"
+        );
+    }
+    let ledger_summary = store
+        .state
+        .context_lifecycle_for(&session_id)
+        .and_then(|ledger| ledger.summary_line())
+        .expect("lifecycle summary after the event");
+    for value in [
+        CACHE_EPOCH,
+        INVALIDATION_REASON,
+        SEMANTIC_HEAD_ID,
+        SEMANTIC_HEAD_KIND,
+    ] {
+        assert!(
+            !ledger_summary.contains(value),
+            "diagnostic {value:?} must stay out of the lifecycle summary line"
+        );
+    }
 }

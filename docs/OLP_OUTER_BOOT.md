@@ -142,6 +142,41 @@ sub_providers 多模型车道(配置法见 configuration.md),给 octoscode
 
 ## 7. 外环战术手册(实战沉淀,按场景查)
 
+### 进化环批注定式
+
+改判(作废既有条目)必须落在**新的未 ACK 编号条目**(R1/R5),已闭环
+条目下的批注不唤醒内环。完整条目示例:
+
+```
+### 4N. 改判作废 #40(2026-09-05,外环(claude))
+> 外环(claude)·改判(作废 #40):<以本条为准的新指令>
+```
+
+R2 记档(声称与复验不符的诚实记录)行示例:
+
+```
+> 外环(codex)·R2 记档(#41):<声称 vs 复验事实>
+```
+
+两式均为**行首定式**,正文提及不算;本行形同时供采集哨识别(进化环
+阶段 1 起收入 `override`/`r2_record` 触发)。
+
+**进化环工具面(阶段 2/3)**
+- 采集挂节拍:`scripts/olp-watch-board.sh <板> <token> --harvest <repo>`——命中
+  即 `olp-evo-harvest.sh`,打 `BOARD-SIGNAL` 后推进基线继续监视;与手跑
+  采集共用状态根与 `harvest.lock`,同一触发行只落一卡。
+- 诊断:`scripts/olp-evo-metrics.sh <repo> [--since] [--json] [--baseline <json>]
+  [--stall <板> --stall-threshold <分钟>]`——`stall:` 列出无 ACK 的派单
+  (两种词序 `派单 43c-2`/`27c 派单`,ACK 认 `ACK(<片号> done|blocked|wontdo`),
+  `fake_verified:` 计 R2 记档卡;固定 `note:` 行声明非 KPI,升降不当红线。
+- 记录直出:`scripts/olp-evo-spec-skeleton.sh <FLAW-NNN.md>` 把症状/根因/
+  结案(或修复)/保护门(或预防)/锚点映射成契约骨架(`pending_` 选择器),
+  只出 stdout 或 `specs/drafts/`;主审补测试选择器与场景后才入 `specs/`。
+- 索引:`scripts/olp-evo-index.sh <repo>` 生成 `INDEX.md`;PROTOCOL 散文被
+  记录取代时只加一行 `> 已记录:FLAW-NNN`,不删原文。
+- kind 候选登记在 `knowledge/context/evolution/README.md`(`iteration_cap`、
+  `patch_failed`),发射点属 octos 侧另立契约。
+
 **派单与节奏**
 - 快慢双轨:修订级 bug 走快轨(直驱、可抢占、单一外环复验、免重仪式);
   战役走全流程。仪式重量随单据尺寸,探索性要求挂大战役不挂 bug fix。

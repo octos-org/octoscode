@@ -14,14 +14,19 @@
 #
 # 用法:
 #   olp-watch-board.sh <板路径> <子串token> [--interval 秒(默认 20)] [--skip-signature <署名>]...
+#                     [--harvest <repo-root>]
 #   退出码:0 = 命中(stdout 打印 BOARD-SIGNAL 与最多 3 行命中);2 = 参数错误;板缺失时等待其出现。
+#   --harvest(阶段 3 节拍采集):常驻模式——命中时先跑 olp-evo-harvest.sh 再报
+#   BOARD-SIGNAL,随后推进基线继续监视(不退出);失败打 stderr `harvest: failed (exit N)`
+#   仍推进;非命中新行不采集。不带 --harvest 保持一击退出。
 set -euo pipefail
 
-board=""; token=""; interval=20; skips=()
+board=""; token=""; interval=20; skips=(); harvest_repo=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --interval) interval="${2:?--interval 需要秒数}"; shift 2 ;;
     --skip-signature) skips+=("${2:?--skip-signature 需要署名}"); shift 2 ;;
+    --harvest) harvest_repo="${2:?--harvest 需要 repo-root}"; shift 2 ;;
     -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     --*) printf 'unknown option: %s\n' "$1" >&2; exit 2 ;;
     *) if [ -z "$board" ]; then board="$1"; elif [ -z "$token" ]; then token="$1"; else interval="$1"; fi; shift ;;
@@ -45,9 +50,38 @@ while :; do
   if [ "$cur" -gt "$base" ]; then
     hits=$(tail -n +"$((base + 1))" "$board" | filter_skips | grep -F -- "$token" || true)
     if [ -n "$hits" ]; then
-      echo "BOARD-SIGNAL: $token"
-      printf '%s\n' "$hits" | head -3
-      exit 0
+      if [ -n "$harvest_repo" ]; then
+        # 44-r1: locate the harvest script by repo-root FIRST (installed
+        # copies like ~/.octos/outer/watch-board.sh work directly), then
+        # fall back to the script's own directory.
+        harvest_sh=""
+        if [ -x "$harvest_repo/scripts/olp-evo-harvest.sh" ]; then
+          harvest_sh="$harvest_repo/scripts/olp-evo-harvest.sh"
+        elif [ -x "$(dirname "$0")/olp-evo-harvest.sh" ]; then
+          harvest_sh="$(dirname "$0")/olp-evo-harvest.sh"
+        else
+          echo "harvest: script not found" >&2
+          harvest_sh=""
+        fi
+        rc=0
+        if [ -n "$harvest_sh" ]; then
+          bash "$harvest_sh" "$harvest_repo" || rc=$?
+        else
+          rc=127
+        fi
+        if [ "$rc" -ne 0 ]; then
+          echo "harvest: failed (exit $rc)" >&2
+        fi
+        echo "BOARD-SIGNAL: $token"
+        # 44-r2: no pipe — `printf | head` dies on SIGPIPE (141) under
+        # pipefail when hits exceed head's window; here-string instead.
+        head -3 <<<"$hits"
+        base=$cur
+      else
+        echo "BOARD-SIGNAL: $token"
+        head -3 <<<"$hits"
+        exit 0
+      fi
     fi
   elif [ "$cur" -lt "$base" ]; then
     # 板被截断/重写:基线失效,重新取基线(不回溯旧内容)。

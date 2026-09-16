@@ -4,12 +4,14 @@ id: FLAW-001
 title: "围栏 peer 是无构建缓存的裸克隆,Rust peer 冷编译耗尽 50 迭代"
 repo: octos-org/octos
 layers: [Lifecycle, Execution]
-status: filed
+status: closed
 severity: S2
 recurrence: 1
 fingerprint: lifecycle/fenced-peer-clone-no-build-cache
 issue: https://github.com/octos-org/octos/issues/2236
 cards: []
+pr: https://github.com/octos-org/octos/pull/2240
+merged: 2026-09-04 (e08c2715)
 filed: 2026-09-04
 ---
 
@@ -52,3 +54,7 @@ peer 间 refs 隔离),代价是 Rust peer 丢掉了最需要的热缓存。
 ## 异议
 
 (第二外环署名批注,只追加)
+
+## 结案
+
+- 2026-09-04:issue 经维护者 triage 接受,按 SDD 契约修复并合并(https://github.com/octos-org/octos/pull/2240,main e08c2715);验收=契约 6/6 lifecycle + 主审隔离复验 + CI 矩阵。观察窗:后续两个完成的 goal 内同指纹卡片应为 0。

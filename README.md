@@ -891,11 +891,11 @@ one — so a profile can re-enable a skill the global defaults disabled:
 
 ## Testing and harnesses
 
-Run the unit/integration suite (mock-backed, no server needed):
+Run the complete unit/integration suite (mock-backed, no server needed):
 
 ```bash
-cargo test
-# CARGO_TARGET_DIR=/tmp/octoscode-target cargo test   # on shared/locked hosts
+cargo test --all-targets
+# CARGO_TARGET_DIR=/tmp/octoscode-target cargo test --all-targets   # on shared/locked hosts
 ```
 
 Heavier live and visual harnesses live alongside the code:
@@ -930,3 +930,14 @@ over WebSocket or stdio; it never hard-codes provider/model truth or persists a
 parallel LLM registry. The current v1 bridge stages selected diff context as
 prompt text — structured context attachments are tracked in
 [`docs/M9_31_CONTEXT_ATTACHMENTS_UPCR.md`](docs/M9_31_CONTEXT_ATTACHMENTS_UPCR.md).
+
+---
+
+## Community and governance
+
+- [Contributing guide](CONTRIBUTING.md)
+- [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Security policy](SECURITY.md)
+- [Project governance](GOVERNANCE.md)
+- [Support](SUPPORT.md)
+- [Apache License 2.0](LICENSE)
