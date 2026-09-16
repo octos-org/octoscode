@@ -365,14 +365,11 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         if dirty {
             let menu_reserved_now = app::menu_surface_active(&store.state);
-            // A menu toggle (open OR close) changes the reserved viewport row
-            // block. On close the incremental shrink strands a blank band
-            // (handled below); on open the incremental grow relies on a DECSTBM
-            // scroll-region + partial-clear path that some Windows terminals
-            // (conhost, older Windows Terminal) do not render correctly, leaving
-            // the newly-opened sessions/slash menu invisible. Force a full
-            // visible-screen clear + scrollback re-flush on BOTH edges so the
-            // menu is always painted on a clean surface.
+            // A menu toggle changes the reserved viewport row block. Force a
+            // full repaint of that owned region on both edges: partial diffs
+            // left newly opened menus invisible on some Windows terminals.
+            // History stays immutable; incremental resizing below consumes
+            // the previous close's blank band without re-flushing old turns.
             let menu_just_toggled = menu_reserved_last_frame != menu_reserved_now;
             menu_reserved_last_frame = menu_reserved_now;
             draw(
@@ -556,31 +553,15 @@ where
     store.state.last_terminal_width = width;
     store.state.last_terminal_height = size.height;
 
-    // A slash/command menu is a RESERVED viewport row block (`menu_height` in
-    // `render_viewport_with_finalization`), not a floating overlay. Opening it
-    // grows the bottom-pinned inline viewport, and that grow scrolls whatever
-    // committed transcript sat above the viewport UP into scrollback
-    // (`resize_viewport_to_size` grow path / `insert_history_lines`), updating
-    // the visible-history watermark to the scrolled position. When the menu
-    // CLOSES the viewport shrinks back, but the incremental shrink path clears
-    // only from the OLD (higher) viewport top DOWNWARD — the scrolled-up
-    // transcript is left stranded high on the screen with a `menu_height` blank
-    // band gaping between it and the composer (a plain committed re-flush alone
-    // can't fix it: `insert_history_lines` would append the fresh copy right
-    // below the stranded one, duplicating it). So do exactly what a resize does
-    // A menu toggle (open OR close) changes the reserved viewport row block.
-    // On close the incremental shrink strands a blank band between the
-    // transcript and the composer. On open the incremental grow relies on a
-    // DECSTBM scroll-region + partial-clear path that some Windows terminals
-    // (conhost, older Windows Terminal) do not render correctly, leaving the
-    // newly-opened sessions/slash menu invisible. On either edge, do exactly
-    // what a resize does for a clean re-render: wipe the visible screen and
-    // re-flush the whole committed transcript against the new viewport. One
-    // frame, and it only fires on the toggle edge (see the event loop), so
-    // repeated menu cycles never accumulate blank bands.
+    // Menu chrome needs a full repaint, including on terminals whose partial
+    // diff rendering left newly opened menus invisible. Clear only the owned
+    // viewport: real scrollback is immutable, so a whole-screen clear followed
+    // by re-flushing history appends another copy on BOTH menu edges. Preserve
+    // the committed/live watermarks and the visible-history extent. The normal
+    // incremental resize below clears vacated menu rows and consumes the prior
+    // close's blank gap before scrolling, so repeated cycles do not grow it.
     if menu_just_toggled {
-        terminal.clear_visible_screen()?;
-        scrollback.mark_flushed_stale();
+        terminal.clear()?;
     }
 
     // This frame will take the FULL viewport reset inside
@@ -1692,7 +1673,7 @@ fn handle_paste(store: &mut Store, text: &str) -> KeyAction {
     // free-text box active, detail viewers, activity navigator): dropping the
     // paste with a visible status beats silently editing the hidden composer.
     if modal_owns_keyboard(store) {
-        store.state.status = "Paste ignored while a dialog is open".to_string();
+        store.state.status = t!("status.paste_ignored_dialog_open").into_owned();
         return KeyAction::Continue;
     }
 
@@ -2288,11 +2269,7 @@ fn handle_activity_navigator_key(store: &mut Store, key: KeyEvent) -> KeyAction 
                 // OLD session's staged prompts on the active queue, so a later
                 // terminal event would submit them into the newly selected
                 // session (codex P1 on the per-session staged-queue fix).
-                store.state.switch_selected_session(idx);
-                // ...and drain the incoming session's restored staged queue
-                // (codex round-2 P2: without this a staged prompt sits stuck
-                // until an unrelated turn event).
-                store.drain_staged_after_direct_switch();
+                store.switch_selected_session_locally(idx);
                 store.state.status = t!(
                     "status.activity_navigator_selected_session",
                     title = store.state.sessions[idx].title.clone()
@@ -3278,11 +3255,11 @@ fn handle_turn_state_detail_key(store: &mut Store, key: KeyEvent) -> KeyAction {
 fn move_down(store: &mut Store) {
     match store.state.focus {
         FocusPane::Sessions => {
-            store.state.select_next_session();
-            // A direct switch restores the incoming session's staged queue;
-            // drain it (as a follow-up command) or a staged prompt sits stuck
-            // until an unrelated turn event (codex round-2 P2).
-            store.drain_staged_after_direct_switch();
+            let len = store.state.sessions.len();
+            if len > 0 {
+                let next = (store.state.selected_session + 1) % len;
+                store.switch_selected_session_locally(next);
+            }
         }
         FocusPane::Tasks => store.state.select_next_task(),
         FocusPane::Artifacts => store.state.select_next_artifact(),
@@ -3295,8 +3272,15 @@ fn move_down(store: &mut Store) {
 fn move_up(store: &mut Store) {
     match store.state.focus {
         FocusPane::Sessions => {
-            store.state.select_prev_session();
-            store.drain_staged_after_direct_switch();
+            let len = store.state.sessions.len();
+            if len > 0 {
+                let previous = if store.state.selected_session == 0 {
+                    len - 1
+                } else {
+                    store.state.selected_session - 1
+                };
+                store.switch_selected_session_locally(previous);
+            }
         }
         FocusPane::Tasks => store.state.select_prev_task(),
         FocusPane::Artifacts => store.state.select_prev_artifact(),
@@ -3498,6 +3482,34 @@ struct TerminalGuard {
 }
 
 impl TerminalGuard {
+    /// Restore the screen buffer and erase any inline viewport owned by this
+    /// process. An alternate-screen exit must clear the SAVED inline viewport:
+    /// `enter_alt_screen` deliberately sets `live_inline_viewport` to `None`,
+    /// but leaving the alternate screen reveals the normal-buffer composer that
+    /// was painted before the overlay opened.
+    fn restore_render_surface_on_exit<W: io::Write>(&self, stdout: &mut W) {
+        if self.mouse_captured {
+            let _ = execute!(stdout, DisableMouseCapture);
+        }
+        if self.mode == RenderMode::AltScreen {
+            let _ = execute!(stdout, LeaveAlternateScreen);
+        }
+        let viewport = match self.mode {
+            RenderMode::Inline => self.live_inline_viewport,
+            RenderMode::AltScreen => self.saved_inline_viewport,
+        };
+        // An empty saved viewport means the overlay was the first frame, so the
+        // normal buffer contains no TUI-owned rows and must be left untouched
+        // (for example, to preserve first-install output above the shell).
+        if let Some(viewport) = viewport.filter(|viewport| !viewport.is_empty()) {
+            let _ = execute!(
+                stdout,
+                crossterm::cursor::MoveTo(0, viewport.top()),
+                crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown)
+            );
+        }
+    }
+
     /// Bring the terminal's mouse-capture state in line with the policy
     /// (`app::wants_mouse_capture`). Idempotent: only writes the escape
     /// sequence on an actual transition.
@@ -3589,26 +3601,7 @@ impl Drop for TerminalGuard {
         #[cfg(not(test))]
         {
             let mut stdout = io::stdout();
-            if self.mouse_captured {
-                let _ = execute!(stdout, DisableMouseCapture);
-            }
-            if self.mode == RenderMode::AltScreen {
-                let _ = execute!(stdout, LeaveAlternateScreen);
-            }
-            // Clear the inline viewport the TUI painted this session. Without
-            // this, the inline model leaves its last frames — status bar,
-            // composer hint, slash menu — fossilized in the user's scrollback
-            // on exit (and they resurface again whenever an alt-screen
-            // overlay drops back to the main screen). Finalized transcript
-            // lives ABOVE the viewport via `insert_history`, so clearing from
-            // the viewport top down only touches TUI-owned rows.
-            if let Some(viewport) = self.live_inline_viewport {
-                let _ = execute!(
-                    stdout,
-                    crossterm::cursor::MoveTo(0, viewport.top()),
-                    crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown)
-                );
-            }
+            self.restore_render_surface_on_exit(&mut stdout);
             let _ = disable_raw_mode();
             let _ = execute!(stdout, DisableBracketedPaste, DisableFocusChange, Show);
         }
@@ -4551,6 +4544,8 @@ mod tests {
         store.apply_event(AppUiEvent::Protocol(
             octos_core::ui_protocol::UiNotification::TurnError(
                 octos_core::ui_protocol::TurnErrorEvent {
+                    token_usage: None,
+                    partial_result: None,
                     session_id,
                     topic: None,
                     turn_id,
@@ -5046,6 +5041,8 @@ mod tests {
         )));
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnError(
             octos_core::ui_protocol::TurnErrorEvent {
+                token_usage: None,
+                partial_result: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id,
@@ -5246,6 +5243,199 @@ mod tests {
             store.state.user_question.is_some(),
             "the picker must stay open until an answer is given"
         );
+    }
+
+    /// Store side of a prompt submitted while the stdio child is being
+    /// replaced: the transport cancels the deferred `turn/start` explicitly
+    /// (child death or a failed scoped-open barrier). The prompt must be
+    /// re-staged — never lost, never duplicated in the transcript — and the
+    /// relaunch reconcile after the replacement child's scoped open must
+    /// resubmit it exactly once.
+    #[test]
+    fn cancelled_scoped_submit_is_restaged_and_resubmitted_exactly_once_after_relaunch() {
+        let mut backend = FakeBackend::new(vec![]);
+        let mut store = store_with_sessions(1);
+        let session_id = store.state.sessions[0].id.clone();
+        store.state.composer = "prompt typed during the daemon restart".into();
+        let command = sent_command(handle_key(&mut store, key(KeyCode::Enter)));
+        assert!(matches!(command, AppUiCommand::SubmitPrompt(_)));
+        send_command(&mut backend, &mut store, command);
+        assert_eq!(backend.sent.len(), 1);
+
+        // The transport lost the child before the scoped session opened.
+        store.apply_event(AppUiEvent::error(
+            "request_cancelled",
+            "turn/start request cancelled because the connection was lost before the scoped session opened: child exited",
+        ));
+        assert_eq!(
+            store.state.pending_messages,
+            vec!["prompt typed during the daemon restart".to_string()],
+            "a cancelled submit must be re-staged, not dropped"
+        );
+        let user_rows = |store: &Store| {
+            store.state.sessions[0]
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.role.as_str() == "user"
+                        && message.content == "prompt typed during the daemon restart"
+                })
+                .count()
+        };
+        assert_eq!(
+            user_rows(&store),
+            0,
+            "the optimistic bubble of a cancelled submit is withdrawn until it is resent"
+        );
+
+        // Replacement child: epoch marker, scoped open, relaunch reconcile.
+        let opened: octos_core::ui_protocol::SessionOpened =
+            serde_json::from_value(serde_json::json!({
+                "session_id": session_id,
+                "active_profile_id": "coding",
+                "workspace_root": "/workspace"
+            }))
+            .expect("session/opened shape");
+        backend
+            .events
+            .push_back(ClientEvent::BackendConnectionEpoch);
+        backend
+            .events
+            .push_back(AppUiEvent::Protocol(UiNotification::SessionOpened(opened)).into());
+        backend.events.push_back(ClientEvent::BackendRelaunched);
+        drain_backend_events(&mut backend, &mut store).expect("drain succeeds");
+
+        let resubmits = backend
+            .sent
+            .iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    AppUiCommand::SubmitPrompt(params)
+                        if params.input.iter().any(|item| matches!(
+                            item,
+                            octos_core::ui_protocol::InputItem::Text { text }
+                                if text == "prompt typed during the daemon restart"
+                        ))
+                )
+            })
+            .count();
+        assert_eq!(
+            resubmits,
+            2,
+            "the original submit plus exactly one resubmission after the scoped reopen; sent={:?}",
+            backend
+                .sent
+                .iter()
+                .map(|command| command.method())
+                .collect::<Vec<_>>()
+        );
+        assert!(store.state.pending_messages.is_empty());
+        assert_eq!(user_rows(&store), 1, "the prompt shows exactly once");
+    }
+
+    /// End-to-end against a real stdio child whose bootstrap outlasts BOTH
+    /// steady-state barriers (hello 3 s + open 10 s), the `octos serve --stdio`
+    /// cold-start shape observed in the 2026-09-04 soak. Before the startup
+    /// grace the client recycled the child mid-boot and the prompt submitted
+    /// during the restart never reached any daemon. The prompt must land on
+    /// the child exactly once and stay in the transcript exactly once.
+    #[cfg(unix)]
+    #[test]
+    fn prompt_submitted_during_slow_child_bootstrap_reaches_the_child_exactly_once() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let marker = temp.path().join("sequence.log");
+        let fixture = temp.path().join("stdio-slow-boot.sh");
+        std::fs::write(
+            &fixture,
+            r#"#!/bin/sh
+marker="$1"
+sleep 14
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"method":"client_hello"'*)
+      printf '{"jsonrpc":"2.0","id":"%s","result":{"type":"server_hello","capabilities":{"version":{"protocol":"octos-ui/v1alpha1","schema_version":1,"jsonrpc":"2.0"},"capabilities_schema_version":2,"supported_methods":["session/open","turn/start"],"supported_notifications":[],"supported_features":[]}}}\n' "$id"
+      ;;
+    *'"method":"session/open"'*)
+      printf 'OPEN\n' >> "$marker"
+      printf '{"jsonrpc":"2.0","id":"%s","result":{"opened":{"session_id":"local:test-0","active_profile_id":"coding","workspace_root":"/confirmed/workspace"}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf 'TURN:%s\n' "$line" >> "$marker"
+      printf '{"jsonrpc":"2.0","id":"%s","result":{}}\n' "$id"
+      ;;
+  esac
+done
+"#,
+        )
+        .expect("write fixture");
+
+        let mut store = store_with_sessions(1);
+        let session_id = store.state.sessions[0].id.clone();
+        let mut backend =
+            crate::transport::ProtocolAppUiBackend::new(crate::transport::AppUiLaunch {
+                endpoint: Some(crate::transport::AppUiEndpoint::stdio(format!(
+                    "sh {} {}",
+                    fixture.display(),
+                    marker.display()
+                ))),
+                session_id: Some(session_id.clone()),
+                profile_id: Some("coding".into()),
+                cwd: Some("/tmp/workspace".into()),
+                ..crate::transport::AppUiLaunch::default()
+            });
+        // Scope the session first (arms the barrier behind the hello), then
+        // submit the prompt exactly as the composer would.
+        send_command(
+            &mut backend,
+            &mut store,
+            AppUiCommand::OpenSession(octos_core::ui_protocol::SessionOpenParams {
+                session_id: session_id.clone(),
+                topic: None,
+                profile_id: Some("coding".into()),
+                cwd: Some("/tmp/workspace".into()),
+                sandbox: None,
+                after: None,
+            }),
+        );
+        store.state.composer = "prompt typed during the daemon restart".into();
+        let command = sent_command(handle_key(&mut store, key(KeyCode::Enter)));
+        send_command(&mut backend, &mut store, command);
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            drain_backend_events(&mut backend, &mut store).expect("drain succeeds");
+            if store.drain_staged_backstop() {
+                drain_pending_autonomy_hydration(&mut backend, &mut store);
+            }
+            let log = std::fs::read_to_string(&marker).unwrap_or_default();
+            if log.contains("TURN:") {
+                // Let a duplicate (if any) land before asserting.
+                std::thread::sleep(Duration::from_millis(300));
+                drain_backend_events(&mut backend, &mut store).expect("drain succeeds");
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let log = std::fs::read_to_string(&marker).unwrap_or_default();
+        assert_eq!(
+            log.matches("TURN:").count(),
+            1,
+            "the prompt must reach the slow-booting child exactly once; log={log}; status={}",
+            store.state.status
+        );
+        assert!(log.contains("prompt typed during the daemon restart"));
+        let user_rows = store.state.sessions[0]
+            .messages
+            .iter()
+            .filter(|message| {
+                message.role.as_str() == "user"
+                    && message.content == "prompt typed during the daemon restart"
+            })
+            .count();
+        assert_eq!(user_rows, 1, "the transcript shows the prompt exactly once");
+        assert!(store.state.pending_messages.is_empty());
     }
 
     #[test]
@@ -5451,13 +5641,10 @@ mod tests {
     }
 
     #[test]
-    fn menu_close_frame_clears_and_reflushes_committed_transcript() {
-        // A slash menu is a reserved viewport row block: opening it grows the
-        // inline viewport and scrolls the committed transcript up; closing it
-        // shrinks the viewport and, without this fix, strands that transcript
-        // high on screen above a `menu_height` blank band. The close frame must
-        // therefore behave like a resize — clear the visible screen and re-flush
-        // the whole committed transcript flush against the shrunk viewport.
+    fn menu_close_frame_clears_only_viewport_and_preserves_committed_transcript() {
+        // Menu chrome needs a full repaint, but already-flushed history is
+        // immutable. A whole-screen clear cannot erase native scrollback, so
+        // re-flushing it appends duplicate answers instead of repairing layout.
         let mut store = Store {
             state: AppState::new(
                 vec![SessionView {
@@ -5521,21 +5708,139 @@ mod tests {
             "a steady redraw must not re-flush committed history: {steady:?}"
         );
 
-        // The menu-close frame clears the visible screen and re-flushes the
-        // whole committed transcript so no stranded copy / blank band survives.
+        // The menu-close frame repaints only the owned viewport region.
         let mark = terminal.backend().buf.len();
         let clears_before = terminal.backend().clears.len();
         draw(&mut terminal, &mut guard, &mut store, &mut scrollback, true)
             .expect("menu-close draw");
         let close = String::from_utf8_lossy(&terminal.backend().buf[mark..]).into_owned();
         assert!(
-            close.contains("zztranscriptmarker"),
-            "the menu-close frame must re-flush the committed transcript: {close:?}"
+            !close.contains("zztranscriptmarker"),
+            "the menu-close frame must preserve immutable committed history: {close:?}"
         );
         assert!(
-            terminal.backend().clears[clears_before..].contains(&ClearType::All),
-            "the menu-close frame must clear the visible screen like a resize"
+            terminal.backend().clears[clears_before..].contains(&ClearType::AfterCursor),
+            "the menu-close frame must clear its owned viewport for a full repaint"
         );
+        assert!(!terminal.backend().clears[clears_before..].contains(&ClearType::All));
+    }
+
+    #[test]
+    fn menu_open_close_with_long_native_history_never_reemits_old_turns() {
+        let mut store = store_with_sessions(1);
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods([
+            crate::model::APPUI_METHOD_SESSION_COMPACT,
+        ]));
+        store.state.sessions[0].messages = (0..40)
+            .flat_map(|i| {
+                [
+                    Message::user(format!("NATIVEUSER{i:02}")),
+                    Message::assistant(format!("NATIVEANSWER{i:02}")),
+                ]
+            })
+            .collect();
+        let mut terminal = InlineTerminal::new(RecordingBackend::new(100, 30)).unwrap();
+        let mut guard = TerminalGuard {
+            mode: RenderMode::Inline,
+            saved_inline_viewport: None,
+            saved_visible_history_extent: None,
+            saved_inline_screen_size: None,
+            mouse_captured: false,
+            live_inline_viewport: None,
+        };
+        let mut scrollback = ScrollbackTracker::new();
+        draw(
+            &mut terminal,
+            &mut guard,
+            &mut store,
+            &mut scrollback,
+            false,
+        )
+        .unwrap();
+        let initial_height = terminal.viewport_area.height;
+        let mut gap = None;
+        for _ in 0..3 {
+            store.open_menu(crate::menu::MenuId::from(
+                crate::menu::registry::MENU_CONTEXT,
+            ));
+            draw(&mut terminal, &mut guard, &mut store, &mut scrollback, true).unwrap();
+            assert!(
+                terminal.viewport_area.height > initial_height,
+                "menu reserves visible rows"
+            );
+            assert!(
+                terminal.visible_history_rows() > 0,
+                "menu must retain tracked history"
+            );
+            store.open_menu(crate::menu::MenuId::from(
+                crate::menu::registry::MENU_COMPACT_CONFIRM,
+            ));
+            draw(
+                &mut terminal,
+                &mut guard,
+                &mut store,
+                &mut scrollback,
+                false,
+            )
+            .unwrap();
+            assert!(store.state.menu_stack.is_active());
+            store.close_menu();
+            draw(
+                &mut terminal,
+                &mut guard,
+                &mut store,
+                &mut scrollback,
+                false,
+            )
+            .unwrap();
+            store.close_menu();
+            draw(&mut terminal, &mut guard, &mut store, &mut scrollback, true).unwrap();
+            assert_eq!(terminal.viewport_area.height, initial_height);
+            let current_gap = terminal
+                .viewport_area
+                .top()
+                .saturating_sub(terminal.visible_history_bottom());
+            if let Some(previous_gap) = gap {
+                assert_eq!(
+                    current_gap, previous_gap,
+                    "menu cycles must not accumulate blank gaps"
+                );
+            }
+            gap = Some(current_gap);
+        }
+        store.state.sessions[0]
+            .messages
+            .push(Message::assistant("NATIVENEWANSWER"));
+        draw(
+            &mut terminal,
+            &mut guard,
+            &mut store,
+            &mut scrollback,
+            false,
+        )
+        .unwrap();
+        assert!(
+            terminal
+                .viewport_area
+                .top()
+                .saturating_sub(terminal.visible_history_bottom())
+                < gap.unwrap_or(0),
+            "new output must fill the bounded vacated menu gap"
+        );
+        let written = String::from_utf8_lossy(&terminal.backend().buf);
+        assert_eq!(written.matches("NATIVENEWANSWER").count(), 1);
+        for i in 0..40 {
+            assert_eq!(
+                written.matches(&format!("NATIVEUSER{i:02}")).count(),
+                1,
+                "user {i} repeated"
+            );
+            assert_eq!(
+                written.matches(&format!("NATIVEANSWER{i:02}")).count(),
+                1,
+                "answer {i} repeated"
+            );
+        }
     }
 
     #[test]
@@ -5619,8 +5924,8 @@ mod tests {
         )
         .expect("steady draw");
 
-        // The menu-close frame: clear_visible_screen + mark_flushed_stale +
-        // re-flush. Inspect ONLY the bytes this frame wrote.
+        // The menu-close frame clears/repaints the owned viewport, preserving
+        // flushed turn coverage. Inspect ONLY the bytes this frame wrote.
         let mark = terminal.backend().buf.len();
         draw(&mut terminal, &mut guard, &mut store, &mut scrollback, true)
             .expect("menu-close draw");
@@ -5709,6 +6014,87 @@ mod tests {
         let written = String::from_utf8_lossy(&terminal.backend().buf);
         assert!(written.contains("\u{1b}[?1049h"));
         assert!(written.contains("\u{1b}[?1049l"));
+    }
+
+    #[test]
+    fn onboarding_alt_screen_exit_clears_the_saved_inline_viewport() {
+        // First-launch Model A paints a short inline frame while launch/resolve
+        // is in flight, then opens onboarding on the alternate screen. Exiting
+        // directly from that overlay must erase the hidden composer after the
+        // normal screen is restored, or the shell prompt lands inside it.
+        let guard = TerminalGuard {
+            mode: RenderMode::AltScreen,
+            saved_inline_viewport: Some(Rect::new(0, 19, 80, 5)),
+            saved_visible_history_extent: Some((0, 19)),
+            saved_inline_screen_size: Some(Size::new(80, 24)),
+            mouse_captured: false,
+            live_inline_viewport: None,
+        };
+        let mut written = Vec::new();
+
+        guard.restore_render_surface_on_exit(&mut written);
+
+        let written = String::from_utf8(written).expect("ANSI output");
+        let leave_alt = written
+            .find("\u{1b}[?1049l")
+            .expect("exit leaves the onboarding alternate screen");
+        let move_to_saved_top = written
+            .find("\u{1b}[20;1H")
+            .expect("cursor moves to the saved inline viewport top");
+        let clear_down = written
+            .find("\u{1b}[J")
+            .expect("saved inline viewport is cleared");
+        assert!(
+            leave_alt < move_to_saved_top && move_to_saved_top < clear_down,
+            "normal screen must be restored before its stale inline viewport is cleared: {written:?}"
+        );
+    }
+
+    #[test]
+    fn inline_exit_still_clears_the_live_inline_viewport() {
+        // Keep the original #547 behavior pinned while sharing the teardown
+        // helper with the alternate-screen exit path.
+        let guard = TerminalGuard {
+            mode: RenderMode::Inline,
+            saved_inline_viewport: None,
+            saved_visible_history_extent: None,
+            saved_inline_screen_size: None,
+            mouse_captured: false,
+            live_inline_viewport: Some(Rect::new(0, 20, 80, 4)),
+        };
+        let mut written = Vec::new();
+
+        guard.restore_render_surface_on_exit(&mut written);
+
+        let written = String::from_utf8(written).expect("ANSI output");
+        assert!(!written.contains("\u{1b}[?1049l"));
+        assert!(written.contains("\u{1b}[21;1H"));
+        assert!(written.contains("\u{1b}[J"));
+    }
+
+    #[test]
+    fn onboarding_alt_screen_exit_preserves_normal_screen_without_an_inline_frame() {
+        // When onboarding is the very first frame, the saved viewport is empty:
+        // there is no hidden TUI surface to erase, and clearing from its cursor
+        // anchor could instead delete first-install output owned by the shell.
+        let guard = TerminalGuard {
+            mode: RenderMode::AltScreen,
+            saved_inline_viewport: Some(Rect::new(0, 6, 0, 0)),
+            saved_visible_history_extent: Some((0, 0)),
+            saved_inline_screen_size: Some(Size::new(80, 24)),
+            mouse_captured: false,
+            live_inline_viewport: None,
+        };
+        let mut written = Vec::new();
+
+        guard.restore_render_surface_on_exit(&mut written);
+
+        let written = String::from_utf8(written).expect("ANSI output");
+        assert!(written.contains("\u{1b}[?1049l"));
+        assert!(
+            !written.contains("\u{1b}[J"),
+            "an empty saved viewport owns no normal-screen rows: {written:?}"
+        );
     }
 
     #[test]

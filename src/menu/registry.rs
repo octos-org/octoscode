@@ -797,7 +797,7 @@ pub fn core_command_specs() -> Vec<CommandSpec> {
         CommandSpec {
             name: "btw",
             aliases: &["aside"],
-            description: "Ask a quick aside question while the current turn keeps working.",
+            description: "command.btw.desc",
             category: CommandCategory::Session,
             availability: CommandAvailability::app_ui_read(APPUI_BTW_METHODS_ALL),
             inline_args: InlineArgMode::Required,
@@ -839,7 +839,7 @@ pub fn core_command_specs() -> Vec<CommandSpec> {
             // #324: the "sessions" alias moved to the Ctrl+S/Alt+S open-session
             // switcher popup; /resume keeps its primary name.
             aliases: &[],
-            description: "Switch to a prior session and reload its transcript.",
+            description: "command.resume.desc",
             category: CommandCategory::Session,
             // Gated on ALL of `APPUI_RESUME_MENU_METHODS_ALL` (`session/list` +
             // `session/hydrate`): `app_ui_read` requires every listed method, so
@@ -852,7 +852,7 @@ pub fn core_command_specs() -> Vec<CommandSpec> {
         CommandSpec {
             name: "rewind",
             aliases: &["backtrack"],
-            description: "Go back to an earlier message in this session to edit and resend it.",
+            description: "command.rewind.desc",
             category: CommandCategory::Session,
             // `session/rollback` is a MUTATING method, so this uses
             // `app_ui_mutating` (like `/review`) — it hides in read-only mode —

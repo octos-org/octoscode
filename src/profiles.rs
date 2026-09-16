@@ -60,7 +60,7 @@ pub fn solo_profiles_dir(stdio_command: Option<&str>) -> Option<PathBuf> {
 /// from "override present but unresolvable" ([`DataDirResolution::Unresolvable`])
 /// so the caller can default only in the former case.
 fn data_dir_from_command(command: &str) -> DataDirResolution {
-    let tokens = shlex::split(command).unwrap_or_default();
+    let tokens = command_tokens(command);
 
     // `--data-dir <path>` or `--data-dir=<path>` (explicit flag wins).
     let mut iter = tokens.iter();
@@ -91,6 +91,59 @@ fn data_dir_from_command(command: &str) -> DataDirResolution {
     }
 
     DataDirResolution::None
+}
+
+/// Split the configured stdio command using the quoting rules of the host that
+/// will execute it. POSIX shlex treats backslashes as escapes, which corrupts
+/// ordinary Windows paths such as `C:\octos\data` before profile discovery can
+/// inspect `--data-dir`.
+fn command_tokens(command: &str) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        split_windows_command_line(command).unwrap_or_default()
+    }
+    #[cfg(not(windows))]
+    {
+        shlex::split(command).unwrap_or_default()
+    }
+}
+
+/// Minimal Windows command-line splitter for inspecting launch configuration.
+/// Double quotes group whitespace and are removed; backslashes remain literal.
+/// The real command is still executed by the platform shell elsewhere.
+#[cfg(windows)]
+fn split_windows_command_line(command: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut started = false;
+
+    for ch in command.chars() {
+        match ch {
+            '"' => {
+                quoted = !quoted;
+                started = true;
+            }
+            ch if ch.is_whitespace() && !quoted => {
+                if started {
+                    tokens.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            _ => {
+                current.push(ch);
+                started = true;
+            }
+        }
+    }
+
+    if quoted {
+        return None;
+    }
+    if started {
+        tokens.push(current);
+    }
+    Some(tokens)
 }
 
 /// Resolve a raw path token, expanding a leading `~`. A token carrying an
@@ -464,7 +517,7 @@ mod tests {
         fs::write(profiles.join("openai.json"), "{}").unwrap();
 
         let command = format!(
-            "octos serve --stdio --solo --data-dir {}",
+            "octos serve --stdio --solo --data-dir \"{}\"",
             tmp.path().display()
         );
         let ids = discover_local_profile_ids(Some(&command));

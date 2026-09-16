@@ -59,6 +59,243 @@ mod i18n_tests {
         assert!(locales.contains(&"zh"), "missing zh: {locales:?}");
     }
 
+    /// Every core slash-command description is an i18n key that resolves in
+    /// both bundled locales. This guards against user-facing English literals
+    /// bypassing localization in the command popup.
+    #[test]
+    fn core_command_descriptions_resolve_in_en_and_zh() {
+        for command in crate::menu::registry::core_command_specs() {
+            let key = command.description;
+            assert!(
+                key.starts_with("command.") && key.ends_with(".desc"),
+                "/{} description must be a command.*.desc i18n key, got `{key}`",
+                command.name
+            );
+            for locale in ["en", "zh"] {
+                let value = t!(key, locale = locale);
+                assert_ne!(
+                    &*value, key,
+                    "missing {locale} translation for /{} (`{key}`)",
+                    command.name
+                );
+                assert!(
+                    !value.trim().is_empty(),
+                    "empty {locale} translation for /{} (`{key}`)",
+                    command.name
+                );
+            }
+        }
+    }
+
+    /// Regression set for the static English literals found by the command,
+    /// menu, activity, and runtime-status localization audit.
+    #[test]
+    fn audited_user_facing_strings_resolve_in_en_and_zh() {
+        let keys = [
+            "app.activity.title",
+            "app.activity.no_matches",
+            "app.activity_navigator.navigator_suffix",
+            "app.activity_navigator.search_active",
+            "app.activity_navigator.query_label",
+            "app.activity_navigator.empty_query",
+            "app.activity_navigator.counts",
+            "app.activity_navigator.filter_label",
+            "app.activity_navigator.filter_label_compact",
+            "app.activity_navigator.query_filter",
+            "app.activity_navigator.results",
+            "app.activity_navigator.detail",
+            "app.activity_navigator.no_selected",
+            "app.activity_navigator.orchestration_active",
+            "app.activity_navigator.running_agents",
+            "app.activity_navigator.pending_continuations",
+            "app.activity_navigator.session_running",
+            "app.activity_navigator.session_blocked",
+            "app.activity_navigator.session_done",
+            "app.activity_navigator.session_error",
+            "app.activity_navigator.no_active_session",
+            "app.activity_navigator.approval_required",
+            "app.activity_navigator.question_pending",
+            "app.activity_navigator.questions",
+            "app.activity_navigator.empty_message",
+            "app.activity_navigator.message_title",
+            "app.activity_navigator.message_subtitle",
+            "app.activity_navigator.content_heading",
+            "app.activity_navigator.reasoning_heading",
+            "app.activity_navigator.output_tail_heading",
+            "app.activity_navigator.output_preview_heading",
+            "app.activity_navigator.diff_preview_ready",
+            "app.activity_navigator.diff_preview_pending",
+            "app.activity_navigator.field",
+            "app.activity_navigator.kind.session",
+            "app.activity_navigator.kind.message",
+            "app.activity_navigator.kind.orchestration",
+            "app.activity_navigator.kind.task",
+            "app.activity_navigator.kind.change",
+            "app.activity_navigator.kind.activity",
+            "app.activity_navigator.kind.approval",
+            "app.activity_navigator.status.running",
+            "app.activity_navigator.status.blocked",
+            "app.activity_navigator.status.failed",
+            "app.activity_navigator.status.done",
+            "app.activity_navigator.filter.all",
+            "app.activity_navigator.filter.running",
+            "app.activity_navigator.filter.blocked",
+            "app.activity_navigator.filter.failed",
+            "app.activity_navigator.filter.done",
+            "app.activity_navigator.run_state.idle",
+            "app.activity_navigator.run_state.running",
+            "app.activity_navigator.run_state.blocked",
+            "app.activity_navigator.run_state.done",
+            "app.activity_navigator.run_state.error",
+            "app.activity_navigator.value.active",
+            "app.activity_navigator.value.pending",
+            "app.activity_navigator.value.running",
+            "app.activity_navigator.value.done",
+            "app.activity_navigator.value.failed",
+            "app.activity_navigator.value.cancelled",
+            "app.activity_navigator.value.interrupted",
+            "app.activity_navigator.value.unknown",
+            "app.activity_navigator.value.user",
+            "app.activity_navigator.value.assistant",
+            "app.activity_navigator.value.system",
+            "app.activity_navigator.value.tool",
+            "app.activity_navigator.value.progress",
+            "app.activity_navigator.value.report",
+            "app.activity_navigator.value.approval",
+            "app.activity_navigator.value.warning",
+            "app.activity_navigator.value.error",
+            "app.activity_navigator.value.added",
+            "app.activity_navigator.value.modified",
+            "app.activity_navigator.value.deleted",
+            "app.activity_navigator.value.renamed",
+            "app.activity_navigator.label.session",
+            "app.activity_navigator.label.phase",
+            "app.activity_navigator.label.state",
+            "app.activity_navigator.label.status",
+            "app.activity_navigator.label.detail",
+            "app.activity_navigator.label.tool",
+            "app.activity_navigator.label.kind",
+            "app.activity_navigator.label.body",
+            "app.activity_navigator.label.question_id",
+            "app.activity_navigator.label.message",
+            "app.activity_navigator.label.role",
+            "app.activity_navigator.label.tool_call",
+            "app.activity_navigator.label.task",
+            "app.activity_navigator.label.turn",
+            "app.activity_navigator.label.file",
+            "app.activity_navigator.label.type",
+            "app.activity_navigator.label.operation",
+            "app.activity_navigator.label.preview",
+            "menu.common.no_status_supplied",
+            "menu.common.local_offline",
+            "menu.common.edit_as",
+            "menu.common.test_named",
+            "menu.common.delete_named",
+            "menu.protocol.uses_method",
+            "menu.protocol.requires_method",
+            "menu.protocol.method_not_advertised",
+            "menu.protocol.returned_no_items",
+            "menu.protocol.no_cached_result",
+            "menu.onboard.item.auth_send.desc",
+            "menu.resume.title",
+            "menu.resume.subtitle",
+            "menu.resume.empty",
+            "menu.resume.loading",
+            "menu.resume.no_preview",
+            "menu.resume.message_count",
+            "menu.resume.search",
+            "menu.resume.footer",
+            "menu.rewind.title",
+            "menu.rewind.subtitle",
+            "menu.rewind.empty",
+            "menu.rewind.drop_count",
+            "menu.rewind.search",
+            "menu.rewind.footer",
+            "menu.cost.usage_totals",
+            "menu.mcp.configured_servers",
+            "menu.mcp.session_servers",
+            "menu.mcp.refresh_first",
+            "menu.model.profile_models",
+            "menu.model.server_unavailable",
+            "menu.skills.installed_skills",
+            "menu.skills.refresh_first",
+            "menu.status.requires_open_session",
+            "menu.tools.configured_tools",
+            "menu.tools.session_tools",
+            "menu.tools.refresh_first",
+            "status.peer_session_read_only",
+            "status.statusline_save_not_wired",
+            "status.terminal_title_save_not_wired",
+            "status.resume_ambiguous",
+            "status.resume_no_match",
+            "status.resuming_session",
+            "status.resume_loaded",
+            "status.resume_parse_failed",
+            "status.rewind_active_turn",
+            "status.rewind_no_active_session",
+            "status.rewind_wrong_session",
+            "status.rewind_transcript_changed",
+            "status.rewinding",
+            "status.rewind_invalid_checkpoint",
+            "status.rewind_checkpoint_min",
+            "status.rewind_checkpoint_out_of_range",
+            "status.rewind_complete",
+            "status.turn_started_in",
+            "status.tool_failed",
+            "status.tool_completed",
+            "status.warning_code_message",
+            "status.router_status",
+            "status.router_failover",
+            "status.queue_empty",
+            "status.queue_pending",
+            "status.plan_updated",
+            "status.tool_lifecycle",
+            "status.file_attached",
+            "status.turn_interrupted_reason",
+            "status.background_completion_persisted",
+            "status.session_event",
+            "status.approval_auto_resolved",
+            "status.approval_decided",
+            "status.approval_cancelled",
+            "status.task_output_cursor",
+            "status.paste_ignored_dialog_open",
+            "status.doctor_outcome.pass",
+            "status.doctor_outcome.warn",
+            "status.doctor_outcome.fail",
+            "status.doctor_outcome.skip",
+            "onboarding.validation.profile_name_required",
+            "onboarding.validation.display_name_required",
+            "onboarding.validation.display_name_too_long",
+            "onboarding.validation.username_required",
+            "onboarding.validation.username_too_long",
+            "onboarding.validation.username_invalid_chars",
+            "onboarding.validation.email_required",
+            "onboarding.validation.email_invalid",
+            "onboarding.validation.profile_collision",
+            "onboarding.validation.local_profile_unsupported",
+            "onboarding.validation.server_rejected_name",
+            "onboarding.validation.server_rejected_username",
+            "onboarding.validation.server_rejected_email",
+            "onboarding.validation.server_rejected_fields",
+            "onboarding.validation.local_profile_create_failed",
+        ];
+        for key in keys {
+            let en = t!(key, locale = "en");
+            let zh = t!(key, locale = "zh");
+            assert_ne!(&*en, key, "missing English translation for `{key}`");
+            assert_ne!(&*zh, key, "missing Chinese translation for `{key}`");
+            assert!(
+                !en.trim().is_empty(),
+                "empty English translation for `{key}`"
+            );
+            assert!(
+                !zh.trim().is_empty(),
+                "empty Chinese translation for `{key}`"
+            );
+            assert_ne!(en, zh, "`{key}` should not display English in Chinese mode");
+        }
+    }
+
     /// #363/#364: the `@` file-picker menu + `!` shell-escape mode keys resolve
     /// in BOTH locales (rust-i18n echoes the key back on a miss).
     #[test]
@@ -200,7 +437,8 @@ mod i18n_tests {
             "app.statusbar.awaiting_fleet",
             "app.autonomy.status_budget_limited_fleet",
             "app.hint.peer_dock_landed",
-            "status.summary_waiting_on_fleet",
+            "status.turn_waiting_on_fleet",
+            "status.turn_missing_answer",
         ];
         for key in keys {
             for locale in ["en", "zh"] {

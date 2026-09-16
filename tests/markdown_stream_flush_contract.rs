@@ -179,15 +179,14 @@ fn commit_suffix_joins_flushed_prefix_without_marker() {
     // watermark says the first part is already in scrollback.
     let full = "first block done.\n\ntail paragraph after watermark.";
     let mut store = streaming_store("ignored");
+    let coverage = live_coverage_for(&store, "first block done.\n\n");
     store.state.sessions[0].live_reply = None;
     store.state.sessions[0]
         .messages
-        .push(Message::assistant(full));
-
-    let coverage = octoscode::app::LiveTurnFinalization {
-        reply_flushed_text: "first block done.\n\n".to_string(),
-        ..Default::default()
-    };
+        .push(Message::assistant_with_thread(
+            full,
+            octos_core::ThreadId::new(coverage.turn_id.clone()),
+        ));
 
     let lines = lines_text(&finalized_history_lines_range_dedup_live(
         &store.state,
@@ -252,19 +251,20 @@ fn code_fence_separator_survives_stream_and_commit_boundaries() {
     );
 
     let mut committed_store = streaming_store("ignored");
+    let committed_coverage = live_coverage_for(&committed_store, flushed_fence);
     committed_store.state.sessions[0].live_reply = None;
     committed_store.state.sessions[0]
         .messages
-        .push(Message::assistant(full));
+        .push(Message::assistant_with_thread(
+            full,
+            octos_core::ThreadId::new(committed_coverage.turn_id.clone()),
+        ));
     let committed = lines_text(&finalized_history_lines_range_dedup_live(
         &committed_store.state,
         palette(),
         80,
         1,
-        &[LiveTurnFinalization {
-            reply_flushed_text: flushed_fence.to_string(),
-            ..Default::default()
-        }],
+        &[committed_coverage],
     ));
     assert_eq!(
         committed.first().map(String::as_str),

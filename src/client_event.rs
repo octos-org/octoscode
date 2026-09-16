@@ -11,19 +11,24 @@ use crate::model::{
     AgentArtifactListResult, AgentArtifactReadResult, AgentCloseResult, AgentInterruptResult,
     AgentListResult, AgentOutputReadResult, AgentStatusReadResult, AuthLogoutResult, AuthMeResult,
     AuthSendCodeResult, AuthStatusResult, AuthVerifyResult, ConfigCapabilitiesListResult,
-    DiffPreviewGetResult, LaunchResolveResult, LoopCreateResult, LoopListResult,
-    LoopMutationResult, McpConfigListResult, McpConfigMutationResult, McpStatusListResult,
-    ModelListResult, ModelSelectResult, ProfileLlmCatalogResult, ProfileLlmListResult,
-    ProfileLlmMutationResult, ProfileLocalCreateResult, ProfileSkillsListResult,
-    ProfileSkillsMutationResult, ProfileSkillsRegistrySearchResult, ReviewStartResult,
-    SessionGoalClearResult, SessionGoalGetResult, SessionGoalSetResult, SessionStatusReadResult,
-    SubProvidersListResult, SubProvidersMutationResult, ToolConfigListResult,
-    ToolConfigMutationResult, ToolStatusListResult,
+    ContextCacheDiagnostics, DiffPreviewGetResult, LaunchResolveResult, LoopCreateResult,
+    LoopListResult, LoopMutationResult, McpConfigListResult, McpConfigMutationResult,
+    McpStatusListResult, ModelListResult, ModelSelectResult, ProfileLlmCatalogResult,
+    ProfileLlmListResult, ProfileLlmMutationResult, ProfileLocalCreateResult,
+    ProfileSkillsListResult, ProfileSkillsMutationResult, ProfileSkillsRegistrySearchResult,
+    ReviewStartResult, SessionGoalClearResult, SessionGoalGetResult, SessionGoalSetResult,
+    SessionStatusReadResult, SubProvidersListResult, SubProvidersMutationResult,
+    ToolConfigListResult, ToolConfigMutationResult, ToolStatusListResult,
 };
 
 #[derive(Debug, Clone)]
 pub enum ClientEvent {
     App(Box<AppUiEvent>),
+    /// A normal typed lifecycle notification plus additive `context_state`
+    /// fields unknown to the pinned `octos-core`. Keeping the typed event in
+    /// the wrapper preserves all existing reducers while the local diagnostic
+    /// mirror remains backward-compatible with older servers.
+    ContextLifecycle(ContextLifecycleClientEvent),
     Capabilities(CapabilitiesClientEvent),
     DiffPreview(DiffPreviewGetResult),
     ModelList(ModelListClientEvent),
@@ -33,6 +38,11 @@ pub enum ClientEvent {
     McpConfigMutation(McpConfigMutationClientEvent),
     PermissionProfile(PermissionProfileClientEvent),
     SessionHydrate(SessionHydrateResult),
+    /// A hydrate response plus additive semantic-cache fields extracted from
+    /// its raw `context_state` before the pinned protocol crate discards them.
+    /// The wrapper is used even when the fields are absent so the store can
+    /// clear an older epoch atomically with the new lifecycle snapshot.
+    SessionHydrateContext(SessionHydrateContextClientEvent),
     /// Result of a `session/list` request, used to populate the `/resume`
     /// session picker.
     SessionList(SessionListResult),
@@ -127,6 +137,30 @@ pub enum ClientEvent {
     /// must fail those latched turns and drain the staged prompt queue, or
     /// every subsequent prompt wedges behind the phantom turn forever.
     BackendRelaunched,
+    /// A replacement stdio child just connected. Queued by the transport
+    /// BEFORE any event from the new child can reach the store, so the store
+    /// can tell turns latched under the dead child (older epoch) from turns
+    /// the new child itself started (current epoch — e.g. a durable
+    /// continuation it resumed before the scoped `session/open` landed).
+    /// `BackendRelaunched` then fails only the older-epoch latches.
+    BackendConnectionEpoch,
+}
+
+#[derive(Debug, Clone)]
+pub struct ContextLifecycleClientEvent {
+    pub event: Box<AppUiEvent>,
+    pub session_id: SessionKey,
+    pub diagnostics: Option<ContextCacheDiagnostics>,
+    /// `Some` only when the same raw response carries an authoritative
+    /// negotiated feature list (currently `session/open`). This closes the
+    /// race where open arrives before the separate capabilities response.
+    pub semantic_cache_advertised: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionHydrateContextClientEvent {
+    pub result: SessionHydrateResult,
+    pub diagnostics: Option<ContextCacheDiagnostics>,
 }
 
 impl From<AppUiEvent> for ClientEvent {
@@ -242,8 +276,16 @@ pub struct ProfileLlmListClientEvent {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProfileLlmMutationClientEvent {
+    pub kind: ProfileLlmMutationKind,
     pub result: ProfileLlmMutationResult,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileLlmMutationKind {
+    Upsert,
+    Delete,
+    Test,
 }
 
 /// #1768 snapshot undo list (also carries restore acknowledgements).

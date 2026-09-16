@@ -12,15 +12,15 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use octos_core::{
     Message, SessionKey, TaskId, ui_protocol::TaskRuntimeState, ui_protocol::TurnId,
-    ui_protocol::approval_kinds,
+    ui_protocol::UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2, ui_protocol::approval_kinds,
 };
 
 use crate::{
     menu::render as menu_render,
     model::{
         ActivityItem, ActivityKind, ActivityNavigatorFilter, AppState, ApprovalModalState,
-        ArtifactDetailState, ComposerPresentation, DiffPreviewPaneState, FocusPane,
-        GoalObjectiveFold, PeerMeta, PlanStep as RenderedPlanStep, ScrollToBottomHit,
+        ArtifactDetailState, AssistantProjectionLane, ComposerPresentation, DiffPreviewPaneState,
+        FocusPane, GoalObjectiveFold, PeerMeta, PlanStep as RenderedPlanStep, ScrollToBottomHit,
         SessionAutonomyState, SessionRunState, SessionView, TaskOutputDetailState, TaskView,
         ThreadGraphDetailState, TurnActivityLog, TurnPromptAnchor, TurnStateDetailState,
         UserQuestionEntry, UserQuestionPickerState, extract_plan_steps, task_state_label,
@@ -149,6 +149,9 @@ pub struct LiveTurnFinalization {
     pub reply_flushed_text: String,
     pub activity_flushed_items: usize,
     pub activity_flushed_keys: Vec<String>,
+    /// The committed footer is independently owned when a log's render anchor
+    /// moves or its activity grows after the turn has settled.
+    pub summary_flushed: bool,
 }
 
 impl LiveTurnFinalization {
@@ -159,6 +162,7 @@ impl LiveTurnFinalization {
             reply_flushed_text: String::new(),
             activity_flushed_items: 0,
             activity_flushed_keys: Vec::new(),
+            summary_flushed: false,
         }
     }
 
@@ -272,6 +276,61 @@ fn boundary_is_word_safe(text: &str, boundary: usize) -> bool {
     !(before && after)
 }
 
+/// Return the byte prefix that canonical persistence has made immutable.
+///
+/// Assistant deltas are provisional until the matching v2
+/// `assistant_persisted` arrives. In a tool-using turn the model can stream a
+/// complete-looking answer, call a tool, and then repeat that answer in its
+/// final response. The server canonicalizes that shape by persisting the
+/// tool-call carrier with empty content, but native terminal scrollback cannot
+/// erase the provisional copy once we flush it. Keep v2 bytes in the repainting
+/// inline viewport until their segment is finalized. This also covers the
+/// rollout shape where v1 deltas arrive first and a v2 persisted row later
+/// takes ownership: withholding the v1 bytes is what makes that takeover safe.
+fn canonical_v2_reply_prefix_len(
+    app: &AppState,
+    session_id: &SessionKey,
+    turn_id: &TurnId,
+    text_len: usize,
+) -> Option<usize> {
+    let key = (session_id.clone(), turn_id.clone());
+    let lane = app.assistant_projection_lanes.get(&key)?;
+    if *lane == AssistantProjectionLane::V1 {
+        // A genuinely legacy v1-only server has no canonical v2 row coming,
+        // so retain the established progressive native-scrollback behavior.
+        // Hold v1 bytes on a connection that negotiated the v2 canonical
+        // counterpart (it can safely hand ownership over later) — and while
+        // capabilities are still UNKNOWN: on a reconnect a recovered
+        // continuation's v1 deltas can precede the capabilities response, and
+        // bytes flushed before the answer arrives cannot be taken back when
+        // the v2 takeover then rebuilds the live text (the canonical commit
+        // would re-render them). Legacy capabilities lift the hold the moment
+        // they land; v2 capabilities keep it for the canonical rows.
+        return match app.capabilities.as_ref() {
+            None => Some(0),
+            Some(capabilities) => capabilities
+                .supports_feature(UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2)
+                .then_some(0),
+        };
+    }
+
+    let Some(segments) = app.v2_live_assistant_segments.get(&key) else {
+        return Some(0);
+    };
+    let mut prefix_end = 0usize;
+    for (index, segment) in segments.iter().enumerate() {
+        if segment.start_offset != prefix_end || !segment.finalized {
+            break;
+        }
+        prefix_end = segments
+            .get(index + 1)
+            .map(|next| next.start_offset)
+            .unwrap_or(text_len)
+            .min(text_len);
+    }
+    Some(prefix_end)
+}
+
 /// Return the next active-turn watermark by extending the previous one with any
 /// newly settled live reply lines and any non-running activity rows.
 pub fn next_live_turn_finalization(
@@ -332,6 +391,14 @@ pub fn next_live_turn_finalization(
             0
         };
         let stable_end = stable_live_reply_prefix_len(&live_reply.text).max(segment_end);
+        // Canonical v2 can rewrite an unpersisted segment (notably removing a
+        // pre-tool answer that the final response repeats). Clamp the native
+        // scrollback watermark to the finalized prefix so that rewrite remains
+        // possible. Once persisted, the segment boundary above releases the
+        // canonical text in the same frame.
+        let stable_end =
+            canonical_v2_reply_prefix_len(app, session_id, turn_id, live_reply.text.len())
+                .map_or(stable_end, |canonical_end| stable_end.min(canonical_end));
         if stable_end > next.reply_flushed_text.len() {
             next.reply_flushed_text = live_reply.text[..stable_end].to_string();
         }
@@ -425,8 +492,9 @@ fn strip_line_background(line: &mut Line<'static>) {
 pub struct CommittedFingerprint {
     pub session_id: String,
     pub message_count: usize,
-    pub activity_log_count: usize,
-    pub content_hash: u64,
+    /// Cumulative dialogue-only hashes, one per message. Activity metadata
+    /// must not invalidate immutable messages, including on append frames.
+    pub message_prefix_hashes: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1283,9 +1351,9 @@ fn localized_in_all_locales(key: &str) -> Vec<String> {
 }
 
 /// Byte offset where a Session Summary block begins in `content`, if any. The
-/// block is either the whole message (failure / no-answer card) or a suffix
-/// appended after a partial live reply (`{prose}\n\n{summary}` — see
-/// `finalize_live_reply_text`). Locale-independent: the title is matched
+/// block may be a genuine error card or a historical summary suffix.
+/// Completion handling no longer synthesizes missing/partial-answer cards.
+/// Locale-independent: the title is matched
 /// against every bundled locale so a stored card highlights regardless of the
 /// current UI language.
 fn session_summary_block_start(content: &str) -> Option<usize> {
@@ -6265,11 +6333,11 @@ pub use render::{
     scrollbar_thumb,
 };
 pub use transcript_build::{
-    committed_activity_keys_for_live_finalization, committed_messages_fingerprint,
-    committed_reply_matches_live_finalization, finalized_history_lines,
-    finalized_history_lines_range, finalized_history_lines_range_dedup_live,
-    finalized_late_activity_lines_for_coverages, finalized_live_turn_lines_between, live_ui_height,
-    live_ui_height_with_finalization,
+    committed_activity_coverages, committed_activity_keys_for_live_finalization,
+    committed_messages_fingerprint, committed_reply_matches_live_finalization,
+    finalized_history_lines, finalized_history_lines_range,
+    finalized_history_lines_range_dedup_live, finalized_late_activity_lines_for_coverages,
+    finalized_live_turn_lines_between, live_ui_height, live_ui_height_with_finalization,
 };
 mod transcript_build;
 #[allow(unused_imports)]

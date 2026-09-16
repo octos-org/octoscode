@@ -64,6 +64,8 @@ app:
     action_next: "Enter = next question | Esc = hide"
     action_dismiss: "Esc = dismiss (no answer to submit)"
   activity:
+    title: "Activity"
+    no_matches: "No activity rows match"
     orchestrating: "Orchestrating..."
     re_entering: "Re-entering (continuing)..."
     finished_errors: "Agent task finished with errors"
@@ -81,6 +83,105 @@ app:
     turn_label: "turn %{id}"
     more_lines_hidden: "... %{count} more line(s) hidden (%{action})"
     expanded_hint: "expanded (Ctrl+O collapse)"
+  activity_navigator:
+    navigator_suffix: " navigator"
+    search_active: "search*: "
+    query_label: "query: "
+    empty_query: "(empty)"
+    counts: "all %{all} | changes %{changes} | running %{running} | blocked %{blocked} | failed %{failed} | done %{done}"
+    filter_label: "  filter: %{filter}"
+    filter_label_compact: "filter: %{filter}"
+    query_filter: "query: %{query}  filter: %{filter}"
+    results: "Results"
+    detail: "Detail"
+    no_selected: "No activity selected"
+    orchestration_active: "orchestration active"
+    running_agents: "running agents: %{count}"
+    pending_continuations: "pending continuations: %{count}"
+    session_running: "session running"
+    session_blocked: "session blocked"
+    session_done: "session done"
+    session_error: "session error"
+    no_active_session: "no active session"
+    approval_required: "approval required"
+    question_pending: "question pending"
+    questions: "questions: %{count}"
+    empty_message: "%{role}: empty message"
+    message_title: "%{role}: %{preview}"
+    message_subtitle: "%{session} · message %{number}"
+    content_heading: "content:"
+    reasoning_heading: "reasoning:"
+    output_tail_heading: "output tail:"
+    output_preview_heading: "output preview:"
+    diff_preview_ready: "diff preview ready"
+    diff_preview_pending: "diff preview pending"
+    field: "%{label}: %{value}"
+    kind:
+      session: "session"
+      message: "message"
+      orchestration: "orchestration"
+      task: "task"
+      change: "change"
+      activity: "activity"
+      approval: "approval"
+    status:
+      running: "running"
+      blocked: "blocked"
+      failed: "failed"
+      done: "done"
+    filter:
+      all: "all"
+      running: "running"
+      blocked: "blocked"
+      failed: "failed"
+      done: "done"
+    run_state:
+      idle: "idle"
+      running: "running"
+      blocked: "blocked"
+      done: "done"
+      error: "error"
+    value:
+      active: "active"
+      pending: "pending"
+      running: "running"
+      done: "done"
+      failed: "failed"
+      cancelled: "cancelled"
+      interrupted: "interrupted"
+      unknown: "unknown"
+      user: "user"
+      assistant: "assistant"
+      system: "system"
+      tool: "tool"
+      progress: "progress"
+      report: "report"
+      approval: "approval"
+      warning: "warning"
+      error: "error"
+      added: "added"
+      modified: "modified"
+      deleted: "deleted"
+      renamed: "renamed"
+    label:
+      session: "session"
+      phase: "phase"
+      state: "state"
+      status: "status"
+      detail: "detail"
+      tool: "tool"
+      kind: "kind"
+      body: "body"
+      question_id: "question id"
+      message: "message"
+      role: "role"
+      tool_call: "tool call"
+      task: "task"
+      turn: "turn"
+      file: "file"
+      type: "type"
+      operation: "operation"
+      preview: "preview"
   diff:
     title: "Diff Preview"
     inline_patch: "Inline patch"
@@ -299,6 +400,22 @@ app:
     justification: "justification"
 
 onboarding:
+  validation:
+    profile_name_required: "Name this profile first. Use /onboard profile-name <id>."
+    display_name_required: "Display name is required. Use /onboard name <display name>."
+    display_name_too_long: "Display name must be 128 characters or fewer."
+    username_required: "Username is required. Use /onboard username <handle>."
+    username_too_long: "Username must be 64 characters or fewer."
+    username_invalid_chars: "Username must be ASCII without whitespace or control characters."
+    email_required: "Email is required by the backend. Use /onboard email <address>."
+    email_invalid: "Email must contain a non-empty local-part and domain (e.g. ada@example.com)."
+    profile_collision: "Local profile collision for '%{username}': %{reason}. Edit the fields with /onboard name|username|email and try again."
+    local_profile_unsupported: "This server returned profile_local_unsupported for profile/local/create. The backend is misconfigured — restart the server with local solo onboarding enabled, or connect to a backend that fully supports it."
+    server_rejected_name: "Server rejected the display name: %{reason}. Edit it with /onboard name <display name>."
+    server_rejected_username: "Server rejected the username: %{reason}. Edit it with /onboard username <handle>."
+    server_rejected_email: "Server rejected the email: %{reason}. Edit it with /onboard email <address>."
+    server_rejected_fields: "Server rejected the profile fields as invalid: %{reason}. Edit them with /onboard name|username|email."
+    local_profile_create_failed: "profile/local/create failed: %{reason}"
   welcome_title: "Welcome to Octos"
   value_saved: "%{value} (saved)"
   value_suggested: "%{value} (suggested)"
@@ -508,6 +625,42 @@ thinking:
   display_off: Reasoning hidden from the transcript (spinner + inspector only).
 
 status:
+  peer_session_read_only: "Peer sessions are read-only — steer peers from the master with peer_send_input."
+  statusline_save_not_wired: "Status line layout save is not wired yet"
+  terminal_title_save_not_wired: "Terminal title layout save is not wired yet"
+  resume_ambiguous: '"%{query}" matches %{count} sessions (%{ids}); type more of the id to pick one.'
+  resume_no_match: 'No prior session matches "%{query}"; run /resume with no argument to browse.'
+  resuming_session: "Resuming %{session}…"
+  resume_loaded: "Loaded %{count} prior session(s) for /resume."
+  resume_parse_failed: "Could not parse the session list: %{error}"
+  rewind_active_turn: "Finish or stop the active turn before rewinding the conversation."
+  rewind_no_active_session: "No active session to rewind."
+  rewind_wrong_session: "Rewind pick belongs to another session — reopen /rewind."
+  rewind_transcript_changed: "Transcript changed — reopen /rewind."
+  rewinding: "Rewinding %{count} turn(s)…"
+  rewind_invalid_checkpoint: '/rewind expects a checkpoint number like /rewind 2 (got "%{value}").'
+  rewind_checkpoint_min: "/rewind needs a checkpoint of 1 or more."
+  rewind_checkpoint_out_of_range: "/rewind %{checkpoint} is out of range — this session has %{count} checkpoint(s)."
+  rewind_complete: "Rewound %{count} turn(s) — edit and resend"
+  turn_started_in: "Turn started in %{session}"
+  tool_failed: "Tool failed: %{tool}"
+  tool_completed: "Tool completed: %{tool}"
+  warning_code_message: "Warning [%{code}]: %{message}"
+  router_status: "Router %{mode} using %{provider} (%{session})"
+  router_failover: "Router failover to %{provider}"
+  queue_empty: "Queue empty"
+  queue_pending: "Queue pending: %{count}"
+  plan_updated: "Plan updated: %{done}/%{count} done"
+  tool_lifecycle: "Tool %{state}: %{id}"
+  file_attached: "File attached: %{path}"
+  turn_interrupted_reason: "Turn interrupted: %{message}"
+  background_completion_persisted: "Background completion persisted: %{id}"
+  session_event: "Session event: %{kind}"
+  approval_auto_resolved: "Approval auto-resolved (%{decision}) by scope policy"
+  approval_decided: "Approval decided: %{decision} (%{detail})"
+  approval_cancelled: "Approval cancelled: %{reason}"
+  task_output_cursor: "Task output @%{offset}"
+  paste_ignored_dialog_open: "Paste ignored while a dialog is open"
   undo_no_session: "No active session to undo in."
   peer_usage: "Usage: /peer [--go] [--worktree] [--cwd <path>] [--n <2-8>] <brief>"
   peer_preparing: "Preparing peer session…"
@@ -536,7 +689,10 @@ status:
   tool_started: "Tool started: %{name} (%{id})"
   question_asked: "Question asked: %{title}"
   turn_completed: "Turn completed in %{title} at seq %{seq}"
+  turn_missing_answer: "No final assistant answer received. Reopen the session to inspect canonical history, or retry."
+  turn_waiting_on_fleet: "%{landed} of %{total} peers landed · waiting on %{peers}; the master resumes when the fleet lands."
   backend_relaunched_turn_lost: "Backend process restarted — the in-flight turn was lost; staged prompts go to the new backend."
+  hydration_queue_full: "Follow-up request queue is full; dropped %{method}."
   turn_completed_stale: "Ignored completed stale turn in %{title}"
   # Read-only mode feedback
   readonly_turn_disabled: "Read-only mode: turn/start disabled"
@@ -702,6 +858,7 @@ status:
   creating_local_profile: "Creating local solo profile"
   onboarding_provider_route_incomplete: "Onboarding provider route is incomplete"
   onboarding_provider_selection_incomplete: "Onboarding provider selection is incomplete"
+  onboarding_profile_unresolved: "No profile selected — create one in the Profile step, or relaunch with --profile-id <id>, then save the provider"
   onboarding_api_key_empty_onboard: "Onboarding API key is empty; use /onboard key <secret>"
   onboarding_api_key_empty_provider: "Onboarding API key is empty; use /provider key <secret>"
   onboarding_loading_catalog: "Loading the provider catalog to check key requirements — retry once it loads"
@@ -726,7 +883,7 @@ status:
   path_not_directory: "path '%{target}' is not a directory"
   workspace_not_directory: "Workspace '%{target}' is not a directory"
   workspace_cannot_be_root: "workspace cannot be the filesystem root"
-  workspace_cannot_be_root_status: "Workspace cannot be /; stage a project directory"
+  workspace_cannot_be_root_status: "Workspace cannot be a filesystem root; stage a project directory"
   workspace_writable: "writable"
   workspace_read_only: "read-only"
   workspace_has_toml: " (has .octos-workspace.toml)"
@@ -762,6 +919,11 @@ status:
   doctor_no_transport: "no Octos UI transport configured"
   doctor_no_transport_recovery: "Relaunch with `octoscode --stdio-command \"octos serve --stdio\"` or `octoscode --endpoint ws://<host>:<port>/api/ui-protocol/ws`."
   onboarding_doctor_summary: "Onboarding doctor — %{summary}"
+  doctor_outcome:
+    pass: "PASS"
+    warn: "WARN"
+    fail: "FAIL"
+    skip: "SKIP"
   ps_active_turn: "active turn %{id}"
   ps_idle: "idle"
   ps_selected_task: "selected task: %{title} [%{state}]"
@@ -935,22 +1097,12 @@ status:
   recovery_search_restricted: "search/fetch is restricted; ask for provider configuration or proceed with an explicit offline caveat"
   # Staged diff-hunk context prompt (inserted into the composer / sent to the agent)
   diff_hunk_prompt: "Use this selected diff hunk as context for the next coding turn.\nfile: %{path}\nstatus: %{status}\nhunk: %{hunk}\n```diff\n"
-  # Turn-completion fallback "Session Summary" assistant cards
+  # Genuine error cards and historical summary rendering
   summary_title: "Session Summary"
   summary_error_label: "Error"
   quota_card: "⏳ Quota exhausted — %{provider}\n  This provider's usage limit for the current billing cycle is reached; the turn could not finish.\n  What you can do now:\n   ▸ Purchase extra usage or upgrade your plan%{link}\n   ▸ /model — switch to another configured model and continue this session\n   ▸ Retry this message after the quota resets (your draft survives)"
   quota_card_provider_unknown: "the active provider"
-  summary_completed_no_answer: "Session Summary\n- Result: Turn completed, but the TUI did not receive a final assistant answer.\n- Activity: %{count} action(s) recorded.\n- Files changed: %{files}.\n- Validation: %{validation}.\n- Risks / follow-up: Review the activity above and continue the turn if the requested answer is incomplete."
-  summary_partial_answer: "Session Summary\n- Result: Turn completed, but the TUI only received a partial live answer.\n- Activity: %{count} action(s) recorded.\n- Files changed: %{files}.\n- Validation: %{validation}.\n- Risks / follow-up: The server may have persisted a fuller answer; continue if the visible answer is incomplete."
-  # octoscode#532: replaces `summary_completed_no_answer` when the master's turn
-  # ends while its peer fleet is still running. That turn ended BY DESIGN — the
-  # fleet-synthesis wake re-enters the master once every peer is done+settled —
-  # so the void-turn wording read as a crash at the exact moment the fleet was
-  # doing its most impressive work.
-  summary_waiting_on_fleet: "Session Summary\n- Result: Turn ended while the peer fleet is still running. The master is NOT stopped — it wakes and synthesizes when the fleet lands.\n- Fleet: %{landed} of %{total} peers landed · waiting on %{peers}.\n- Activity: %{count} action(s) recorded.\n- Files changed: %{files}.\n- Validation: %{validation}.\n- Risks / follow-up: Nothing to do — Alt+P peeks the peer dock. The master reports once the last peer lands."
   summary_failed: "Session Summary\n- Result: Turn failed before producing a final answer.\n- Error: %{code}: %{message}\n- Activity: %{count} action(s) recorded.\n- Failures: %{failed}.\n- Risks / follow-up: Fix the error above or continue the turn with a more specific instruction."
-  summary_none_observed: "none observed"
-  summary_not_reported: "not reported"
   summary_none_recorded: "none recorded"
   # Shown (status line + terse transcript note) when the user interrupts their
   # own turn (Esc/Ctrl+C). Deliberately terse: a user stop is not a failure, so
@@ -972,6 +1124,8 @@ command:
   agents:
     desc: Inspect or interrupt backend-owned subagents.
   aliases_label: 'Aliases:'
+  btw:
+    desc: Ask a quick aside question while the current turn keeps working.
   context:
     desc: Context-window controls — compact now, and choose LLM vs heuristic summarization.
   copy:
@@ -1010,6 +1164,10 @@ command:
     desc: "Gather peer results from the blackboard into this session: /gather [all | <slug> …]."
   research:
     desc: Manage research provider lanes (deep_research cheap/strong models).
+  resume:
+    desc: Switch to a prior session and reload its transcript.
+  rewind:
+    desc: Go back to an earlier message in this session to edit and resend it.
   onboard:
     desc: Open the setup wizard to configure or reconfigure your profile, provider, model, and workspace.
   permissions:
@@ -1051,6 +1209,18 @@ command:
   turn:
     desc: Inspect backend turn lifecycle state.
 menu:
+  common:
+    no_status_supplied: "no status supplied"
+    local_offline: "local/offline"
+    edit_as: "Edit as: %{command}"
+    test_named: "Test %{name}"
+    delete_named: "Delete %{name}"
+  protocol:
+    uses_method: "Uses %{method}."
+    requires_method: "Requires %{method}."
+    method_not_advertised: "Octos UI method `%{method}` is not advertised"
+    returned_no_items: "%{method} returned no %{items}"
+    no_cached_result: "%{method} is advertised but no result is cached yet"
   file_picker:
     title: "Insert file path"
     search: "Type to filter workspace files"
@@ -1210,6 +1380,11 @@ menu:
     unavailable_no_session: Compaction requires an open Octos UI session.
     unavailable_title: Compaction unavailable
   context:
+    diagnostics:
+      cache_epoch: Cache epoch
+      last_invalidation: Last invalidation
+      semantic_head: Semantic head
+      title: OUP context cache
     item:
       compact:
         desc: Summarize older messages now to free up the context window.
@@ -1248,6 +1423,7 @@ menu:
     title: Cost
     unavailable_no_session: Usage totals require an open Octos UI session.
     unavailable_title: Cost unavailable
+    usage_totals: usage totals yet
   empty: No options available
   filter:
     placeholder: Filter options
@@ -1344,6 +1520,9 @@ menu:
     title: Login
     unavailable_title: Login unavailable
   mcp:
+    configured_servers: configured servers
+    session_servers: servers for this session
+    refresh_first: Run Refresh MCP config first
     item:
       cached:
         label: Server MCP config
@@ -1360,6 +1539,8 @@ menu:
     title: MCP
     unavailable_title: MCP unavailable
   model:
+    profile_models: models for this profile
+    server_unavailable: server reports this model is unavailable
     footer: Enter select or refresh | Esc close
     item:
       add:
@@ -1511,6 +1692,7 @@ menu:
       auth_refresh:
         label: Refresh auth status
       auth_send:
+        desc: Uses auth/send_code with the wizard email.
         label: Send email OTP
       auth_status:
         desc: Use /onboard email <address>, /onboard send-code, /onboard code <otp>, then /onboard verify.
@@ -1645,10 +1827,28 @@ menu:
     title: Update Model Permissions
     unavailable_no_session: Permissions require an open Octos UI session.
     unavailable_title: Permissions unavailable
+  resume:
+    title: "Resume a session"
+    subtitle: "Switch to a prior session and reload its transcript."
+    empty: "No prior sessions to resume"
+    loading: "Loading sessions…"
+    no_preview: "(no preview)"
+    message_count: "%{count} msgs"
+    search: "Search sessions…"
+    footer: "Enter resume · /resume <id> · Esc"
+  rewind:
+    title: "Rewind the conversation"
+    subtitle: "Go back to an earlier message to edit and resend it."
+    empty: "Nothing to rewind to in this session"
+    drop_count: "drops %{count} turn(s)"
+    search: "Search messages…"
+    footer: "Enter rewind · /rewind <n> · Esc"
   runtime_preview_title: Runtime
   search:
     label: "Search "
   skills:
+    installed_skills: installed skills
+    refresh_first: Run Refresh installed skills first
     item:
       cache_empty:
         label: Installed skills not loaded
@@ -1671,6 +1871,7 @@ menu:
     title: Skills
     unavailable_title: Skills unavailable
   status:
+    requires_open_session: server status requires an open Octos UI session
     item:
       capabilities:
         label: Capabilities
@@ -1764,6 +1965,9 @@ menu:
     subtitle: Choose terminal title components.
     title: Terminal Title
   tools:
+    configured_tools: configured tools
+    session_tools: tools for this session
+    refresh_first: Run Refresh tool config first
     item:
       cached:
         label: Server tool config

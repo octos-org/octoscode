@@ -26,7 +26,7 @@ QUICKSTART 的发现命令为准。
 
 ## 模式 outer — 外环上岗(强模型审查员)
 
-收编自 /olp-outer(旧 skill 保留为薄转发)。上岗四步:
+收编自 /olp-outer(旧 skill 保留为薄转发)。上岗五步:
 
 1. **读规程**:`docs/OLP_OUTER_BOOT.md`(操作面)+
    `docs/OUTER_LOOP_PROTOCOL.md`(ACK 定式/多外环规则/预算档)
@@ -50,6 +50,25 @@ QUICKSTART 的发现命令为准。
    `scripts/olp-board-append.sh`,flock 原子)→ 立编号条目唤醒内环 →
    内环 ACK 后**隔离 worktree 独立复验** → 采认代推。安全红线见
    BOOT §5。
+5. **retro(进化环)**:①触发——战役收官,或进化黑板新卡 ≥ 10 张;
+   ②命令——`scripts/olp-evo-harvest.sh <repo> &&
+   scripts/olp-evo-retro.sh <repo>`(采集→简报,记录目录在
+   `knowledge/context/evolution/`);③处置——每次最多推进 3 条记录;
+   立案条件 hint ≥ 2 或主审目视跨 goal/跨条目复发,或 S1;issue 由
+   operator 发布或明示委托;④authority——未持 outer-duty 锁只读简报
+   不写记录;⑤采集哨只认带署名的行首定式
+   `> 外环(<署名>)·改判(作废 #N):` /
+   `> 外环(<署名>)·R2 记档(#N):`,纪律里的散文"R2 记档"不落卡。
+   ⑥阶段 2/3 工具面(全部只读或只写自家状态目录):监视器
+   `scripts/olp-watch-board.sh <板> <token> --harvest <repo>` 命中即采集并常驻
+   (不带 `--harvest` 仍一击退出);`scripts/olp-evo-metrics.sh <repo>
+   [--since EVO-NNNN] [--json] [--baseline <json>] [--stall <板>
+   --stall-threshold <分钟> [--now <ISO>]]` 窗口化诊断(非 KPI:含
+   `increase:/decrease:`、`stall:`、`fake_verified:`,不作红线);
+   `scripts/olp-evo-spec-skeleton.sh <FLAW-NNN.md>` 从记录直出契约骨架到
+   stdout(仓内只许写 `specs/drafts/`,主审补选择器后才入 `specs/`);
+   `scripts/olp-evo-index.sh <repo>` 生成 `knowledge/context/evolution/INDEX.md`;
+   回放基线 `fixtures/evolution/replay/`(合成夹具,实现 commit 不得改)。
 
 ## 模式 inner — 内环形态选型(执行侧)
 
@@ -78,8 +97,10 @@ operator 点破的教训。上岗即遵守,不要重蹈:
    沉默与"还在干活"不可区分(实案:夜间断供熔断 8 小时无人知)。
    哨死(超时被回收)会收到失败通知,收到即重挂。
 2. **侦听哨唯一合法配方:基线+子串,禁止手搓格式匹配**。板面哨一律
-   `~/.octos/outer/watch-board.sh <板> <token>`(基线行数裁剪判定域,
-   只看挂哨后新增行;域内 `grep -F` 宽松匹配,任何前缀格式一视同仁)。
+   发行版 `scripts/olp-watch-board.sh`(`olp-init.sh` 安装为
+   `~/.octos/outer/watch-board.sh`)`<板> <token> [--skip-signature <署名>]`(基线行数裁剪
+   判定域,只看挂哨后新增行;域内 `grep -F` 宽松匹配,任何前缀格式一视同仁;
+   外环自己的批注若引用 token 会误报——先落板后挂哨,或用 `--skip-signature` 排除本署名)。
    实案四起同一病灶——谓词作用于全文件+猜格式:三次误报(任务书自述/
    引用文字/历史同号 ACK),一次漏报(`### ` 前缀没猜到,哨空转数小时
    致复验迟到);非板面哨锚定唯一新信号:行号基线+署名、产物文件

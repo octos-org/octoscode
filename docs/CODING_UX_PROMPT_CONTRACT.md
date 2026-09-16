@@ -154,9 +154,12 @@ The coding TUI must keep the live work area readable during long turns:
   already at the latest line.
 - Plan text rendered from model markdown strips formatting markers such as
   `**bold**` and inline backticks in compact TUI rows.
-- If a turn completes or fails without a final assistant message, the TUI must
-  insert a structured fallback `Session Summary` so the user sees what happened
-  instead of only raw activity.
+- The TUI must not fabricate a `Session Summary` for a successful terminal with
+  no answer, or guess that a live answer is partial from punctuation, length or
+  tool activity. Preserve actual model text and reasoning. Recover only the
+  canonical answer belonging to the same turn; otherwise show a missing-answer
+  diagnostic in lifecycle/status UI. Genuine server errors remain diagnostics,
+  not substitute assistant answers. See `specs/terminal-answer-integrity.spec`.
 
 Composer requirements:
 

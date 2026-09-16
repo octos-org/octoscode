@@ -159,6 +159,7 @@ fn scrollback_flush_keeps_children() {
         Palette::for_theme(ThemeName::default()),
         100,
         std::slice::from_ref(&coverage),
+        store.state.sessions[0].messages.len(),
     );
     let text: Vec<String> = lines
         .iter()

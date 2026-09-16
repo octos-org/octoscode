@@ -1,0 +1,25 @@
+name: Conduct contact request
+description: Ask for a private channel to report a Code of Conduct concern
+title: "conduct contact: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        STOP: this issue will be public.
+
+        Use this form only to ask for a private maintainer channel. Do not identify people or include incident details, messages, screenshots, or private information here.
+  - type: input
+    id: contact
+    attributes:
+      label: Preferred contact
+      description: Provide a GitHub handle or another contact method where an uninvolved maintainer can reach you privately.
+      placeholder: "@username"
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: I have not included names, incident details, messages, screenshots, or private information in this public request.
+          required: true

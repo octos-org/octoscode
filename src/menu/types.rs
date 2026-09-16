@@ -770,6 +770,9 @@ pub struct MenuAppSnapshot<'a> {
     /// the live `used / max (pct%)` context-window usage. `None` until a token
     /// estimate is known for the session.
     pub context_window_usage: Option<(u64, u64)>,
+    /// Display-only cache epoch and semantic-boundary labels reported by OUP.
+    /// `None` for older servers, which keeps the diagnostic pane hidden.
+    pub context_cache_diagnostics: Option<&'a crate::model::ContextCacheDiagnostics>,
     /// Active-session sub-agent roster for the `/agents` picker (#323),
     /// mirrored from `AppState::active_session_agents`.
     pub agents: &'a [octos_core::ui_protocol::UiAgentRecord],

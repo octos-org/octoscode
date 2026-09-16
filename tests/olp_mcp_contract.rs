@@ -73,21 +73,23 @@ fn temp_outer_root(tag: &str) -> std::path::PathBuf {
     for sub in ["mcp/questions", "mcp/answers", "mcp/consumed"] {
         std::fs::create_dir_all(dir.join(sub)).unwrap();
     }
-    // Fake board_append.sh recording bodies into board_calls.log.
-    let script = dir.join("board_append.sh");
-    std::fs::write(
-        &script,
-        "#!/usr/bin/env bash\ncat >> \"$(dirname \"$1\")/board_calls.log\"\n",
-    )
-    .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
+
+        // Fake board_append.sh recording bodies into board_calls.log.
+        let script = dir.join("board_append.sh");
+        std::fs::write(
+            &script,
+            "#!/usr/bin/env bash\ncat >> \"$(dirname \"$1\")/board_calls.log\"\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     dir
 }
 
+#[cfg(unix)]
 fn board_text(root: &std::path::Path) -> String {
     std::fs::read_to_string(root.join("board_calls.log")).unwrap_or_default()
 }
@@ -199,8 +201,11 @@ fn self_test_ask_outer_roundtrip() {
     assert_eq!(archive["question"]["tried"], "读过两处源码");
     assert_eq!(archive["answer"]["answer"], "外环答:走候选 b");
 
-    let board = board_text(&root);
-    assert!(board.contains("MCP(ask_outer)"), "ask audited: {board}");
+    #[cfg(unix)]
+    {
+        let board = board_text(&root);
+        assert!(board.contains("MCP(ask_outer)"), "ask audited: {board}");
+    }
 }
 
 /// Scenario: 90s 超时降级 — no answer present; compressed clock returns the
@@ -218,6 +223,7 @@ fn self_test_ask_outer_timeout_degrades() {
         elapsed < Duration::from_secs(3),
         "compressed clock: {elapsed:?}"
     );
+    #[cfg(unix)]
     assert!(board_text(&root).contains("timeout"), "timeout audited");
 }
 
@@ -263,6 +269,7 @@ fn self_test_ask_outer_requires_tried() {
 /// Scenario: report_blocked 直通落板 — no mailbox round-trip, board audit
 /// signed MCP(ask_outer).
 #[test]
+#[cfg(unix)]
 fn self_test_report_blocked_board_only() {
     let root = temp_outer_root("blocked");
     let mut server = ServerProc::spawn(&root, 1.0);

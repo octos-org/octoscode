@@ -1,0 +1,90 @@
+name: Bug report
+description: Report a reproducible problem in octoscode
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve octoscode. Search existing issues first.
+        Do not report vulnerabilities or include secrets here; follow SECURITY.md instead.
+  - type: input
+    id: version
+    attributes:
+      label: octoscode version
+      description: Run `octoscode --version`.
+      placeholder: octoscode 0.x.y
+    validations:
+      required: true
+  - type: input
+    id: server-version
+    attributes:
+      label: Octos server version
+      description: Include this when the issue involves a live server connection.
+      placeholder: octos 0.x.y or not applicable
+    validations:
+      required: true
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: installation
+    attributes:
+      label: Installation method
+      options:
+        - npm
+        - Homebrew
+        - Shell installer
+        - PowerShell installer
+        - cargo install
+        - Built from source
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest deterministic sequence that demonstrates the problem.
+      placeholder: |
+        1. Run ...
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Relevant diagnostics
+      description: Paste minimal logs or redacted `octoscode doctor --json` output. Remove tokens, keys, credentials, private prompts, and session data.
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched for an existing issue describing this problem.
+          required: true
+        - label: I removed secrets and private data from this report.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

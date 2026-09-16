@@ -1,0 +1,370 @@
+{
+ "provenance": "fixture 复制品 — 从前轮真实评审证据复制,内容与源逐字节一致(见 source_sha256_check)",
+ "source_root": "/Users/zhangalex/Work/Projects/FW/octoscode/.octos/reviews/pr-627-630-20260909",
+ "source_manifest_protocol": "olp/v2",
+ "derived_note": "源 MANIFEST.json 的 combined_file_sha256 为 [hex-redacted];本清单为复制后自算哈希,源对账经 source_sha256_check=byte-identical outer-verification/ 为外层独立执行证据的只读复制,哈希入本清单。",
+ "source_sha256_check": "byte-identical(源/fixture 逐一 SHA256 相等)",
+ "files": [
+  {
+   "path": "MANIFEST.json",
+   "sha256": "e192dd18b496fd1e7fd8cb6d7cd498fcda2b61a67940d30520d3fd1a95be21ef",
+   "bytes": 23709
+  },
+  {
+   "path": "evidence/README.md",
+   "sha256": "ca5124d1a35129c5879e037a6ba30ca54a697850d86994c114e74f102f2fa19b",
+   "bytes": 3096
+  },
+  {
+   "path": "evidence/adversarial.log",
+   "sha256": "0c495c1cc928a6f215c48a9db3bd632c8808ace1c9698d823e48e47d56744e6e",
+   "bytes": 15657
+  },
+  {
+   "path": "evidence/reproduce.sh",
+   "sha256": "cd63b0c7cf27c6bbaff37b6c014e1774c127ade3f7d3dda686f7ce1c7736bfb0",
+   "bytes": 1900
+  },
+  {
+   "path": "evidence/store-repros.rs",
+   "sha256": "12647fc4905b2f8fbdb81f7a8dac5fb6535a85888cf86451318724026d190793",
+   "bytes": 5752
+  },
+  {
+   "path": "evidence/transport-repros.rs",
+   "sha256": "020440e4425e4d0f16544cc98046a0bc54b28a96976bbc6a3c1cd5a39fb0d551",
+   "bytes": 3513
+  },
+  {
+   "path": "pr-627/native/pr627-glm/result-1.md",
+   "sha256": "cd722ef4ab2c1f3625efbd30d68b090b347a6132dc9d376e6e1a5c0e0e98f3ec",
+   "bytes": 121
+  },
+  {
+   "path": "pr-627/native/pr627-glm/turns.txt",
+   "sha256": "22c5eaded1337824b8dbbf3ce988b11263e6301078080d62b08ff1a22e80668d",
+   "bytes": 21
+  },
+  {
+   "path": "pr-627/native/pr627-glm-primary/result-1.md",
+   "sha256": "424f3b87a6e7d4f7c9bb53ff80e57180c8c72624bc8c8db4cb0badd1c1fa8399",
+   "bytes": 4708
+  },
+  {
+   "path": "pr-627/native/pr627-glm-primary/result-2.md",
+   "sha256": "fc9c1ccfdd02d6cd88c5d664ffdbfe026f6a12b61923d530ec29397531708367",
+   "bytes": 3078
+  },
+  {
+   "path": "pr-627/native/pr627-glm-primary/result-3.md",
+   "sha256": "220c37d29325207b69283e9f94d7efe1643162e5035ec1733b1217e8fb35ac63",
+   "bytes": 2873
+  },
+  {
+   "path": "pr-627/native/pr627-glm-primary/result-4.md",
+   "sha256": "ff9f0e65988299c4594b73119ee8086432dfcdec226642cfb428735904fa937e",
+   "bytes": 3398
+  },
+  {
+   "path": "pr-627/native/pr627-glm-primary/turns.txt",
+   "sha256": "6b2129f8e561f3e7f6711773ed5e3ae842cbb6b63270aa3d9fc9b6c20759fa3a",
+   "bytes": 92
+  },
+  {
+   "path": "pr-627/native/pr627-k3/result-1.md",
+   "sha256": "ed4e85e3adaa2c7af318ed4caddddc376eacce1a36e89d364ace194df14ca45e",
+   "bytes": 1494
+  },
+  {
+   "path": "pr-627/native/pr627-k3/result-2.md",
+   "sha256": "7bc99032c7e5a2bb518dc523ebaa375e85bb3c440443c6af8944d5f599343e3c",
+   "bytes": 2355
+  },
+  {
+   "path": "pr-627/native/pr627-k3/result-3.md",
+   "sha256": "90484a34e5a4614406c49eec36ccb495c14cbc375444cd1e9bbd82d4e2bf10ba",
+   "bytes": 2531
+  },
+  {
+   "path": "pr-627/native/pr627-k3/turns.txt",
+   "sha256": "745702c83e8ced009d95fb877e5305d417d10ffd5cb879ef9eb85fb418d9263e",
+   "bytes": 69
+  },
+  {
+   "path": "pr-627/result.md",
+   "sha256": "50829fd711592abd36e7e900a41467c28bcc6421c390afa3446c2c392ef2b3a5",
+   "bytes": 6913
+  },
+  {
+   "path": "pr-627/runtime-evidence.json",
+   "sha256": "364b62c930df6cfe9802291bc8892116d53249a410a753a9ce6844d5affb9c12",
+   "bytes": 1677
+  },
+  {
+   "path": "pr-628/native/pr628-glm/result-1.md",
+   "sha256": "6522573157a48f96a51d1b31c39453401fffe51e87ad399bff5b4e671603bd84",
+   "bytes": 121
+  },
+  {
+   "path": "pr-628/native/pr628-glm/turns.txt",
+   "sha256": "ffba19fca45b70d44aa50095842089c899b6fec03867224d4a49ded4e0850446",
+   "bytes": 21
+  },
+  {
+   "path": "pr-628/native/pr628-glm-primary/result-1.md",
+   "sha256": "e0a83a2ce419bbbbcba3d443ee8ccf381c7cbd50109458ad9535e6fd28783937",
+   "bytes": 1816
+  },
+  {
+   "path": "pr-628/native/pr628-glm-primary/result-2.md",
+   "sha256": "46d2aa64a648f58444ac33a689d312492031bd88d6a40b66b0f7d78a4eae10e0",
+   "bytes": 986
+  },
+  {
+   "path": "pr-628/native/pr628-glm-primary/result-3.md",
+   "sha256": "96971035dbfa7355bebcece832c1b27a3fb178625f3bf1c53661ac664ce03c18",
+   "bytes": 1072
+  },
+  {
+   "path": "pr-628/native/pr628-glm-primary/result-4.md",
+   "sha256": "b242e4ae95c2da7c29ae08fd5944b22adc3ac7c964c927fb898d41df344fcfc5",
+   "bytes": 1505
+  },
+  {
+   "path": "pr-628/native/pr628-glm-primary/result-5.md",
+   "sha256": "e835762d4bdfa2c990047308110d2c0a315dc222868fdf5bc9b0b5f9ab87ed0a",
+   "bytes": 1578
+  },
+  {
+   "path": "pr-628/native/pr628-glm-primary/result-6.md",
+   "sha256": "703b528d4c217141ea51ae11f3342651de0758905e539f8f269c48bf2bddd389",
+   "bytes": 1870
+  },
+  {
+   "path": "pr-628/native/pr628-glm-primary/result-7.md",
+   "sha256": "14a02ac6c2a15a98c53998b994a28c72f229a7956e6eb1da67a577e77f90d4d1",
+   "bytes": 1845
+  },
+  {
+   "path": "pr-628/native/pr628-glm-primary/turns.txt",
+   "sha256": "e3c02c24233b630cca014c38f5e375c957f010abd11f4f6b679f5630060f8b3f",
+   "bytes": 161
+  },
+  {
+   "path": "pr-628/native/pr628-k3/result-1.md",
+   "sha256": "7bd3940aeb7c9fab6daeac1820da7774d210fc65b757af30313df31943240355",
+   "bytes": 911
+  },
+  {
+   "path": "pr-628/native/pr628-k3/result-2.md",
+   "sha256": "c29e5d1f42bffe2537dec24014ae7659e64913a6d819538726472586ed2c7398",
+   "bytes": 1256
+  },
+  {
+   "path": "pr-628/native/pr628-k3/result-3.md",
+   "sha256": "ab0cad1cb244e2eedae5f623333be6766b58029d30ada79bd860ff081350c613",
+   "bytes": 1587
+  },
+  {
+   "path": "pr-628/native/pr628-k3/result-4.md",
+   "sha256": "54e81609665ff050a7195a2d0b16fff8d17fffaca7be53e7bf6d8b5b0aa51cc3",
+   "bytes": 1308
+  },
+  {
+   "path": "pr-628/native/pr628-k3/result-5.md",
+   "sha256": "8dc9fd58696207ceb9b78e16e1eb48a7d3f0e083824b0e8b7363957739a7036e",
+   "bytes": 678
+  },
+  {
+   "path": "pr-628/native/pr628-k3/result-6.md",
+   "sha256": "aadef9b99c95e89ec64b60830f3cb2c9c508d0e50e6d6ea940ee1b9420fb1d5d",
+   "bytes": 981
+  },
+  {
+   "path": "pr-628/native/pr628-k3/result-7.md",
+   "sha256": "785dea08fbf3c13120ff91111edf3cec7914edc8e0859ea1a35bdc9b14d8a3c1",
+   "bytes": 966
+  },
+  {
+   "path": "pr-628/native/pr628-k3/turns.txt",
+   "sha256": "26aa8b67f1a1da51f2a8558a5666b4e115f71b60bae9d95c9aeed1f0a62dd63a",
+   "bytes": 138
+  },
+  {
+   "path": "pr-628/result.md",
+   "sha256": "d5389589173aff448845a4d511e594775cc557c14c056ff4446909fae3c5834c",
+   "bytes": 5718
+  },
+  {
+   "path": "pr-628/runtime-evidence.json",
+   "sha256": "f0e0df072e19f14627d7b9c5cca783fee1979775fc7e32e53f64d3709c4aa16c",
+   "bytes": 1677
+  },
+  {
+   "path": "pr-629/native/pr629-glm/result-1.md",
+   "sha256": "e0a1b19c1b187eb128a94ea882217f25c0dbd73e6a77deafcea37eb59e1e01f4",
+   "bytes": 121
+  },
+  {
+   "path": "pr-629/native/pr629-glm/turns.txt",
+   "sha256": "ffba19fca45b70d44aa50095842089c899b6fec03867224d4a49ded4e0850446",
+   "bytes": 21
+  },
+  {
+   "path": "pr-629/native/pr629-glm-primary/result-1.md",
+   "sha256": "15593e6a735d46841cead17cab98d8de34316f4770a808fc004b95949b813fdf",
+   "bytes": 2381
+  },
+  {
+   "path": "pr-629/native/pr629-glm-primary/result-2.md",
+   "sha256": "1748fb72e9f1d39d9ecdc83b44104e9541196d410e56c792d5c86705c60355b9",
+   "bytes": 1577
+  },
+  {
+   "path": "pr-629/native/pr629-glm-primary/result-3.md",
+   "sha256": "f7ca6764794d180a09480971559a0594fa4e4ab059706010d1352f1e0d16011b",
+   "bytes": 1603
+  },
+  {
+   "path": "pr-629/native/pr629-glm-primary/result-4.md",
+   "sha256": "d6c821e890cf642f5dc00eb83630b75592164af25645a9773ae4691b9bfcdbeb",
+   "bytes": 1785
+  },
+  {
+   "path": "pr-629/native/pr629-glm-primary/turns.txt",
+   "sha256": "685d30bccfccbf294e34dd19672b779b4dd71a193e1da7614fd86f1b279f7e1e",
+   "bytes": 92
+  },
+  {
+   "path": "pr-629/native/pr629-k3/result-1.md",
+   "sha256": "43bcf940c3c8bb7a457b1f574c9dffcd726a40d1bc9a4a06c52e3ec54fd0299a",
+   "bytes": 861
+  },
+  {
+   "path": "pr-629/native/pr629-k3/result-2.md",
+   "sha256": "37fa876c8d27409a7c21dd3056f9df9ca721846e2525d2aec5f7237d3dcd2e34",
+   "bytes": 883
+  },
+  {
+   "path": "pr-629/native/pr629-k3/result-3.md",
+   "sha256": "b283350b2ceee2b8d3c38469c5f2790115b682274a277c4334861315a22a1a3f",
+   "bytes": 1012
+  },
+  {
+   "path": "pr-629/native/pr629-k3/result-4.md",
+   "sha256": "10a21f7d2ac20d23249ee24c9fd0fa0ae05a688ce2e964e12b6f67a467178060",
+   "bytes": 1167
+  },
+  {
+   "path": "pr-629/native/pr629-k3/result-5.md",
+   "sha256": "b996275350f535090b90470c2d06e541c2926d0bc4b951c9507bd99fe53ec8b5",
+   "bytes": 2067
+  },
+  {
+   "path": "pr-629/native/pr629-k3/turns.txt",
+   "sha256": "cbc9be858ccb0d20f45d7ff83aa6f7d7cf6721c397f4dd59ff7585cf3ed7120f",
+   "bytes": 115
+  },
+  {
+   "path": "pr-629/result.md",
+   "sha256": "35314672c0612bb3ba3b86f5351d3fd68d02c9eecda55f03f6d9952ea41fcc6e",
+   "bytes": 7605
+  },
+  {
+   "path": "pr-629/runtime-evidence.json",
+   "sha256": "080ab501bc692647cde51ef9aa3cb24f11fbff4ce99fda113e0c6c679a376505",
+   "bytes": 1849
+  },
+  {
+   "path": "pr-630/native/pr630-glm/result-1.md",
+   "sha256": "5e8297044792f809a9f3fb2f0e81cab062bac707b669ec50769c8aaade6bbf86",
+   "bytes": 121
+  },
+  {
+   "path": "pr-630/native/pr630-glm/turns.txt",
+   "sha256": "22c5eaded1337824b8dbbf3ce988b11263e6301078080d62b08ff1a22e80668d",
+   "bytes": 21
+  },
+  {
+   "path": "pr-630/native/pr630-glm-primary/result-1.md",
+   "sha256": "c56b9b835828be884b21d1e110245eca942df6bbd569c89d565173f9d23865b2",
+   "bytes": 2077
+  },
+  {
+   "path": "pr-630/native/pr630-glm-primary/result-2.md",
+   "sha256": "14a32ae95c688df56aac1674017a902cce54c78510273b55985c53eabf1ded5a",
+   "bytes": 1023
+  },
+  {
+   "path": "pr-630/native/pr630-glm-primary/result-3.md",
+   "sha256": "29d1fb99de3463d00f4a1d05004d171160ef03023aef33f6cc75851ccce3e253",
+   "bytes": 2092
+  },
+  {
+   "path": "pr-630/native/pr630-glm-primary/result-4.md",
+   "sha256": "4a8907ed3a2feb25d15c17dbe57fe3b8cf378ba117a751ec571a13ba46a519de",
+   "bytes": 2493
+  },
+  {
+   "path": "pr-630/native/pr630-glm-primary/turns.txt",
+   "sha256": "e6d0881246175cc8c9228ab20e8db2c8d005a82463be84066e7b1cd351ffe5d0",
+   "bytes": 92
+  },
+  {
+   "path": "pr-630/native/pr630-k3/result-1.md",
+   "sha256": "621982717f766ad4697423eaf5b86f04b71aa4041b2af3cb154d660b02c64336",
+   "bytes": 1650
+  },
+  {
+   "path": "pr-630/native/pr630-k3/result-2.md",
+   "sha256": "35a6cdb39e50ec402db0be0c6e6db1c20c13dc6e44117c82a657340f528f6a25",
+   "bytes": 1742
+  },
+  {
+   "path": "pr-630/native/pr630-k3/result-3.md",
+   "sha256": "c1bbcd108f243cf1e018096bbd60202004104fa73f00aebde7d3a88efbf5f2c7",
+   "bytes": 2384
+  },
+  {
+   "path": "pr-630/native/pr630-k3/turns.txt",
+   "sha256": "4f5c55f45ac28e3f5dcb80ee7a2d273cfaa719e5a289229a5f8f1280dafec3d2",
+   "bytes": 69
+  },
+  {
+   "path": "pr-630/result.md",
+   "sha256": "47571aa3e1a19c443b005cf1b1cd574094f3222abe1ed12ad0db3e02a9a7af55",
+   "bytes": 8157
+  },
+  {
+   "path": "pr-630/runtime-evidence.json",
+   "sha256": "3dd9c51863afb3e29456112e0607feebe5da54b3ef6a62f77b1dadeaac7c86fb",
+   "bytes": 1682
+  },
+  {
+   "path": "outer-verification/outer-verification-slot.json",
+   "sha256": "143c5afb33e586a7efdff292f488c9de5eb3f0a7e0c8fbfca2c5426acf9ac0e8",
+   "bytes": 1166
+  },
+  {
+   "path": "outer-verification/outer-629-base.log",
+   "sha256": "86c806aa9f90dccc9e7ceea64408bac3839f6ee0e99991d81764cefbe5719ad9",
+   "bytes": 1407
+  },
+  {
+   "path": "outer-verification/outer-629-head.log",
+   "sha256": "46a71bf778d034de9ef9bf4292aa62f2469a6581d9c91c8d75782c96cffb52c3",
+   "bytes": 1407
+  },
+  {
+   "path": "outer-verification/residual-629-repro.rs",
+   "sha256": "172d25638df5af31b8e8915663148e5ef1abe12c837c63f86c4c1f6f4fba8a86",
+   "bytes": 990
+  },
+  {
+   "path": "outer-verification/README.md",
+   "sha256": "b505dc9cad62ae36daf76277c9e189b7edc18aabc468b4e881099a13f7972a4a",
+   "bytes": 532
+  }
+ ],
+ "note": "*.log 在仓库 .gitignore 全局忽略;清单内的 3 个 .log 是本任务固定缺陷证据/外层双执行日志,必须以 git add -f 强制纳入提交(checkout 后逐字节核验)。若干净树缺失任一 .log,清单核验 fail-closed(测试 olp_review_regression_dataset_classifies_four_prs 显式报缺,不静默跳过)。"
+}

@@ -33,6 +33,9 @@ pub struct ScrollbackTracker {
     /// Recently completed live-turn watermarks kept long enough to dedupe the
     /// eventual committed assistant message / archived activity log.
     completed_live: Vec<LiveTurnFinalization>,
+    /// Already-rendered archived activity, retained with the canonical logs
+    /// independently of the short-lived reply streaming cache.
+    archived_activity: Vec<LiveTurnFinalization>,
     /// Whether the last line pushed to scrollback was blank. Reply chunks stream
     /// in across many flushes; without carrying this, a chunk that ends on a
     /// blank followed by one that opens on a blank stacks into a 2-line gap at
@@ -84,6 +87,7 @@ impl ScrollbackTracker {
     pub fn mark_committed_flush_stale(&mut self) {
         self.last = CommittedFingerprint::default();
         self.flushed_messages = 0;
+        self.archived_activity.clear();
         self.last_flushed_ends_blank = false;
         // The committed re-flush will write below the old tail; a group header
         // up there is no longer the attach point for continuation rows.
@@ -118,6 +122,26 @@ impl ScrollbackTracker {
         let (previous_live, next_live) = self.reconcile_active_live(app);
         let mut lines_to_insert = Vec::new();
         let mut reset = false;
+        let mut activity_coverage = self.archived_activity.clone();
+        for live in &self.completed_live {
+            if let Some(old) = activity_coverage
+                .iter_mut()
+                .find(|old| old.session_id == live.session_id && old.turn_id == live.turn_id)
+            {
+                // Preserve reply streaming ownership while adding archived
+                // activity keys for logs whose render anchor moves later.
+                old.reply_flushed_text = live.reply_flushed_text.clone();
+                old.summary_flushed |= live.summary_flushed;
+                for key in &live.activity_flushed_keys {
+                    if !old.activity_flushed_keys.contains(key) {
+                        old.activity_flushed_keys.push(key.clone());
+                    }
+                }
+                old.activity_flushed_items = old.activity_flushed_keys.len();
+            } else {
+                activity_coverage.push(live.clone());
+            }
+        }
 
         // No active session, or no committed messages yet → no committed
         // history to flush. Live-turn deltas below may still insert lines.
@@ -135,32 +159,28 @@ impl ScrollbackTracker {
                 || (fingerprint.session_id == self.last.session_id
                     && fingerprint.message_count >= self.flushed_messages
                     && is_prefix_preserved(&self.last, &fingerprint, self.flushed_messages));
-            let covered_late_activity = self.covered_late_activity_arrived(app, &fingerprint);
-
             if is_extension {
                 // Append only the messages we have not flushed yet. If a live
                 // turn was already streamed into scrollback, skip the covered
                 // prefix when the committed assistant/log catches up.
                 let committed_start = self.flushed_messages;
+                lines_to_insert.extend(app::finalized_late_activity_lines_for_coverages(
+                    app,
+                    palette,
+                    wrap_width,
+                    &activity_coverage,
+                    committed_start,
+                ));
                 lines_to_insert.extend(app::finalized_history_lines_range_dedup_live(
                     app,
                     palette,
                     wrap_width,
                     committed_start,
-                    &self.completed_live,
+                    &activity_coverage,
                 ));
                 self.flushed_messages = fingerprint.message_count;
                 self.last = fingerprint;
                 self.refresh_completed_live_coverage(app, Some(committed_start));
-            } else if covered_late_activity {
-                lines_to_insert.extend(app::finalized_late_activity_lines_for_coverages(
-                    app,
-                    palette,
-                    wrap_width,
-                    &self.completed_live,
-                ));
-                self.last = fingerprint;
-                self.refresh_completed_live_coverage(app, None);
             } else {
                 // Discontinuity: session switch or hydrate replaced history. We
                 // cannot remove already-written scrollback, but we re-flush the
@@ -183,6 +203,13 @@ impl ScrollbackTracker {
                 reset = true;
             }
         }
+        self.archived_activity = if self.flushed_messages == 0 {
+            // No committed rendering ran in this frame. In particular, an
+            // unanchored late log must not be acknowledged before history arrives.
+            Vec::new()
+        } else {
+            app::committed_activity_coverages(app, if reset { &[] } else { &activity_coverage })
+        };
 
         let mut delta_activity_turn = None;
         if let Some(next) = next_live.as_ref() {
@@ -194,6 +221,7 @@ impl ScrollbackTracker {
                     reply_flushed_text: String::new(),
                     activity_flushed_items: 0,
                     activity_flushed_keys: Vec::new(),
+                    summary_flushed: false,
                 });
             // Capsule continuation is only offered when nothing was inserted
             // ahead of this delta in the SAME buffer (committed lines would
@@ -291,20 +319,6 @@ impl ScrollbackTracker {
         }
     }
 
-    fn covered_late_activity_arrived(
-        &self,
-        app: &AppState,
-        fingerprint: &CommittedFingerprint,
-    ) -> bool {
-        fingerprint.session_id == self.last.session_id
-            && fingerprint.message_count == self.flushed_messages
-            && fingerprint.message_count == self.last.message_count
-            && fingerprint.activity_log_count > self.last.activity_log_count
-            && self.completed_live.iter().any(|coverage| {
-                app::committed_activity_keys_for_live_finalization(app, coverage).is_some()
-            })
-    }
-
     fn refresh_completed_live_coverage(&mut self, app: &AppState, reply_start: Option<usize>) {
         for coverage in &mut self.completed_live {
             if let Some(start) = reply_start
@@ -326,30 +340,29 @@ impl ScrollbackTracker {
     }
 }
 
-/// Whether the already-flushed prefix is preserved in the new fingerprint. We
-/// only have a hash of the *whole* committed list, so when the message count is
-/// unchanged we can compare hashes directly; when it grew we optimistically
-/// treat it as an append (the common streaming/commit case). A hydrate that
-/// rewrites earlier messages while also growing the list is the one case this
-/// can miss; it is rare and self-heals on the next count-stable frame.
+/// Validate exactly the already-flushed dialogue prefix even when new rows
+/// append. Activity metadata has its own delta coverage; it is not a rewrite
+/// of immutable user/assistant messages.
 fn is_prefix_preserved(
     last: &CommittedFingerprint,
     next: &CommittedFingerprint,
     flushed: usize,
 ) -> bool {
-    if next.message_count == last.message_count {
-        // Same length: only an append-noop if the content is identical.
-        return next.content_hash == last.content_hash;
-    }
-    // Grew: treat as append as long as we had flushed a prefix of it.
     next.message_count >= flushed
+        && (flushed == 0
+            || last
+                .message_prefix_hashes
+                .get(flushed - 1)
+                .is_some_and(|hash| next.message_prefix_hashes.get(flushed - 1) == Some(hash)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cli::ThemeName;
-    use crate::model::{ActivityItem, ActivityKind, AppState, TurnActivityLog};
+    use crate::model::{
+        ActivityItem, ActivityKind, AppState, LiveReply, TurnActivityLog, TurnPromptAnchor,
+    };
     use octos_core::Message;
     use octos_core::SessionKey;
     use octos_core::app_ui::AppUiSession;
@@ -456,6 +469,7 @@ mod tests {
             reply_flushed_text: "streamed so far".into(),
             activity_flushed_items: 2,
             activity_flushed_keys: vec!["k1".into(), "k2".into()],
+            summary_flushed: false,
         };
         tracker.active_live = Some(live.clone());
         tracker.completed_live = vec![live.clone()];
@@ -541,6 +555,245 @@ mod tests {
     }
 
     #[test]
+    fn continuation_coverage_never_consumes_another_turn_with_the_same_prefix() {
+        let turn = TurnId::new();
+        let other = TurnId::new();
+        let prefix = "Background result is ready.\n\n";
+        let mut app = state(vec![
+            Message::user("start task"),
+            Message::assistant("foreground ack"),
+        ]);
+        let session_id = app.sessions[0].id.clone();
+        app.turn_prompt_anchors.push(TurnPromptAnchor {
+            session_id: session_id.clone(),
+            turn_id: turn.clone(),
+            content: "start task".into(),
+            anchor_index: 0,
+            prior_matching_user_count: 0,
+        });
+        // Both continuations share a user anchor. Identity must beat a prefix
+        // even when the other turn commits first in the same flush.
+        app.sessions[0]
+            .messages
+            .push(Message::assistant_with_thread(
+                format!("{prefix}Other result."),
+                octos_core::ThreadId::new(other.0.to_string()),
+            ));
+        app.sessions[0]
+            .messages
+            .push(Message::assistant_with_thread(
+                format!("{prefix}Own result."),
+                octos_core::ThreadId::new(turn.0.to_string()),
+            ));
+        let coverage = LiveTurnFinalization {
+            session_id: session_id.0,
+            turn_id: turn.0.to_string(),
+            reply_flushed_text: prefix.into(),
+            ..Default::default()
+        };
+        let lines =
+            app::finalized_history_lines_range_dedup_live(&app, palette(), 80, 2, &[coverage]);
+        let text = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.find("Background result is ready.").unwrap() < text.find("Other result.").unwrap(),
+            "other turn must retain its prefix: {text}"
+        );
+        assert_eq!(
+            text.matches("Background result is ready.").count(),
+            1,
+            "only the matching turn was already flushed: {text}"
+        );
+    }
+
+    #[test]
+    fn legacy_reply_with_shared_anchor_retains_ambiguous_prefix() {
+        let turn = TurnId::new();
+        let other = TurnId::new();
+        let mut app = state(vec![
+            Message::user("shared request"),
+            Message::assistant("Same prefix.\n\nOther answer."),
+        ]);
+        let session_id = app.sessions[0].id.clone();
+        for turn_id in [turn.clone(), other] {
+            app.turn_prompt_anchors.push(TurnPromptAnchor {
+                session_id: session_id.clone(),
+                turn_id,
+                content: "shared request".into(),
+                anchor_index: 0,
+                prior_matching_user_count: 0,
+            });
+        }
+        let coverage = LiveTurnFinalization {
+            session_id: session_id.0,
+            turn_id: turn.0.to_string(),
+            reply_flushed_text: "Same prefix.\n\n".into(),
+            ..Default::default()
+        };
+        let lines =
+            app::finalized_history_lines_range_dedup_live(&app, palette(), 80, 1, &[coverage]);
+        assert!(
+            lines
+                .iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| span.content.contains("Same prefix."))
+        );
+    }
+
+    #[test]
+    fn server_continuation_reuses_prompt_anchor_without_reflushing_live_prefix() {
+        // Server-initiated continuations (background child completion / scatter
+        // join synthesis) do not add a new user row. Their turn anchor therefore
+        // points at the same user row as the foreground turn immediately before
+        // them. The old reply-index inference resolved that anchor to the FIRST
+        // assistant after the user row ("foreground ack"), rejected the live
+        // continuation coverage, and flushed the continuation a second time at
+        // commit even though its canonical prefix was already in scrollback.
+        let session_id = SessionKey("local:test".into());
+        let turn_id = TurnId::new();
+        let answer = "Background result is ready.\n\nNo follow-up work remains.";
+        let mut app = state(vec![
+            Message::user("start background task"),
+            Message::assistant("foreground ack"),
+        ]);
+        app.sessions[0].live_reply = Some(LiveReply {
+            turn_id: turn_id.clone(),
+            text: answer.into(),
+        });
+        app.turn_prompt_anchors.push(TurnPromptAnchor {
+            session_id: session_id.clone(),
+            turn_id: turn_id.clone(),
+            content: "start background task".into(),
+            anchor_index: 0,
+            prior_matching_user_count: 0,
+        });
+
+        let mut tracker = ScrollbackTracker::new();
+        let live = tracker.sync(&app, palette(), 80);
+        let live_text = live
+            .lines_to_insert
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            live_text.contains("Background result is ready."),
+            "the completed first paragraph should have streamed to scrollback: {live_text:?}"
+        );
+
+        app.sessions[0].live_reply = None;
+        app.sessions[0]
+            .messages
+            .push(Message::assistant_with_thread(
+                answer,
+                octos_core::ThreadId::new(turn_id.0.to_string()),
+            ));
+        let committed = tracker.sync(&app, palette(), 80);
+        let committed_text = committed
+            .lines_to_insert
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<Vec<_>>()
+            .join("");
+
+        assert!(
+            !committed_text.contains("Background result is ready."),
+            "the live-flushed canonical prefix must not be emitted twice: {committed_text:?}"
+        );
+        assert!(
+            committed_text.contains("No follow-up work remains."),
+            "only the unflushed suffix should be emitted at commit: {committed_text:?}"
+        );
+    }
+
+    /// P2-16: a coverage archived for a turn that ERRORED must not dedup a
+    /// later turn's committed reply on direct-prefix evidence. T1 streams
+    /// "Background result is ready." then errors; its committed row is the
+    /// failure card (no shared prefix), so T1's coverage survives. T2 later
+    /// commits a fresh reply that starts with the same paragraph: it must
+    /// reach scrollback in full, not be skipped as "already flushed for T1"
+    /// with its suffix rendered bullet-less under T1's stale block.
+    #[test]
+    fn errored_turn_coverage_does_not_dedup_a_later_same_prefix_reply() {
+        let session_id = SessionKey("local:test".into());
+        let errored_turn = TurnId::new();
+        let shared_prefix = "Background result is ready.";
+        let mut app = state(vec![
+            Message::user("start background task"),
+            Message::assistant("foreground ack"),
+        ]);
+        app.sessions[0].live_reply = Some(LiveReply {
+            turn_id: errored_turn.clone(),
+            text: format!("{shared_prefix}\n\nstill streaming"),
+        });
+        app.turn_prompt_anchors.push(TurnPromptAnchor {
+            session_id: session_id.clone(),
+            turn_id: errored_turn.clone(),
+            content: "start background task".into(),
+            anchor_index: 0,
+            prior_matching_user_count: 0,
+        });
+        let joined = |update: &ScrollbackUpdate| -> String {
+            update
+                .lines_to_insert
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect::<Vec<_>>()
+                .join("")
+        };
+
+        let mut tracker = ScrollbackTracker::new();
+        let live = tracker.sync(&app, palette(), 80);
+        assert!(
+            joined(&live).contains(shared_prefix),
+            "precondition: T1's completed first paragraph streamed to scrollback"
+        );
+
+        // T1 errors: the failure card commits; T1's coverage survives.
+        app.sessions[0].live_reply = None;
+        app.sessions[0].messages.push(Message::assistant(
+            "Session Summary\n- Result: Turn failed before producing a final answer.",
+        ));
+        app.mark_turn_errored(&session_id, &errored_turn);
+        let _ = tracker.sync(&app, palette(), 80);
+
+        // T2 commits a fresh reply that happens to share the first paragraph.
+        let later_turn = TurnId::new();
+        app.sessions[0].messages.push(Message::user("run it again"));
+        app.turn_prompt_anchors.push(TurnPromptAnchor {
+            session_id: session_id.clone(),
+            turn_id: later_turn,
+            content: "run it again".into(),
+            anchor_index: 3,
+            prior_matching_user_count: 0,
+        });
+        app.sessions[0].messages.push(Message::assistant(format!(
+            "{shared_prefix}\n\nSecond run, nothing else changed."
+        )));
+        let committed = joined(&tracker.sync(&app, palette(), 80));
+
+        assert!(
+            committed.contains(shared_prefix),
+            "a later turn's same-prefix reply is a fresh answer, not the errored turn's flushed prefix: {committed:?}"
+        );
+        assert!(
+            committed.contains("Second run, nothing else changed."),
+            "the fresh reply's suffix renders with it: {committed:?}"
+        );
+    }
+
+    #[test]
     fn no_new_messages_flushes_nothing() {
         let mut tracker = ScrollbackTracker::new();
         let app = state(vec![Message::user("hi"), Message::assistant("a1")]);
@@ -551,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn late_activity_log_archive_triggers_reflush() {
+    fn late_activity_log_archive_appends_activity_without_reflushing_messages() {
         let mut tracker = ScrollbackTracker::new();
         let mut app = state(vec![
             Message::user("build the site"),
@@ -582,11 +835,367 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect::<Vec<_>>()
             .join("");
-        assert!(update.reset, "late activity log changes finalized history");
+        assert!(!update.reset, "late activity is not a message rewrite");
+        assert!(!text.contains("build the site") && !text.contains("done"));
         assert!(
             text.contains("Agent task completed") && text.contains("Bash($ cargo test"),
             "reflush should include archived activity log: {text:?}"
         );
+    }
+
+    #[test]
+    fn late_activity_after_ten_turns_appends_only_new_activity_and_keeps_rewrite_guard() {
+        let mut app = state(vec![
+            Message::user("OLDPROMPT"),
+            Message::assistant("OLDANSWER"),
+        ]);
+        let session = app.sessions[0].id.clone();
+        let parent = TurnId::new();
+        app.turn_activity_logs.push(TurnActivityLog {
+            session_id: session.clone(),
+            turn_id: parent.clone(),
+            request: Some("OLDPROMPT".into()),
+            anchor_index: Some(0),
+            items: vec![
+                ActivityItem::new(ActivityKind::Tool, "Spawn", "complete")
+                    .with_turn(parent.clone())
+                    .with_session(session.clone())
+                    .with_tool_call("parent-call"),
+            ],
+        });
+        let mut tracker = ScrollbackTracker::new();
+        let _ = tracker.sync(&app, palette(), 100);
+        for n in 0..10 {
+            let turn = TurnId::new();
+            app.sessions[0]
+                .messages
+                .push(Message::user(format!("PROMPT{n}")));
+            app.sessions[0].live_reply = Some(LiveReply {
+                turn_id: turn,
+                text: format!("ANSWER{n}\n\n"),
+            });
+            let _ = tracker.sync(&app, palette(), 100);
+            app.sessions[0]
+                .messages
+                .push(Message::assistant(format!("ANSWER{n}\n\n")));
+            app.sessions[0].live_reply = None;
+            let _ = tracker.sync(&app, palette(), 100);
+        }
+        assert!(tracker.completed_live.len() <= 8);
+        app.turn_activity_logs[0].items.push(
+            ActivityItem::new(ActivityKind::Progress, "LATEBACKGROUND", "completed")
+                .with_turn(parent)
+                .with_session(session)
+                .with_tool_call("parent-call"),
+        );
+        let update = tracker.sync(&app, palette(), 100);
+        let text = update
+            .lines_to_insert
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(
+            !update.reset,
+            "same-message history cannot reset because an old activity log gained a row"
+        );
+        assert!(
+            text.contains("LATEBACKGROUND"),
+            "new activity must still render: {text}"
+        );
+        assert!(
+            !text.contains("OLDPROMPT") && !text.contains("OLDANSWER") && !text.contains("PROMPT9"),
+            "{text}"
+        );
+        assert!(
+            tracker
+                .sync(&app, palette(), 100)
+                .lines_to_insert
+                .is_empty()
+        );
+        app.sessions[0].messages[1].content = "GENUINEREWRITE".into();
+        app.turn_activity_logs[0].items.push(ActivityItem::new(
+            ActivityKind::Progress,
+            "another late row",
+            "completed",
+        ));
+        assert!(
+            tracker.sync(&app, palette(), 100).reset,
+            "real message rewrite must win over activity delta"
+        );
+        app.sessions[0].messages.truncate(1);
+        assert!(
+            tracker.sync(&app, palette(), 100).reset,
+            "rollback shrink must still reset"
+        );
+    }
+
+    #[test]
+    fn late_activity_and_new_messages_share_a_frame_without_losing_delta_or_rewrite_guard() {
+        let mut app = state(vec![
+            Message::user("PREFIXPROMPT"),
+            Message::assistant("PREFIXANSWER"),
+        ]);
+        let session = app.sessions[0].id.clone();
+        let turn = TurnId::new();
+        app.turn_activity_logs.push(TurnActivityLog {
+            session_id: session.clone(),
+            turn_id: turn.clone(),
+            request: Some("PREFIXPROMPT".into()),
+            anchor_index: Some(0),
+            items: vec![
+                ActivityItem::new(ActivityKind::Tool, "read_file", "complete")
+                    .with_tool_call("original")
+                    .with_turn(turn.clone()),
+            ],
+        });
+        let mut tracker = ScrollbackTracker::new();
+        let _ = tracker.sync(&app, palette(), 100);
+        app.turn_activity_logs[0].items.push(
+            ActivityItem::new(ActivityKind::Progress, "SAMEFRAMELATE", "completed")
+                .with_canonical_activity_id("late-id")
+                .with_turn(turn),
+        );
+        app.sessions[0]
+            .messages
+            .extend([Message::user("NEWPROMPT"), Message::assistant("NEWANSWER")]);
+        let update = tracker.sync(&app, palette(), 100);
+        let text = update
+            .lines_to_insert
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(!update.reset);
+        for expected in ["SAMEFRAMELATE", "NEWPROMPT", "NEWANSWER"] {
+            assert_eq!(text.matches(expected).count(), 1, "{text}");
+        }
+        assert!(!text.contains("PREFIXPROMPT") && !text.contains("PREFIXANSWER"));
+        app.turn_activity_logs[0].items[0].duration_ms = Some(99);
+        let metadata = tracker.sync(&app, palette(), 100);
+        assert!(!metadata.reset);
+        assert!(
+            metadata.lines_to_insert.is_empty(),
+            "metadata-only update does not replay finished messages/activity"
+        );
+        app.sessions[0].messages[0].content = "REWRITTENPREFIX".into();
+        app.sessions[0]
+            .messages
+            .push(Message::assistant("GROWINGHISTORY"));
+        assert!(
+            tracker.sync(&app, palette(), 100).reset,
+            "growing history cannot hide a rewritten committed prefix"
+        );
+    }
+
+    #[test]
+    fn archived_activity_anchor_move_on_first_answer_does_not_repeat_old_tool() {
+        let mut app = state(vec![Message::user("ANCHORPROMPT")]);
+        let session = app.sessions[0].id.clone();
+        let turn = TurnId::new();
+        app.turn_activity_logs.push(TurnActivityLog {
+            session_id: session.clone(),
+            turn_id: turn.clone(),
+            request: Some("ANCHORPROMPT".into()),
+            anchor_index: Some(0),
+            items: vec![
+                ActivityItem::new(ActivityKind::Tool, "read_file", "complete")
+                    .with_tool_call("anchor-call")
+                    .with_turn(turn.clone())
+                    .with_output_preview("OLD_TOOL_ONCE"),
+            ],
+        });
+        app.attach_turn_summary(&session, &turn, 75, 1);
+        let mut tracker = ScrollbackTracker::new();
+        let first = tracker.sync(&app, palette(), 100);
+        let text = |update: &ScrollbackUpdate| {
+            update
+                .lines_to_insert
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+        assert!(text(&first).contains("OLD_TOOL_ONCE"));
+        assert!(text(&first).contains("Ran for"));
+        app.sessions[0]
+            .messages
+            .push(Message::assistant("FIRSTANSWER"));
+        let second = tracker.sync(&app, palette(), 100);
+        assert!(!second.reset);
+        assert!(text(&second).contains("FIRSTANSWER"));
+        assert!(
+            !text(&second).contains("OLD_TOOL_ONCE"),
+            "canonical answer moves old log's render anchor but must not reemit its tool"
+        );
+        assert!(
+            !text(&second).contains("Ran for"),
+            "moving an already rendered log must not repeat its committed footer"
+        );
+    }
+
+    #[test]
+    fn late_summary_without_activity_is_appended_once_without_replaying_dialogue() {
+        let mut app = state(vec![
+            Message::user("LATEFOOTERPROMPT"),
+            Message::assistant("LATEFOOTERANSWER"),
+        ]);
+        let session = app.sessions[0].id.clone();
+        let turn = TurnId::new();
+        app.turn_activity_logs.push(TurnActivityLog {
+            session_id: session.clone(),
+            turn_id: turn.clone(),
+            request: Some("LATEFOOTERPROMPT".into()),
+            anchor_index: Some(0),
+            items: Vec::new(),
+        });
+        let text = |update: &ScrollbackUpdate| {
+            update
+                .lines_to_insert
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+        let mut tracker = ScrollbackTracker::new();
+        assert!(!text(&tracker.sync(&app, palette(), 100)).contains("Ran for"));
+        app.attach_turn_summary(&session, &turn, 75, 0);
+        let late = tracker.sync(&app, palette(), 100);
+        assert!(!late.reset);
+        assert_eq!(text(&late).matches("Ran for").count(), 1);
+        assert!(!text(&late).contains("LATEFOOTERPROMPT"));
+        assert!(!text(&late).contains("LATEFOOTERANSWER"));
+        assert!(
+            tracker
+                .sync(&app, palette(), 100)
+                .lines_to_insert
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn archived_running_tool_is_not_acknowledged_before_its_terminal_output() {
+        let mut app = state(vec![
+            Message::user("PENDINGTOOLPROMPT"),
+            Message::assistant("PENDINGTOOLANSWER"),
+        ]);
+        let session = app.sessions[0].id.clone();
+        let turn = TurnId::new();
+        app.turn_activity_logs.push(TurnActivityLog {
+            session_id: session.clone(),
+            turn_id: turn.clone(),
+            request: Some("PENDINGTOOLPROMPT".into()),
+            anchor_index: Some(0),
+            items: vec![
+                ActivityItem::new(ActivityKind::Tool, "read_file", "running")
+                    .with_tool_call("pending-tool")
+                    .with_turn(turn.clone()),
+            ],
+        });
+        let mut tracker = ScrollbackTracker::new();
+        tracker.completed_live.push(LiveTurnFinalization {
+            session_id: session.0,
+            turn_id: turn.0.to_string(),
+            ..Default::default()
+        });
+        let first = tracker.sync(&app, palette(), 100);
+        assert!(!first.reset);
+        app.turn_activity_logs[0].items[0].status = "complete".into();
+        app.turn_activity_logs[0].items[0].output_preview = Some("TERMINALTOOLOUTPUT".into());
+        let completed = tracker.sync(&app, palette(), 100);
+        let output = completed
+            .lines_to_insert
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(!completed.reset);
+        assert!(output.contains("TERMINALTOOLOUTPUT"));
+        assert!(!output.contains("PENDINGTOOLANSWER"));
+        assert!(
+            tracker
+                .sync(&app, palette(), 100)
+                .lines_to_insert
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn unanchored_archived_activity_requires_exact_owner_and_retains_once_coverage() {
+        let mut app = state(vec![
+            Message::user("UNANCHOREDPROMPT"),
+            Message::assistant("UNANCHOREDANSWER"),
+        ]);
+        let session = app.sessions[0].id.clone();
+        let known = TurnId::new();
+        let unknown = TurnId::new();
+        for (turn, marker) in [(&known, "OWNEDLEGACYTOOL"), (&unknown, "UNOWNEDTOOL")] {
+            app.turn_activity_logs.push(TurnActivityLog {
+                session_id: session.clone(),
+                turn_id: turn.clone(),
+                request: None,
+                anchor_index: None,
+                items: vec![
+                    ActivityItem::new(ActivityKind::Tool, "read_file", "complete")
+                        .with_tool_call(marker)
+                        .with_turn(turn.clone())
+                        .with_output_preview(marker),
+                ],
+            });
+        }
+        let text = |update: &ScrollbackUpdate| {
+            update
+                .lines_to_insert
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+        let mut tracker = ScrollbackTracker::new();
+        tracker.completed_live.push(LiveTurnFinalization {
+            session_id: session.0.clone(),
+            turn_id: known.0.to_string(),
+            ..Default::default()
+        });
+        let awaiting_history = std::mem::take(&mut app.sessions[0].messages);
+        assert!(
+            tracker
+                .sync(&app, palette(), 100)
+                .lines_to_insert
+                .is_empty()
+        );
+        assert!(
+            tracker.archived_activity.is_empty(),
+            "a frame with no history did not render or acknowledge the late log"
+        );
+        app.sessions[0].messages = awaiting_history;
+        let first = tracker.sync(&app, palette(), 100);
+        assert!(text(&first).contains("OWNEDLEGACYTOOL"));
+        assert!(!text(&first).contains("UNOWNEDTOOL"));
+        assert_eq!(tracker.archived_activity.len(), 1);
+        // Coverage follows the retained log, not the shorter live-reply cache.
+        tracker.completed_live.clear();
+        assert!(
+            tracker
+                .sync(&app, palette(), 100)
+                .lines_to_insert
+                .is_empty()
+        );
+        app.turn_activity_logs[0].anchor_index = Some(0);
+        assert!(
+            tracker
+                .sync(&app, palette(), 100)
+                .lines_to_insert
+                .is_empty()
+        );
+        // Once its own anchor becomes available, the unknown log is rendered;
+        // it was not falsely acknowledged while another turn had coverage.
+        app.turn_activity_logs[1].anchor_index = Some(0);
+        let newly_owned = tracker.sync(&app, palette(), 100);
+        assert!(!newly_owned.reset);
+        assert!(text(&newly_owned).contains("UNOWNEDTOOL"));
+        assert!(!text(&newly_owned).contains("OWNEDLEGACYTOOL"));
+        assert!(!text(&newly_owned).contains("UNANCHOREDANSWER"));
     }
 
     #[test]
