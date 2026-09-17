@@ -49,6 +49,13 @@ provider, paste its API key, and open your first coding chat. The
 > replies — no server, connected to nothing. Plain `octoscode` is the real
 > thing.
 
+> **Want it in a browser too?** The solo launch above talks to its server over
+> stdio, which serves exactly one client. Run the server on a port instead and
+> the terminal and
+> [octoscode-web](https://github.com/octos-org/octoscode-web) can both attach —
+> to the same sessions, at the same time. See
+> [Two ways to run](#two-ways-to-run).
+
 ### If something looks wrong
 
 | Symptom | Fix |
@@ -254,10 +261,44 @@ agents in parallel**, use the `octos chat` CLI in the main
 
 ## Other ways to run
 
+### Two ways to run
+
+The TUI never contains the agent — `octos serve` does. What changes is how the
+two talk, and that decides whether anything else can join.
+
+| | **Solo (stdio)** | **Server (WebSocket)** |
+| --- | --- | --- |
+| Start it with | `octoscode` | `octos serve --host … --port …`, then `octoscode --endpoint …` |
+| Who runs the server | the TUI spawns and auto-provisions it | you do, and it outlives the client |
+| How many clients | exactly one | as many as you point at it |
+| Browser client | no | yes — [octoscode-web](https://github.com/octos-org/octoscode-web) |
+| Setup | none | a port and a shared token |
+
+Solo is the default because it is the shortest path to a working session.
+`--stdio` runs the protocol over the child's stdin and stdout *instead of*
+binding HTTP, so there is no port for anything else to reach — a browser cannot
+attach to a solo launch, however it is configured.
+
 ### Connect to a running `octos serve` over WebSocket
 
 If a server is already running (locally or remote), connect over its UI Protocol
-WebSocket instead of spawning a child. Start the server from the sibling repo:
+WebSocket instead of spawning a child:
+
+```bash
+# terminal 1 — the server, bound to a port
+export OCTOS_AUTH_TOKEN=local-dev-token
+octos serve --host 127.0.0.1 --port 50080 --auth-token "$OCTOS_AUTH_TOKEN"
+
+# terminal 2 — the TUI, attaching to it
+octoscode --endpoint ws://127.0.0.1:50080/api/ui-protocol/ws
+```
+
+With `--endpoint` the TUI provisions **nothing**: it does not download a server
+binary and does not spawn a child, because there is no stdio command to run
+([`backend_ensure.rs`](src/backend_ensure.rs) returns early — "WebSocket launch
+— no local backend to provision"). The server you started is the only one.
+
+Or from a source checkout of the sibling repo:
 
 ```bash
 cd ../octos
@@ -283,6 +324,36 @@ Use the **same** token for `--auth-token` on both sides (or set
 `OCTOS_AUTH_TOKEN`). Add `--profile-id <id>` to open an existing profile and
 skip onboarding; add `--readonly` for a view-only session that never sends
 turns.
+
+### Run the browser client alongside the terminal
+
+A port-bound server accepts more than one client, so
+[octoscode-web](https://github.com/octos-org/octoscode-web) can attach to the
+server you just started. Give it the same origin and the same token you
+gave the TUI — `http://127.0.0.1:50080` in the example above — in its connection
+form.
+
+> A one-time pairing link (`octos serve --web-url …`, which prints a URL the
+> browser can open with no token to copy) exists on `octos` `main` but is not in
+> a tagged release yet; the latest is `v2.0.3-rc.11`. Until it ships, use the
+> origin and token.
+
+Both clients can open the **same session**. Pass `--session <id>` here and pick
+that session in the browser, and you get one conversation with two front ends:
+`session/open` attaches rather than claims, the server replays what each client
+missed from its own cursor, and every later event for that session is pushed to
+every attached connection. A turn started in the terminal streams into the
+browser while it runs, and the reverse.
+
+Two consequences worth knowing before you rely on it:
+
+- **One turn at a time per session.** The server keeps a single active-turn slot
+  per session; while one client's turn runs, the other's `turn/start` is refused
+  rather than queued server-side.
+- **Neither client owns the session.** Either may start a turn whenever the slot
+  is free, and any attached client can interrupt the running turn — the abort
+  path keys on the session and turn, not on the connection that started it. Use
+  `--readonly` on the TUI when you want it to watch without sending.
 
 ### Mock mode (no server)
 
