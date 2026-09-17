@@ -355,6 +355,33 @@ Two consequences worth knowing before you rely on it:
   path keys on the session and turn, not on the connection that started it. Use
   `--readonly` on the TUI when you want it to watch without sending.
 
+### Attaching: what differs, and what bites
+
+Attaching is not just a different address. Four things change, and all four have
+produced confusing sessions:
+
+- **No pairing link.** The TUI is token-only. `octos serve --web-url` prints a
+  link for the *browser*; the TUI has no `/pair/claim` support, so give it
+  `--auth-token` or `OCTOS_AUTH_TOKEN`. The token rides an
+  `Authorization: Bearer` header on the WebSocket upgrade, not a query
+  parameter.
+- **No local profile discovery.** Attached launches skip the profiles data dir,
+  because a remote server's profile registry is not visible from here. The
+  profile picker and `/profiles` are unavailable; pass `--profile-id <id>`.
+- **`--session` is optional, and omitting it opens nothing.** You connect and
+  the status line says so — "Pass --session to open an interactive session."
+  Pick one with `/resume`, or pass the id up front.
+- **A bare session id can hit `profile '_main' is not configured`.** Some status
+  reads carry only the session id, and on the WebSocket transport the server
+  resolves the profile from the authenticated identity — an admin token has
+  none — falling back to `_main` regardless of `--profile-id`. Sessions the TUI
+  creates carry their profile in the key and are fine; a hand-passed id that
+  does not is not. Use a profile-prefixed session id, or authenticate as that
+  profile's user rather than with an admin token.
+
+`octoscode doctor` probes a configured endpoint with `config/capabilities/list`
+and is the fastest way to tell a bad address from a bad token.
+
 ### Mock mode (no server)
 
 For render/keyboard/theme smoke tests with no backend at all:
@@ -401,7 +428,9 @@ settings loaded by `octos serve`, and the TUI config rejects them.
 
 ### Config file
 
-`--config FILE` reads JSON launch defaults (CLI flags win on conflict):
+`~/.config/octoscode/config.json` is read on **every** launch, with no flag —
+`--config FILE` points at a different one. CLI flags win on conflict. Print the
+path with `octoscode config path`.
 
 ```json
 {
@@ -423,6 +452,24 @@ settings loaded by `octos serve`, and the TUI config rejects them.
 back into this file (merging — it never clobbers transport keys like
 `stdio_command`); without `--config` it falls back to
 `~/.config/octoscode/config.json`.
+
+To attach to a running server instead, swap the transport key (the file is
+strict JSON — unknown keys are rejected, and there are no comments):
+
+```json
+{
+  "mode": "protocol",
+  "endpoint": "ws://127.0.0.1:50080/api/ui-protocol/ws",
+  "auth-token": "local-dev-token",
+  "cwd": "/path/to/project"
+}
+```
+
+`endpoint` and `stdio_command` are one choice, here as on the command line. A
+config file carrying `stdio_command` makes `octoscode --endpoint …` **fail to
+start** — "endpoint and stdio-command cannot both be configured" — because the
+flag and the file each supply one half. Remove the key, or point `--config` at
+a file that omits it.
 
 ### Themes
 
