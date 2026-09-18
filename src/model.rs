@@ -134,6 +134,13 @@ pub const APPUI_METHOD_PEER_CLOSED: &str = "peer/closed";
 /// vendored octos-core rev predates the variant, mirroring
 /// [`APPUI_METHOD_PEER_STAGED`].
 pub const APPUI_METHOD_BACKGROUND_ACTIVITY: &str = "background/activity";
+/// judge.decisions.v1 (#3): `judge/decision` — one notification per turn
+/// carrying the keyword-tier result, the judge verdict (tier, confidence,
+/// agrees, error code), and `has_cjk`. Display-only. Not a request method
+/// (never appears in `AppUiCommand::method()`); decoded tui-locally in the
+/// transport because the vendored octos-core rev predates the variant,
+/// mirroring [`APPUI_METHOD_BACKGROUND_ACTIVITY`].
+pub const APPUI_METHOD_JUDGE_DECISION: &str = "judge/decision";
 /// octos#1807: `turn/steer` — mid-turn prompt injection into the ACTIVE
 /// turn. Params `{session_id, expected_turn_id?, input}`; result
 /// `{turn_id, steered}`. `steered:true` = the text joined the live turn
@@ -280,6 +287,13 @@ pub const APPUI_FEATURE_CODING_LOOP_RUNTIME_V1: &str = "coding.loop_runtime.v1";
 /// receive a notification it cannot render. Tui-local mirror: the vendored
 /// octos-core rev predates the constant.
 pub const APPUI_FEATURE_BACKGROUND_ACTIVITY_V1: &str = "event.background_activity.v1";
+/// judge.decisions.v1 (#3): server pushes one `judge/decision` notification
+/// per turn (keyword-tier result, judge verdict + confidence + agrees flag,
+/// error code, `has_cjk`). When advertised the marker renders in the harness
+/// status row; when NOT negotiated the server never sends the frame, so an
+/// older TUI can never receive a notification it cannot render. Tui-local
+/// mirror: the vendored octos-core rev predates the constant.
+pub const APPUI_FEATURE_JUDGE_DECISIONS_V1: &str = "judge.decisions.v1";
 /// task-consume-turn-steer-dropped: server guarantees that accepted-but-
 /// undrained `turn/steer` inputs are returned as `turn/steer_dropped` BEFORE
 /// the turn's terminal frame. When advertised, a terminal without a preceding
@@ -3834,6 +3848,37 @@ impl BackgroundActivityParams {
             .filter(|label| !label.is_empty())
             .unwrap_or(self.origin_id.as_str())
     }
+}
+
+/// Params of the per-turn [`APPUI_METHOD_JUDGE_DECISION`] notification
+/// (judge.decisions.v1, #3): the keyword-tier result plus the judge verdict.
+/// `session_id` is REQUIRED and is the routing key (same discipline as
+/// [`BackgroundActivityParams`]). All judge fields but `keyword_tier` are
+/// optional — a tiered judge can fail (`judge_error`) without a verdict, or
+/// succeed without advertising its model. Display-only: nothing in the client
+/// may branch on the verdict.
+///
+/// Tui-local wire mirror (the vendored octos-core rev predates the
+/// `UiNotification` variant), decoded in the transport exactly like
+/// [`BackgroundActivityParams`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JudgeDecisionParams {
+    pub session_id: String,
+    #[serde(default)]
+    pub turn_id: Option<String>,
+    pub keyword_tier: String,
+    #[serde(default)]
+    pub judge_tier: Option<String>,
+    #[serde(default)]
+    pub judge_confidence: Option<f64>,
+    #[serde(default)]
+    pub judge_agrees: Option<bool>,
+    #[serde(default)]
+    pub judge_error: Option<String>,
+    #[serde(default)]
+    pub judge_model: Option<String>,
+    #[serde(default)]
+    pub has_cjk: bool,
 }
 
 /// Per-session cap on retained background-activity rows. The SERVER already

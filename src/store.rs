@@ -8761,6 +8761,11 @@ impl Store {
                 self.state.push_background_activity(event);
                 None
             }
+            // judge.decisions.v1 (#3), Rule 1: the per-turn judge verdict is
+            // decoded and routed; the status-row latch (`last_judge`) is
+            // wired by the status-marker rule. Nothing branches on the
+            // verdict — display only.
+            ClientEvent::JudgeDecision(_) => None,
             ClientEvent::PeerClosed(e) => self.apply_peer_closed_event(e),
             ClientEvent::PeerGathered(event) => self.apply_peer_gathered_event(event),
             ClientEvent::SubProvidersMutation(event) => {
