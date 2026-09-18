@@ -21,7 +21,7 @@ octos 服务端将新增可选特性 `judge.decisions.v1`,每个 turn 推送一�
 - 本地解码:`src/model.rs` 新增 `APPUI_METHOD_JUDGE_DECISION = "judge/decision"`、`APPUI_FEATURE_JUDGE_DECISIONS_V1 = "judge.decisions.v1"`
   与 `JudgeDecisionParams { session_id: String, turn_id: Option<String>, keyword_tier: String, judge_tier: Option<String>,
   judge_confidence: Option<f64>, judge_agrees: Option<bool>, judge_error: Option<String>, judge_model: Option<String>, has_cjk: bool }`
-  (`serde(default)`);`src/transport.rs:3618` 附近的本地拦截链增加该方法,产生新的 `AppUiEvent::JudgeDecision(JudgeDecisionParams)`。
+  (`serde(default)`);`src/transport.rs:3618` 附近的本地拦截链增加该方法,产生新的 `ClientEvent::JudgeDecision(JudgeDecisionParams)`(`src/client_event.rs`,与 `BackgroundActivity` 同形)。
 - 特性广告:`appui_feature_tokens_for(old_server)`(`src/transport.rs:3257`)只在 **现代列表** 追加 `judge.decisions.v1`;
   `OCTOSCODE_OLD_SERVER_FEATURES=1` 的 baseline 列表不变。
 - 状态:`SessionAutonomyState` 新增 `last_judge: Option<JudgeDecisionView>`(`turn_id`、`keyword_tier`、`judge_tier`、`confidence`、
@@ -40,6 +40,7 @@ octos 服务端将新增可选特性 `judge.decisions.v1`,每个 turn 推送一�
 
 ### Allowed Changes
 - src/model.rs
+- src/client_event.rs
 - src/transport.rs
 - src/store.rs
 - src/app.rs
@@ -71,11 +72,11 @@ Scenario: 现代特性列表含 judge.decisions.v1 而 baseline 不含(critical)
   When 读取两个列表
   Then 前者含 `"judge.decisions.v1"`,后者不含,且后者与本任务之前的 baseline 逐项相同
 
-Scenario: judge/decision 通知被本地解码为 AppUiEvent
+Scenario: judge/decision 通知被本地解码为 ClientEvent
   Test: judge_decision_notification_decodes_locally
   Given 一条 method 为 `judge/decision` 的 JSON-RPC 通知,params 含 `keyword_tier: "cheap"`、`judge_tier: "strong"`、`judge_confidence: 0.87`、`judge_agrees: false`
   When 经 `notification_to_app_event` 处理
-  Then 得到 `AppUiEvent::JudgeDecision`,字段与 params 一致,不产生 `unknown_notification` 错误
+  Then 得到 `ClientEvent::JudgeDecision`,字段与 params 一致,不产生 `unknown_notification` 错误
 
 Scenario: 缺省字段的通知也能解码
   Test: judge_decision_notification_decodes_with_absent_optional_fields
