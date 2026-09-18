@@ -727,6 +727,12 @@ pub struct SessionAutonomyState {
     /// Turn that authored the current `plan`, when known. The plan is per-turn
     /// working state, so it is cleared when this turn completes.
     pub plan_turn_id: Option<TurnId>,
+    /// judge.decisions.v1 (#3): the latest `judge/decision` verdict for this
+    /// session, rendered as a muted marker in the harness status row. Display
+    /// ONLY — nothing in the client may branch on the verdict. Cleared when
+    /// the NEXT turn starts (a verdict survives its own turn's completion so
+    /// the operator can still read how the finished round judged).
+    pub last_judge: Option<JudgeDecisionView>,
     /// When each TERMINAL agent was first observed terminal, by agent id —
     /// LOCAL `Instant`s stamped lazily by the strip's linger sweep (never the
     /// server's `updated_at_ms`; a remote server's clock can skew). Drives the
@@ -757,6 +763,7 @@ impl SessionAutonomyState {
             loops: Vec::new(),
             plan: None,
             plan_turn_id: None,
+            last_judge: None,
             terminal_seen: Vec::new(),
             unseen: Vec::new(),
         }
@@ -3879,6 +3886,33 @@ pub struct JudgeDecisionParams {
     pub judge_model: Option<String>,
     #[serde(default)]
     pub has_cjk: bool,
+}
+
+/// Display-only view of one [`JudgeDecisionParams`] verdict, latched per
+/// session as [`SessionAutonomyState::last_judge`] (#3). Drops the wire
+/// routing field (`session_id`) and keeps only what the status-row marker
+/// renders. Nothing in the client may branch on these values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JudgeDecisionView {
+    pub turn_id: Option<String>,
+    pub keyword_tier: String,
+    pub judge_tier: Option<String>,
+    pub confidence: Option<f64>,
+    pub agrees: Option<bool>,
+    pub error: Option<String>,
+}
+
+impl From<&JudgeDecisionParams> for JudgeDecisionView {
+    fn from(params: &JudgeDecisionParams) -> Self {
+        Self {
+            turn_id: params.turn_id.clone(),
+            keyword_tier: params.keyword_tier.clone(),
+            judge_tier: params.judge_tier.clone(),
+            confidence: params.judge_confidence,
+            agrees: params.judge_agrees,
+            error: params.judge_error.clone(),
+        }
+    }
 }
 
 /// Per-session cap on retained background-activity rows. The SERVER already
@@ -7651,6 +7685,28 @@ impl AppState {
                 entry.plan = None;
                 entry.plan_turn_id = None;
             }
+        }
+    }
+
+    /// judge.decisions.v1 (#3): latch the latest `judge/decision` verdict for
+    /// the session's status-row marker. Display only — callers must never
+    /// branch on the verdict. `params.session_id` is the routing key (same
+    /// discipline as [`Self::set_session_plan`]).
+    pub fn set_session_judge(&mut self, params: JudgeDecisionParams) {
+        let entry = self.session_autonomy_mut(&SessionKey(params.session_id.clone()));
+        entry.last_judge = Some(JudgeDecisionView::from(&params));
+    }
+
+    /// judge.decisions.v1 (#3): retire the status-row judge marker when the
+    /// session's next turn starts — a verdict describes the round that just
+    /// ended, so it survives its own turn's completion but not a new turn.
+    pub fn clear_session_judge(&mut self, session_id: &SessionKey) {
+        if let Some(entry) = self
+            .session_autonomy
+            .iter_mut()
+            .find(|s| &s.session_id == session_id)
+        {
+            entry.last_judge = None;
         }
     }
 

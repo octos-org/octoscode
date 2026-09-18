@@ -340,6 +340,12 @@ This list is kept complete by `tests/docs_drift.rs`.
 |---|---|
 | `BackgroundActivity` | `background/activity` |
 
+### `judge/`
+
+| Notification | Wire method |
+|---|---|
+| `JudgeDecision` | `judge/decision` |
+
 ### `approval/`
 
 | Notification | Wire method |
