@@ -286,8 +286,9 @@ WebSocket instead of spawning a child:
 
 ```bash
 # terminal 1 — the server, bound to a port
+# (~/.octos/bin is where octoscode installs it; it is not on your PATH)
 export OCTOS_AUTH_TOKEN=local-dev-token
-octos serve --host 127.0.0.1 --port 50080 --auth-token "$OCTOS_AUTH_TOKEN"
+~/.octos/bin/octos serve --host 127.0.0.1 --port 50080 --auth-token "$OCTOS_AUTH_TOKEN"
 
 # terminal 2 — the TUI, attaching to it
 octoscode --endpoint ws://127.0.0.1:50080/api/ui-protocol/ws
@@ -325,18 +326,86 @@ Use the **same** token for `--auth-token` on both sides (or set
 skip onboarding; add `--readonly` for a view-only session that never sends
 turns.
 
-### Run the browser client alongside the terminal
+### Use the terminal and the browser together, step by step
 
-A port-bound server accepts more than one client, so
-[octoscode-web](https://github.com/octos-org/octoscode-web) can attach to the
-server you just started. Give it the same origin and the same token you
-gave the TUI — `http://127.0.0.1:50080` in the example above — in its connection
-form.
+Three terminals, one server. Pick a token — any string you like — and use the
+same one everywhere below.
+
+**Before you start.** Run `octoscode` once on its own (see
+[Start here](#start-here)). That downloads the server to `~/.octos/bin/octos`.
+It is **not** added to your `PATH`, so the commands below spell out the full
+path. You also need [Node.js 22+](https://nodejs.org) and pnpm for the browser
+client; `corepack enable` installs the right pnpm.
+
+**1. Start the server** — terminal 1:
+
+```bash
+export OCTOS_AUTH_TOKEN=my-local-token
+~/.octos/bin/octos serve --host 127.0.0.1 --port 50080 \
+  --auth-token "$OCTOS_AUTH_TOKEN" --solo
+```
+
+`--solo` is what lets the browser set up your profile on first run. Leave it
+out and a fresh server answers "This server cannot onboard from the Web".
+
+**2. Start the browser client** — terminal 2:
+
+```bash
+git clone https://github.com/octos-org/octoscode-web.git
+cd octoscode-web
+pnpm install --frozen-lockfile
+OCTOSCODE_DEV_PROXY_TARGET=http://127.0.0.1:50080 \
+OCTOSCODE_DEV_PROXY_ORIGIN=http://127.0.0.1:50080 \
+pnpm dev
+```
+
+Keep both `OCTOSCODE_DEV_PROXY_*` variables. They make the browser talk only to
+the web client's own address, which forwards to the server. Leave them out and
+the server refuses the browser, because by default it trusts only its own
+address — and the page says "Could not connect", blaming your server and token
+even though both are fine.
+
+**3. Open the browser** at the address step 2 prints — usually
+<http://127.0.0.1:4173>, or the next free port if that one is taken.
+
+- Leave **Server origin** as it is — it already points at this page.
+- Paste your token into **Auth token** and select **Connect**.
+- Under **Add workspace**, type the full path of a project folder and select
+  **Start session**.
+- The first time only, **Create your local coding profile** opens. Set
+  **Profile ID** to `main` (step 4 uses it), choose a **Provider** and
+  **Model**, and paste the provider's API key.
+
+**4. Attach the terminal** — terminal 3, using the **Profile ID** from step 3:
+
+```bash
+OCTOS_AUTH_TOKEN=my-local-token octoscode \
+  --endpoint ws://127.0.0.1:50080/api/ui-protocol/ws --profile-id main
+```
+
+The status line reads "Pass --session to open an interactive session." That is
+expected, not an error: type `/resume` to pick the conversation you started in
+the browser.
+
+**If a step fails**
+
+| You see | Fix |
+| --- | --- |
+| `command not found: octos` | Use the full path, `~/.octos/bin/octos` — see *Before you start* |
+| "This server cannot onboard from the Web" | Restart the server with `--solo` (step 1) |
+| "Could not connect" in the browser, though the server is running and the token is right | Restart step 2 with both `OCTOSCODE_DEV_PROXY_*` variables set |
+| The TUI will not start: "endpoint and stdio-command cannot both be configured" | Your `~/.config/octoscode/config.json` has a `stdio_command`; see [Config file](#config-file) |
+| Nothing happens after `/resume` | The browser session has not finished a turn yet — send one message there first |
+
+**Hosting the browser client somewhere else?** If you serve it without that
+proxy, the server has to be told to trust its address: set
+`OCTOS_APPUI_ALLOWED_ORIGINS=http://<client host>:<port>` on the server, or
+`appui.allowed_origins` in its config. It trusts only its own address otherwise.
 
 > A one-time pairing link (`octos serve --web-url …`, which prints a URL the
 > browser can open with no token to copy) exists on `octos` `main` but is not in
 > a tagged release yet; the latest is `v2.0.3-rc.11`. Until it ships, use the
-> origin and token.
+> token.
 
 Both clients can open the **same session**. Pass `--session <id>` here and pick
 that session in the browser, and you get one conversation with two front ends:
