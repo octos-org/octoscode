@@ -12,6 +12,7 @@ pub mod config;
 pub mod doctor;
 pub mod github;
 pub mod install_method;
+pub mod olp;
 pub mod olp_mcp;
 #[cfg(target_os = "linux")]
 pub mod outer_duty;
@@ -25,7 +26,14 @@ use doctor::DoctorArgs;
 use update::UpdateArgs;
 
 /// Recognized subcommand names. Kept tiny so we never shadow a flag.
-const SUBCOMMANDS: &[&str] = &["update", "doctor", "config", "olp-mcp-serve", "outer-duty"];
+const SUBCOMMANDS: &[&str] = &[
+    "update",
+    "doctor",
+    "config",
+    "olp",
+    "olp-mcp-serve",
+    "outer-duty",
+];
 
 /// Inspect `argv` (excluding the program name) for a leading subcommand. If the
 /// first non-flag positional is `update`/`doctor`, run it and return its exit
@@ -44,6 +52,7 @@ where
         Some(Route::Update(args)) => Ok(Some(update::run(args)?.exit_code())),
         Some(Route::Doctor(args)) => Ok(Some(doctor::run(args)?)),
         Some(Route::Config(args)) => Ok(Some(config::run(args)?)),
+        Some(Route::Olp(args)) => Ok(Some(olp::run(args)?)),
         Some(Route::OlpMcpServe) => Ok(Some(olp_mcp::run())),
         #[cfg(target_os = "linux")]
         Some(Route::OuterDuty(args)) => Ok(Some(outer_duty::run(args))),
@@ -57,6 +66,7 @@ where
 /// network I/O the command bodies do.
 #[derive(Debug)]
 enum Route {
+    Olp(olp::OlpCli),
     Update(UpdateArgs),
     Doctor(DoctorArgs),
     /// `octoscode olp-mcp-serve` — OUTER_LOOP_REVIEW #31: the Rust OLP-MCP
@@ -156,6 +166,7 @@ fn route(argv: &[String]) -> Option<Route> {
         "update" => Some(Route::Update(UpdateCli::parse_from(&sub_argv).into_args())),
         "doctor" => Some(Route::Doctor(DoctorCli::parse_from(&sub_argv).into_args())),
         "config" => Some(Route::Config(ConfigCli::parse_from(&sub_argv).into_args())),
+        "olp" => Some(Route::Olp(olp::OlpCli::parse_from(&sub_argv))),
         "olp-mcp-serve" => Some(Route::OlpMcpServe),
         #[cfg(target_os = "linux")]
         "outer-duty" => match parse_outer_duty_args(&sub_argv[1..]) {

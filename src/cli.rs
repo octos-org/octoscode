@@ -190,7 +190,8 @@ fn version_string() -> &'static str {
     after_help = "Subcommands:\n  \
         doctor   Diagnose octoscode's environment, install, and connectivity\n  \
         update   Update octoscode in place (or print the upgrade command)\n  \
-        config   Show or locate the TUI config file"
+        config   Show or locate the TUI config file\n  \
+        olp      Initialize, watch, and maintain OLP boards using Bash"
 )]
 struct CliArgs {
     /// JSON config file used as launch defaults. CLI flags override config values.
