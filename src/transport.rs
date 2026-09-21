@@ -21,12 +21,13 @@ use octos_core::ui_protocol::{
 };
 use octos_core::ui_protocol::{
     JSON_RPC_VERSION, MAX_TEXT_FRAME_BYTES, RpcRequest, UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1,
-    UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1, UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1,
-    UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1, UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1,
-    UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1, UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1,
-    UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1, UI_PROTOCOL_FEATURE_PLAN_TODOS_V1,
-    UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2, UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1,
-    UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1, UI_PROTOCOL_FEATURE_USER_QUESTION_V1,
+    UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1, UI_PROTOCOL_FEATURE_CODING_AGENT_CONTROL_V1,
+    UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1, UI_PROTOCOL_FEATURE_CODING_GOAL_RUNTIME_V1,
+    UI_PROTOCOL_FEATURE_CODING_LOOP_RUNTIME_V1, UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1,
+    UI_PROTOCOL_FEATURE_HARNESS_TASK_CONTROL_V1, UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1,
+    UI_PROTOCOL_FEATURE_PLAN_TODOS_V1, UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2,
+    UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1, UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1,
+    UI_PROTOCOL_FEATURE_USER_QUESTION_V1,
 };
 use octos_core::{Message, SessionKey, TaskId};
 use serde_json::Value;
@@ -3257,6 +3258,7 @@ fn appui_feature_header_for(old_server: bool) -> String {
 fn appui_feature_tokens_for(old_server: bool) -> Vec<String> {
     let baseline = [
         UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1,
+        UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1,
         UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1,
         UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1,
         UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1,
@@ -3267,6 +3269,9 @@ fn appui_feature_tokens_for(old_server: bool) -> Vec<String> {
     }
     [
         UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1,
+        // session/list (and therefore /resume) is gated by this feature on
+        // both transports, including servers using the compatibility baseline.
+        UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1,
         UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1,
         UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1,
         UI_PROTOCOL_FEATURE_CODING_AUTONOMY_V1,
@@ -6772,6 +6777,53 @@ mod tests {
     fn websocket_target_label_is_unchanged() {
         let ws = "ws://127.0.0.1:50179/api/ui-protocol/ws";
         assert_eq!(protocol_target_label(ws), ws);
+    }
+
+    #[test]
+    fn negotiated_stdio_and_websocket_features_enable_resume_and_rewind() {
+        use crate::menu::{
+            AvailabilityContext, CapabilitySet, CommandRegistry, ConnectionState, RuntimeMode,
+            TaskActivity,
+        };
+
+        let registry = CommandRegistry::with_core_commands();
+        for old_server in [false, true] {
+            let mut exchange = ProtocolExchange::default();
+            let hello = exchange.build_client_hello_request(appui_feature_tokens_for(old_server));
+            let stdio_features: Vec<String> =
+                serde_json::from_value(hello.params["supported_features"].clone())
+                    .expect("stdio feature tokens");
+            let websocket_features: Vec<String> = appui_feature_header_for(old_server)
+                .split(',')
+                .map(|token| token.trim().to_owned())
+                .collect();
+
+            for (transport, features) in
+                [("stdio", stdio_features), ("websocket", websocket_features)]
+            {
+                // Exercise the server's real capability negotiation, rather than
+                // supplying synthetic methods that bypass the feature gates.
+                let negotiated = UiProtocolCapabilities::for_negotiated_features(features);
+                let capabilities = CapabilitySet::from(&negotiated);
+                let context = AvailabilityContext {
+                    task: TaskActivity::Idle,
+                    approval_modal_visible: false,
+                    readonly: false,
+                    runtime: RuntimeMode::Protocol,
+                    connection: ConnectionState::Connected,
+                    capabilities: Some(&capabilities),
+                    feature_flags: &[],
+                    session_open: true,
+                };
+                let commands = registry.available_commands(&context);
+                for name in ["resume", "rewind"] {
+                    assert!(
+                        commands.iter().any(|command| command.name == name),
+                        "/{name} must be available after {transport} negotiation (old_server={old_server})"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
