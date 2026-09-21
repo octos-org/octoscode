@@ -119,12 +119,14 @@ thread_local! {
 thread_local! {
     /// goal_05 / OUTER_LOOP_REVIEW #11 candidate (a): when set, `highlight_block`
     /// renders every code block in the plain fallback style — no syntect work at
-    /// all. The full-history rebuild on a hydrate/session-switch discontinuity
-    /// (`finalized_history_lines`) sets this so the UI thread isn't blocked
-    /// re-highlighting every code block in the history on a cold cache (measured:
-    /// syntect was 88% of the rebuild, 31-38% of total load time). The scrollback
-    /// snapshot therefore shows code blocks unhighlighted; the live viewport and
-    /// the pager rebuild every frame and highlight normally.
+    /// all. The full-history rebuilds set this so the UI thread isn't blocked
+    /// re-highlighting every code block in the history on a cold cache
+    /// (measured: syntect was 88% of the rebuild, 31-38% of total load time):
+    /// the hydrate/session-switch discontinuity (`finalized_history_lines`) and
+    /// the startup first flush (`finalized_history_lines_range_dedup_live` with
+    /// a fresh tracker). The scrollback snapshot therefore shows code blocks
+    /// unhighlighted; the live viewport and the pager rebuild every frame and
+    /// highlight normally.
     static DEFER_HIGHLIGHT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 

@@ -171,13 +171,34 @@ impl ScrollbackTracker {
                     &activity_coverage,
                     committed_start,
                 ));
-                lines_to_insert.extend(app::finalized_history_lines_range_dedup_live(
-                    app,
-                    palette,
-                    wrap_width,
-                    committed_start,
-                    &activity_coverage,
-                ));
+                // A first flush (fresh tracker: startup, or a full re-flush
+                // after `mark_flushed_stale` / `mark_committed_flush_stale`)
+                // appends the WHOLE history in one go, so it is a full-history
+                // rebuild like the discontinuity branch below — defer syntect
+                // highlighting the same way rather than paying cold-cache
+                // highlighting of every code block on the path to first frame.
+                // Later incremental appends are a handful of messages and keep
+                // full highlighting.
+                //
+                // A 0-message sync pins the session id, so a same-session bulk
+                // hydrate afterwards would miss this gate and stay highlighted
+                // — accepted: startup bootstrap delivers history synchronously
+                // before the first sync, and a fresh session's first code
+                // blocks should keep full highlighting.
+                let history_lines = || {
+                    app::finalized_history_lines_range_dedup_live(
+                        app,
+                        palette,
+                        wrap_width,
+                        committed_start,
+                        &activity_coverage,
+                    )
+                };
+                lines_to_insert.extend(if first_flush {
+                    crate::highlight::with_deferred_highlight(history_lines)
+                } else {
+                    history_lines()
+                });
                 self.flushed_messages = fingerprint.message_count;
                 self.last = fingerprint;
                 self.refresh_completed_live_coverage(app, Some(committed_start));
@@ -396,6 +417,65 @@ mod tests {
         assert!(
             !update.lines_to_insert.is_empty(),
             "expected committed lines to flush"
+        );
+    }
+
+    /// #647: a fresh tracker's first flush rebuilds the WHOLE committed
+    /// history, so code blocks render in the plain fallback style with
+    /// syntect deferred — cold-cache highlighting of every block blocked the
+    /// first frame (measured: 88% of the rebuild cost). Small incremental
+    /// appends afterwards keep full syntect highlighting.
+    #[test]
+    fn first_flush_defers_highlighting_incremental_appends_highlight() {
+        let code = "```rust\nlet answer: u32 = 42; // the answer\n```";
+        let app1 = state(vec![
+            Message::user("q"),
+            Message::assistant(format!("see:\n\n{code}")),
+        ]);
+        let mut tracker = ScrollbackTracker::new();
+        let first = tracker.sync(&app1, palette(), 60);
+        let muted_fg = palette().muted().fg;
+        // The content spans of the flushed code line (past the indent + `│ `
+        // rule prefixes `push_code_block_lines` prepends).
+        let code_line_spans = |update: &ScrollbackUpdate| {
+            update
+                .lines_to_insert
+                .iter()
+                .find(|line| {
+                    let text: String = line
+                        .spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect();
+                    text.contains("let answer")
+                })
+                .expect("code line flushed")
+                .spans[2..]
+                .to_vec()
+        };
+        let first_spans = code_line_spans(&first);
+        assert_eq!(
+            first_spans.len(),
+            1,
+            "first flush defers highlighting: one plain span for the whole code line"
+        );
+        assert_eq!(first_spans[0].style.fg, muted_fg);
+
+        let app2 = state(vec![
+            Message::user("q"),
+            Message::assistant(format!("see:\n\n{code}")),
+            Message::user("q2"),
+            Message::assistant(format!("more:\n\n{code}")),
+        ]);
+        let second = tracker.sync(&app2, palette(), 60);
+        let second_spans = code_line_spans(&second);
+        assert!(
+            second_spans.len() > 1,
+            "incremental appends keep syntect highlighting (multiple token spans)"
+        );
+        assert!(
+            second_spans.iter().any(|span| span.style.fg != muted_fg),
+            "syntect token colors differ from the plain fallback"
         );
     }
 
