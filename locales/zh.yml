@@ -591,7 +591,7 @@ command:
   help:
     desc: 显示可用命令
   keymap:
-    desc: 查看并编辑 TUI 按键绑定
+    desc: 查看 TUI 按键绑定
   lang:
     desc: 切换 UI 显示语言，例如 /lang zh（en、zh）
   login:
@@ -898,6 +898,8 @@ menu:
     item:
       composer_delete_word:
         desc: 删除光标前一个单词。
+      composer_file_picker:
+        desc: 在词边界处打开工作区文件选择器。
       composer_kill_line:
         desc: 删除光标到行尾的文本。
       composer_move_char:
@@ -906,12 +908,40 @@ menu:
         desc: 移动光标到行首/行尾。
       composer_move_word:
         desc: 按词移动光标。
+      composer_newline:
+        desc: 在输入框中插入换行。
+      composer_shell_escape:
+        desc: 在空输入框中以 ! 开头，将该行作为本地 shell 命令运行。
       composer_submit:
         desc: 提交输入框或精确斜杠命令。
+      composer_vim_mode:
+        desc: 切换 vim 模态编辑（NORMAL/INSERT 模式）。
+      global_agent_dock:
+        desc: 切换子代理面板（需存在子代理）。
+      global_agent_peek:
+        desc: 在子代理实时视图间切换（需存在子代理）。
+      global_clear:
+        desc: 清除已暂存消息，否则清空输入框草稿。
+      global_copy:
+        desc: 将最近一条助手回复复制到剪贴板。
+      global_expand:
+        desc: 展开或折叠工具输出；diff 浮层打开时切换该浮层。
+      global_goal_fold:
+        desc: 折叠或展开目标横幅（需已设置目标）。
       global_interrupt:
         desc: 中断当前活动轮次。
+      global_interrupt_esc:
+        desc: 关闭最上层界面；在输入框焦点下中断当前活动轮次。
+      global_pager:
+        desc: 打开或关闭 transcript 分页器。
+      global_peers:
+        desc: 切换 peer 面板（需存在 peer）。
+      global_pending_decision:
+        desc: 重新打开被隐藏的待处理审批或提问。
       global_quit:
         desc: 退出 TUI。
+      global_sessions:
+        desc: 打开会话切换器（需 2 个以上已打开会话）。
       menu_accept:
         desc: 确认高亮菜单行。
       menu_cancel:
@@ -927,15 +957,9 @@ menu:
       diff_next_hunk:
         desc: 循环到下一个 diff hunk（到末尾后回到开头）。
     preview_body: 此视图展示菜单层面的按键。持久化按键编辑将在后续版本提供。
-    preview_title: 编辑
+    preview_title: 说明
     search: 筛选按键绑定
     subtitle: 当前 TUI 按键绑定。
-    tab:
-      approval: 审批
-      composer: 输入框
-      global: 全局
-      menu: 菜单
-      task: 任务
     title: 按键映射
   lang:
     item:

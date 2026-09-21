@@ -15,7 +15,6 @@ use crate::menu::{
     AppUiActionKind, AvailabilityStatus, ClientEffect, CommandRegistry, KeyBinding, LocalAction,
     MenuAction, MenuAppSnapshot, MenuBuildResult, MenuContext, MenuId, MenuItem, MenuItemState,
     MenuMode, MenuPreview, MenuPreviewRow, MenuProvider, MenuRegistry, MenuSpec, MenuStatusSpec,
-    MenuTab,
     registry::{
         APPUI_MCP_MENU_METHODS_ANY, APPUI_METHOD_APPROVAL_SCOPES_CLEAR, APPUI_METHOD_AUTH_LOGOUT,
         APPUI_METHOD_AUTH_ME, APPUI_METHOD_AUTH_SEND_CODE, APPUI_METHOD_AUTH_STATUS,
@@ -665,6 +664,10 @@ fn component_menu(
 }
 
 fn keymap_menu() -> MenuSpec {
+    // The rows mirror the bindings actually dispatched in
+    // `event_loop::handle_key` (and the composer readline layer); keep the
+    // list in sync with that code, not with memory. Conditional bindings say
+    // so in their description.
     let rows = [
         (
             "global.quit",
@@ -677,9 +680,69 @@ fn keymap_menu() -> MenuSpec {
             t!("menu.keymap.item.global_interrupt.desc"),
         ),
         (
+            "global.interrupt-esc",
+            "Esc",
+            t!("menu.keymap.item.global_interrupt_esc.desc"),
+        ),
+        (
+            "global.copy",
+            "Ctrl+Y",
+            t!("menu.keymap.item.global_copy.desc"),
+        ),
+        (
+            "global.pager",
+            "Ctrl+T",
+            t!("menu.keymap.item.global_pager.desc"),
+        ),
+        (
+            "global.expand",
+            "Ctrl+O",
+            t!("menu.keymap.item.global_expand.desc"),
+        ),
+        (
+            "global.clear",
+            "Ctrl+U",
+            t!("menu.keymap.item.global_clear.desc"),
+        ),
+        (
+            "global.sessions",
+            "Ctrl+S/Alt+S",
+            t!("menu.keymap.item.global_sessions.desc"),
+        ),
+        (
+            "global.peers",
+            "Alt+P/Ctrl+L",
+            t!("menu.keymap.item.global_peers.desc"),
+        ),
+        (
+            "global.agent-dock",
+            "Ctrl+G/Alt+G",
+            t!("menu.keymap.item.global_agent_dock.desc"),
+        ),
+        (
+            "global.agent-peek",
+            "Tab/Shift+Tab",
+            t!("menu.keymap.item.global_agent_peek.desc"),
+        ),
+        (
+            "global.pending-decision",
+            "Ctrl+R/Alt+A",
+            t!("menu.keymap.item.global_pending_decision.desc"),
+        ),
+        (
+            "global.goal-fold",
+            "Ctrl+P",
+            t!("menu.keymap.item.global_goal_fold.desc"),
+        ),
+        (
             "composer.submit",
             "Enter",
             t!("menu.keymap.item.composer_submit.desc"),
+        ),
+        (
+            "composer.newline",
+            "Shift+Enter/Ctrl+J",
+            t!("menu.keymap.item.composer_newline.desc"),
         ),
         (
             "composer.move-line",
@@ -705,6 +768,21 @@ fn keymap_menu() -> MenuSpec {
             "composer.kill-line",
             "Ctrl+K",
             t!("menu.keymap.item.composer_kill_line.desc"),
+        ),
+        (
+            "composer.shell-escape",
+            "!",
+            t!("menu.keymap.item.composer_shell_escape.desc"),
+        ),
+        (
+            "composer.file-picker",
+            "@",
+            t!("menu.keymap.item.composer_file_picker.desc"),
+        ),
+        (
+            "composer.vim-mode",
+            "/vimmode",
+            t!("menu.keymap.item.composer_vim_mode.desc"),
         ),
         (
             "menu.accept",
@@ -750,7 +828,9 @@ fn keymap_menu() -> MenuSpec {
         title: t!("menu.keymap.title").into_owned(),
         subtitle: Some(t!("menu.keymap.subtitle").into_owned()),
         items,
-        tabs: keymap_tabs(),
+        // No tabs: they were never wired to filtering (or even rendered), so
+        // showing them promised a grouping the menu does not have (#652).
+        tabs: Vec::new(),
         searchable: true,
         search_placeholder: Some(t!("menu.keymap.search").into_owned()),
         footer_hint: Some(t!("menu.footer.esc_close").into_owned()),
@@ -7700,25 +7780,6 @@ fn app_snapshot_rows(app: MenuAppSnapshot<'_>) -> Vec<MenuPreviewRow> {
     .collect()
 }
 
-fn keymap_tabs() -> Vec<MenuTab> {
-    [
-        ("global", t!("menu.keymap.tab.global")),
-        ("composer", t!("menu.keymap.tab.composer")),
-        ("menu", t!("menu.keymap.tab.menu")),
-        ("task", t!("menu.keymap.tab.task")),
-        ("approval", t!("menu.keymap.tab.approval")),
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(idx, (id, label))| MenuTab {
-        id: id.to_owned(),
-        label: label.into_owned(),
-        active: idx == 0,
-        count: None,
-    })
-    .collect()
-}
-
 fn numeric_shortcut(index: usize) -> Option<KeyBinding> {
     let digit = char::from_digit((index + 1) as u32, 10)?;
     Some(KeyBinding::new(KeyCode::Char(digit), KeyModifiers::empty()))
@@ -8360,6 +8421,63 @@ mod tests {
             spec.preview.is_none(),
             "slash-command menu should render full-width (no Routing preview pane)"
         );
+    }
+
+    #[test]
+    fn keymap_menu_covers_hint_bar_bindings_without_decorative_tabs() {
+        // #652: the cheat-sheet had drifted to 15 of the ~25 bindings the hint
+        // bar advertises, and carried five tabs nothing rendered or filtered.
+        let spec = keymap_menu();
+        assert!(
+            spec.tabs.is_empty(),
+            "keymap tabs are not wired to filtering — don't promise them"
+        );
+        let rows: std::collections::HashMap<&str, &str> = spec
+            .items
+            .iter()
+            .map(|item| (item.id.as_str(), item.label.as_str()))
+            .collect();
+        // id → advertised chord, mirroring `event_loop::handle_key` (and the
+        // composer readline layer). Chords are asserted, not just presence, so
+        // a rebind in the menu can't silently drift from what the row shows.
+        for (id, chord) in [
+            ("global.quit", "Ctrl+Q"),
+            ("global.interrupt", "Ctrl+C"),
+            ("global.interrupt-esc", "Esc"),
+            ("global.copy", "Ctrl+Y"),
+            ("global.pager", "Ctrl+T"),
+            ("global.expand", "Ctrl+O"),
+            ("global.clear", "Ctrl+U"),
+            ("global.sessions", "Ctrl+S/Alt+S"),
+            ("global.peers", "Alt+P/Ctrl+L"),
+            ("global.agent-dock", "Ctrl+G/Alt+G"),
+            ("global.agent-peek", "Tab/Shift+Tab"),
+            ("global.pending-decision", "Ctrl+R/Alt+A"),
+            ("global.goal-fold", "Ctrl+P"),
+            ("composer.submit", "Enter"),
+            ("composer.newline", "Shift+Enter/Ctrl+J"),
+            ("composer.move-line", "Ctrl+A/E"),
+            ("composer.move-char", "Ctrl+B/F"),
+            ("composer.move-word", "Alt+B/F"),
+            ("composer.delete-word", "Ctrl+W"),
+            ("composer.kill-line", "Ctrl+K"),
+            ("composer.shell-escape", "!"),
+            ("composer.file-picker", "@"),
+            ("composer.vim-mode", "/vimmode"),
+            ("menu.accept", "Enter"),
+            ("menu.cancel", "Esc"),
+            ("menu.next", "Down/J"),
+            ("menu.previous", "Up/K"),
+            ("diff.open-toggle", "Alt+V/Ctrl+V"),
+            ("diff.stage-hunk", "Alt+C/Ctrl+X"),
+            ("diff.next-hunk", "Alt+H/Ctrl+N"),
+        ] {
+            assert_eq!(
+                rows.get(id).copied(),
+                Some(chord),
+                "keymap row {id} missing or chord drifted"
+            );
+        }
     }
 
     #[test]

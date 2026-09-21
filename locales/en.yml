@@ -1143,7 +1143,7 @@ command:
   help:
     desc: Show available commands.
   keymap:
-    desc: Inspect and edit TUI key bindings.
+    desc: Inspect TUI key bindings.
   lang:
     desc: Switch the UI display language, e.g. /lang zh (en, zh).
   login:
@@ -1446,6 +1446,8 @@ menu:
     item:
       composer_delete_word:
         desc: Delete previous composer word.
+      composer_file_picker:
+        desc: At a word boundary, open the workspace file picker.
       composer_kill_line:
         desc: Delete composer text to line end.
       composer_move_char:
@@ -1454,12 +1456,40 @@ menu:
         desc: Move composer cursor to line start/end.
       composer_move_word:
         desc: Move composer cursor by word.
+      composer_newline:
+        desc: Insert a newline in the composer.
+      composer_shell_escape:
+        desc: From an empty composer, run the line as a local shell command.
       composer_submit:
         desc: Submit composer or exact slash command.
+      composer_vim_mode:
+        desc: Toggle vim modal editing (NORMAL/INSERT modes).
+      global_agent_dock:
+        desc: Toggle the sub-agent dock (needs sub-agents).
+      global_agent_peek:
+        desc: Cycle the sub-agent live views (needs sub-agents).
+      global_clear:
+        desc: Clear staged messages, else the composer draft.
+      global_copy:
+        desc: Copy the last assistant reply to the clipboard.
+      global_expand:
+        desc: Expand or collapse tool output; toggles the diff overlay when open.
+      global_goal_fold:
+        desc: Fold or expand the goal banner (needs an active goal).
       global_interrupt:
         desc: Interrupt the active turn.
+      global_interrupt_esc:
+        desc: Close the topmost surface; from the composer, interrupt the active turn.
+      global_pager:
+        desc: Open or close the transcript pager.
+      global_peers:
+        desc: Toggle the peer dock (needs a peer roster).
+      global_pending_decision:
+        desc: Re-open a hidden pending approval or question.
       global_quit:
         desc: Quit the TUI.
+      global_sessions:
+        desc: Open the session switcher (needs 2+ open sessions).
       menu_accept:
         desc: Accept highlighted menu row.
       menu_cancel:
@@ -1475,15 +1505,9 @@ menu:
       diff_next_hunk:
         desc: Cycle to the next diff hunk (wraps at the end).
     preview_body: This slice exposes the menu surface. Persisted keymap editing remains a follow-up provider action.
-    preview_title: Editing
+    preview_title: Note
     search: Filter key bindings
     subtitle: Current TUI key bindings.
-    tab:
-      approval: Approval
-      composer: Composer
-      global: Global
-      menu: Menu
-      task: Task
     title: Keymap
   lang:
     item:

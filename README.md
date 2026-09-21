@@ -608,7 +608,7 @@ q          quit
 /status     snapshot-backed session, runtime, and connection status
 /cost       server-reported token and cost usage
 /title      configure terminal-title items
-/keymap     inspect and edit TUI key bindings
+/keymap     inspect TUI key bindings
 /login      sign in with email OTP, or inspect current auth state
 /exit       quit the TUI
 ```

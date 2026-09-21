@@ -328,6 +328,64 @@ mod i18n_tests {
         }
     }
 
+    /// #652: the /keymap cheat-sheet strings resolve in BOTH locales
+    /// (rust-i18n only checks at compile time that a key exists in SOME
+    /// locale; a zh-only miss silently falls back to English at runtime).
+    #[test]
+    fn keymap_menu_keys_resolve_in_en_and_zh() {
+        let keys = [
+            "command.keymap.desc",
+            "menu.keymap.title",
+            "menu.keymap.subtitle",
+            "menu.keymap.search",
+            "menu.keymap.preview_title",
+            "menu.keymap.preview_body",
+            "menu.keymap.item.global_quit.desc",
+            "menu.keymap.item.global_interrupt.desc",
+            "menu.keymap.item.global_interrupt_esc.desc",
+            "menu.keymap.item.global_copy.desc",
+            "menu.keymap.item.global_pager.desc",
+            "menu.keymap.item.global_expand.desc",
+            "menu.keymap.item.global_clear.desc",
+            "menu.keymap.item.global_sessions.desc",
+            "menu.keymap.item.global_peers.desc",
+            "menu.keymap.item.global_agent_dock.desc",
+            "menu.keymap.item.global_agent_peek.desc",
+            "menu.keymap.item.global_pending_decision.desc",
+            "menu.keymap.item.global_goal_fold.desc",
+            "menu.keymap.item.composer_submit.desc",
+            "menu.keymap.item.composer_newline.desc",
+            "menu.keymap.item.composer_move_line.desc",
+            "menu.keymap.item.composer_move_char.desc",
+            "menu.keymap.item.composer_move_word.desc",
+            "menu.keymap.item.composer_delete_word.desc",
+            "menu.keymap.item.composer_kill_line.desc",
+            "menu.keymap.item.composer_shell_escape.desc",
+            "menu.keymap.item.composer_file_picker.desc",
+            "menu.keymap.item.composer_vim_mode.desc",
+            "menu.keymap.item.menu_accept.desc",
+            "menu.keymap.item.menu_cancel.desc",
+            "menu.keymap.item.menu_next.desc",
+            "menu.keymap.item.menu_previous.desc",
+            "menu.keymap.item.diff_open_toggle.desc",
+            "menu.keymap.item.diff_stage_hunk.desc",
+            "menu.keymap.item.diff_next_hunk.desc",
+        ];
+        for key in keys {
+            for locale in ["en", "zh"] {
+                let value = t!(key, locale = locale);
+                assert_ne!(
+                    &*value, key,
+                    "missing {locale} translation for `{key}` (got the raw key back)"
+                );
+                assert!(
+                    !value.trim().is_empty(),
+                    "empty {locale} translation for `{key}`"
+                );
+            }
+        }
+    }
+
     /// #324: the session-switcher strings resolve in BOTH locales.
     #[test]
     fn sessions_popup_keys_resolve_in_en_and_zh() {
