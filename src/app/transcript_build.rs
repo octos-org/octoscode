@@ -185,6 +185,20 @@ pub(super) fn live_tail_lines_with_finalization(
                 active_finalization,
             );
         }
+    } else if app.resume_list_loaded
+        && !app.resume_sessions.is_empty()
+        && flow_report_items(app).is_empty()
+    {
+        // Returning-user continuity (#654): with no session open the inline
+        // live tail is the surface a fresh launch actually shows — point at
+        // the N historical sessions instead of a blank area. Same rule as the
+        // fullscreen empty transcript: a surface showing report content is not
+        // "empty", so the hint stays out of the way. Self-resolving: the line
+        // is gone as soon as a session opens.
+        lines.push(Line::from(Span::styled(
+            t!("app.empty.resume_hint", count = app.resume_sessions.len()).to_string(),
+            palette.muted(),
+        )));
     }
 
     // Reports are turn-independent local transcript output, so they remain
@@ -992,6 +1006,16 @@ pub(super) fn transcript_render_model(
             t!("app.empty.no_session").to_string(),
             palette.muted(),
         )));
+        // Returning-user continuity: once the connect-time `session/list`
+        // prefetch has landed with prior sessions, point at `/resume` instead
+        // of leaving a bare "No session selected". The line is self-resolving —
+        // it disappears as soon as a session opens.
+        if app.resume_list_loaded && !app.resume_sessions.is_empty() {
+            lines.push(Line::from(Span::styled(
+                t!("app.empty.resume_hint", count = app.resume_sessions.len()).to_string(),
+                palette.muted(),
+            )));
+        }
     } else {
         push_report_section(&mut lines, palette, app, wrap_width);
     }

@@ -4593,6 +4593,57 @@ mod tests {
         assert!(!text.contains("Ask Octos to change code"));
     }
 
+    /// Returning-user continuity (#654): with no session open, the empty
+    /// transcript points at the N historical sessions once the connect-time
+    /// `session/list` prefetch has landed — before it lands (or when the
+    /// server has none) the bare "No session selected" stays as-is.
+    #[test]
+    fn render_empty_transcript_points_returning_user_at_resume() {
+        let mut state = AppState::new(
+            vec![],
+            0,
+            "Octos UI connected".into(),
+            Some("stdio:octos serve --stdio".into()),
+            false,
+        );
+
+        // Prefetch has not landed yet: no hint.
+        let text = rendered_text(&state);
+        assert!(text.contains("No session selected"));
+        assert!(!text.contains("/resume"));
+
+        // Landed but empty (first-ever user): still no hint.
+        state.resume_list_loaded = true;
+        let text = rendered_text(&state);
+        assert!(text.contains("No session selected"));
+        assert!(!text.contains("/resume"));
+
+        // Landed with prior sessions: the hint names the count and /resume.
+        state.resume_sessions = vec![
+            crate::model::ResumeSessionRow {
+                id: "s:prior".into(),
+                title: None,
+                message_count: 4,
+                updated_at: None,
+                last_prompt: None,
+            },
+            crate::model::ResumeSessionRow {
+                id: "s:older".into(),
+                title: None,
+                message_count: 1,
+                updated_at: None,
+                last_prompt: None,
+            },
+        ];
+        let text = rendered_text(&state);
+        assert!(text.contains("No session selected"));
+        assert!(
+            text.contains("2 prior session(s)"),
+            "hint should name the session count, got: {text:?}"
+        );
+        assert!(text.contains("/resume"));
+    }
+
     /// M22 (#58): the first-run onboarding surface renders the ASCII OCTOS
     /// wordmark in the MAIN window (not a right-side preview pane). This pins
     /// the splash so a future refactor cannot quietly drop the distinctive
@@ -15079,6 +15130,46 @@ mod tests {
                 "composer line {marker} must stay visible (not capped); rows: {rows:#?}"
             );
         }
+    }
+    /// Returning-user continuity (#654): the inline live tail — the surface a
+    /// no-session launch actually shows — points at the N historical sessions
+    /// once the connect-time prefetch has landed, instead of staying blank.
+    #[test]
+    fn live_tail_shows_resume_hint_without_session() {
+        let mut app = AppState::new(
+            vec![],
+            0,
+            "Octos UI connected".into(),
+            Some("stdio:octos serve --stdio".into()),
+            false,
+        );
+        let palette = Palette::for_theme(ThemeName::Slate);
+        let tail_text = |app: &AppState| {
+            live_tail_lines_with_finalization(app, palette, 98, None)
+                .iter()
+                .flat_map(|line| line.spans.iter().map(|span| span.content.clone()))
+                .collect::<String>()
+        };
+
+        // Before the prefetch lands: blank tail, no hint.
+        assert!(!tail_text(&app).contains("/resume"));
+
+        app.resume_list_loaded = true;
+        // Landed but empty (first-ever user): still no hint.
+        assert!(!tail_text(&app).contains("/resume"));
+
+        app.resume_sessions = vec![crate::model::ResumeSessionRow {
+            id: "s:prior".into(),
+            title: None,
+            message_count: 4,
+            updated_at: None,
+            last_prompt: None,
+        }];
+        let text = tail_text(&app);
+        assert!(
+            text.contains("1 prior session(s)") && text.contains("/resume"),
+            "the live tail must point at prior sessions, got: {text:?}"
+        );
     }
 }
 mod running_row_regression {

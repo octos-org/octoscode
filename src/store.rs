@@ -9281,6 +9281,7 @@ impl Store {
                 // (reconnect/refresh) so an open picker doesn't blank out.
                 let resume_sessions = self.state.resume_sessions.clone();
                 let resume_list_loaded = self.state.resume_list_loaded;
+                let resume_prefetch_pending = self.state.resume_prefetch_pending;
                 // Local-only: the `/rewind` picker rows are derived from the
                 // transcript and the pending prefill is in-flight; neither is
                 // echoed in a snapshot, so preserve both across replays.
@@ -9396,6 +9397,7 @@ impl Store {
                 state.composer_mode = composer_mode;
                 state.resume_sessions = resume_sessions;
                 state.resume_list_loaded = resume_list_loaded;
+                state.resume_prefetch_pending = resume_prefetch_pending;
                 state.rewind_turns = rewind_turns;
                 state.pending_rewind_prefill = pending_rewind_prefill;
                 state.pending_interrupt_restores = pending_interrupt_restores;
@@ -9982,8 +9984,40 @@ impl Store {
         if self.active_menu_is_onboarding() {
             self.onboarding_hydrate_saved_provider_command()
         } else {
-            None
+            self.maybe_prefetch_resume_sessions()
         }
+    }
+
+    /// Returning-user continuity: on connect with no session open (and no
+    /// onboarding wizard in the way), fetch `session/list` once so the empty
+    /// transcript can point at the N historical sessions (`/resume`) instead
+    /// of a bare "No session selected". The fetch doubles as a warm-up for the
+    /// `/resume` picker. Gated on the same capability pair as `/resume` itself
+    /// (`APPUI_RESUME_MENU_METHODS_ALL`): hinting at a hidden command would be
+    /// worse than no hint. `cwd: None` here; the transport stamps the launch
+    /// workspace cwd onto the request (see
+    /// `ProtocolAppUiBackend::fill_session_list_cwd`), same as the picker.
+    /// Skipped once a list has landed (`resume_list_loaded`): the list is
+    /// local-only state preserved across snapshot replays, so a reconnect
+    /// keeps the last known count rather than re-fetching.
+    fn maybe_prefetch_resume_sessions(&mut self) -> Option<AppUiCommand> {
+        if !self.state.sessions.is_empty()
+            || self.state.resume_list_loaded
+            || self.state.resume_prefetch_pending
+        {
+            return None;
+        }
+        let capabilities = self.state.capabilities.as_ref()?;
+        if !crate::menu::registry::APPUI_RESUME_MENU_METHODS_ALL
+            .iter()
+            .all(|method| capabilities.supports_method(method))
+        {
+            return None;
+        }
+        // The capabilities event applies twice per connect; latch so the
+        // second application does not fire a duplicate fetch.
+        self.state.resume_prefetch_pending = true;
+        Some(AppUiCommand::ListSessions(SessionListParams { cwd: None }))
     }
 
     /// Resolve the cwd for the per-project launch flow — the `launch/resolve`
@@ -10309,6 +10343,17 @@ impl Store {
         // renders "No sessions" with the parse-error status, not `Loading`
         // forever).
         self.state.resume_list_loaded = true;
+        self.state.resume_prefetch_pending = false;
+        // Picker bookkeeping belongs on the status line only when the user
+        // actually has `/resume` open. The connect-time prefetch (the
+        // returning-user hint) lands through this same reducer with no picker
+        // open — it must not clobber the connect status, nor surface a parse
+        // error for a command the user never ran.
+        let picker_open = self
+            .state
+            .menu_stack
+            .active()
+            .is_some_and(|frame| frame.id.as_str() == crate::menu::registry::MENU_RESUME);
         match serde_json::from_value::<Vec<ResumeSessionRow>>(result.sessions) {
             Ok(mut rows) => {
                 // Stable sort by `updated_at` DESC. `Option<String>` orders
@@ -10318,11 +10363,15 @@ impl Store {
                 rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
                 let count = rows.len();
                 self.state.resume_sessions = rows;
-                self.state.status = t!("status.resume_loaded", count = count).into_owned();
+                if picker_open {
+                    self.state.status = t!("status.resume_loaded", count = count).into_owned();
+                }
             }
             Err(err) => {
-                self.state.status =
-                    t!("status.resume_parse_failed", error = err.to_string()).into_owned();
+                if picker_open {
+                    self.state.status =
+                        t!("status.resume_parse_failed", error = err.to_string()).into_owned();
+                }
             }
         }
     }
@@ -15532,6 +15581,11 @@ impl Store {
         // the old child (its transport is gone), so their markers must not
         // suppress the re-hydration the new child's `session/opened` triggers.
         self.state.hydrate_in_flight.clear();
+        // Same class: an in-flight connect-time `session/list` prefetch died
+        // with the old child — clear the latch so the new child's capabilities
+        // event re-fires it, otherwise the returning-user `/resume` hint stays
+        // dead for the rest of the process.
+        self.state.resume_prefetch_pending = false;
         // Model catalogs describe the dead process's startup-pinned profile.
         // Drop them now; the reopened session/status establishes the effective
         // model and `/model` refetches the replacement process's choices.
@@ -21368,6 +21422,213 @@ now analyzing the bus module"
         );
         // A short/legacy entry still parses (missing title/updated_at default).
         assert_eq!(store.state.resume_sessions[2].message_count, 3);
+    }
+
+    #[test]
+    fn capabilities_prefetch_session_list_when_no_session_open() {
+        let mut store = protocol_store_without_sessions();
+        let capabilities = || {
+            ClientEvent::Capabilities(CapabilitiesClientEvent {
+                result: crate::model::ConfigCapabilitiesListResult {
+                    capabilities: UiProtocolCapabilities::new(
+                        crate::menu::registry::APPUI_RESUME_MENU_METHODS_ALL,
+                        &[],
+                    ),
+                },
+                message: "Octos UI capabilities refreshed".into(),
+            })
+        };
+
+        let follow_up = store.apply_client_event(capabilities());
+
+        assert!(
+            matches!(follow_up, Some(AppUiCommand::ListSessions(_))),
+            "connect with no session open must prefetch session/list so the empty transcript can point at /resume, got: {follow_up:?}"
+        );
+
+        // The capabilities event applies TWICE per connect (server-hello
+        // capabilities + the config/capabilities/list response); the pending
+        // latch must suppress the duplicate fetch before the first lands.
+        let second = store.apply_client_event(capabilities());
+        assert!(
+            !matches!(second, Some(AppUiCommand::ListSessions(_))),
+            "an in-flight prefetch must not fire a duplicate session/list, got: {second:?}"
+        );
+
+        // Once the result lands, the latch clears and the hint is populated.
+        store.apply_client_event(ClientEvent::SessionList(SessionListResult {
+            sessions: serde_json::json!([{ "id": "s:prior", "message_count": 2 }]),
+        }));
+        assert!(store.state.resume_list_loaded);
+        assert!(!store.state.resume_prefetch_pending);
+    }
+
+    #[test]
+    fn capabilities_prefetch_skipped_with_session_open_or_list_loaded() {
+        // A session is already open — no empty transcript, nothing to hint.
+        let mut store = store_with_empty_session();
+        let follow_up =
+            store.apply_client_event(ClientEvent::Capabilities(CapabilitiesClientEvent {
+                result: crate::model::ConfigCapabilitiesListResult {
+                    capabilities: UiProtocolCapabilities::new(
+                        crate::menu::registry::APPUI_RESUME_MENU_METHODS_ALL,
+                        &[],
+                    ),
+                },
+                message: "Octos UI capabilities refreshed".into(),
+            }));
+        assert!(
+            !matches!(follow_up, Some(AppUiCommand::ListSessions(_))),
+            "an open session must not trigger the prefetch, got: {follow_up:?}"
+        );
+
+        // Once a list result has landed, a later capabilities refresh (e.g.
+        // reconnect) must not re-fetch on top of the still-valid list…
+        let mut store = protocol_store_without_sessions();
+        store.apply_client_event(ClientEvent::SessionList(SessionListResult {
+            sessions: serde_json::json!([{ "id": "s:prior", "message_count": 2 }]),
+        }));
+        let follow_up =
+            store.apply_client_event(ClientEvent::Capabilities(CapabilitiesClientEvent {
+                result: crate::model::ConfigCapabilitiesListResult {
+                    capabilities: UiProtocolCapabilities::new(
+                        crate::menu::registry::APPUI_RESUME_MENU_METHODS_ALL,
+                        &[],
+                    ),
+                },
+                message: "Octos UI capabilities refreshed".into(),
+            }));
+        assert!(
+            !matches!(follow_up, Some(AppUiCommand::ListSessions(_))),
+            "a landed session/list result must suppress the prefetch, got: {follow_up:?}"
+        );
+    }
+
+    #[test]
+    fn capabilities_prefetch_skipped_when_resume_capability_missing() {
+        // A server advertising session/list but NOT session/hydrate cannot
+        // serve /resume picks, so the hint (and its fetch) stays off — the
+        // same gate the /resume menu visibility uses.
+        let mut store = protocol_store_without_sessions();
+        let follow_up =
+            store.apply_client_event(ClientEvent::Capabilities(CapabilitiesClientEvent {
+                result: crate::model::ConfigCapabilitiesListResult {
+                    capabilities: UiProtocolCapabilities::new(
+                        &[octos_core::ui_protocol::methods::SESSION_LIST],
+                        &[],
+                    ),
+                },
+                message: "Octos UI capabilities refreshed".into(),
+            }));
+        assert!(
+            !matches!(follow_up, Some(AppUiCommand::ListSessions(_))),
+            "a list-only server must not get the prefetch, got: {follow_up:?}"
+        );
+        assert!(
+            !store.state.resume_prefetch_pending,
+            "a gated prefetch must not leave the latch set"
+        );
+    }
+
+    #[test]
+    fn backend_relaunch_clears_prefetch_latch_for_retry() {
+        let mut store = protocol_store_without_sessions();
+        let capabilities = || {
+            ClientEvent::Capabilities(CapabilitiesClientEvent {
+                result: crate::model::ConfigCapabilitiesListResult {
+                    capabilities: UiProtocolCapabilities::new(
+                        crate::menu::registry::APPUI_RESUME_MENU_METHODS_ALL,
+                        &[],
+                    ),
+                },
+                message: "Octos UI capabilities refreshed".into(),
+            })
+        };
+
+        let first = store.apply_client_event(capabilities());
+        assert!(matches!(first, Some(AppUiCommand::ListSessions(_))));
+        assert!(store.state.resume_prefetch_pending);
+
+        // The stdio child dies before answering the prefetch; the replacement
+        // child's capabilities event must be allowed to re-fire it, otherwise
+        // the hint stays dead for the rest of the process.
+        store.apply_client_event(ClientEvent::BackendRelaunched);
+        assert!(
+            !store.state.resume_prefetch_pending,
+            "relaunch must clear the in-flight prefetch latch"
+        );
+
+        let second = store.apply_client_event(capabilities());
+        assert!(
+            matches!(second, Some(AppUiCommand::ListSessions(_))),
+            "the new child's capabilities event must re-fire the prefetch, got: {second:?}"
+        );
+    }
+
+    #[test]
+    fn snapshot_replay_preserves_resume_prefetch_latch() {
+        let mut store = protocol_store_without_sessions();
+        store.state.resume_list_loaded = true;
+        store.state.resume_prefetch_pending = true;
+        store.state.resume_sessions = vec![crate::model::ResumeSessionRow {
+            id: "s:prior".into(),
+            title: None,
+            message_count: 2,
+            updated_at: None,
+            last_prompt: None,
+        }];
+
+        store.apply_event(AppUiEvent::Snapshot(AppUiSnapshot {
+            sessions: vec![],
+            selected_session: 0,
+            status: "reconnected".into(),
+            target: None,
+            readonly: false,
+        }));
+
+        // All three pieces of resume-list local state survive a replay —
+        // dropping the latch would re-admit the duplicate-fetch race the
+        // double-capabilities application creates.
+        assert!(store.state.resume_list_loaded);
+        assert!(store.state.resume_prefetch_pending);
+        assert_eq!(store.state.resume_sessions.len(), 1);
+    }
+
+    #[test]
+    fn launch_resolve_path_defers_resume_prefetch() {
+        // On a launch/resolve-capable server the launch flow itself owns
+        // continuity (Resume auto-opens the folder's brain; the prompt offers
+        // the cross-profile switch), so the connect-time prefetch is NOT
+        // evaluated on that path — pin that precedence deliberately.
+        let mut store = protocol_store_without_sessions();
+        store.state.workspace.root = "/tmp/launch-project".into();
+
+        let follow_up =
+            store.apply_client_event(ClientEvent::Capabilities(CapabilitiesClientEvent {
+                result: crate::model::ConfigCapabilitiesListResult {
+                    capabilities: UiProtocolCapabilities::new(
+                        &[
+                            crate::model::APPUI_METHOD_LAUNCH_RESOLVE,
+                            octos_core::ui_protocol::methods::SESSION_LIST,
+                            octos_core::ui_protocol::methods::SESSION_HYDRATE,
+                        ],
+                        &[],
+                    )
+                    .with_supported_features([
+                        crate::model::APPUI_FEATURE_SESSION_WORKSPACE_CWD_V1,
+                    ]),
+                },
+                message: "Octos UI capabilities refreshed".into(),
+            }));
+
+        assert!(
+            matches!(follow_up, Some(AppUiCommand::LaunchResolve(_))),
+            "launch/resolve must win the capabilities follow-up slot, got: {follow_up:?}"
+        );
+        assert!(
+            !store.state.resume_prefetch_pending,
+            "the launch/resolve path must not arm the prefetch latch"
+        );
     }
 
     #[test]

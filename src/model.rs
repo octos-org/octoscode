@@ -5322,6 +5322,18 @@ pub struct AppState {
     /// Set true when the first (and every subsequent) `session/list` result is
     /// applied. Local-only client state — preserved across snapshot replays.
     pub resume_list_loaded: bool,
+    /// Whether the connect-time `session/list` prefetch (the returning-user
+    /// `/resume` hint, see `Store::maybe_prefetch_resume_sessions`) is in
+    /// flight. The capabilities event applies TWICE per connect (the
+    /// server-hello capabilities and the `config/capabilities/list` response
+    /// both land there), so without this latch each application would fire
+    /// its own fetch. Cleared when the list result lands, and by
+    /// `Store::reconcile_after_backend_relaunch` (an in-flight prefetch died
+    /// with the old child, so the replacement may retry once). A response
+    /// lost on a still-live connection leaves it set, deliberately — the
+    /// hint is best-effort and must not retry-storm a server that cannot
+    /// answer. Local-only client state — preserved across snapshot replays.
+    pub resume_prefetch_pending: bool,
     /// Active-session user turns for the `/rewind` picker, newest-first.
     /// Populated locally (from the active session's transcript) when
     /// `OpenRewindPicker` is dispatched, and mirrored into `MenuAppSnapshot` so
@@ -7267,6 +7279,7 @@ impl AppState {
             pending_clipboard: None,
             resume_sessions: Vec::new(),
             resume_list_loaded: false,
+            resume_prefetch_pending: false,
             rewind_turns: Vec::new(),
             pending_rewind_prefill: None,
             pending_interrupt_restores: Vec::new(),

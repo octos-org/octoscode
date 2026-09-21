@@ -27,6 +27,7 @@ app:
     turn: "回合"
   empty:
     no_session: "未选择会话"
+    resume_hint: "有 %{count} 个先前会话 — 输入 /resume 继续"
     no_tasks: "暂无任务"
     no_artifacts: "快照中无制品"
     no_plan: "暂无活动计划"

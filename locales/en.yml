@@ -36,6 +36,7 @@ app:
     turn: "Turn"
   empty:
     no_session: "No session selected"
+    resume_hint: "%{count} prior session(s) — run /resume to continue"
     no_tasks: "No tasks yet"
     no_artifacts: "No artifacts in snapshot"
     no_plan: "No active plan"
