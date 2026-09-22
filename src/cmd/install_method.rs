@@ -13,6 +13,9 @@
 //! live environment (and, when the `update` feature is on, the receipt probe).
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use super::probe::{PROBE_TIMEOUT, probe_output};
 
 /// How this `octoscode` binary was installed. Drives `update`'s per-method
 /// behavior (self-update vs. print-the-command) and `doctor`'s fix lines.
@@ -303,7 +306,7 @@ fn live_classifier_input() -> PathClassifierInput {
 /// independent of these prefixes.
 fn brew_prefixes() -> Vec<PathBuf> {
     let mut prefixes = vec![PathBuf::from("/opt/homebrew")];
-    if let Ok(out) = std::process::Command::new("brew").arg("--prefix").output() {
+    if let Some(out) = probe_output(Command::new("brew").arg("--prefix"), PROBE_TIMEOUT) {
         if out.status.success() {
             let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !p.is_empty() {
@@ -324,10 +327,7 @@ fn brew_prefixes() -> Vec<PathBuf> {
 /// the only thing that actually owns globally-installed packages.
 fn npm_global_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
-    if let Ok(out) = std::process::Command::new("npm")
-        .args(["root", "-g"])
-        .output()
-    {
+    if let Some(out) = probe_output(Command::new("npm").args(["root", "-g"]), PROBE_TIMEOUT) {
         if out.status.success() {
             let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !p.is_empty() {

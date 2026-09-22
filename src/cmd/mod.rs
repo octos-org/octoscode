@@ -15,6 +15,7 @@ pub mod install_method;
 pub mod olp_mcp;
 #[cfg(target_os = "linux")]
 pub mod outer_duty;
+pub mod probe;
 pub mod update;
 
 use clap::Parser;

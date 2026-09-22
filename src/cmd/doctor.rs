@@ -22,6 +22,7 @@
 //! - **Network**: GitHub reachability.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use eyre::Result;
@@ -43,6 +44,7 @@ use tokio_tungstenite::{
 
 use super::github::{self, Reachability};
 use super::install_method::{self, InstallMethod};
+use super::probe::{PROBE_TIMEOUT, probe_output};
 use crate::model::{APPUI_METHOD_CONFIG_CAPABILITIES_LIST, ConfigCapabilitiesListResult};
 
 /// Features the TUI *requires* of any server it connects to (the set it sends
@@ -630,13 +632,10 @@ fn install_method_label(path: &Path) -> &'static str {
 }
 
 /// Run `<path> --version` and return its first non-empty line, or `None` if the
-/// binary can't be run / prints nothing. No timeout — these are our own
-/// fast-responding binaries (same as the backend probe in `backend_ensure`).
+/// binary can't be run / prints nothing. Bounded by [`PROBE_TIMEOUT`] — a
+/// wedged located binary must not hang the diagnostic run (#232 #18).
 fn probe_version(path: &Path) -> Option<String> {
-    let output = std::process::Command::new(path)
-        .arg("--version")
-        .output()
-        .ok()?;
+    let output = probe_output(Command::new(path).arg("--version"), PROBE_TIMEOUT)?;
     let text = String::from_utf8_lossy(&output.stdout);
     text.lines()
         .map(str::trim)
@@ -785,18 +784,13 @@ fn term_check_with(term: Option<&str>, probe: impl Fn(&str) -> TerminfoProbe) ->
 
 /// Probe whether `term`'s terminfo entry is loadable by shelling out to
 /// `infocmp`. A zero exit means the entry was found; a non-zero exit means it's
-/// missing; a spawn failure means `infocmp` isn't installed (can't probe).
+/// missing; a spawn failure — or a wedged `infocmp` that outlives
+/// [`PROBE_TIMEOUT`] (#232 #18) — means the probe can't answer.
 fn probe_terminfo(term: &str) -> TerminfoProbe {
-    match std::process::Command::new("infocmp")
-        .arg("-1")
-        .arg(term)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-    {
-        Ok(status) if status.success() => TerminfoProbe::Found,
-        Ok(_) => TerminfoProbe::Missing,
-        Err(_) => TerminfoProbe::ProberAbsent,
+    match probe_output(Command::new("infocmp").arg("-1").arg(term), PROBE_TIMEOUT) {
+        Some(output) if output.status.success() => TerminfoProbe::Found,
+        Some(_) => TerminfoProbe::Missing,
+        None => TerminfoProbe::ProberAbsent,
     }
 }
 
@@ -1283,11 +1277,8 @@ fn stdio_command_check(command: &str) -> Check {
     let resolved = which(&program);
     match resolved {
         Some(path) => {
-            // Surface the server build (best effort).
-            let version = std::process::Command::new(&path)
-                .arg("--version")
-                .output()
-                .ok()
+            // Surface the server build (best effort, bounded by PROBE_TIMEOUT).
+            let version = probe_output(Command::new(&path).arg("--version"), PROBE_TIMEOUT)
                 .filter(|o| o.status.success())
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
             let detail = match &version {

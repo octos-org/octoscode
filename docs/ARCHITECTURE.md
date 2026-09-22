@@ -491,6 +491,7 @@ added without a row here.
 | `src/cmd/update.rs` | 606 | `octoscode update` — install-method-aware updater (design §A). |
 | `src/cmd/olp_mcp.rs` | 20 | `octoscode olp-mcp-serve` entry — OUTER_LOOP_REVIEW #31 OLP-MCP server subcommand. |
 | `src/cmd/outer_duty.rs` | 98 | `octoscode outer-duty` entry — OUTER_LOOP_REVIEW #38 per-project duty lock (hold/check). |
+| `src/cmd/probe.rs` | 174 | Bounded child-process probes for `doctor` / `update` environment detection. |
 | `src/lib.rs` | 317 | Crate root — module declarations and the shared public surface. |
 | `src/main.rs` | 53 | Binary entry point: subcommand dispatch, then `event_loop::run`. |
 
