@@ -287,6 +287,12 @@ it by hand.
 |---|---|
 | `ListConfigCapabilities` | `config/capabilities/list` |
 
+### `server/`
+
+| AppUI command | Wire method |
+|---|---|
+| `ServerShutdown` | `server/shutdown` |
+
 ### `local/`
 
 | AppUI command | Wire method |

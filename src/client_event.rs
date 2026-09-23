@@ -30,6 +30,10 @@ pub enum ClientEvent {
     /// mirror remains backward-compatible with older servers.
     ContextLifecycle(ContextLifecycleClientEvent),
     Capabilities(CapabilitiesClientEvent),
+    /// Result of a `server/shutdown` request (octos#2407): the `/status`
+    /// Stop-server confirm resolves here — confirmed stops every connected
+    /// client including this one, unconfirmed must be surfaced verbatim.
+    ServerShutdown(ServerShutdownClientEvent),
     DiffPreview(DiffPreviewGetResult),
     ModelList(ModelListClientEvent),
     ModelSelect(ModelSelectClientEvent),
@@ -183,6 +187,20 @@ pub struct HydrateErrorClientEvent {
 pub struct CapabilitiesClientEvent {
     pub result: ConfigCapabilitiesListResult,
     pub message: String,
+}
+
+/// Result of a `server/shutdown` request. `confirmed` is true ONLY when the
+/// serve acknowledged with `{ "stopping": true }`; anything else — an invalid
+/// result shape or an RPC error frame — means the stop was not confirmed and
+/// the server may still be running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerShutdownClientEvent {
+    pub confirmed: bool,
+    /// Why the stop was not confirmed (RPC error, cancellation, pre-send
+    /// rejection, …), when the producing path knows. Diagnostics only — the
+    /// status line always shows the locale copy; this rides the activity
+    /// entry's detail.
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

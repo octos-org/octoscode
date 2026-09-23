@@ -326,6 +326,12 @@ Use the **same** token for `--auth-token` on both sides (or set
 skip onboarding; add `--readonly` for a view-only session that never sends
 turns.
 
+A local server started with `--solo` also advertises `server/shutdown`
+([octos#2407](https://github.com/octos-org/octos/pull/2407)): the `/status`
+menu then shows a **Stop server** row that stops `octos serve` like Ctrl+C in
+its terminal — for every connected client — behind a Cancel-first
+confirmation. Servers without the advertisement show no such row.
+
 ### Use the terminal and the browser together, step by step
 
 Three terminals, one server. Pick a token — any string you like — and use the

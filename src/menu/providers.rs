@@ -28,15 +28,16 @@ use crate::menu::{
         APPUI_METHOD_PROFILE_LLM_TEST, APPUI_METHOD_PROFILE_LLM_UPSERT,
         APPUI_METHOD_PROFILE_LOCAL_CREATE, APPUI_METHOD_PROFILE_SKILLS_INSTALL,
         APPUI_METHOD_PROFILE_SKILLS_LIST, APPUI_METHOD_PROFILE_SKILLS_REGISTRY_SEARCH,
-        APPUI_METHOD_PROFILE_SKILLS_REMOVE, APPUI_METHOD_SESSION_COMPACT,
-        APPUI_METHOD_SESSION_COMPACT_MODE_SET, APPUI_METHOD_TOOL_CONFIG_DELETE,
-        APPUI_METHOD_TOOL_CONFIG_LIST, APPUI_METHOD_TOOL_CONFIG_SET_ENABLED,
-        APPUI_METHOD_TOOL_CONFIG_TEST, APPUI_METHOD_TOOL_CONFIG_UPSERT,
-        APPUI_METHOD_TOOL_STATUS_LIST, APPUI_ONBOARDING_METHODS_ANY,
-        APPUI_PERMISSION_MENU_METHODS_ANY, APPUI_PROVIDER_MENU_METHODS_ANY,
-        APPUI_TOOL_SETTINGS_MENU_METHODS_ANY, MENU_COMPACT_CONFIRM, MENU_CONTEXT, MENU_COST,
-        MENU_HELP, MENU_KEYMAP, MENU_LOGIN, MENU_MCP, MENU_MODEL, MENU_MODEL_CONFIG, MENU_ONBOARD,
-        MENU_ONBOARD_LANGUAGE, MENU_PERMISSIONS, MENU_RESUME, MENU_REWIND, MENU_SKILLS,
+        APPUI_METHOD_PROFILE_SKILLS_REMOVE, APPUI_METHOD_SERVER_SHUTDOWN,
+        APPUI_METHOD_SESSION_COMPACT, APPUI_METHOD_SESSION_COMPACT_MODE_SET,
+        APPUI_METHOD_TOOL_CONFIG_DELETE, APPUI_METHOD_TOOL_CONFIG_LIST,
+        APPUI_METHOD_TOOL_CONFIG_SET_ENABLED, APPUI_METHOD_TOOL_CONFIG_TEST,
+        APPUI_METHOD_TOOL_CONFIG_UPSERT, APPUI_METHOD_TOOL_STATUS_LIST,
+        APPUI_ONBOARDING_METHODS_ANY, APPUI_PERMISSION_MENU_METHODS_ANY,
+        APPUI_PROVIDER_MENU_METHODS_ANY, APPUI_TOOL_SETTINGS_MENU_METHODS_ANY,
+        MENU_COMPACT_CONFIRM, MENU_CONTEXT, MENU_COST, MENU_HELP, MENU_KEYMAP, MENU_LOGIN,
+        MENU_MCP, MENU_MODEL, MENU_MODEL_CONFIG, MENU_ONBOARD, MENU_ONBOARD_LANGUAGE,
+        MENU_PERMISSIONS, MENU_RESUME, MENU_REWIND, MENU_SERVER_STOP_CONFIRM, MENU_SKILLS,
         MENU_STATUS, MENU_STATUS_LINE, MENU_THEME, MENU_TITLE, MENU_TOOL_SETTINGS,
     },
 };
@@ -47,7 +48,7 @@ use crate::model::{
     OnboardingAction, OnboardingProviderPending, OnboardingProviderSaveTarget,
     OnboardingProviderStatus, OnboardingWizardState, ProfileLlmListParams, ProfileLlmSelectParams,
     ProfileSkillsInstallParams, ProfileSkillsListParams, ProfileSkillsRemoveParams,
-    RuntimePolicyMcpServer, SessionCompactModeParams, SessionCompactParams,
+    RuntimePolicyMcpServer, ServerShutdownParams, SessionCompactModeParams, SessionCompactParams,
     SessionStatusReadParams, ToolConfigDeleteParams, ToolConfigEntry, ToolConfigListParams,
     ToolConfigSetEnabledParams, ToolConfigTestParams, ToolStatus, ToolStatusListParams,
 };
@@ -75,6 +76,7 @@ pub fn core_menu_registry() -> MenuRegistry {
         Provider::Title,
         Provider::Keymap,
         Provider::Status,
+        Provider::ServerStopConfirm,
         Provider::Cost,
         Provider::CompactConfirm,
         Provider::Context,
@@ -128,6 +130,7 @@ enum Provider {
     Title,
     Keymap,
     Status,
+    ServerStopConfirm,
     Cost,
     CompactConfirm,
     Context,
@@ -176,6 +179,7 @@ impl MenuProvider for Provider {
             Self::Title => MENU_TITLE,
             Self::Keymap => MENU_KEYMAP,
             Self::Status => MENU_STATUS,
+            Self::ServerStopConfirm => MENU_SERVER_STOP_CONFIRM,
             Self::Cost => MENU_COST,
             Self::CompactConfirm => MENU_COMPACT_CONFIRM,
             Self::Context => MENU_CONTEXT,
@@ -224,6 +228,7 @@ impl MenuProvider for Provider {
             Self::Title => MenuBuildResult::Ready(title_menu(ctx)),
             Self::Keymap => MenuBuildResult::Ready(keymap_menu()),
             Self::Status => MenuBuildResult::Ready(status_menu(ctx)),
+            Self::ServerStopConfirm => server_stop_confirm_menu(ctx),
             Self::Cost => cost_menu(ctx),
             Self::CompactConfirm => compact_confirm_menu(ctx),
             Self::Context => context_menu(ctx),
@@ -832,6 +837,33 @@ fn status_menu(ctx: &MenuContext<'_>) -> MenuSpec {
         );
     }
 
+    // octos#2407 / octoscode#653: a local `octos serve --solo` over HTTP
+    // advertises `server/shutdown` — until now a TUI user's only way to stop
+    // it was killing the process. Web parity (octoscode-web#129): the row
+    // renders ONLY while the method is advertised — hidden entirely
+    // otherwise, not shown as a disabled placeholder.
+    if ctx
+        .availability
+        .supports_method(APPUI_METHOD_SERVER_SHUTDOWN)
+    {
+        items.push(
+            MenuItem::new(
+                "status.stop_server",
+                t!("menu.status.item.stop_server.label"),
+                MenuAction::OpenMenu(MenuId::from(
+                    crate::menu::registry::MENU_SERVER_STOP_CONFIRM,
+                )),
+            )
+            .with_description(t!("menu.status.item.stop_server.desc").into_owned())
+            // Advertised but still not pressable in a read-only launch:
+            // same gate as every other mutating row.
+            .maybe_disabled(mutating_action_missing_reason(
+                ctx,
+                APPUI_METHOD_SERVER_SHUTDOWN,
+            )),
+        );
+    }
+
     items.push(capability_summary_item(ctx));
 
     MenuSpec {
@@ -1005,6 +1037,53 @@ fn compact_confirm_menu(ctx: &MenuContext<'_>) -> MenuBuildResult {
         id: MenuId::from(MENU_COMPACT_CONFIRM),
         title: t!("menu.compact.title").into_owned(),
         subtitle: Some(t!("menu.compact.subtitle").into_owned()),
+        items,
+        tabs: Vec::new(),
+        searchable: false,
+        search_placeholder: None,
+        footer_hint: Some(t!("menu.footer.esc_close").into_owned()),
+        preview: None,
+        mode: MenuMode::SingleSelect,
+    })
+}
+
+/// Cancel-first confirm for the `/status` Stop-server row (octos#2407,
+/// octoscode#653). `server/shutdown` stops the serve for EVERY connected
+/// client and cancels their running turns, so unlike the other confirm menus
+/// — whose blast radius is one session or profile — the safe verb owns the
+/// default cursor slot (row order: Cancel, then Stop). Mirrors the web
+/// client's Settings → General control (octoscode-web#129).
+fn server_stop_confirm_menu(ctx: &MenuContext<'_>) -> MenuBuildResult {
+    if !ctx
+        .availability
+        .supports_method(APPUI_METHOD_SERVER_SHUTDOWN)
+    {
+        return MenuBuildResult::Unavailable(MenuStatusSpec {
+            id: MenuId::from(crate::menu::registry::MENU_SERVER_STOP_CONFIRM),
+            title: t!("menu.server_stop.unavailable_title").into_owned(),
+            message: method_missing_reason(ctx, APPUI_METHOD_SERVER_SHUTDOWN),
+            footer_hint: Some(t!("menu.footer.esc_close").into_owned()),
+        });
+    }
+
+    let items = vec![
+        MenuItem::new(
+            "server_stop.cancel",
+            t!("menu.server_stop.item.cancel.label"),
+            MenuAction::Close,
+        ),
+        MenuItem::new(
+            "server_stop.confirm",
+            t!("menu.server_stop.item.confirm.label"),
+            MenuAction::send_appui(AppUiCommand::ServerShutdown(ServerShutdownParams {})),
+        )
+        .with_description(t!("menu.server_stop.item.confirm.desc").into_owned()),
+    ];
+
+    MenuBuildResult::Ready(MenuSpec {
+        id: MenuId::from(crate::menu::registry::MENU_SERVER_STOP_CONFIRM),
+        title: t!("menu.server_stop.title").into_owned(),
+        subtitle: Some(t!("menu.server_stop.subtitle").into_owned()),
         items,
         tabs: Vec::new(),
         searchable: false,
@@ -9755,6 +9834,148 @@ mod tests {
         };
         assert_eq!(params.session_id, session_id);
         assert!(refresh.is_enabled());
+    }
+
+    /// octoscode#653: the Stop-server row renders ONLY while the serve
+    /// advertises `server/shutdown` — hidden entirely otherwise (web
+    /// parity), never a disabled placeholder.
+    #[test]
+    fn status_menu_hides_stop_server_without_server_shutdown_capability() {
+        let registry = core_menu_registry();
+        let other_capabilities =
+            CapabilitySet::from_methods([AppUiActionKind::SessionStatusRead.method()]);
+        for availability in [
+            AvailabilityContext::local(),
+            AvailabilityContext::protocol(&other_capabilities),
+        ] {
+            let ctx = MenuContext {
+                availability,
+                app: MenuAppSnapshot::default(),
+                terminal: TerminalSize::default(),
+                theme_name: None,
+                selected_path: &[],
+            };
+
+            let MenuBuildResult::Ready(spec) = registry.build(&MenuId::from(MENU_STATUS), &ctx)
+            else {
+                panic!("expected status menu");
+            };
+            assert!(
+                !spec
+                    .items
+                    .iter()
+                    .any(|item| item.id == "status.stop_server"),
+                "stop-server row must not render without the advertisement"
+            );
+        }
+    }
+
+    #[test]
+    fn status_menu_offers_stop_server_when_capability_advertised() {
+        let registry = core_menu_registry();
+        let capabilities = CapabilitySet::from_methods([APPUI_METHOD_SERVER_SHUTDOWN]);
+        let ctx = MenuContext {
+            availability: AvailabilityContext::protocol(&capabilities),
+            app: MenuAppSnapshot::default(),
+            terminal: TerminalSize::default(),
+            theme_name: None,
+            selected_path: &[],
+        };
+
+        let MenuBuildResult::Ready(spec) = registry.build(&MenuId::from(MENU_STATUS), &ctx) else {
+            panic!("expected status menu");
+        };
+        let stop = spec
+            .items
+            .iter()
+            .find(|item| item.id == "status.stop_server")
+            .expect("stop-server row");
+        assert!(stop.is_enabled());
+        assert!(
+            matches!(&stop.action, MenuAction::OpenMenu(id) if *id == MenuId::from(MENU_SERVER_STOP_CONFIRM)),
+            "stop-server row must open the confirm menu"
+        );
+    }
+
+    /// Readonly sessions keep the row visible (the user should see WHY it's
+    /// unavailable) but disabled — stopping the serve is mutating.
+    #[test]
+    fn status_menu_stop_server_disabled_in_readonly() {
+        let registry = core_menu_registry();
+        let capabilities = CapabilitySet::from_methods([APPUI_METHOD_SERVER_SHUTDOWN]);
+        let mut availability = AvailabilityContext::protocol(&capabilities);
+        availability.readonly = true;
+        let ctx = MenuContext {
+            availability,
+            app: MenuAppSnapshot::default(),
+            terminal: TerminalSize::default(),
+            theme_name: None,
+            selected_path: &[],
+        };
+
+        let MenuBuildResult::Ready(spec) = registry.build(&MenuId::from(MENU_STATUS), &ctx) else {
+            panic!("expected status menu");
+        };
+        let stop = spec
+            .items
+            .iter()
+            .find(|item| item.id == "status.stop_server")
+            .expect("stop-server row");
+        assert!(
+            !stop.is_enabled(),
+            "readonly must disable the mutating stop-server row"
+        );
+    }
+
+    /// Cancel-first: stopping the serve disconnects EVERY client, so the
+    /// safe verb owns the default cursor slot (row order Cancel, then Stop).
+    #[test]
+    fn server_stop_confirm_menu_is_cancel_first_and_sends_server_shutdown() {
+        let registry = core_menu_registry();
+        let capabilities = CapabilitySet::from_methods([APPUI_METHOD_SERVER_SHUTDOWN]);
+        let ctx = MenuContext {
+            availability: AvailabilityContext::protocol(&capabilities),
+            app: MenuAppSnapshot::default(),
+            terminal: TerminalSize::default(),
+            theme_name: None,
+            selected_path: &[],
+        };
+
+        let MenuBuildResult::Ready(spec) =
+            registry.build(&MenuId::from(MENU_SERVER_STOP_CONFIRM), &ctx)
+        else {
+            panic!("expected server-stop confirm menu");
+        };
+        assert_eq!(spec.items.len(), 2);
+        assert_eq!(spec.items[0].id, "server_stop.cancel");
+        assert!(
+            matches!(spec.items[0].action, MenuAction::Close),
+            "Cancel must own the default cursor slot"
+        );
+        assert_eq!(spec.items[1].id, "server_stop.confirm");
+        let AppUiCommand::ServerShutdown(_) = appui_command(&spec.items[1].action) else {
+            panic!("expected a server/shutdown action");
+        };
+    }
+
+    #[test]
+    fn server_stop_confirm_menu_unavailable_without_capability() {
+        let registry = core_menu_registry();
+        let capabilities =
+            CapabilitySet::from_methods([AppUiActionKind::SessionStatusRead.method()]);
+        let ctx = MenuContext {
+            availability: AvailabilityContext::protocol(&capabilities),
+            app: MenuAppSnapshot::default(),
+            terminal: TerminalSize::default(),
+            theme_name: None,
+            selected_path: &[],
+        };
+
+        let result = registry.build(&MenuId::from(MENU_SERVER_STOP_CONFIRM), &ctx);
+        assert!(
+            matches!(result, MenuBuildResult::Unavailable(_)),
+            "the confirm must refuse to build without the advertisement"
+        );
     }
 
     #[test]

@@ -57,9 +57,9 @@ use crate::{
         ProfileLlmListClientEvent, ProfileLlmMutationClientEvent, ProfileLlmMutationKind,
         ProfileLocalCreateClientEvent, ProfileSkillsListClientEvent,
         ProfileSkillsMutationClientEvent, ProfileSkillsRegistrySearchClientEvent,
-        SessionBtwClientEvent, SessionHydrateContextClientEvent, SessionStatusClientEvent,
-        SubProvidersListClientEvent, SubProvidersMutationClientEvent, ToolConfigListClientEvent,
-        ToolConfigMutationClientEvent, ToolStatusClientEvent,
+        ServerShutdownClientEvent, SessionBtwClientEvent, SessionHydrateContextClientEvent,
+        SessionStatusClientEvent, SubProvidersListClientEvent, SubProvidersMutationClientEvent,
+        ToolConfigListClientEvent, ToolConfigMutationClientEvent, ToolStatusClientEvent,
     },
     model::{
         AppUiAuthToken, AppUiCommand, AuthLogoutResult, AuthMeResult, AuthSendCodeResult,
@@ -261,6 +261,14 @@ fn command_error_event(command: &AppUiCommand, code: &str, message: String) -> C
             code: code.to_owned(),
             message,
         })
+    } else if matches!(command, AppUiCommand::ServerShutdown(_)) {
+        // A pre-send rejection of server/shutdown means the stop was never
+        // confirmed — surface the typed not-confirmed outcome, not raw
+        // transport text.
+        ClientEvent::ServerShutdown(ServerShutdownClientEvent {
+            confirmed: false,
+            reason: Some(message),
+        })
     } else {
         app_error(code, message).into()
     }
@@ -352,6 +360,12 @@ pub struct ProtocolAppUiBackend {
     /// suppressed so we don't respawn a backend that will only crash again —
     /// the fix for the "two octoscode competing for the DB" silent crash-loop.
     fatal_error: Option<String>,
+    /// Latched when the serve acknowledges `server/shutdown` with
+    /// `{ "stopping": true }` (octos#2407): the drain that closes this socket
+    /// ~250ms later is the INTENDED outcome, so the generic disconnect status
+    /// and read-error must not overwrite the store's "Server stopping…"
+    /// announcement.
+    server_stop_confirmed: bool,
     /// The session to re-open after a reconnect: the MOST RECENTLY opened
     /// session, which tracks the user's current selection (set by `/resume`, a
     /// tab-switch, or the initial launch open) — NOT the fixed launch
@@ -582,6 +596,19 @@ impl CancelledRequest {
     }
 
     fn into_client_event(self) -> ClientEvent {
+        if self.method == crate::model::APPUI_METHOD_SERVER_SHUTDOWN {
+            // A cancelled server/shutdown (e.g. the socket dropped before the
+            // ack arrived) means the stop was never confirmed — surface the
+            // typed not-confirmed outcome, not a raw cancellation error.
+            let reason = match &self.event {
+                AppUiEvent::Error(error) => Some(error.message.clone()),
+                _ => None,
+            };
+            return ClientEvent::ServerShutdown(ServerShutdownClientEvent {
+                confirmed: false,
+                reason,
+            });
+        }
         if let Some(session_id) = self.hydrate_session
             && let AppUiEvent::Error(error) = self.event
         {
@@ -1705,6 +1732,7 @@ impl ProtocolAppUiBackend {
             connection_state: ProtocolConnectionState::Disconnected,
             reconnect: ReconnectBackoff::default(),
             disconnected_status_reported: false,
+            server_stop_confirmed: false,
             fatal_error: None,
             reopen_session: None,
             pending_launch_resolve: None,
@@ -1868,6 +1896,10 @@ impl ProtocolAppUiBackend {
         let should_report_reconnect = self.disconnected_status_reported;
         self.connection_state = ProtocolConnectionState::Connected;
         self.disconnected_status_reported = false;
+        // A fresh connection means the confirmed stop's drain already ran its
+        // course (or the serve was restarted) — from here on, a disconnect is
+        // a genuine failure again, never the intended drain.
+        self.server_stop_confirmed = false;
 
         if should_report_reconnect {
             self.queue.push_back(
@@ -1972,7 +2004,10 @@ impl ProtocolAppUiBackend {
             // Suppress the raw stderr-tail status for the fatal-conflict case:
             // the clean, actionable error above is what the user should read, and
             // a following Status would overwrite it in the status line.
-            if !is_fatal_conflict {
+            // Same suppression after a CONFIRMED server/shutdown: the store
+            // already announced "Server stopping…", and this drain closing
+            // the socket is the intended outcome, not a failure.
+            if !is_fatal_conflict && !self.server_stop_confirmed {
                 self.queue
                     .push_back(AppUiEvent::Status(AppUiStatus { message }).into());
             }
@@ -1980,6 +2015,15 @@ impl ProtocolAppUiBackend {
         }
         self.queue
             .extend(cancelled_requests.into_iter().filter_map(|cancelled| {
+                // A duplicate `server/shutdown` cancelled by the CONFIRMED
+                // stop's own drain is moot — emitting its not-confirmed event
+                // would clobber the "Server stopping…" status with the exact
+                // opposite of the truth.
+                if self.server_stop_confirmed
+                    && cancelled.method == crate::model::APPUI_METHOD_SERVER_SHUTDOWN
+                {
+                    return None;
+                }
                 (!cancelled.is_capabilities_probe()).then_some(cancelled.into_client_event())
             }));
     }
@@ -2225,6 +2269,28 @@ impl ProtocolAppUiBackend {
                 .map(|pending| (request_id, pending))
         });
         let event = self.protocol.decode_rpc_text(text)?;
+        // octos#2407: once the serve acknowledges `server/shutdown`, the
+        // drain that closes this socket is the intended outcome — latch it so
+        // `mark_disconnected` does not overwrite the store's "Server
+        // stopping…" status with a generic disconnect line.
+        if matches!(
+            &event,
+            Some(ClientEvent::ServerShutdown(event)) if event.confirmed
+        ) {
+            self.server_stop_confirmed = true;
+        }
+        // A late/duplicate `server/shutdown` reply arriving NOT-confirmed
+        // after the confirmed ack (the user pressed Stop twice inside the
+        // drain window) is moot — surfacing it would flip the status to
+        // "not confirmed" while the server is, in fact, stopping.
+        if self.server_stop_confirmed
+            && matches!(
+                &event,
+                Some(ClientEvent::ServerShutdown(event)) if !event.confirmed
+            )
+        {
+            return Ok(None);
+        }
         let Some((request_id, pending)) = response_request else {
             return Ok(event);
         };
@@ -2581,13 +2647,18 @@ impl ProtocolAppUiBackend {
                 self.mark_disconnected(
                     "UI protocol disconnected while reading; reconnect will retry on next send/read.",
                 );
-                self.queue.push_back(
-                    AppUiEvent::Error(AppUiError {
-                        code: "transport_read".into(),
-                        message: format!("failed to read UI protocol transport message: {err}"),
-                    })
-                    .into(),
-                );
+                // After a confirmed server/shutdown the drain can surface as
+                // a read error on this socket — the intended outcome, not a
+                // failure worth an error line.
+                if !self.server_stop_confirmed {
+                    self.queue.push_back(
+                        AppUiEvent::Error(AppUiError {
+                            code: "transport_read".into(),
+                            message: format!("failed to read UI protocol transport message: {err}"),
+                        })
+                        .into(),
+                    );
+                }
                 Ok(None)
             }
         }
@@ -2630,8 +2701,13 @@ impl ProtocolAppUiBackend {
                                 .then_some(cancelled.into_client_event())
                         }));
                 }
-                self.queue
-                    .push_back(AppUiEvent::Error(AppUiError { code, message }).into());
+                // After a confirmed server/shutdown the drain surfaces as a
+                // disconnecting transport error on this socket — the intended
+                // outcome, not a failure worth an error line.
+                if !(disconnect && self.server_stop_confirmed) {
+                    self.queue
+                        .push_back(AppUiEvent::Error(AppUiError { code, message }).into());
+                }
                 Ok(self.queue.pop_front())
             }
         }
@@ -2750,7 +2826,12 @@ impl ProtocolAppUiBackend {
             | AppUiCommand::ResumeLoop(_)
             | AppUiCommand::FireLoopNow(_)
             | AppUiCommand::CompactContext(_)
-            | AppUiCommand::SetCompactionMode(_) => {
+            | AppUiCommand::SetCompactionMode(_)
+            // octos#2407: stopping the serve is the most destructive command
+            // the TUI can send — an EXPECTED readonly block, labeled like the
+            // mutations above, never the "unexpectedly blocked read-style"
+            // readonly_policy fallback.
+            | AppUiCommand::ServerShutdown(_) => {
                 self.queue.push_back(
                     AppUiEvent::Error(AppUiError {
                         code: "readonly".into(),
@@ -2868,6 +2949,13 @@ impl AppUiBackend for ProtocolAppUiBackend {
                     session_id: params.session_id.clone(),
                     code: "too_many_pending_requests".into(),
                     message,
+                })
+            } else if matches!(command, AppUiCommand::ServerShutdown(_)) {
+                // The stop never left this client, so it was never confirmed —
+                // surface the typed not-confirmed outcome.
+                ClientEvent::ServerShutdown(ServerShutdownClientEvent {
+                    confirmed: false,
+                    reason: Some(message),
                 })
             } else {
                 AppUiEvent::Error(AppUiError {
@@ -3437,6 +3525,7 @@ fn rpc_request_from_command(
         AppUiCommand::OpenSession(params) => serde_json::to_value(params),
         AppUiCommand::ListConfigCapabilities(params) => serde_json::to_value(params),
         AppUiCommand::ReadSessionStatus(params) => serde_json::to_value(params),
+        AppUiCommand::ServerShutdown(params) => serde_json::to_value(params),
         AppUiCommand::SessionBtw(params) => serde_json::to_value(params),
         AppUiCommand::CompactContext(params) => serde_json::to_value(params),
         AppUiCommand::SetCompactionMode(params) => serde_json::to_value(params),
@@ -3749,6 +3838,19 @@ fn success_response_to_app_event(
                     .into(),
                 )),
             }
+        }
+        crate::model::APPUI_METHOD_SERVER_SHUTDOWN => {
+            // The serve writes its `{ "stopping": true }` acknowledgement
+            // BEFORE flipping the stop switch (the flip drains this very
+            // socket), so anything but an explicit `stopping: true` means the
+            // stop was NOT confirmed — surface that, never guess success.
+            let confirmed = result.get("stopping") == Some(&Value::Bool(true));
+            Ok(Some(ClientEvent::ServerShutdown(
+                ServerShutdownClientEvent {
+                    confirmed,
+                    reason: None,
+                },
+            )))
         }
         methods::SESSION_OPEN => {
             let diagnostics = context_cache_diagnostics_from_context_state(
@@ -5065,6 +5167,9 @@ fn error_response_to_app_event(
     let hydrate_session = pending_request
         .as_ref()
         .and_then(|request| request.hydrate_session.clone());
+    let pending_method = pending_request
+        .as_ref()
+        .map(|request| request.method.clone());
     let message = match (pending_request, request_id) {
         (Some(request), Some(id)) => {
             format!("{} request {id} failed: {message}", request.method)
@@ -5079,6 +5184,16 @@ fn error_response_to_app_event(
                 session_id,
                 code,
                 message,
+            })
+        }
+        // A refused `server/shutdown` is a NOT-confirmed stop: surface it
+        // through the same typed event as an unconfirmed result so the store
+        // shows the "shutdown was not confirmed" copy rather than a raw RPC
+        // error the user cannot act on.
+        None if pending_method.as_deref() == Some(crate::model::APPUI_METHOD_SERVER_SHUTDOWN) => {
+            ClientEvent::ServerShutdown(ServerShutdownClientEvent {
+                confirmed: false,
+                reason: Some(message),
             })
         }
         None => app_error(code, message).into(),
@@ -9605,6 +9720,10 @@ mod tests {
                     text: "steer".into(),
                 }],
             }),
+            // octos#2407 / octoscode#653: `server/shutdown` stops the serve
+            // for EVERY connected client — the most destructive method the
+            // TUI can send, blocked in read-only mode like any mutation.
+            AppUiCommand::ServerShutdown(crate::model::ServerShutdownParams {}),
         ];
         for command in &mutating_commands {
             assert!(
@@ -11549,6 +11668,321 @@ mod tests {
         let event =
             error_response_to_app_event(frame.as_object().expect("object"), &mut pending_requests);
         assert!(matches!(event, ClientEvent::App(_)));
+    }
+
+    /// octos#2407 / octoscode#653: the serve acknowledges `server/shutdown`
+    /// with `{ "stopping": true }` BEFORE flipping its stop switch — the only
+    /// shape that confirms the stop.
+    #[test]
+    fn server_shutdown_ack_decodes_to_confirmed_event() {
+        let mut pending = HashMap::new();
+        pending.insert(
+            "tui-42".to_string(),
+            PendingRequest {
+                method: crate::model::APPUI_METHOD_SERVER_SHUTDOWN.into(),
+                select_session: None,
+                hydrate_session: None,
+            },
+        );
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "id": "tui-42",
+            "result": {"stopping": true},
+        })
+        .to_string();
+        let event = rpc_text_to_app_event_with_pending(&frame, &mut pending)
+            .expect("frame decodes")
+            .expect("client event");
+        let ClientEvent::ServerShutdown(event) = event else {
+            panic!("expected a ServerShutdown event");
+        };
+        assert!(event.confirmed);
+        assert!(
+            pending.is_empty(),
+            "an answered request leaves the pending set"
+        );
+    }
+
+    /// Anything but an explicit `stopping: true` means the stop was NOT
+    /// confirmed — never guess success from a well-formed 200-shaped reply.
+    #[test]
+    fn server_shutdown_unconfirmed_result_decodes_to_not_confirmed() {
+        for result in [json!({}), json!({"stopping": false}), json!("ok")] {
+            let mut pending = HashMap::new();
+            pending.insert(
+                "tui-42".to_string(),
+                PendingRequest {
+                    method: crate::model::APPUI_METHOD_SERVER_SHUTDOWN.into(),
+                    select_session: None,
+                    hydrate_session: None,
+                },
+            );
+            let frame = json!({
+                "jsonrpc": "2.0",
+                "id": "tui-42",
+                "result": result,
+            })
+            .to_string();
+            let event = rpc_text_to_app_event_with_pending(&frame, &mut pending)
+                .expect("frame decodes")
+                .expect("client event");
+            let ClientEvent::ServerShutdown(event) = event else {
+                panic!("expected a ServerShutdown event for {result}");
+            };
+            assert!(!event.confirmed, "{result} must not confirm a stop");
+        }
+    }
+
+    /// A refused `server/shutdown` (RPC error frame) is a NOT-confirmed stop,
+    /// surfaced through the typed event so the store can show the "shutdown
+    /// was not confirmed" copy instead of a raw RPC error.
+    #[test]
+    fn server_shutdown_error_decodes_to_not_confirmed() {
+        let mut pending = HashMap::new();
+        pending.insert(
+            "tui-42".to_string(),
+            PendingRequest {
+                method: crate::model::APPUI_METHOD_SERVER_SHUTDOWN.into(),
+                select_session: None,
+                hydrate_session: None,
+            },
+        );
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "id": "tui-42",
+            "error": {
+                "code": -32600,
+                "message": "server/shutdown is not available on this server",
+            },
+        })
+        .to_string();
+        let event = rpc_text_to_app_event_with_pending(&frame, &mut pending)
+            .expect("frame decodes")
+            .expect("client event");
+        let ClientEvent::ServerShutdown(event) = event else {
+            panic!("expected a ServerShutdown event");
+        };
+        assert!(!event.confirmed);
+    }
+
+    #[test]
+    fn server_shutdown_request_serializes_with_empty_params() {
+        let request = rpc_request_from_command(
+            "tui-42".into(),
+            AppUiCommand::ServerShutdown(crate::model::ServerShutdownParams {}),
+        )
+        .expect("request builds");
+        assert_eq!(request.method, crate::model::APPUI_METHOD_SERVER_SHUTDOWN);
+        assert_eq!(request.params, json!({}));
+    }
+
+    /// A `server/shutdown` cancelled before its ack arrived (the socket
+    /// dropped mid-flight) is a NOT-confirmed stop — the typed event carries
+    /// that, not a raw cancellation error.
+    #[test]
+    fn server_shutdown_cancelled_decodes_to_not_confirmed() {
+        let mut exchange = ProtocolExchange::default();
+        exchange
+            .build_tracked_request(AppUiCommand::ServerShutdown(
+                crate::model::ServerShutdownParams {},
+            ))
+            .expect("tracked request");
+
+        let cancelled = exchange.cancel_pending_requests("test disconnect");
+        let event = cancelled
+            .into_iter()
+            .next()
+            .expect("one")
+            .into_client_event();
+        let ClientEvent::ServerShutdown(event) = event else {
+            panic!("expected a ServerShutdown event");
+        };
+        assert!(!event.confirmed);
+    }
+
+    /// Pre-send rejections of `server/shutdown` (barrier flushes, size gates)
+    /// map to the typed not-confirmed outcome via `command_error_event`.
+    #[test]
+    fn server_shutdown_command_error_event_is_not_confirmed() {
+        let event = command_error_event(
+            &AppUiCommand::ServerShutdown(crate::model::ServerShutdownParams {}),
+            "request_cancelled",
+            "test rejection".to_string(),
+        );
+        let ClientEvent::ServerShutdown(event) = event else {
+            panic!("expected a ServerShutdown event");
+        };
+        assert!(!event.confirmed);
+    }
+
+    /// After the serve confirms `server/shutdown`, the drain closing this
+    /// socket is the intended outcome: neither the generic disconnect status
+    /// nor a transport error may clobber the store's "Server stopping…"
+    /// announcement.
+    #[test]
+    fn confirmed_server_shutdown_disconnect_stays_quiet() {
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch {
+            endpoint: Some(AppUiEndpoint::websocket(
+                "wss://example.test/ui-protocol",
+                None,
+            )),
+            ..AppUiLaunch::default()
+        });
+        let request = backend
+            .build_tracked_request(AppUiCommand::ServerShutdown(
+                crate::model::ServerShutdownParams {},
+            ))
+            .expect("request builds");
+        backend.mark_connected("wss://example.test/ui-protocol");
+
+        let ack = json!({
+            "jsonrpc": "2.0",
+            "id": request.id,
+            "result": {"stopping": true},
+        })
+        .to_string();
+        let event = backend
+            .decode_rpc_text(&ack)
+            .expect("ack decodes")
+            .expect("client event");
+        let ClientEvent::ServerShutdown(event) = event else {
+            panic!("expected a ServerShutdown event");
+        };
+        assert!(event.confirmed);
+        assert!(backend.server_stop_confirmed, "the ack must latch");
+
+        // The serve's stop-switch flip drains this socket ~250ms later,
+        // surfacing as a disconnect and a disconnecting transport error.
+        backend.mark_disconnected("transport closed for test");
+        backend
+            .handle_transport_event(TransportEvent::Error {
+                code: "transport_read".into(),
+                message: "connection reset".into(),
+                disconnect: true,
+            })
+            .expect("handled");
+
+        assert!(
+            backend.queue.is_empty(),
+            "no disconnect status or transport error may surface after a confirmed shutdown; queued: {:?}",
+            backend.queue
+        );
+    }
+
+    /// The latch scopes to the drained connection ONLY: once a fresh
+    /// connection is up (the user restarted the serve, as the status copy
+    /// suggests), later disconnects are genuine failures and must surface
+    /// normally again.
+    #[test]
+    fn server_stop_confirmed_latch_clears_on_reconnect() {
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch {
+            endpoint: Some(AppUiEndpoint::websocket(
+                "wss://example.test/ui-protocol",
+                None,
+            )),
+            ..AppUiLaunch::default()
+        });
+        let request = backend
+            .build_tracked_request(AppUiCommand::ServerShutdown(
+                crate::model::ServerShutdownParams {},
+            ))
+            .expect("request builds");
+        backend.mark_connected("wss://example.test/ui-protocol");
+
+        let ack = json!({
+            "jsonrpc": "2.0",
+            "id": request.id,
+            "result": {"stopping": true},
+        })
+        .to_string();
+        backend.decode_rpc_text(&ack).expect("ack decodes");
+        assert!(backend.server_stop_confirmed, "the ack must latch");
+
+        // The drain kills the connection quietly …
+        backend.mark_disconnected("transport closed for test");
+        assert!(backend.queue.is_empty());
+        // … then the serve comes back and the TUI reconnects.
+        backend.mark_connected("wss://example.test/ui-protocol");
+        assert!(
+            !backend.server_stop_confirmed,
+            "a new connection must clear the latch"
+        );
+        backend.queue.pop_front(); // the "reconnected" status
+
+        // A LATER, unrelated disconnect is a genuine failure again.
+        backend.mark_disconnected("second connection died");
+        let status = backend.queue.pop_front().expect("disconnect status");
+        assert!(
+            matches!(unwrap_app_event(status), AppUiEvent::Status(_)),
+            "post-reconnect disconnects must surface their status again"
+        );
+    }
+
+    /// A duplicate `server/shutdown` racing the confirmed stop's drain — a
+    /// second press, cancelled mid-flight or answered with a late error — is
+    /// moot. It must NOT emit a not-confirmed event that would flip the
+    /// status to the exact opposite of the truth.
+    #[test]
+    fn duplicate_server_shutdown_during_confirmed_drain_stays_quiet() {
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch {
+            endpoint: Some(AppUiEndpoint::websocket(
+                "wss://example.test/ui-protocol",
+                None,
+            )),
+            ..AppUiLaunch::default()
+        });
+        let first = backend
+            .build_tracked_request(AppUiCommand::ServerShutdown(
+                crate::model::ServerShutdownParams {},
+            ))
+            .expect("request builds");
+        backend.mark_connected("wss://example.test/ui-protocol");
+
+        // The user presses Stop again inside the drain window: a second
+        // in-flight request.
+        let second = backend
+            .build_tracked_request(AppUiCommand::ServerShutdown(
+                crate::model::ServerShutdownParams {},
+            ))
+            .expect("request builds");
+
+        // First request's ack confirms the stop and latches.
+        let ack = json!({
+            "jsonrpc": "2.0",
+            "id": first.id,
+            "result": {"stopping": true},
+        })
+        .to_string();
+        backend.decode_rpc_text(&ack).expect("ack decodes");
+        assert!(backend.server_stop_confirmed);
+
+        // Variant A: a late error frame for the duplicate is dropped.
+        let late_error = json!({
+            "jsonrpc": "2.0",
+            "id": second.id,
+            "error": {"code": -32600, "message": "server is shutting down"},
+        })
+        .to_string();
+        let event = backend.decode_rpc_text(&late_error).expect("frame decodes");
+        assert!(
+            event.is_none(),
+            "a late not-confirmed server/shutdown reply must be dropped"
+        );
+
+        // Variant B: the drain cancels an in-flight duplicate — no
+        // not-confirmed event either.
+        let third = backend
+            .build_tracked_request(AppUiCommand::ServerShutdown(
+                crate::model::ServerShutdownParams {},
+            ))
+            .expect("request builds");
+        assert!(backend.protocol.pending_requests.contains_key(&third.id));
+        backend.mark_disconnected("transport closed for test");
+        assert!(
+            backend.queue.is_empty(),
+            "no not-confirmed event from a drain-cancelled duplicate; queued: {:?}",
+            backend.queue
+        );
     }
 
     /// Seam 5: request cancellation carries the hydrate session out of the

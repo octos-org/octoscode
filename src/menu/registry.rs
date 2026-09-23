@@ -81,6 +81,10 @@ pub const MENU_LOOP_ACTIONS: &str = "loop-actions";
 /// `/rewind` turn picker menu.
 pub const MENU_REWIND: &str = "rewind";
 pub const MENU_STATUS: &str = "status";
+/// Cancel-first confirm for the `/status` Stop-server row (octos#2407):
+/// stopping the serve ends it for EVERY connected client, so the safe verb
+/// sits under the cursor.
+pub const MENU_SERVER_STOP_CONFIRM: &str = "server-stop-confirm";
 pub const MENU_THEME: &str = "theme";
 /// Reasoning/thinking effort selection menu (opened by `/thinking` with no arg).
 pub const MENU_THINKING: &str = "thinking";
@@ -102,6 +106,7 @@ pub const APPUI_METHOD_MODEL_LIST: &str = crate::model::APPUI_METHOD_MODEL_LIST;
 pub const APPUI_METHOD_MODEL_SELECT: &str = crate::model::APPUI_METHOD_MODEL_SELECT;
 pub const APPUI_METHOD_SESSION_STATUS_READ: &str = crate::model::APPUI_METHOD_SESSION_STATUS_READ;
 pub const APPUI_METHOD_SESSION_COMPACT: &str = crate::model::APPUI_METHOD_SESSION_COMPACT;
+pub const APPUI_METHOD_SERVER_SHUTDOWN: &str = crate::model::APPUI_METHOD_SERVER_SHUTDOWN;
 pub const APPUI_METHOD_SESSION_COMPACT_MODE_SET: &str =
     crate::model::APPUI_METHOD_SESSION_COMPACT_MODE_SET;
 pub const APPUI_METHOD_PERMISSION_PROFILE_LIST: &str = "permission/profile/list";

@@ -8373,6 +8373,40 @@ impl Store {
                 self.refresh_active_menu_if_open();
                 follow_up
             }
+            ClientEvent::ServerShutdown(event) => {
+                if event.confirmed {
+                    // The serve acknowledged and flips its stop switch right
+                    // after this reply, draining every connection including
+                    // ours — the disconnect that follows is the point, not a
+                    // failure. Say so BEFORE the socket drops.
+                    //
+                    // The confirm menu is moot now: close the stack so a
+                    // second Enter cannot fire a duplicate stop into the
+                    // drain window.
+                    self.close_all_menus();
+                    self.apply_event(AppUiEvent::status(
+                        t!("menu.server_stop.stopping").into_owned(),
+                    ));
+                } else {
+                    // A refused/unconfirmed stop is a BENIGN outcome — the
+                    // server keeps running and this session is untouched — so
+                    // surface the failure copy as a warning, NOT through the
+                    // generic AppUiEvent::Error arm, which would flip the
+                    // run-state chip to Error as if a turn had failed.
+                    let message = t!("menu.server_stop.not_confirmed").into_owned();
+                    let activity = ActivityItem::new(
+                        ActivityKind::Warning,
+                        "server_shutdown_not_confirmed",
+                        message.clone(),
+                    );
+                    self.state.push_activity(match event.reason {
+                        Some(reason) => activity.with_detail(reason),
+                        None => activity,
+                    });
+                    self.state.status = message;
+                }
+                None
+            }
             ClientEvent::LaunchResolve(result) => {
                 let follow_up = self.apply_launch_resolve_event(result);
                 self.refresh_active_menu_if_open();
@@ -25823,6 +25857,53 @@ now analyzing the bus module"
         assert_eq!(
             store.state.onboarding.profile_id.as_deref(),
             Some("ada-server")
+        );
+    }
+
+    /// octoscode#653: a confirmed `server/shutdown` tells the user the serve
+    /// is stopping (the disconnect that follows is the point); an unconfirmed
+    /// one surfaces the "not confirmed" copy instead of pretending success.
+    #[test]
+    fn server_shutdown_result_surfaces_confirmed_and_not_confirmed() {
+        let mut store = protocol_store_without_sessions();
+        store.apply_client_event(ClientEvent::ServerShutdown(
+            crate::client_event::ServerShutdownClientEvent {
+                confirmed: true,
+                reason: None,
+            },
+        ));
+        assert!(
+            store.state.status.starts_with("Server stopping"),
+            "confirmed stop announces itself before the socket drops: {}",
+            store.state.status
+        );
+
+        let mut store = protocol_store_without_sessions();
+        store.apply_client_event(ClientEvent::ServerShutdown(
+            crate::client_event::ServerShutdownClientEvent {
+                confirmed: false,
+                reason: Some("server/shutdown is not available on this server".into()),
+            },
+        ));
+        assert!(
+            store
+                .state
+                .status
+                .contains("Shutdown was not confirmed. Check the server before trying again."),
+            "unconfirmed stop shows the failure copy: {}",
+            store.state.status
+        );
+        // The underlying reason rides the warning activity's detail so the
+        // failure stays diagnosable without raw text on the status line.
+        let activity = store
+            .state
+            .activity
+            .iter()
+            .find(|item| item.title == "server_shutdown_not_confirmed")
+            .expect("warning activity");
+        assert_eq!(
+            activity.detail.as_deref(),
+            Some("server/shutdown is not available on this server")
         );
     }
 

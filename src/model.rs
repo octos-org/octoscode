@@ -77,6 +77,11 @@ pub const APPUI_METHOD_CONFIG_CAPABILITIES_LIST: &str = "config/capabilities/lis
 pub const APPUI_METHOD_SESSION_STATUS_READ: &str = "session/status/read";
 pub const APPUI_METHOD_SESSION_COMPACT: &str = "session/compact";
 pub const APPUI_METHOD_SESSION_COMPACT_MODE_SET: &str = "session/compact/mode/set";
+/// `server/shutdown` — stop a local `octos serve --solo` over HTTP, exactly
+/// as Ctrl+C in its terminal would (octos#2407). The serve advertises it only
+/// where it can run, so the TUI shows its Stop-server row exactly when
+/// pressing it would stop the server.
+pub const APPUI_METHOD_SERVER_SHUTDOWN: &str = "server/shutdown";
 pub const APPUI_METHOD_MODEL_LIST: &str = "profile/llm/list";
 pub const APPUI_METHOD_MODEL_SELECT: &str = "profile/llm/select";
 pub const APPUI_METHOD_MCP_STATUS_LIST: &str = "mcp/status/list";
@@ -862,6 +867,13 @@ pub enum AppUiCommand {
     StartReview(ReviewStartParams),
     ListConfigCapabilities(ConfigCapabilitiesListParams),
     ReadSessionStatus(SessionStatusReadParams),
+    /// `server/shutdown` — stop the connected local `octos serve --solo`,
+    /// ending the process for EVERY connected client and cancelling their
+    /// running turns (octos#2407). The most destructive method the TUI can
+    /// send: MUTATING, intentionally NOT listed in
+    /// [`ProtocolAppUiBackend::readonly_allows_command`], and only reachable
+    /// behind the capability-gated, Cancel-first `/status` confirm menu.
+    ServerShutdown(ServerShutdownParams),
     SessionBtw(octos_core::ui_protocol::SessionBtwParams),
     CompactContext(SessionCompactParams),
     SetCompactionMode(SessionCompactModeParams),
@@ -977,6 +989,7 @@ impl AppUiCommand {
             Self::StartReview(_) => APPUI_METHOD_REVIEW_START,
             Self::ListConfigCapabilities(_) => APPUI_METHOD_CONFIG_CAPABILITIES_LIST,
             Self::ReadSessionStatus(_) => APPUI_METHOD_SESSION_STATUS_READ,
+            Self::ServerShutdown(_) => APPUI_METHOD_SERVER_SHUTDOWN,
             Self::SessionBtw(_) => octos_core::ui_protocol::methods::SESSION_BTW,
             Self::CompactContext(_) => APPUI_METHOD_SESSION_COMPACT,
             Self::SetCompactionMode(_) => APPUI_METHOD_SESSION_COMPACT_MODE_SET,
@@ -1118,6 +1131,11 @@ pub struct SessionCompactModeParams {
     /// `"llm"` or `"heuristic"`.
     pub mode: String,
 }
+
+/// Params for `server/shutdown` — none: the request stops the serve the
+/// client is connected to, so there is nothing to target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerShutdownParams {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelListParams {

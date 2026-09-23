@@ -1322,6 +1322,18 @@ menu:
     subtitle: 通过 Octos UI 管理的档案级自定义技能。
     title: 技能
     unavailable_title: 技能不可用
+  server_stop:
+    title: 停止 Octos 服务器？
+    subtitle: 连接到此服务器的所有客户端——本 TUI、其他终端、浏览器标签页——都会断开，正在运行的轮次会被取消。对话保留在磁盘上。要继续使用 Octos，请在终端重新启动 `octos serve`。
+    unavailable_title: 停止服务器不可用
+    stopping: 服务器正在停止——所有已连接的客户端都将断开。要继续使用，请在终端重新启动 `octos serve`。
+    not_confirmed: 停止未确认。请检查服务器状态后再试。
+    item:
+      cancel:
+        label: 取消
+      confirm:
+        desc: 如同在其终端按 Ctrl+C 一样停止 `octos serve`——使用 server/shutdown。此操作无法在此处撤销。
+        label: 停止服务器
   status:
     requires_open_session: 服务器状态需要已打开的 Octos UI 会话
     item:
@@ -1337,6 +1349,9 @@ menu:
         label: 服务器运行时状态
       snapshot:
         label: 快照状态
+      stop_server:
+        label: 停止服务器
+        desc: 如同在其终端按 Ctrl+C 一样停止本机 `octos serve`。所有已连接的客户端都会断开，正在运行的轮次会被取消——会先要求确认。使用 server/shutdown。
     preview_title: 快照
     subtitle: 基于快照的状态；服务器字段受能力门控。
     title: 状态

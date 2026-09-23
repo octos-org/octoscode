@@ -815,7 +815,22 @@ fn drain_pending_autonomy_hydration(backend: &mut dyn AppUiBackend, store: &mut 
 
 fn send_command(backend: &mut dyn AppUiBackend, store: &mut Store, command: AppUiCommand) {
     let method = command.method();
+    let is_server_shutdown = matches!(command, AppUiCommand::ServerShutdown(_));
     if let Err(err) = backend.send(command) {
+        // A server/shutdown that never reached the backend was never
+        // confirmed — surface the typed not-confirmed outcome, not raw
+        // transport text.
+        if is_server_shutdown {
+            if let Some(followup) = store.apply_client_event(ClientEvent::ServerShutdown(
+                crate::client_event::ServerShutdownClientEvent {
+                    confirmed: false,
+                    reason: Some(format!("{err:#}")),
+                },
+            )) {
+                send_command(backend, store, followup);
+            }
+            return;
+        }
         // OUTER_LOOP_REVIEW #27: never swallow a failed send silently — the
         // user (composer input above all) must see that THIS command did not
         // reach the backend, named by method, instead of the TUI sitting

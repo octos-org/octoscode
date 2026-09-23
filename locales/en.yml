@@ -1870,6 +1870,18 @@ menu:
     subtitle: Profile-owned customer skills over Octos UI.
     title: Skills
     unavailable_title: Skills unavailable
+  server_stop:
+    title: "Stop the Octos server?"
+    subtitle: "Every client connected to this server — this TUI, other terminals, browser tabs — is disconnected, and any running turn is cancelled. Conversations are kept on disk. To use Octos again, start `octos serve` from a terminal."
+    unavailable_title: Stop server unavailable
+    stopping: "Server stopping — every connected client is being disconnected. Start `octos serve` again from a terminal to continue."
+    not_confirmed: "Shutdown was not confirmed. Check the server before trying again."
+    item:
+      cancel:
+        label: Cancel
+      confirm:
+        desc: "Stops `octos serve` like Ctrl+C in its terminal — uses server/shutdown. This cannot be undone from here."
+        label: Stop server
   status:
     requires_open_session: server status requires an open Octos UI session
     item:
@@ -1885,6 +1897,9 @@ menu:
         label: Server runtime status
       snapshot:
         label: Snapshot status
+      stop_server:
+        label: Stop server
+        desc: "Stops `octos serve` on this computer, like Ctrl+C in its terminal. Every connected client is disconnected and running turns are cancelled — asks to confirm first. Uses server/shutdown."
     preview_title: Snapshot
     subtitle: Snapshot-backed status; server-owned fields are capability gated.
     title: Status
