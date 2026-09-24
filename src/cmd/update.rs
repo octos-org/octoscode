@@ -579,6 +579,16 @@ mod tests {
         assert!(!is_update_available(&rc, &rc, true));
     }
 
+    #[test]
+    fn dotted_rc_numbers_advance_in_numeric_order() {
+        let rc9 = parse_version("v0.3.0-rc.9").unwrap();
+        let rc10 = parse_version("v0.3.0-rc.10").unwrap();
+        let rc11 = parse_version("v0.3.0-rc.11").unwrap();
+        assert!(is_update_available(&rc9, &rc10, true));
+        assert!(is_update_available(&rc10, &rc11, true));
+        assert!(!is_update_available(&rc11, &rc11, true));
+    }
+
     #[cfg(feature = "update")]
     #[test]
     fn prerelease_channel_uses_specific_tag_semantics() {
@@ -587,8 +597,8 @@ mod tests {
             ..UpdateArgs::default()
         };
 
-        match update_request(&args, Some("v0.3.0-rc.8")) {
-            UpdateRequest::SpecificTag(tag) => assert_eq!(tag, "v0.3.0-rc.8"),
+        match update_request(&args, Some("v0.3.0-rc.11")) {
+            UpdateRequest::SpecificTag(tag) => assert_eq!(tag, "v0.3.0-rc.11"),
             _ => panic!("prerelease channel must resolve to a specific tag"),
         }
     }
