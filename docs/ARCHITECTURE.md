@@ -488,6 +488,7 @@ added without a row here.
 | `src/cmd/github.rs` | 155 | Minimal GitHub Releases client for `update --check` and `doctor`. |
 | `src/cmd/install_method.rs` | 746 | Install-method detection for `octoscode update`/`doctor` (design §A.3). |
 | `src/cmd/mod.rs` | 273 | `octoscode` subcommands: `update` and `doctor` (design doc). |
+| `src/cmd/olp.rs` | 254 | `octoscode olp`: init, watch, board append, and evolution commands backed by bundled Bash scripts. |
 | `src/cmd/update.rs` | 606 | `octoscode update` — install-method-aware updater (design §A). |
 | `src/cmd/olp_mcp.rs` | 20 | `octoscode olp-mcp-serve` entry — OUTER_LOOP_REVIEW #31 OLP-MCP server subcommand. |
 | `src/cmd/outer_duty.rs` | 98 | `octoscode outer-duty` entry — OUTER_LOOP_REVIEW #38 per-project duty lock (hold/check). |

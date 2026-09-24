@@ -11,13 +11,13 @@ OctoLoop = OLP(Outer-Loop Protocol,协议名)之上的产品化封装:用户装
 
 ## 模式 init — 铺脚手架(首次/新机器)
 
-引导运行仓库的一键引导脚本,再核对依赖清单:
+引导在目标项目目录运行初始化命令,再核对依赖清单:
 
 ```bash
-bash scripts/olp-init.sh          # 铺脚手架(黑板/信箱/监视器接线)
+octoscode olp init .             # 在当前项目初始化 OLP 脚手架
 ```
 
-脚本按需询问(不假设环境);完成后逐项核对
+命令调用内置 Bash 脚本,检查依赖并保留已有文件;完成后逐项核对
 `docs/OLP_QUICKSTART.md` §1 环境依赖清单(octos/octoscode 可执行、
 herdr 或 tmux、外环模型 CLI)。herdr 来源与分支钉在 §1 依赖表
 (hagency-org/herdr,octoscode 识别当前在 feat/octoscode-agent 分支)。任何缺口按 §6 故障速查处理,再跑
