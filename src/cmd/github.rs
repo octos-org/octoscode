@@ -100,10 +100,9 @@ pub fn latest_release(prerelease_channel: bool) -> Result<Option<LatestRelease>>
     }))
 }
 
-/// Newest non-draft prerelease (first matching entry of `/releases`, which
-/// GitHub returns newest-first). Stable releases are deliberately skipped: an
-/// explicit prerelease-channel request must not snap back to stable merely
-/// because stable has higher SemVer precedence.
+/// Highest-versioned non-draft prerelease. GitHub orders releases by creation
+/// time rather than SemVer, so an older RC published later must not send a
+/// client backwards from e.g. rc.11 to rc.10.
 fn newest_prerelease(client: &reqwest::blocking::Client) -> Result<Option<LatestRelease>> {
     let resp = authed(client.get(RELEASES_URL))
         .query(&[("per_page", "100")])
@@ -124,8 +123,14 @@ fn newest_prerelease(client: &reqwest::blocking::Client) -> Result<Option<Latest
 fn select_newest_prerelease(payloads: Vec<ReleasePayload>) -> Option<LatestRelease> {
     payloads
         .into_iter()
-        .find(|r| !r.draft && r.prerelease)
-        .map(|r| LatestRelease {
+        .filter(|r| !r.draft && r.prerelease)
+        .filter_map(|r| {
+            let version =
+                semver::Version::parse(r.tag_name.strip_prefix('v').unwrap_or(&r.tag_name)).ok()?;
+            Some((version, r))
+        })
+        .max_by(|(left, _), (right, _)| left.cmp(right))
+        .map(|(_, r)| LatestRelease {
             tag: r.tag_name,
             prerelease: r.prerelease,
         })
@@ -174,12 +179,14 @@ mod tests {
     fn prerelease_channel_skips_newer_stable_and_draft_entries() {
         let selected = select_newest_prerelease(vec![
             release("v0.3.0", false, false),
-            release("v0.3.0-rc.9", true, true),
-            release("v0.3.0-rc.8", true, false),
+            release("v0.3.0-rc.12", true, true),
+            release("v0.3.0-rc.10", true, false),
+            release("v0.3.0-rc.9", true, false),
+            release("v0.3.0-rc.11", true, false),
         ])
         .expect("published prerelease");
 
-        assert_eq!(selected.tag, "v0.3.0-rc.8");
+        assert_eq!(selected.tag, "v0.3.0-rc.11");
         assert!(selected.prerelease);
     }
 

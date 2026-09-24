@@ -5467,6 +5467,8 @@ impl MockAppUiBackend {
             text: "M9 scaffold over mock transport.".into(),
         }));
         self.enqueue_protocol(UiNotification::TaskUpdated(TaskUpdatedEvent {
+            started_at: None,
+            relaunched_from: None,
             session_id: session_id.clone(),
             topic: None,
             task_id: build_task_id.clone(),
@@ -5504,6 +5506,8 @@ impl MockAppUiBackend {
             duration_ms: Some(420),
         }));
         self.enqueue_protocol(UiNotification::TaskUpdated(TaskUpdatedEvent {
+            started_at: None,
+            relaunched_from: None,
             session_id: session_id.clone(),
             topic: None,
             task_id: build_task_id,
@@ -6142,6 +6146,8 @@ impl AppUiBackend for MockAppUiBackend {
                     .push_back(ClientEvent::SessionRollback(SessionRollbackResult {
                         dropped_turns: 1,
                         thread: SessionHydrateResult {
+                            replayed_projection_envelopes: None,
+                            projection_thread_sequences: None,
                             session_id: session_id.clone(),
                             cursor: UiCursor {
                                 stream: session_id.0.clone(),
@@ -8277,10 +8283,7 @@ mod tests {
     /// honors it stops sending `message/delta` + `turn/completed` entirely —
     /// the reply text and the turn terminal ride inside `projection/envelope`
     /// instead. This is the exact frame a live server emits for a reasoning
-    /// delta; it has to reach the v2 notification, because the v1 arm is
-    /// dropped on the floor (`store.rs` `UiNotification::Envelope(_) => None`)
-    /// and a dropped terminal leaves the UI spinning on "Working" forever with
-    /// the answer only visible after a restart re-hydrates the session.
+    /// delta; it must reach the v2 notification to settle the live turn.
     /// task-consume-turn-steer-dropped: the modern negotiation header asks the
     /// server for the dropped-before-terminal steer guarantee; the old-server
     /// baseline does not.
@@ -8462,18 +8465,12 @@ mod tests {
         );
     }
 
-    /// A `projection/envelope` frame WITHOUT `turn_id` decodes to the v1
-    /// `UiNotification::Envelope` arm. That arm used to return `None`, so a v1
-    /// server's reply text and turn terminal vanished silently: the composer
-    /// spun on "Working" forever and the answer only surfaced after a restart
-    /// re-hydrated the session. v1 carries the same payloads as v2 (minus the
-    /// segment id, and spelling the terminal `turn_completed`), so it must be
-    /// applied, not discarded.
+    /// A server using the legacy delta lane still needs to settle the turn
+    /// when its terminal notification arrives.
     #[test]
-    fn envelope_v1_turn_lands_and_settles_like_v2() {
-        const THREAD: &str = "b6a0e44e-8336-4cc0-a9db-93439010b313";
-        let session = "v1-envelope-session";
-
+    fn legacy_delta_turn_lands_and_settles() {
+        let turn_id = TurnId::new();
+        let session = "legacy-delta-session";
         let mut store = crate::store::Store::from_snapshot(AppUiSnapshot {
             sessions: vec![AppUiSession {
                 id: SessionKey(session.into()),
@@ -8492,23 +8489,12 @@ mod tests {
         store.compose_command().expect("submit starts a turn");
 
         let mut pending = HashMap::new();
-        // No `turn_id` anywhere: this is the v1 wire shape.
         let frames = [
-            json!({"jsonrpc":"2.0","method":"projection/envelope","params":{
-                "session_id": session, "thread_id": THREAD, "seq": 1,
-                "payload": {"type":"assistant_delta","data":{"text":"Hello! "}}}}),
-            json!({"jsonrpc":"2.0","method":"projection/envelope","params":{
-                "session_id": session, "thread_id": THREAD, "seq": 2,
-                "payload": {"type":"assistant_persisted","data":{
-                    "text":"Hello! How can I help you today?",
-                    "meta": {"message_id":"v1:1:1786348294194329000",
-                             "persisted_at":"2026-08-10T07:51:34.194329Z"}}}}}),
-            json!({"jsonrpc":"2.0","method":"projection/envelope","params":{
-                "session_id": session, "thread_id": THREAD, "seq": 3,
-                "payload": {"type":"turn_completed","data":{
-                    "token_usage":{"input_tokens":87,"output_tokens":43}}}}}),
+            json!({"jsonrpc":"2.0","method":methods::MESSAGE_DELTA,"params":{
+                "session_id": session, "turn_id": turn_id, "text": "Hello! How can I help you today?"}}),
+            json!({"jsonrpc":"2.0","method":methods::TURN_COMPLETED,"params":{
+                "session_id": session, "turn_id": turn_id}}),
         ];
-
         for frame in frames {
             let event = rpc_text_to_app_event_with_pending(&frame.to_string(), &mut pending)
                 .expect("frame decodes")
@@ -8525,18 +8511,11 @@ mod tests {
             .map(|message| message.content.clone())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(
-            transcript.contains("How can I help you today?"),
-            "v1 assistant answer never reached the transcript: {transcript:?}"
-        );
-        assert!(
-            store.state.sessions[0].live_reply.is_none(),
-            "v1 terminal left the turn live, so the spinner never clears"
-        );
+        assert!(transcript.contains("How can I help you today?"));
+        assert!(store.state.sessions[0].live_reply.is_none());
         assert_ne!(
             store.state.run_state,
-            crate::model::SessionRunState::InProgress,
-            "run state stuck InProgress after the v1 turn terminal"
+            crate::model::SessionRunState::InProgress
         );
     }
 

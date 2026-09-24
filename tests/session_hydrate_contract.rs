@@ -66,6 +66,8 @@ fn session_hydrate_result_replaces_durable_messages() {
     let session_id = SessionKey("coding:local:tui#coding".into());
     let turn_id = TurnId::new();
     let result = SessionHydrateResult {
+        replayed_projection_envelopes: None,
+        projection_thread_sequences: None,
         session_id: session_id.clone(),
         cursor: UiCursor {
             stream: "session".into(),

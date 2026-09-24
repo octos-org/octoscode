@@ -637,7 +637,7 @@ fn have(program: &str) -> bool {
 /// v2.0.3-rc.1 while this stayed on v2.0.2, so a fresh install auto-provisioned
 /// a server whose protocol predated the client's. [`REQUIRED_OCTOS_CORE_REV`]
 /// and the test beside it now make the pair checkable instead of a comment.
-pub(crate) const REQUIRED_OCTOS_RELEASE: &str = "v2.0.3-rc.11";
+pub(crate) const REQUIRED_OCTOS_RELEASE: &str = "v2.0.3-rc.12";
 
 /// The `octos-core` rev that [`REQUIRED_OCTOS_RELEASE`] resolves to — i.e. the
 /// commit the release tag points at, and the rev Cargo.toml must pin.
@@ -651,7 +651,7 @@ pub(crate) const REQUIRED_OCTOS_RELEASE: &str = "v2.0.3-rc.11";
 /// Test-only: its whole job is to be compared against Cargo.toml, so it would
 /// be dead weight in a real build.
 #[cfg(test)]
-pub(crate) const REQUIRED_OCTOS_CORE_REV: &str = "d51601dff70cb27318ac7b3bd95e1c018132b756";
+pub(crate) const REQUIRED_OCTOS_CORE_REV: &str = "f4a31d9a0ef2228e919c3d516b78a9d82ad6f470";
 /// Env var overriding the octos release tag to install (fork / pinned build).
 const OCTOS_RELEASE_ENV: &str = "OCTOSCODE_OCTOS_RELEASE";
 /// The octos server-bundle asset name for THIS build's target platform, or
