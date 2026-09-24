@@ -7,7 +7,7 @@ estimate: 0.25d
 
 ## 意图
 
-混合版本服务端可能同时投递 `projection/envelope` v1 streaming 与延迟的
+混合版本服务端可能同时投递旧式 `message/delta` streaming 与延迟的
 `projection/envelope.v2` persisted 行。两者是同一 turn 的两份投影，不是两个回答；
 客户端不得让迟到的 persisted 行改写已经刷入原生 scrollback 的正文并在提交时再次重放。
 
@@ -15,9 +15,9 @@ estimate: 0.25d
 
 - `projection.envelope.v2` 的 assistant delta 在匹配的 persisted 行到达前是
   provisional；只有连续 finalized segment 前缀可以刷入不可逆的原生 scrollback。
-- 已协商 `projection.envelope.v2` 时，先到的兼容 v1 正文同样保持 provisional；
+- 已协商 `projection.envelope.v2` 时，先到的旧式 delta 正文同样保持 provisional；
   延迟的 canonical v2 persisted 行可以接管并重建 live reply。
-- 未协商 v2 的真正 v1-only 服务端不会有 canonical 接管，继续按既有规则渐进刷入
+- 未协商 v2 的旧式 delta 服务端不会有 canonical 接管，继续按既有规则渐进刷入
   scrollback。
 - v2 最先产生正文时仍独占该 turn；后到的 v1 文本视为重复投影并忽略。
 - lane 选择在 turn terminal、turn switch 与 stale hydrate 清理时释放。
@@ -46,7 +46,7 @@ estimate: 0.25d
 
 ### Forbidden
 - 不按正文内容做模糊去重。
-- 不改变 v1/v2 wire payload、terminal 与 hydrate 语义；仅允许 finalized
+- 不改变旧式 delta/v2 wire payload、terminal 与 hydrate 语义；仅允许 finalized
   canonical 前缀推进原生 scrollback watermark。
 - 不改变 tool/activity 投影。
 

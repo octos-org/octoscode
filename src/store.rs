@@ -3,15 +3,15 @@ use std::collections::BTreeSet;
 use octos_core::app_ui::{AppUiError, AppUiEvent, AppUiSnapshot};
 use octos_core::ui_protocol::{
     ApprovalAutoResolvedEvent, ApprovalCancelledEvent, ApprovalDecidedEvent, ApprovalId,
-    ApprovalRespondParams, AttachmentOwnerV2, DiffPreviewGetParams, Envelope, EnvelopeNotification,
-    EnvelopeToolEndStatus, EnvelopeV2, EnvelopeV2Notification, HydratedMessage, InputItem,
-    MessageDeltaEvent, Payload, PayloadV2, ReplayLossyEvent, SessionHydrateParams,
-    SessionHydrateResult, SessionListParams, SessionListResult, SessionOpenParams,
-    SessionRollbackParams, SessionRollbackResult, TaskArtifactReadParams, TaskOutputDeltaEvent,
-    TaskOutputReadParams, TaskRuntimeState, TaskUpdatedEvent, ThreadGraphGetParams,
-    TurnCompletedEvent, TurnErrorEvent, TurnId, TurnInterruptParams, TurnLifecycleState,
-    TurnStartParams, TurnStateGetParams, TurnTerminalOutcome, UiContextState, UiNotification,
-    UiProgressEvent, UserQuestionRequestedEvent,
+    ApprovalRespondParams, DiffPreviewGetParams, EnvelopeToolEndStatus, EnvelopeV2,
+    EnvelopeV2Notification, HydratedMessage, InputItem, MessageDeltaEvent, PayloadV2,
+    ReplayLossyEvent, SessionHydrateParams, SessionHydrateResult, SessionListParams,
+    SessionListResult, SessionOpenParams, SessionRollbackParams, SessionRollbackResult,
+    TaskArtifactReadParams, TaskOutputDeltaEvent, TaskOutputReadParams, TaskRuntimeState,
+    TaskUpdatedEvent, ThreadGraphGetParams, TurnCompletedEvent, TurnErrorEvent, TurnId,
+    TurnInterruptParams, TurnLifecycleState, TurnStartParams, TurnStateGetParams,
+    TurnTerminalOutcome, UiContextState, UiNotification, UiProgressEvent,
+    UserQuestionRequestedEvent,
 };
 use octos_core::{Message, MessageRole, SessionKey, TaskId, ThreadId};
 use serde_json::Value;
@@ -10774,6 +10774,7 @@ impl Store {
                         completed_at: active_turn.completed_at,
                         thread_id: active_turn.thread_id.clone(),
                         committed_seqs: Vec::new(),
+                        running: None,
                     });
             }
         }
@@ -12454,15 +12455,6 @@ impl Store {
             UiNotification::ReplayLossy(event) => self.apply_replay_lossy(event),
             UiNotification::TurnSpawnComplete(event) => self.apply_turn_spawn_complete(event),
             UiNotification::FileAttached(event) => self.apply_file_attached(event),
-            // A v1 server projects the SAME turn content as v2 — reply deltas
-            // and the turn terminal included — so discarding this arm silently
-            // stranded a whole turn: nothing rendered, the spinner never
-            // cleared, and the answer only appeared once a restart re-hydrated
-            // the session from the server. Lift it into the v2 shape and run
-            // the one handler instead of maintaining a second projection.
-            UiNotification::Envelope(event) => {
-                self.apply_envelope_v2(envelope_v1_as_v2(event), AssistantProjectionLane::V1)
-            }
             // Added by octos-core v2.0.3-rc.1; no client surface yet, so
             // drop it rather than guess at a rendering. (PeerClosed, added in
             // the same core rev, IS handled above by the peer console.)
@@ -12732,18 +12724,6 @@ impl Store {
                 self.state
                     .pending_loop_attribution
                     .insert(event.session_id.clone());
-                self.state.push_activity(
-                    ActivityItem::new(ActivityKind::Progress, event.loop_id, status)
-                        .with_session(event.session_id.clone()),
-                );
-                None
-            }
-            UiNotification::LoopCompleted(event) => {
-                let status = event.status.clone().unwrap_or_else(|| "completed".into());
-                if let Some(loop_state) = event.loop_state.clone() {
-                    self.state
-                        .upsert_session_loop(&event.session_id, loop_state);
-                }
                 self.state.push_activity(
                     ActivityItem::new(ActivityKind::Progress, event.loop_id, status)
                         .with_session(event.session_id.clone()),
@@ -16742,116 +16722,6 @@ fn hydrated_row_to_message(row: HydratedMessage) -> Message {
         client_message_id: row.client_message_id,
         thread_id: row.thread_id,
         timestamp: row.persisted_at,
-    }
-}
-
-/// Lift a v1 projection envelope into the v2 shape so both wire versions run
-/// through [`Store::apply_envelope_v2`].
-///
-/// The payloads are the same union; v1 only lacks the two things v2 added:
-///
-/// * **No `turn_id`.** The thread IS the turn on the v1 wire (a thread is never
-///   reused — a new turn must use a new `thread_id`), and a live v2 server
-///   projects `turn_id == thread_id` anyway, so the thread id is the faithful
-///   substitute rather than a placeholder.
-/// * **No `assistant_segment_id`.** v1 predates multi-segment assistant
-///   iterations, so every fragment in a thread belongs to one segment; deltas
-///   and the persisted message must agree on the id or the persisted text
-///   opens a second bubble instead of finalizing the streamed one.
-///
-/// `turn_completed` becomes the canonical `TurnTerminal`. v1 has no failure
-/// terminal — an errored turn ends via `turn/failed`, not an envelope — so
-/// `Completed` is the only outcome this can carry.
-fn envelope_v1_as_v2(event: EnvelopeNotification) -> EnvelopeV2Notification {
-    let EnvelopeNotification {
-        session_id,
-        topic,
-        envelope,
-    } = event;
-    let Envelope {
-        thread_id,
-        seq,
-        client_message_id,
-        payload,
-    } = envelope;
-    let segment_id = format!("{thread_id}:assistant:1");
-
-    let payload_v2 = match payload {
-        Payload::UserMessage { text, files } => PayloadV2::UserMessage { text, files },
-        Payload::AssistantDelta { text } => PayloadV2::AssistantDelta {
-            text,
-            assistant_segment_id: segment_id,
-        },
-        Payload::ReasoningDelta { text } => PayloadV2::ReasoningDelta { text },
-        Payload::AssistantPersisted { text, meta } => PayloadV2::AssistantPersisted {
-            text,
-            assistant_segment_id: segment_id,
-            meta,
-        },
-        Payload::ToolStart {
-            tool_call_id,
-            name,
-            arguments_preview,
-        } => PayloadV2::ToolStart {
-            tool_call_id,
-            name,
-            arguments_preview,
-        },
-        Payload::ToolProgress {
-            tool_call_id,
-            message,
-        } => PayloadV2::ToolProgress {
-            tool_call_id,
-            message,
-        },
-        Payload::ToolEnd {
-            tool_call_id,
-            status,
-            error,
-            reason,
-            output_preview,
-            duration_ms,
-        } => PayloadV2::ToolEnd {
-            tool_call_id,
-            status,
-            error,
-            reason,
-            output_preview,
-            duration_ms,
-        },
-        Payload::FileAttached {
-            path,
-            mime,
-            size_bytes,
-        } => PayloadV2::FileAttached {
-            path,
-            mime,
-            size_bytes,
-            // v1 carries no owner; anchor to the thread's sole assistant
-            // segment so the file lands on the bubble it was streamed beside.
-            attachment_owner: AttachmentOwnerV2 {
-                assistant_segment_id: Some(segment_id),
-                tool_call_id: None,
-            },
-        },
-        Payload::TurnCompleted { token_usage } => PayloadV2::TurnTerminal {
-            outcome: TurnTerminalOutcome::Completed,
-            error: None,
-            token_usage: Some(token_usage),
-        },
-    };
-
-    EnvelopeV2Notification {
-        session_id,
-        topic,
-        envelope: EnvelopeV2 {
-            thread_id: thread_id.clone(),
-            seq,
-            cursor: None,
-            turn_id: thread_id,
-            client_message_id,
-            payload: payload_v2,
-        },
     }
 }
 
@@ -21494,6 +21364,8 @@ now analyzing the bus module"
         let session_id = SessionKey("glm:local:tui#research".into());
 
         store.apply_client_event(ClientEvent::SessionHydrate(SessionHydrateResult {
+            replayed_projection_envelopes: None,
+            projection_thread_sequences: None,
             session_id: session_id.clone(),
             cursor: octos_core::ui_protocol::UiCursor {
                 stream: session_id.0.clone(),
@@ -23423,6 +23295,8 @@ now analyzing the bus module"
         store.apply_client_event(ClientEvent::SessionRollback(SessionRollbackResult {
             dropped_turns: 1,
             thread: SessionHydrateResult {
+                replayed_projection_envelopes: None,
+                projection_thread_sequences: None,
                 replayed_tool_envelopes: None,
                 session_id: SessionKey("local:a".into()),
                 cursor: octos_core::ui_protocol::UiCursor {
@@ -23484,6 +23358,8 @@ now analyzing the bus module"
         store.apply_client_event(ClientEvent::SessionRollback(SessionRollbackResult {
             dropped_turns: 1,
             thread: SessionHydrateResult {
+                replayed_projection_envelopes: None,
+                projection_thread_sequences: None,
                 replayed_tool_envelopes: None,
                 session_id: session_id.clone(),
                 cursor: octos_core::ui_protocol::UiCursor {
@@ -23553,6 +23429,8 @@ now analyzing the bus module"
         store.apply_client_event(ClientEvent::SessionRollback(SessionRollbackResult {
             dropped_turns: 2,
             thread: SessionHydrateResult {
+                replayed_projection_envelopes: None,
+                projection_thread_sequences: None,
                 replayed_tool_envelopes: None,
                 session_id: session_id.clone(),
                 cursor: octos_core::ui_protocol::UiCursor {
@@ -34533,22 +34411,44 @@ now analyzing the bus module"
         })
     }
 
-    fn envelope_v1_notification(
+    enum LegacyPayload {
+        AssistantDelta {
+            text: String,
+        },
+        TurnCompleted {
+            token_usage: octos_core::ui_protocol::EnvelopeTokenUsage,
+        },
+    }
+
+    fn legacy_notification(
         session_id: SessionKey,
-        seq: u64,
+        _seq: u64,
         thread_id: &str,
-        payload: Payload,
+        payload: LegacyPayload,
     ) -> UiNotification {
-        UiNotification::Envelope(EnvelopeNotification {
-            session_id,
-            topic: None,
-            envelope: Envelope {
-                thread_id: thread_id.into(),
-                seq,
-                client_message_id: None,
-                payload,
-            },
-        })
+        let turn_id: TurnId =
+            serde_json::from_value(serde_json::json!(thread_id)).expect("legacy turn id is a UUID");
+        match payload {
+            LegacyPayload::AssistantDelta { text } => {
+                UiNotification::MessageDelta(MessageDeltaEvent {
+                    session_id,
+                    topic: None,
+                    turn_id,
+                    text,
+                })
+            }
+            LegacyPayload::TurnCompleted { token_usage } => {
+                UiNotification::TurnCompleted(TurnCompletedEvent {
+                    session_id,
+                    topic: None,
+                    turn_id,
+                    cursor: None,
+                    tokens_in: u32::try_from(token_usage.input_tokens).ok(),
+                    tokens_out: u32::try_from(token_usage.output_tokens).ok(),
+                    session_result: None,
+                })
+            }
+        }
     }
 
     #[test]
@@ -38151,6 +38051,8 @@ now analyzing the bus module"
         assert!(store.state.composer.is_empty());
 
         let result = SessionHydrateResult {
+            replayed_projection_envelopes: None,
+            projection_thread_sequences: None,
             replayed_tool_envelopes: None,
             session_id: session_id.clone(),
             cursor: octos_core::ui_protocol::UiCursor {
@@ -42191,9 +42093,9 @@ now analyzing the bus module"
     #[test]
     fn session_scoped_turnless_events_stamp_their_owning_session() {
         use octos_core::ui_protocol::{
-            AgentArtifactUpdatedEvent, AgentOutputDeltaEvent, LoopCompletedEvent, LoopFiredEvent,
-            LoopUpdatedEvent, RouterFailoverEvent, SessionEventBridgedEvent,
-            TurnSpawnCompleteEvent, UiLoopRecord, WarningEvent,
+            AgentArtifactUpdatedEvent, AgentOutputDeltaEvent, LoopFiredEvent, LoopUpdatedEvent,
+            RouterFailoverEvent, SessionEventBridgedEvent, TurnSpawnCompleteEvent, UiLoopRecord,
+            WarningEvent,
         };
         let mut store = store_with_two_sessions("local:focused", "local:background");
         let background_id = SessionKey("local:background".into());
@@ -42251,19 +42153,6 @@ now analyzing the bus module"
                     fire: None,
                     ok: Some(true),
                     status: Some("fired".into()),
-                }),
-            ),
-            (
-                "loop/completed",
-                UiNotification::LoopCompleted(LoopCompletedEvent {
-                    session_id: background_id.clone(),
-                    profile_id: None,
-                    loop_id: "loop_01".into(),
-                    loop_state: None,
-                    status: Some("completed".into()),
-                    completed_at_ms: Some(3),
-                    result: None,
-                    error: None,
                 }),
             ),
             (
@@ -43145,6 +43034,7 @@ now analyzing the bus module"
         let turn_id = TurnId::new();
         store.apply_client_event(ClientEvent::Autonomy(AutonomyClientEvent {
             result: AutonomyResult::TurnState(TurnStateGetResult {
+                running: None,
                 session_id: SessionKey("local:test".into()),
                 turn_id: turn_id.clone(),
                 state: TurnLifecycleState::Active,
@@ -43259,6 +43149,8 @@ now analyzing the bus module"
         let session_id = store.state.sessions[0].id.clone();
 
         let result = SessionHydrateResult {
+            replayed_projection_envelopes: None,
+            projection_thread_sequences: None,
             replayed_tool_envelopes: None,
             session_id: session_id.clone(),
             cursor: octos_core::ui_protocol::UiCursor {
@@ -43322,6 +43214,8 @@ now analyzing the bus module"
         store.state.pending_autonomy_hydration.clear();
 
         store.apply_client_event(ClientEvent::SessionHydrate(SessionHydrateResult {
+            replayed_projection_envelopes: None,
+            projection_thread_sequences: None,
             session_id: session_id.clone(),
             cursor: octos_core::ui_protocol::UiCursor {
                 stream: session_id.0.clone(),
@@ -43388,6 +43282,8 @@ now analyzing the bus module"
             )
         };
         let result_for = |sid: &SessionKey, msgs| SessionHydrateResult {
+            replayed_projection_envelopes: None,
+            projection_thread_sequences: None,
             replayed_tool_envelopes: None,
             session_id: sid.clone(),
             cursor: UiCursor {
@@ -45353,8 +45249,8 @@ now analyzing the bus module"
         use crate::viewport::ScrollbackTracker;
         use octos_core::ui_protocol::{MessageMeta, UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2};
 
-        const WIRE_TURN: &str = "reconnect-report-turn";
-        const SEGMENT: &str = "reconnect-report-turn:assistant:1";
+        const WIRE_TURN: &str = "9b510fb5-232c-4e9a-910e-409f07415962";
+        const SEGMENT: &str = "9b510fb5-232c-4e9a-910e-409f07415962:assistant:1";
         const REPORT: &str = "Fleet Synthesis Report\n\nOne canonical answer.";
 
         let mut store = store_with_empty_session();
@@ -45386,11 +45282,11 @@ now analyzing the bus module"
 
         // Compatibility v1 starts first, but remains provisional because v2
         // was negotiated. Canonical persistence then takes ownership.
-        store.apply_event(AppUiEvent::Protocol(envelope_v1_notification(
+        store.apply_event(AppUiEvent::Protocol(legacy_notification(
             session_id.clone(),
             1,
             WIRE_TURN,
-            Payload::AssistantDelta {
+            LegacyPayload::AssistantDelta {
                 text: REPORT.into(),
             },
         )));
@@ -45433,6 +45329,8 @@ now analyzing the bus module"
             .expect("session/opened shape");
         store.apply_event(AppUiEvent::Protocol(UiNotification::SessionOpened(opened)));
         store.apply_client_event(ClientEvent::SessionHydrate(SessionHydrateResult {
+            replayed_projection_envelopes: None,
+            projection_thread_sequences: None,
             replayed_tool_envelopes: None,
             session_id: session_id.clone(),
             cursor: UiCursor {
@@ -45490,6 +45388,8 @@ now analyzing the bus module"
             "Allow write_file",
         );
         let result = SessionHydrateResult {
+            replayed_projection_envelopes: None,
+            projection_thread_sequences: None,
             replayed_tool_envelopes: None,
             session_id: session_id.clone(),
             cursor: UiCursor {
@@ -45641,6 +45541,8 @@ now analyzing the bus module"
         );
 
         let result = SessionHydrateResult {
+            replayed_projection_envelopes: None,
+            projection_thread_sequences: None,
             replayed_tool_envelopes: None,
             session_id: session_id.clone(),
             cursor: octos_core::ui_protocol::UiCursor {
@@ -45690,6 +45592,8 @@ now analyzing the bus module"
         let mut store = store_with_empty_session();
         let session_id = store.state.sessions[0].id.clone();
         let result = SessionHydrateResult {
+            replayed_projection_envelopes: None,
+            projection_thread_sequences: None,
             session_id: session_id.clone(),
             cursor: octos_core::ui_protocol::UiCursor {
                 stream: session_id.0.clone(),
@@ -46015,6 +45919,8 @@ now analyzing the bus module"
             payload,
         };
         let result = SessionHydrateResult {
+            replayed_projection_envelopes: None,
+            projection_thread_sequences: None,
             session_id: session_id.clone(),
             cursor: octos_core::ui_protocol::UiCursor {
                 stream: session_id.0.clone(),
@@ -46120,6 +46026,8 @@ now analyzing the bus module"
             payload,
         };
         let make_result = || SessionHydrateResult {
+            replayed_projection_envelopes: None,
+            projection_thread_sequences: None,
             session_id: session_id.clone(),
             cursor: octos_core::ui_protocol::UiCursor {
                 stream: session_id.0.clone(),
@@ -46204,6 +46112,8 @@ now analyzing the bus module"
         );
 
         let result = SessionHydrateResult {
+            replayed_projection_envelopes: None,
+            projection_thread_sequences: None,
             replayed_tool_envelopes: None,
             session_id: session_id.clone(),
             cursor: octos_core::ui_protocol::UiCursor {
@@ -46256,6 +46166,8 @@ now analyzing the bus module"
             );
 
             let result = SessionHydrateResult {
+                replayed_projection_envelopes: None,
+                projection_thread_sequences: None,
                 replayed_tool_envelopes: None,
                 session_id: session_id.clone(),
                 cursor: octos_core::ui_protocol::UiCursor {
@@ -46410,6 +46322,8 @@ now analyzing the bus module"
         turns: Vec<HydratedTurn>,
     ) -> SessionHydrateResult {
         SessionHydrateResult {
+            replayed_projection_envelopes: None,
+            projection_thread_sequences: None,
             replayed_tool_envelopes: None,
             session_id: session_id.clone(),
             cursor: octos_core::ui_protocol::UiCursor {
@@ -46813,6 +46727,8 @@ now analyzing the bus module"
                 .push("queued behind dead turn".into());
 
             let result = SessionHydrateResult {
+                replayed_projection_envelopes: None,
+                projection_thread_sequences: None,
                 replayed_tool_envelopes: None,
                 session_id: session_id.clone(),
                 cursor: octos_core::ui_protocol::UiCursor {
@@ -47002,6 +46918,8 @@ now analyzing the bus module"
         // a full transcript snapshot; a second apply was the double scrollback
         // insert the operator saw).
         let hydrate = SessionHydrateResult {
+            replayed_projection_envelopes: None,
+            projection_thread_sequences: None,
             replayed_tool_envelopes: None,
             session_id: session_id.clone(),
             cursor: octos_core::ui_protocol::UiCursor {
@@ -47474,6 +47392,8 @@ now analyzing the bus module"
         );
         let hydrate = hydrate_result_with_turns(&session_id, vec![]);
         let hydrate = octos_core::ui_protocol::SessionHydrateResult {
+            replayed_projection_envelopes: None,
+            projection_thread_sequences: None,
             pending_questions: Some(vec![question]),
             ..hydrate
         };
@@ -48068,11 +47988,11 @@ now analyzing the bus module"
         };
 
         // The first lane to produce assistant content is v1 streaming.
-        store.apply_event(AppUiEvent::Protocol(envelope_v1_notification(
+        store.apply_event(AppUiEvent::Protocol(legacy_notification(
             session_id.clone(),
             1,
             WIRE_TURN,
-            Payload::AssistantDelta {
+            LegacyPayload::AssistantDelta {
                 text: REPORT_PARTIAL.into(),
             },
         )));
@@ -48101,20 +48021,20 @@ now analyzing the bus module"
             sync(&mut tracker, &store, &mut emitted);
         }
 
-        store.apply_event(AppUiEvent::Protocol(envelope_v1_notification(
+        store.apply_event(AppUiEvent::Protocol(legacy_notification(
             session_id.clone(),
             4,
             WIRE_TURN,
-            Payload::AssistantDelta {
+            LegacyPayload::AssistantDelta {
                 text: REPORT_TAIL.into(),
             },
         )));
         sync(&mut tracker, &store, &mut emitted);
-        store.apply_event(AppUiEvent::Protocol(envelope_v1_notification(
+        store.apply_event(AppUiEvent::Protocol(legacy_notification(
             session_id,
             5,
             WIRE_TURN,
-            Payload::TurnCompleted {
+            LegacyPayload::TurnCompleted {
                 token_usage: octos_core::ui_protocol::EnvelopeTokenUsage::default(),
             },
         )));
@@ -48182,11 +48102,11 @@ now analyzing the bus module"
         };
 
         // The recovered continuation streams over v1 before capabilities land.
-        store.apply_event(AppUiEvent::Protocol(envelope_v1_notification(
+        store.apply_event(AppUiEvent::Protocol(legacy_notification(
             session_id.clone(),
             1,
             WIRE_TURN,
-            Payload::AssistantDelta {
+            LegacyPayload::AssistantDelta {
                 text: REPORT_PARTIAL.into(),
             },
         )));
@@ -48226,20 +48146,20 @@ now analyzing the bus module"
             sync(&mut tracker, &store, &mut emitted);
         }
 
-        store.apply_event(AppUiEvent::Protocol(envelope_v1_notification(
+        store.apply_event(AppUiEvent::Protocol(legacy_notification(
             session_id.clone(),
             4,
             WIRE_TURN,
-            Payload::AssistantDelta {
+            LegacyPayload::AssistantDelta {
                 text: REPORT_TAIL.into(),
             },
         )));
         sync(&mut tracker, &store, &mut emitted);
-        store.apply_event(AppUiEvent::Protocol(envelope_v1_notification(
+        store.apply_event(AppUiEvent::Protocol(legacy_notification(
             session_id,
             5,
             WIRE_TURN,
-            Payload::TurnCompleted {
+            LegacyPayload::TurnCompleted {
                 token_usage: octos_core::ui_protocol::EnvelopeTokenUsage::default(),
             },
         )));
@@ -48278,11 +48198,11 @@ now analyzing the bus module"
                 },
             },
         )));
-        store.apply_event(AppUiEvent::Protocol(envelope_v1_notification(
+        store.apply_event(AppUiEvent::Protocol(legacy_notification(
             session_id,
             2,
             WIRE_TURN,
-            Payload::AssistantDelta {
+            LegacyPayload::AssistantDelta {
                 text: "duplicate legacy answer".into(),
             },
         )));

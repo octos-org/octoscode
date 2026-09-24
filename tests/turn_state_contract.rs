@@ -85,6 +85,7 @@ fn turn_state_result_opens_detail_surface() {
 
     store.apply_client_event(ClientEvent::Autonomy(AutonomyClientEvent {
         result: AutonomyResult::TurnState(TurnStateGetResult {
+            running: None,
             session_id: SessionKey("coding:local:tui#coding".into()),
             turn_id: turn_id.clone(),
             state: TurnLifecycleState::Active,
