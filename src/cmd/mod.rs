@@ -17,6 +17,7 @@ pub mod olp_mcp;
 // Unix-only, so the module is not built elsewhere.
 #[cfg(unix)]
 pub mod olp_runtime_watch_ledger;
+pub mod olp_runtime_watch;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod outer_duty;
 pub mod update;
@@ -26,10 +27,18 @@ use eyre::Result;
 
 use config::{ConfigArgs, ConfigCli};
 use doctor::DoctorArgs;
+use olp_runtime_watch::{OlpRuntimeWatchArgs, OlpRuntimeWatchCli};
 use update::UpdateArgs;
 
 /// Recognized subcommand names. Kept tiny so we never shadow a flag.
-const SUBCOMMANDS: &[&str] = &["update", "doctor", "config", "olp-mcp-serve", "outer-duty"];
+const SUBCOMMANDS: &[&str] = &[
+    "update",
+    "doctor",
+    "config",
+    "olp-mcp-serve",
+    "olp-runtime-watch",
+    "outer-duty",
+];
 
 /// Inspect `argv` (excluding the program name) for a leading subcommand. If the
 /// first non-flag positional is `update`/`doctor`, run it and return its exit
@@ -49,6 +58,7 @@ where
         Some(Route::Doctor(args)) => Ok(Some(doctor::run(args)?)),
         Some(Route::Config(args)) => Ok(Some(config::run(args)?)),
         Some(Route::OlpMcpServe) => Ok(Some(olp_mcp::run())),
+        Some(Route::OlpRuntimeWatch(args)) => Ok(Some(olp_runtime_watch::run(args)?)),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         Some(Route::OuterDuty(args)) => Ok(Some(outer_duty::run(args))),
         Some(Route::UsageError) => Ok(Some(2)),
@@ -66,6 +76,9 @@ enum Route {
     /// `octoscode olp-mcp-serve` — OUTER_LOOP_REVIEW #31: the Rust OLP-MCP
     /// outer-loop server (newline-delimited JSON-RPC over stdio).
     OlpMcpServe,
+    /// `octoscode olp-runtime-watch` — runtime/process/ledger observer;
+    /// observation only: never accepts tasks, never writes boards.
+    OlpRuntimeWatch(OlpRuntimeWatchArgs),
     /// `octoscode outer-duty` — OUTER_LOOP_REVIEW #38: the per-project
     /// session-lifetime OS-exclusive duty lock (hold/check). Linux
     /// (PDEATHSIG) and macOS (guardian process); see OUTER_LOOP_PROTOCOL R7.
@@ -161,6 +174,13 @@ fn route(argv: &[String]) -> Option<Route> {
         "doctor" => Some(Route::Doctor(DoctorCli::parse_from(&sub_argv).into_args())),
         "config" => Some(Route::Config(ConfigCli::parse_from(&sub_argv).into_args())),
         "olp-mcp-serve" => Some(Route::OlpMcpServe),
+        "olp-runtime-watch" => match OlpRuntimeWatchCli::parse_from(&sub_argv).into_args() {
+            Ok(args) => Some(Route::OlpRuntimeWatch(args)),
+            Err(report) => {
+                eprintln!("{report}");
+                Some(Route::UsageError)
+            }
+        },
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         "outer-duty" => match parse_outer_duty_args(&sub_argv[1..]) {
             Ok(args) => Some(Route::OuterDuty(args)),
