@@ -13,6 +13,7 @@ pub mod doctor;
 pub mod github;
 pub mod install_method;
 pub mod olp_mcp;
+pub mod olp_runtime_watch_ledger;
 #[cfg(target_os = "linux")]
 pub mod outer_duty;
 pub mod update;
