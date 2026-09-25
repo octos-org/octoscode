@@ -31,6 +31,60 @@ if [ ! -d "$REPO_ROOT" ] && [ ! -f "$REPO_ROOT" ]; then
     echo "error: repo-root not found: $REPO_ROOT" >&2
     exit 2
 fi
+
+# --- #12c capability preflight (all platforms) ---------------------------
+# Production launches must not depend on the caller remembering
+# scripts/verify.sh (or its PATH). EVERY required capability is validated
+# before ANY write: GNU `stat -c '%s'`, GNU `realpath -m`, `sha256sum`,
+# `flock`, and `python3` (utf8 mode). On Darwin only, a failed probe first
+# tries discovery consistent with verify.sh — brew prefix, then the stock
+# /opt/homebrew and /usr/local coreutils gnubin dirs (nothing installed,
+# no override knob); Linux/other platforms take the PATH as-is so a
+# missing tool (e.g. flock) still fails here. Unusable after discovery ⇒
+# exit 2 with actionable guidance BEFORE state mkdir, lock, or any board
+# write.
+gnu_probe_succeeds() {
+    command -v stat >/dev/null 2>&1 \
+        && stat -c '%s' /dev/null >/dev/null 2>&1 \
+        && command -v realpath >/dev/null 2>&1 \
+        && realpath -m /dev/null >/dev/null 2>&1 \
+        && sha256sum /dev/null >/dev/null 2>&1 \
+        && command -v flock >/dev/null 2>&1 \
+        && python3 -X utf8 -c 'import sys' >/dev/null 2>&1
+}
+
+if ! gnu_probe_succeeds; then
+    if [ "$(uname -s)" = "Darwin" ]; then
+        gnubin=""
+        # Prefer the active brew prefix (any arch / custom location). The
+        # assignment is guarded so a failing brew cannot trip set -e.
+        if command -v brew >/dev/null 2>&1; then
+            candidate="$(brew --prefix coreutils 2>/dev/null || true)"
+            candidate="$candidate/libexec/gnubin"
+            [ -d "$candidate" ] && gnubin="$candidate"
+        fi
+        if [ -z "$gnubin" ]; then
+            for prefix in /opt/homebrew /usr/local; do
+                candidate="$prefix/opt/coreutils/libexec/gnubin"
+                if [ -d "$candidate" ]; then
+                    gnubin="$candidate"
+                    break
+                fi
+            done
+        fi
+        if [ -n "$gnubin" ]; then
+            PATH="$gnubin:$PATH"
+            export PATH
+        fi
+    fi
+    # Re-probe AFTER discovery: only now is availability decided.
+    if ! gnu_probe_succeeds; then
+        echo "error: required tools not usable: GNU stat -c / realpath -m / sha256sum, flock, python3." >&2
+        echo "  Run via scripts/verify.sh, or install once: brew install coreutils" >&2
+        exit 2
+    fi
+fi
+
 REAL_REPO=$(realpath "$REPO_ROOT")
 PROJECT_KEY=$(printf '%s' "$REAL_REPO" | sha256sum | cut -c1-16)
 STATE_DIR="$STATE_ROOT/$PROJECT_KEY"
@@ -67,8 +121,19 @@ hex_of() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
 # the cut splits a UTF-8 sequence mid-character, producing an EVOLUTION.md
 # that does not decode. python3 (already a hard dependency of this script)
 # slices by code points in every locale; -X utf8 pins argv/stdout encoding
-# so PYTHONUTF8=0 / PYTHONCOERCECLOCALE=0 cannot restore locale dependence.
+# so PYTHONUTF8=0 / PYTHONCOERCE_C_LOCALE=0 cannot restore locale dependence.
 char_prefix() { # text limit
+    # Fast path: no truncation needed when the text already fits. ${#s}
+    # counts bytes under LC_ALL=C and characters under UTF-8 locales —
+    # byte count upper-bounds character count, so shell-length <= limit
+    # guarantees the text fits in BOTH regimes; returning it whole is
+    # exact and avoids a python spawn per short card (a 400-card burst
+    # would otherwise pay 400 interpreter startups inside the watcher's
+    # polling window).
+    if [ "${#1}" -le "$2" ]; then
+        printf '%s' "$1"
+        return 0
+    fi
     python3 -X utf8 -c 'import sys; sys.stdout.write(sys.argv[1][:int(sys.argv[2])])' "$1" "$2"
 }
 

@@ -166,6 +166,14 @@ impl Drop for Sandbox {
     }
 }
 
+/// #12c: chmod +x for PATH-stub scripts (portable unix mode set).
+fn make_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perm = std::fs::metadata(path).unwrap().permissions();
+    perm.set_mode(0o755);
+    std::fs::set_permissions(path, perm).unwrap();
+}
+
 fn copy_dir(src: &Path, dst: &Path) {
     std::fs::create_dir_all(dst).unwrap();
     for entry in std::fs::read_dir(src).unwrap() {
@@ -558,6 +566,218 @@ fn olp_evo_harvest_missing_ts_events_dedup_across_reruns() {
     assert_eq!(sb.evo_count(), 1, "ts-less event must dedup on rerun");
 }
 
+/// #12c: GNU capability preflight. With no GNU stat -c / realpath -m
+/// reachable and no usable brew, the script must exit 2 BEFORE any
+/// realpath/sha256sum use, state mkdir, or board write, with actionable
+/// guidance. With GNU capability reachable (PATH or brew discovery), a
+/// DIRECT launch — no scripts/verify.sh PATH fixup — must succeed.
+#[test]
+fn olp_evo_harvest_fails_before_writes_when_gnu_tools_missing() {
+    if !ensure_gnu_tooling_or_skip() {
+        panic!("host lacks required tooling; see stderr");
+    }
+    let sb = Sandbox::new("gnu-miss");
+    let board_text = "### 1. A\n\nACK(blocked): x\n";
+    std::fs::write(sb.repo.join(".octos/OUTER_LOOP_REVIEW.md"), board_text).unwrap();
+
+    // --- negative A: all-platform validation, GNU shapes rejected. The
+    // uname=Linux stub bypasses Darwin discovery entirely, so the probe
+    // result alone decides — deterministic on every host.
+    let stub = sb.root.join("stubs");
+    std::fs::create_dir_all(&stub).unwrap();
+    for (name, body) in [
+        (
+            "stat",
+            "#!/bin/sh\n[ \"$1\" = \"-c\" ] && exit 1\nexec /usr/bin/stat \"$@\"\n",
+        ),
+        (
+            "realpath",
+            "#!/bin/sh\n[ \"$1\" = \"-m\" ] && exit 1\nexec /usr/bin/realpath \"$@\"\n",
+        ),
+        ("uname", "#!/bin/sh\necho Darwin\n"),
+    ] {
+        let p = stub.join(name);
+        std::fs::write(&p, body).unwrap();
+        make_executable(&p);
+    }
+    std::fs::write(stub.join("uname"), "#!/bin/sh\necho Linux\n").unwrap();
+    make_executable(&stub.join("uname"));
+    let run_restricted = |stub_dir: &Path| {
+        Command::new("bash")
+            .arg(script())
+            .arg(&sb.repo)
+            .env("PATH", format!("{}:/usr/bin:/bin", stub_dir.display()))
+            .env("OLP_EVO_STATE", &sb.state_root)
+            .env("OLP_EVO_EVENTS", "")
+            .env("OLP_EVO_MCP_BOARD", "/nonexistent")
+            .output()
+            .unwrap()
+    };
+    let out = run_restricted(&stub);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "missing GNU tools must exit 2: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("coreutils"), "guidance names the fix: {err}");
+    assert!(err.contains("verify.sh") && err.contains("brew"), "{err}");
+    assert!(
+        find_files(&sb.state_root).is_empty(),
+        "zero side effects: state root must stay empty"
+    );
+    assert_eq!(
+        std::fs::read_dir(&sb.state_root)
+            .map(|d| d.count())
+            .unwrap_or(0),
+        0,
+        "state root must contain no entries at all (incl. empty dirs)"
+    );
+    assert!(!sb.evo_board().exists(), "evo board must not be created");
+    assert_eq!(
+        std::fs::read_to_string(sb.repo.join(".octos/OUTER_LOOP_REVIEW.md")).unwrap(),
+        board_text,
+        "review board untouched"
+    );
+
+    // --- negative B: ONLY flock missing (everything else capable) — the
+    // all-platform final validation must still fail BEFORE any write.
+    let ok = sb.root.join("stubs-ok");
+    std::fs::create_dir_all(&ok).unwrap();
+    for (name, body) in [
+        (
+            "stat",
+            "#!/bin/sh\nif [ \"$1\" = \"-c\" ]; then echo 0; exit 0; fi\nexec /usr/bin/stat \"$@\"\n",
+        ),
+        (
+            "realpath",
+            "#!/bin/sh\nif [ \"$1\" = \"-m\" ]; then echo /dev/null; exit 0; fi\nexec /usr/bin/realpath \"$@\"\n",
+        ),
+        (
+            "sha256sum",
+            "#!/bin/sh\necho 0000000000000000000000000000000000000000000000000000000000000000  -\n",
+        ),
+        ("uname", "#!/bin/sh\necho Linux\n"),
+    ] {
+        let p = ok.join(name);
+        std::fs::write(&p, body).unwrap();
+        make_executable(&p);
+    }
+    // flock deliberately NOT provided; the uname=Linux stub means no
+    // Darwin discovery can rescue the run.
+    let out = run_restricted(&ok);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "missing flock must exit 2 before writes: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("flock"), "guidance names flock: {err}");
+    assert!(
+        find_files(&sb.state_root).is_empty(),
+        "zero side effects also on missing-flock path"
+    );
+    assert_eq!(
+        std::fs::read_dir(&sb.state_root)
+            .map(|d| d.count())
+            .unwrap_or(0),
+        0,
+        "missing-flock path must create no entries at all (incl. empty dirs)"
+    );
+
+    // --- positive: direct launch auto-discovers GNU capability ---
+    let gnu_available = cfg!(target_os = "linux")
+        || Path::new("/opt/homebrew/opt/coreutils/libexec/gnubin").is_dir()
+        || Path::new("/usr/local/opt/coreutils/libexec/gnubin").is_dir();
+    if !gnu_available {
+        eprintln!("SKIP (explicit): no GNU coreutils installed; discovery half not runnable");
+        return;
+    }
+    let out = Command::new("bash")
+        .arg(script())
+        .arg(&sb.repo)
+        // No scripts/verify.sh PATH fixup: BSD stat/realpath resolve first
+        // and the script must discover gnubin via brew itself.
+        .env("PATH", "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin")
+        .env("OLP_EVO_STATE", &sb.state_root)
+        .env("OLP_EVO_EVENTS", "")
+        .env("OLP_EVO_MCP_BOARD", "/nonexistent")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "direct launch must auto-discover GNU tools: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(sb.evo_count(), 1, "the trigger still lands a card");
+}
+
+/// #12c: /bin/bash on Darwin is Bash 3.2, which does not support the
+/// `$'\uff08'` escape the old reconcile used. A fullwidth EVO heading
+/// must still reconcile NEXT_ID (state lost after a crash) with no
+/// non-numeric warning and no duplicate cards.
+#[test]
+fn olp_evo_harvest_bash32_parses_fullwidth_evo_heading_and_reconciles() {
+    if !ensure_gnu_tooling_or_skip() {
+        panic!("host lacks required tooling; see stderr");
+    }
+    let sb = Sandbox::new("bash32");
+    let review = sb.repo.join(".octos/OUTER_LOOP_REVIEW.md");
+    std::fs::write(&review, "### 12. A\n\nACK(blocked): fresh trigger\n").unwrap();
+    // Crash aftermath: the board holds EVO-0007 (fullwidth heading) but
+    // the state file was never committed — reconcile must recover 8.
+    std::fs::write(
+        sb.evo_board(),
+        "### EVO-0007（2026-09-25T00:00:00Z，harvest）\n\
+         trigger: ack_blocked\n\
+         source: review old\n\
+         identity: board:old#12#blocked#seed\n\
+         envelope: line=3 offset=0 ts=2026-09-25T00:00:00Z\n\
+         symptom: seeded\n\n",
+    )
+    .unwrap();
+    let run = || {
+        Command::new("/bin/bash")
+            .arg(script())
+            .arg(&sb.repo)
+            .env("OLP_EVO_STATE", &sb.state_root)
+            .env("OLP_EVO_EVENTS", "")
+            .env("OLP_EVO_MCP_BOARD", "/nonexistent")
+            .output()
+            .unwrap()
+    };
+    let out1 = run();
+    assert!(
+        out1.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
+    let err = String::from_utf8_lossy(&out1.stderr);
+    assert!(!err.contains("non-numeric"), "fullwidth id parsed: {err}");
+    let lines = read_lines(sb.evo_board());
+    assert!(
+        lines.iter().any(|l| l.starts_with("### EVO-0008")),
+        "new card must take reconciled next_id 8, headings: {:?}",
+        lines
+            .iter()
+            .filter(|l| l.starts_with("### EVO-"))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| l.starts_with("### EVO-0007"))
+            .count(),
+        1,
+        "seeded card not duplicated"
+    );
+    let out2 = run();
+    assert!(out2.status.success());
+    assert_eq!(sb.evo_count(), 2, "rerun adds zero cards");
+}
+
 /// #12c: under LC_ALL=C the old ${s:0:200} truncation counted BYTES and
 /// split a UTF-8 character mid-sequence, emitting an EVOLUTION.md that does
 /// not decode as UTF-8. The symptom must be cut by Unicode characters
@@ -587,8 +807,8 @@ fn olp_evo_harvest_lc_all_c_long_chinese_symptom_truncates_by_characters() {
     );
     assert_eq!(sb.evo_count(), 1, "long Chinese ACK must harvest one card");
     let board_bytes = std::fs::read(sb.evo_board()).unwrap();
-    let board_text = String::from_utf8(board_bytes)
-        .expect("EVOLUTION.md must decode as UTF-8 under LC_ALL=C");
+    let board_text =
+        String::from_utf8(board_bytes).expect("EVOLUTION.md must decode as UTF-8 under LC_ALL=C");
     let symptom = board_text
         .lines()
         .find(|l| l.starts_with("symptom: "))
@@ -599,7 +819,10 @@ fn olp_evo_harvest_lc_all_c_long_chinese_symptom_truncates_by_characters() {
         "symptom must be at most 200 characters, got {}",
         body.chars().count()
     );
-    assert!(body.contains('中'), "symptom keeps whole characters: {body}");
+    assert!(
+        body.contains('中'),
+        "symptom keeps whole characters: {body}"
+    );
     let out2 = sb.run_env(hostile_env);
     assert!(out2.status.success());
     assert_eq!(sb.evo_count(), 1, "second run must add zero cards");
