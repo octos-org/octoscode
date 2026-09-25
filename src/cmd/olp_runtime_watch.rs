@@ -120,25 +120,60 @@ const PROBE_MAX_OUTPUT: usize = 8 * 1024;
 /// `try_wait` under PROBE_DEADLINE. On timeout the probe child is killed and
 /// reaped — never a watched pid — and `None` is returned. Output is size-
 /// bounded via metadata before a regular-file read.
+/// RAII: from spawn until Drop, any early return (including `?`) kills +
+/// reaps OUR probe child. The watched pid is never touched.
+struct ReapOnDrop(Option<std::process::Child>);
+
+impl ReapOnDrop {
+    fn reap(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+impl Drop for ReapOnDrop {
+    fn drop(&mut self) {
+        self.reap();
+    }
+}
+
 fn bounded_run(mut cmd: Command) -> Option<(std::process::ExitStatus, Vec<u8>, u64)> {
-    let mut out_file = tempfile::tempfile().ok()?;
+    let out_file = tempfile::tempfile().ok()?;
     let err_file = tempfile::tempfile().ok()?;
     let out_fd = out_file.try_clone().ok()?;
     let err_fd = err_file.try_clone().ok()?;
     cmd.stdin(Stdio::null())
         .stdout(Stdio::from(out_fd))
         .stderr(Stdio::from(err_fd));
-    let mut child = cmd.spawn().ok()?;
+    let mut child = ReapOnDrop(Some(cmd.spawn().ok()?));
     let deadline = Instant::now() + PROBE_DEADLINE;
     let status = loop {
-        match child.try_wait() {
+        match child.0.as_mut()?.try_wait() {
             Ok(Some(s)) => break Some(s),
             Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
+                // Deadline: guard Drop reaps our probe child, then Unknown.
+                return None;
             }
-            Ok(None) => std::thread::sleep(PROBE_POLL),
+            Ok(None) => {
+                // In-loop size bound: over-large output or an UNKNOWABLE size
+                // (metadata failure — never assumed empty) => Unknown now.
+                let over = |f: &std::fs::File| {
+                    f.metadata()
+                        .map(|m| m.len() > PROBE_MAX_OUTPUT as u64)
+                        .map_err(|_| ())
+                };
+                if matches!(over(&out_file), Ok(true))
+                    || matches!(over(&err_file), Ok(true))
+                    || over(&out_file).is_err()
+                    || over(&err_file).is_err()
+                {
+                    return None;
+                }
+                std::thread::sleep(PROBE_POLL);
+            }
+            // try_wait failure: Drop reaps before we bail, no orphan.
             Err(_) => return None,
         }
     };
@@ -146,6 +181,7 @@ fn bounded_run(mut cmd: Command) -> Option<(std::process::ExitStatus, Vec<u8>, u
     if out_file.metadata().ok()?.len() as usize > PROBE_MAX_OUTPUT {
         return None;
     }
+    let mut out_file = out_file;
     out_file.seek(std::io::SeekFrom::Start(0)).ok()?;
     let mut raw = Vec::new();
     out_file
@@ -155,7 +191,13 @@ fn bounded_run(mut cmd: Command) -> Option<(std::process::ExitStatus, Vec<u8>, u
     if raw.len() > PROBE_MAX_OUTPUT {
         return None;
     }
-    let err_len = err_file.metadata().map(|m| m.len()).unwrap_or(0);
+    // stderr size must be KNOWABLE, not assumed: metadata failure is a
+    // failed observation (Unknown), never "empty stderr".
+    let err_len = err_file.metadata().ok()?.len();
+    if err_len > PROBE_MAX_OUTPUT as u64 {
+        return None;
+    }
+    child.0 = None; // exited normally; nothing left to reap
     Some((status, raw, err_len))
 }
 
@@ -279,12 +321,14 @@ pub fn herdr_agent_status(name: &str) -> Option<String> {
         return None;
     }
     let value: serde_json::Value = serde_json::from_slice(&raw).ok()?;
-    let agent = value.get("agent")?;
+    // Real envelope: {"id":...,"result":{"agent":{...,"agent_status":...}}};
+    // errors come back as {"error":{...}} with a nonzero exit status.
+    let agent = value.get("result")?.get("agent")?;
     let got = agent.get("name")?.as_str()?;
     if got != name {
         return None;
     }
-    Some(agent.get("status")?.as_str()?.to_string())
+    Some(agent.get("agent_status")?.as_str()?.to_string())
 }
 
 /// Lowercase hex of a digest (used for birth identities; never raw ps text).
@@ -307,18 +351,21 @@ fn probe_json(p: &ProbeState) -> serde_json::Value {
 }
 
 /// One observation cycle's whitelisted NDJSON record.
-fn observation_record(
-    s: &IdentitySnapshot,
-    agent: &ProbeState,
-    backend: &ProbeState,
-    monitors: &[(u32, ProbeState)],
+/// Everything one observation cycle contributes to the snapshot record.
+struct Cycle<'a> {
+    agent: &'a ProbeState,
+    backend: &'a ProbeState,
+    monitors: &'a [(u32, ProbeState)],
     seq: u64,
-    iso_time: &str,
-    agent_status: Option<&str>,
-) -> serde_json::Value {
+    iso_time: &'a str,
+    agent_status: Option<&'a str>,
+    identity_alerts: &'a [u32],
+}
+
+fn observation_record(s: &IdentitySnapshot, c: &Cycle<'_>) -> serde_json::Value {
     json!({
-        "seq": seq,
-        "observation_time": iso_time,
+        "seq": c.seq,
+        "observation_time": c.iso_time,
         "identity": {
             "agent": s.agent,
             "agent_pid": s.agent_pid,
@@ -330,15 +377,24 @@ fn observation_record(
             "task": s.task,
         },
         "task_accepted": false,
-        "agent": probe_json(agent),
-        "backend": probe_json(backend),
-        "monitors": monitors
+        "agent": probe_json(c.agent),
+        "backend": probe_json(c.backend),
+        "monitors": c.monitors
             .iter()
             .map(|(pid, p)| json!({"pid": pid, "state": monitor_probe_json(p)}))
             .collect::<Vec<_>>(),
         "observation_state": "watching",
-        "agent_status": agent_status.unwrap_or("observation_unknown"),
-        "agent_status_advisory": if agent_status.is_some() { "observed" } else { "herdr_unavailable_observation_unknown" },
+        "alerts": c.identity_alerts
+            .iter()
+            .map(|pid| {
+                json!({
+                    "kind": "process_identity_changed",
+                    "pid": pid,
+                })
+            })
+            .collect::<Vec<_>>(),
+        "agent_status": c.agent_status.unwrap_or("observation_unknown"),
+        "agent_status_advisory": if c.agent_status.is_some() { "observed" } else { "herdr_unavailable_observation_unknown" },
     })
 }
 
@@ -453,7 +509,10 @@ pub fn initial_snapshot_json(s: &IdentitySnapshot) -> serde_json::Value {
 pub fn run(args: OlpRuntimeWatchArgs) -> Result<i32> {
     let s = &args.snapshot;
     let mut seq = 0u64;
-    let mut last_birth: Option<String> = None;
+    // First-seen birth baselines for EVERY watched pid (agent, backend,
+    // monitors). A later different birth => process_identity_changed alert;
+    // a missing pid never overwrites its baseline.
+    let mut births: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
     loop {
         seq += 1;
         let agent = probe_pid(s.agent_pid);
@@ -461,29 +520,40 @@ pub fn run(args: OlpRuntimeWatchArgs) -> Result<i32> {
         let monitors: Vec<(u32, ProbeState)> =
             s.monitor_pid.iter().map(|p| (*p, probe_pid(*p))).collect();
         let agent_status = herdr_agent_status(&s.agent);
-        if let ProbeState::Alive(birth) = &agent {
-            if let Some(prev) = &last_birth {
-                if prev != birth {
-                    println!(
-                        "{}",
-                        json!({"seq": seq, "alert": "process_identity_changed", "pid": s.agent_pid, "task_accepted": false})
-                    );
+        // First-seen baseline per pid: entry() inserts ONLY on first sight;
+        // later cycles compare without overwriting, and a missing pid never
+        // touches its baseline.
+        let mut identity_alerts: Vec<u32> = Vec::new();
+        for (pid, state) in std::iter::once((s.agent_pid, &agent))
+            .chain(std::iter::once((s.backend_pid, &backend)))
+            .chain(monitors.iter().map(|(p, s)| (*p, s)))
+        {
+            if let ProbeState::Alive(birth) = state {
+                match births.entry(pid) {
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        slot.insert(birth.clone());
+                    }
+                    std::collections::hash_map::Entry::Occupied(slot) => {
+                        if slot.get() != birth {
+                            identity_alerts.push(pid);
+                            // Deliberately do NOT overwrite the baseline: the
+                            // alert repeats until the outer loop intervenes.
+                        }
+                    }
                 }
             }
-            last_birth = Some(birth.clone());
         }
-        println!(
-            "{}",
-            observation_record(
-                s,
-                &agent,
-                &backend,
-                &monitors,
-                seq,
-                &iso_now(),
-                agent_status.as_deref()
-            )
-        );
+        let iso_time = iso_now();
+        let cycle = Cycle {
+            agent: &agent,
+            backend: &backend,
+            monitors: &monitors,
+            seq,
+            iso_time: &iso_time,
+            agent_status: agent_status.as_deref(),
+            identity_alerts: &identity_alerts,
+        };
+        println!("{}", observation_record(s, &cycle));
         if s.once {
             return Ok(0);
         }
@@ -503,6 +573,56 @@ mod tests {
         let mut v: Vec<&'static str> = vec![];
         let _ = (&b, &l, &mut v);
         v
+    }
+
+    #[test]
+    fn herdr_envelope_parses_agent_status_exact_name() {
+        let ok = br#"{"id":"cli:agent:get","result":{"agent":{"agent":"octoscode","agent_status":"working","name":"inner_x"}},"type":"agent_info"}"#;
+        let v: serde_json::Value = serde_json::from_slice(ok).unwrap();
+        let agent = v.get("result").unwrap().get("agent").unwrap();
+        assert_eq!(agent.get("name").unwrap().as_str(), Some("inner_x"));
+        assert_eq!(agent.get("agent_status").unwrap().as_str(), Some("working"));
+        // Old shape (top-level agent / status) must NOT satisfy the read.
+        let old = br#"{"agent":{"name":"inner_x","status":"working"}}"#;
+        let v2: serde_json::Value = serde_json::from_slice(old).unwrap();
+        assert!(v2.get("result").is_none());
+        // Error envelope has no result.agent and must fail the read.
+        let err = br#"{"error":{"code":"agent_not_found"},"id":"cli:agent:get"}"#;
+        let v3: serde_json::Value = serde_json::from_slice(err).unwrap();
+        assert!(v3.get("result").and_then(|r| r.get("agent")).is_none());
+    }
+
+    #[test]
+    fn parse_ps_listing_accepts_real_shape_and_rejects_garbage() {
+        let self_pid = std::process::id();
+        let real = format!("{self_pid} Fri Sep 25 21:08:03 2026     S   \n");
+        match parse_ps_listing(&real, self_pid) {
+            Some(ProbeState::Alive(birth)) => assert_eq!(birth.len(), 64),
+            other => panic!("expected Alive, got {other:?}"),
+        }
+        // pid mismatch
+        assert!(parse_ps_listing(&real, self_pid + 1).is_none());
+        // STAT-only change must keep the same birth identity (no reuse flag).
+        let running = real.replace("     S   ", "     R   ");
+        let a = parse_ps_listing(&real, self_pid).unwrap();
+        let b = parse_ps_listing(&running, self_pid).unwrap();
+        assert_eq!(a, b);
+        // zombie flag
+        let zomb = format!("{self_pid} Fri Sep 25 21:08:03 2026     Z   \n");
+        assert!(matches!(
+            parse_ps_listing(&zomb, self_pid),
+            Some(ProbeState::Zombie)
+        ));
+        // garbage: two rows, wrong field count, bad month, bad hms
+        assert!(parse_ps_listing(&format!("{real}{real}"), self_pid).is_none());
+        assert!(parse_ps_listing("123 X", 123).is_none());
+        assert!(parse_ps_listing("123 Fri Xop 25 21:08:03 2026 S", 123).is_none());
+        assert!(parse_ps_listing("123 Fri Sep 25 21:8:03 2026 S", 123).is_none());
+        // single-digit day (space-padded lstart collapses) is accepted
+        assert!(matches!(
+            parse_ps_listing("123 Wed Sep  5 01:02:03 2026 S", 123),
+            Some(ProbeState::Alive(_))
+        ));
     }
 
     #[test]
