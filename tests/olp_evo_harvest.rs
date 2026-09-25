@@ -558,6 +558,53 @@ fn olp_evo_harvest_missing_ts_events_dedup_across_reruns() {
     assert_eq!(sb.evo_count(), 1, "ts-less event must dedup on rerun");
 }
 
+/// #12c: under LC_ALL=C the old ${s:0:200} truncation counted BYTES and
+/// split a UTF-8 character mid-sequence, emitting an EVOLUTION.md that does
+/// not decode as UTF-8. The symptom must be cut by Unicode characters
+/// regardless of locale, and a rerun must add zero cards.
+#[test]
+fn olp_evo_harvest_lc_all_c_long_chinese_symptom_truncates_by_characters() {
+    let sb = Sandbox::new("lc-c");
+    let long_zh = "中文采集边界测试".repeat(80);
+    std::fs::write(
+        sb.repo.join(".octos/OUTER_LOOP_REVIEW.md"),
+        format!("### 1. UTF-8 cut probe\n\nACK(blocked): x{long_zh}\n"),
+    )
+    .unwrap();
+    let hostile_env: &[(&str, &str)] = &[
+        ("LC_ALL", "C"),
+        // #12c: hostile Python env must not restore locale-dependent
+        // argv/stdout encoding — the script pins PYTHONUTF8=1 (and -X utf8
+        // in char_prefix) against these.
+        ("PYTHONUTF8", "0"),
+        ("PYTHONCOERCE_C_LOCALE", "0"),
+    ];
+    let out1 = sb.run_env(hostile_env);
+    assert!(
+        out1.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
+    assert_eq!(sb.evo_count(), 1, "long Chinese ACK must harvest one card");
+    let board_bytes = std::fs::read(sb.evo_board()).unwrap();
+    let board_text = String::from_utf8(board_bytes)
+        .expect("EVOLUTION.md must decode as UTF-8 under LC_ALL=C");
+    let symptom = board_text
+        .lines()
+        .find(|l| l.starts_with("symptom: "))
+        .expect("symptom line");
+    let body = &symptom["symptom: ".len()..];
+    assert!(
+        body.chars().count() <= 200,
+        "symptom must be at most 200 characters, got {}",
+        body.chars().count()
+    );
+    assert!(body.contains('中'), "symptom keeps whole characters: {body}");
+    let out2 = sb.run_env(hostile_env);
+    assert!(out2.status.success());
+    assert_eq!(sb.evo_count(), 1, "second run must add zero cards");
+}
+
 /// #41-r5a ④: a non-numeric EVO heading (### EVO-draft) on the board must
 /// not abort reconcile — harvesting still lands cards.
 #[test]

@@ -8,6 +8,13 @@
 # Exit codes: 2 board missing; 70 injected fault; 0 ok; 1 other errors.
 set -euo pipefail
 
+# #12c: pin EVERY python3 child to UTF-8 regardless of LC_ALL / PYTHONUTF8
+# inherited from the caller. Under LC_ALL=C + PYTHONUTF8=0, open() reads
+# and stdout default to ASCII and the state-commit pass dies decoding the
+# very cards this script wrote (EVOLUTION.md is UTF-8 by contract). This
+# export overrides a hostile PYTHONUTF8=0 and needs no installed locale.
+export PYTHONUTF8=1
+
 REPO_ROOT="${1:?usage: olp-evo-harvest.sh <repo-root> [--dry-run]}"
 DRY_RUN=0
 [ "${2:-}" = "--dry-run" ] && DRY_RUN=1
@@ -54,6 +61,16 @@ HARVEST_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 now_rfc3339() { printf '%s' "$HARVEST_TS"; }
 
 hex_of() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
+
+# #12c: truncate by UNICODE CHARACTERS, independent of LC_ALL. Bash
+# ${s:0:N} counts locale "characters" — under LC_ALL=C those are BYTES and
+# the cut splits a UTF-8 sequence mid-character, producing an EVOLUTION.md
+# that does not decode. python3 (already a hard dependency of this script)
+# slices by code points in every locale; -X utf8 pins argv/stdout encoding
+# so PYTHONUTF8=0 / PYTHONCOERCECLOCALE=0 cannot restore locale dependence.
+char_prefix() { # text limit
+    python3 -X utf8 -c 'import sys; sys.stdout.write(sys.argv[1][:int(sys.argv[2])])' "$1" "$2"
+}
 
 file_stat() { stat -c '%d %i' "$1" 2>/dev/null || echo "0 0"; }
 
@@ -149,7 +166,10 @@ harvest_board() { # realpath
             # signed forms report the ORIGINAL line (contract: symptom 取原行前 200 字符)
             local symptom_base=${rest:-$trimmed}
             case $trigger in override|r2_record) symptom_base=$trimmed ;; esac
-            local symptom=${symptom_base:0:200}
+            # #12c: cut by Unicode characters, not locale bytes (LC_ALL=C
+            # would otherwise split a UTF-8 sequence mid-character).
+            local symptom
+            symptom=$(char_prefix "$symptom_base" 200)
             add_candidate "$trigger" review "$rp" "$ident" "$line_no" "$line_off" "$(now_rfc3339)" "$symptom"
         fi
     done < "$BOARD"
@@ -252,7 +272,7 @@ print((r[: m.start()] if m else r)[:80])
             if [ "$kind" = blocked ]; then trigger=report_blocked; else trigger=ask_outer_timeout; fi
             lsha=$(printf '%s' "$line" | sha256sum | cut -d' ' -f1)
             ident="mcp:$rp#$ts#$kind#$ask_id#$lsha"
-            symptom="kind=$kind id=$ask_id reason=${reason:0:80}"
+            symptom="kind=$kind id=$ask_id reason=$(char_prefix "$reason" 80)"
             add_candidate "$trigger" mcp "$rp" "$ident" "$line_no" "$line_off" "$(now_rfc3339)" "$symptom"
         fi
     done < "$MCP_BOARD"
@@ -328,12 +348,18 @@ if [ -f "$EVO_BOARD" ]; then
     while IFS= read -r line; do
         case $line in
             '### EVO-'*)
-                # The id is followed directly by a fullwidth （, not a
-                # space — slice NUMERIC PREFIX ONLY (arithmetic on the
-                # raw remainder is a syntax error that would abort the
-                # whole reconcile loop under set -e).
+                # #12c: extract LEADING DIGITS portably. The previous
+                # ${local_id%%[$'\uff08' ]*} used a \uXXXX escape Bash 3.2
+                # (Darwin /bin/bash) does not support: it produced the
+                # literal 6-char string '\uff08', the fullwidth （ was
+                # never stripped, and reconcile broke. A regex capture of
+                # leading digits works on every bash this script runs under.
                 local_id=${line#\#\#\# EVO-}
-                local_id=${local_id%%[$'\uff08' ]*}
+                if [[ $local_id =~ ^([0-9]+) ]]; then
+                    local_id=${BASH_REMATCH[1]}
+                else
+                    local_id=""
+                fi
                 # 41-r5a ④: a non-numeric id (e.g. `### EVO-draft`) must be
                 # skipped with a warning, never abort the reconcile loop
                 # (`value too great for base` kills set -e scripts).
