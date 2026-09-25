@@ -49,26 +49,37 @@ monitor 进程、真实 UI ledger、任务自有源文件做有界探测，及�
 
 ### Rule: identity-snapshot — 快照验证后冻结，task_accepted 恒 false
 Scenario: 零 PID/坏路径被拒，正常快照不含敏感负载
-  Test: olp_runtime_watch_validates_snapshot_and_never_accepts
+  Test: cmd::olp_runtime_watch::tests::validates_and_freezes_snapshot_unaccepted
+  Test: cmd::olp_runtime_watch::tests::rejects_zero_pid_and_missing_paths
+  Test: empty_task_is_rejected_with_usage_error
+  Test: zero_pid_is_rejected_with_usage_error
+  Test: herdr_stub_real_envelope_surfaces_agent_status_only
   Given 合法进程/文件参数与一个目标 turn
   When 启动
   Then 身份 NDJSON 输出且 task_accepted:false；无置真代码路径
 
 ### Rule: process-probe — 有界 ps 探测，缺失/僵尸/未知三分
 Scenario: 真实子进程终止 => process_missing；探测超时 => unknown 非死亡
-  Test: olp_runtime_watch_alerts_on_agent_exit_and_distinguishes_timeout
+  Test: terminated_agent_is_process_missing_never_acceptance
+  Test: live_agent_alive_and_terminated_monitor_is_watcher_missing
+  Test: real_ps_multi_heartbeat_no_identity_alert
+  Test: identity_change_alert_lives_in_snapshot_and_repeats_per_role
+  Test: hung_herdr_stub_yields_unknown_without_breaking_process_probes
+  Test: herdr_whitelist_done_idle_unknown_and_mismatch_fixtures
+  Test: cmd::olp_runtime_watch::tests::parse_ps_listing_accepts_real_shape_and_rejects_garbage
+  Test: cmd::olp_runtime_watch::tests::herdr_envelope_parses_agent_status_exact_name
   Given 测试自有子进程与 monitor 进程
   When 子进程退出 / 单独 monitor 退出 / 探测超时注入
   Then 分别 process_missing、watcher_missing、observation_unknown；不杀不重启
 
-### Rule: ledger-scan — 目标 turn 过滤与轮转
+### Rule: ledger-scan — 目标 turn 过滤与轮转（PENDING：#8 独立账本模块集成后实现与测试）
 Scenario: 目标 turn 工具失败被告警，旧/异 turn 记录被忽略；滚动后继续
   Test: olp_runtime_watch_target_turn_error_alerted_rotation_followed
   Given 真实形状 JSONL（event.session_id/event.turn_id 嵌套）
   When 目标 turn tool_completed success=false；轮转到同父目录后继
   Then 告警含 kind+身份；后继被增量跟踪；部分行保留；无 reasoning/preview 输出
 
-### Rule: stall-detection — 事件持续但文件不变 => stalled_no_progress
+### Rule: stall-detection — 事件持续但文件不变 => stalled_no_progress（PENDING：文件哈希/Git HEAD 进度接入后实现与测试）
 Scenario: 重复读事件+哈希不变触发停滞；真实字节变更重置
   Test: olp_runtime_watch_stall_and_progress_reset
   Given progress-file 与持续事件流
@@ -77,6 +88,8 @@ Scenario: 重复读事件+哈希不变触发停滞；真实字节变更重置
 
 ### Rule: never-accept — Done/ACK 也不自接受
 Scenario: Done 无证据、或存在有效 ACK
-  Test: olp_runtime_watch_done_and_ack_never_self_accept
+  Test: herdr_whitelist_done_idle_unknown_and_mismatch_fixtures
+  Test: terminated_agent_is_process_missing_never_acceptance
+  Pending: 板面有效 ACK 存在时也不自接受（待 ledger/ACK 观测集成，#8 后）
   When ledger 出现 Done/turn 完成/板上已有 ACK
   Then 仅 awaiting_review/completion_unverified，task_accepted 仍 false

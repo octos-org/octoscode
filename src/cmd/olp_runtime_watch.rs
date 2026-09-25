@@ -248,13 +248,14 @@ fn parse_ps_listing(line: &str, want: u32) -> Option<ProbeState> {
         return None;
     }
     let stat = fields[6];
-    if !stat.chars().all(|c| {
-        matches!(
-            c,
-            'R' | 'S' | 'U' | 'I' | 'Z' | '+' | 's' | 'l' | 'W' | 'X' | 'T' | 'N' | 'L' | 'J'
-        )
-    }) || stat.is_empty()
-    {
+    // STAT grammar: exactly one leading state char, then 0+ modifiers.
+    // A bare modifier ('+' alone) or an unknown char rejects the row.
+    let mut stat_chars = stat.chars();
+    let first = stat_chars.next()?;
+    if !matches!(first, 'R' | 'S' | 'U' | 'I' | 'Z' | 'T' | 'W' | 'X') {
+        return None;
+    }
+    if !stat_chars.all(|c| matches!(c, '+' | 's' | 'l' | 'N' | 'L' | 'J')) {
         return None;
     }
     // lstart is five fixed-width C-locale fields; validate the shape of the
@@ -280,24 +281,27 @@ fn parse_ps_listing(line: &str, want: u32) -> Option<ProbeState> {
     ) {
         return None;
     }
-    let date_num: u32 = if (1..=2).contains(&date.len()) && date.chars().all(|c| c.is_ascii_digit())
-    {
-        date.parse().ok()?
-    } else {
-        return None;
-    };
-    if !(1..=31).contains(&date_num) {
-        return None;
-    }
+    // lstart is fixed-width; each of HH/MM/SS must be exactly 2 digits.
+    // (chrono's %H:%M:%S tolerates single digits, so enforce width here.)
     let hms_parts: Vec<&str> = hms.split(':').collect();
     if hms_parts.len() != 3
-        || !hms_parts
+        || hms_parts
             .iter()
-            .all(|p| p.len() == 2 && p.chars().all(|c| c.is_ascii_digit()))
+            .any(|p| p.len() != 2 || !p.chars().all(|c| c.is_ascii_digit()))
     {
         return None;
     }
-    if year.len() != 4 || !year.chars().all(|c| c.is_ascii_digit()) {
+    // Build the instant with chrono (real calendar: rejects Feb 31, 99:99:99,
+    // month/day/time out of range) — no hand-rolled year math.
+    let date_padded = format!("{:0>2}", date);
+    let dt = chrono::NaiveDateTime::parse_from_str(
+        &format!("{year}-{mon}-{date_padded}T{hms}"),
+        "%Y-%b-%dT%H:%M:%S",
+    )
+    .ok()?;
+    // Cross-check ps's weekday token against the real calendar weekday.
+    let real_dow = dt.format("%a").to_string();
+    if real_dow != day {
         return None;
     }
     let lstart = format!("{day} {mon} {date} {hms} {year}");
@@ -313,22 +317,70 @@ fn parse_ps_listing(line: &str, want: u32) -> Option<ProbeState> {
 /// EXACT agent-name match, and expose ONLY the status string — never stdout
 /// payload or stderr. Unavailable/malformed/timeout => None (advisory
 /// observation_unknown; no crash, no kill, never aborts other probes).
-pub fn herdr_agent_status(name: &str) -> Option<String> {
+/// Known Herdr agent_status values (live-calibrated: working/done observed
+/// on real agents; starting/idle are the documented remainder). Anything
+/// else is an UNKNOWN observation — never echoed back (no string leak).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentStatus {
+    Working,
+    Done,
+    Idle,
+    Starting,
+}
+
+/// Classified Herdr agent status for one observation cycle: a terminal
+/// Done/Idle is completion-UNVERIFIED (awaiting outer review), never
+/// acceptance; unknown values / probe failures are Unknown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentObservation {
+    Working,
+    /// Herdr reports a terminal state — task completion still unverified.
+    CompletionUnverifiedAwaitingReview,
+    Starting,
+    Unknown,
+}
+
+pub fn herdr_agent_status(name: &str) -> AgentObservation {
     let mut cmd = Command::new("herdr");
     cmd.args(["agent", "get", name]);
-    let (status, raw, err_len) = bounded_run(cmd)?;
+    let Some((status, raw, err_len)) = bounded_run(cmd) else {
+        return AgentObservation::Unknown;
+    };
     if !status.success() || err_len > 0 {
-        return None;
+        return AgentObservation::Unknown;
     }
-    let value: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&raw) else {
+        return AgentObservation::Unknown;
+    };
     // Real envelope: {"id":...,"result":{"agent":{...,"agent_status":...}}};
     // errors come back as {"error":{...}} with a nonzero exit status.
-    let agent = value.get("result")?.get("agent")?;
-    let got = agent.get("name")?.as_str()?;
-    if got != name {
-        return None;
+    let Some(agent) = value.get("result").and_then(|r| r.get("agent")) else {
+        return AgentObservation::Unknown;
+    };
+    // EXACT name match required; a mismatched reply is not this agent.
+    if agent.get("name").and_then(|n| n.as_str()) != Some(name) {
+        return AgentObservation::Unknown;
     }
-    Some(agent.get("agent_status")?.as_str()?.to_string())
+    // Whitelist: only known values pass through; the raw string is never
+    // emitted, so an unexpected value cannot leak into NDJSON.
+    match agent.get("agent_status").and_then(|s| s.as_str()) {
+        Some("working") => AgentObservation::Working,
+        Some("done") | Some("idle") => AgentObservation::CompletionUnverifiedAwaitingReview,
+        Some("starting") => AgentObservation::Starting,
+        _ => AgentObservation::Unknown,
+    }
+}
+
+fn agent_status_json(o: &AgentObservation) -> serde_json::Value {
+    match o {
+        AgentObservation::Working => json!({"state": "working"}),
+        AgentObservation::CompletionUnverifiedAwaitingReview => json!({
+            "state": "completion_unverified",
+            "disposition": "awaiting_review",
+        }),
+        AgentObservation::Starting => json!({"state": "starting"}),
+        AgentObservation::Unknown => json!({"state": "observation_unknown"}),
+    }
 }
 
 /// Lowercase hex of a digest (used for birth identities; never raw ps text).
@@ -358,7 +410,7 @@ struct Cycle<'a> {
     monitors: &'a [(u32, ProbeState)],
     seq: u64,
     iso_time: &'a str,
-    agent_status: Option<&'a str>,
+    agent_status: &'a AgentObservation,
     identity_alerts: &'a [u32],
 }
 
@@ -383,7 +435,12 @@ fn observation_record(s: &IdentitySnapshot, c: &Cycle<'_>) -> serde_json::Value 
             .iter()
             .map(|(pid, p)| json!({"pid": pid, "state": monitor_probe_json(p)}))
             .collect::<Vec<_>>(),
-        "observation_state": "watching",
+        "observation_state": match c.agent_status {
+            AgentObservation::CompletionUnverifiedAwaitingReview => {
+                "awaiting_review"
+            }
+            _ => "watching",
+        },
         "alerts": c.identity_alerts
             .iter()
             .map(|pid| {
@@ -393,8 +450,11 @@ fn observation_record(s: &IdentitySnapshot, c: &Cycle<'_>) -> serde_json::Value 
                 })
             })
             .collect::<Vec<_>>(),
-        "agent_status": c.agent_status.unwrap_or("observation_unknown"),
-        "agent_status_advisory": if c.agent_status.is_some() { "observed" } else { "herdr_unavailable_observation_unknown" },
+        "agent_status": agent_status_json(c.agent_status),
+        "agent_status_advisory": match c.agent_status {
+            AgentObservation::Unknown => "herdr_unavailable_or_unknown_value",
+            _ => "observed",
+        },
     })
 }
 
@@ -550,7 +610,7 @@ pub fn run(args: OlpRuntimeWatchArgs) -> Result<i32> {
             monitors: &monitors,
             seq,
             iso_time: &iso_time,
-            agent_status: agent_status.as_deref(),
+            agent_status: &agent_status,
             identity_alerts: &identity_alerts,
         };
         println!("{}", observation_record(s, &cycle));
@@ -618,9 +678,23 @@ mod tests {
         assert!(parse_ps_listing("123 X", 123).is_none());
         assert!(parse_ps_listing("123 Fri Xop 25 21:08:03 2026 S", 123).is_none());
         assert!(parse_ps_listing("123 Fri Sep 25 21:8:03 2026 S", 123).is_none());
-        // single-digit day (space-padded lstart collapses) is accepted
+        // single-digit day (space-padded lstart collapses) accepted, with
+        // the REAL weekday (2026-09-05 was a Saturday).
         assert!(matches!(
-            parse_ps_listing("123 Wed Sep  5 01:02:03 2026 S", 123),
+            parse_ps_listing("123 Sat Sep  5 01:02:03 2026 S", 123),
+            Some(ProbeState::Alive(_))
+        ));
+        // weekday/calendar mismatch (Sep 5 2026 is Sat, not Wed) rejected
+        assert!(parse_ps_listing("123 Wed Sep  5 01:02:03 2026 S", 123).is_none());
+        // impossible calendar date rejected via chrono (Feb 31 does not exist)
+        assert!(parse_ps_listing("123 Wed Feb 31 01:02:03 2026 S", 123).is_none());
+        // out-of-range time rejected (99:99:99)
+        assert!(parse_ps_listing("123 Fri Sep 25 99:99:99 2026 S", 123).is_none());
+        // bare modifier without a leading state char rejected
+        assert!(parse_ps_listing("123 Fri Sep 25 21:08:03 2026 +", 123).is_none());
+        // modifier combinations still valid states
+        assert!(matches!(
+            parse_ps_listing("123 Fri Sep 25 21:08:03 2026 Ss+", 123),
             Some(ProbeState::Alive(_))
         ));
     }
