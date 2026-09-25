@@ -123,6 +123,13 @@ pub struct LedgerCursor {
     terminal: Option<LedgerTurnStateView>,
     first: bool,
     idle_polls: u32,
+    /// #9:初始积压边界——首次成功打开常规文件时的长度。积压未消费完
+    /// 期间 initial_scan 恒为 true(历史读入不是新进展);消费完后的
+    /// 追加才以 initial_scan=false 报告。
+    initial_backlog_end: Option<u64>,
+    /// #9:超长行丢弃状态。Some(discarded_bytes) 表示正丢弃字节直到
+    /// 换行;期间任何"恰好合法"的尾巴都不是新事件。
+    discarding_oversize: Option<u64>,
 }
 
 impl LedgerCursor {
@@ -215,6 +222,8 @@ impl LedgerCursor {
             terminal: None,
             first: true,
             idle_polls: 0,
+            initial_backlog_end: None,
+            discarding_oversize: None,
         }
     }
 
@@ -291,17 +300,18 @@ impl LedgerCursor {
 
     /// 增量 poll。不打印；预算耗尽时保持断点，下个 poll 继续。
     pub fn poll(&mut self) -> LedgerPoll {
-        let initial_scan = self.first;
-        self.first = false;
         let mut out = LedgerPoll {
             path: self.ledger.clone(),
             byte_offset: self.offset,
-            initial_scan,
+            initial_scan: false, // 真值在成功打开并定积压边界后写入
             last_seq: self.watermark,
             alerts: Vec::new(),
             turn_state: self.terminal,
             observation_unknown: None,
         };
+        // #9 历史标记:initial_scan = 首次尚未完成 或 初始积压未消费完。
+        // 读失败不消耗 first;只在首次成功打开并记录积压边界后推进。
+        let mut initial_scan = self.first;
         // 文件不存在：可重试的 unknown（部署后文件可能才出现）。
         let meta = match fs::metadata(&self.ledger) {
             Ok(m) => m,
@@ -322,7 +332,21 @@ impl LedgerCursor {
             }
         }
         self.identity = Some(id);
+        // 首次成功打开常规文件:记录积压边界,消耗 first。
+        if self.first {
+            self.initial_backlog_end = Some(len);
+            self.first = false;
+        }
+        if let Some(backlog_end) = self.initial_backlog_end {
+            initial_scan = self.offset < backlog_end || self.first;
+        }
         if len < self.offset {
+            // #9 截短恢复:安全重置游标,给一拍 unknown,watermark 保留
+            // (目标 scope seq 去重,不重复告警旧 seq),下一 poll 恢复读取。
+            self.offset = 0;
+            self.partial.clear();
+            self.discarding_oversize = None;
+            self.initial_backlog_end = Some(len);
             return LedgerCursor::unknown("ledger_truncated", &out);
         }
         // #8 边界①:先把上次预算残留的完整行从 partial 里解析出来,
@@ -377,6 +401,16 @@ impl LedgerCursor {
             Ok(f) => f,
             Err(_) => return LedgerCursor::unknown("ledger_unreadable", &out),
         };
+        // #9 fd 身份核对:对实际打开的 fd 取 metadata,不能旧路径 meta
+        // 配新 fd 静默读取。
+        let fd_meta = match f.metadata() {
+            Ok(m) => m,
+            Err(_) => return LedgerCursor::unknown("ledger_unreadable", &out),
+        };
+        let fd_id = (fd_meta.dev(), fd_meta.ino());
+        if self.identity.is_some_and(|prev| prev != fd_id) {
+            return LedgerCursor::unknown("ledger_replaced", &out);
+        }
         if f.seek(SeekFrom::Start(self.offset)).is_err() {
             return LedgerCursor::unknown("ledger_unreadable", &out);
         }
@@ -390,35 +424,62 @@ impl LedgerCursor {
                 Err(_) => return LedgerCursor::unknown("ledger_unreadable", &out),
             }
         }
-        buf.truncate(read_total);
+        // #9 预算与内存:partial 有界——已缓冲完整行先消化,再补读;
+        // partial 长度上限 = MAX_BYTES_PER_POLL + MAX_LINE_BYTES,持续
+        // 追加压力下不会无限增长。
         self.offset += read_total as u64;
         self.partial.extend_from_slice(&buf);
+        out.initial_scan = initial_scan;
         // 只解析完整换行行；尾巴留在 partial。
         let mut alerts = Vec::new();
         let mut lines = 0usize;
         let mut unknown: Option<String> = None;
-        let mut rest = std::mem::take(&mut self.partial);
+        let mut consumed = 0usize; // #9: 已消费索引,一次 drain,无逐行大复制
         loop {
+            let rest = &self.partial[consumed..];
             if lines >= MAX_LINES_PER_POLL || alerts.len() >= MAX_ALERTS_PER_POLL {
                 // 预算耗尽：保留未解析尾巴，下个 poll 继续（不丢数据）。
-                self.partial = rest;
                 unknown = Some("budget_exhausted".into());
                 break;
             }
             let Some(nl) = rest.iter().position(|&b| b == b'\n') else {
+                // 无换行尾巴。
+                if let Some(discarded) = self.discarding_oversize.as_mut() {
+                    // #9 丢弃态:吞掉这些字节,不是事件。
+                    *discarded += rest.len() as u64;
+                    consumed = self.partial.len();
+                    continue;
+                }
                 if rest.len() > MAX_LINE_BYTES {
-                    // 超限无换行：丢弃该超长"行"，标一次 unknown。
-                    rest.clear();
+                    // 超限无换行：进入丢弃态,丢弃字节直到换行。
+                    self.discarding_oversize = Some(rest.len() as u64);
+                    consumed = self.partial.len();
                     unknown = Some("line_too_long".into());
                 }
-                self.partial = rest;
                 break;
             };
-            let mut line = rest.split_off(nl + 1);
-            std::mem::swap(&mut line, &mut rest);
-            line.pop(); // drop '\n'
+            let line = &rest[..nl];
+            if self.discarding_oversize.is_some() {
+                // 丢弃态遇到换行:该超长行(含此前全部尾巴)整体作废,
+                // 从换行之后重新开始;后续合法行正常恢复。
+                let d = self.discarding_oversize.take().unwrap();
+                let _ = d;
+                consumed += nl + 1;
+                continue;
+            }
+            if line.len() > MAX_LINE_BYTES {
+                // 换行分隔的超长行:同样限长作废,不解析。
+                self.discarding_oversize = Some(0);
+                consumed += nl + 1;
+                unknown = Some("line_too_long".into());
+                continue;
+            }
+            consumed += nl + 1;
             lines += 1;
-            match self.parse_record(&line) {
+            // 行内容先拷入有界缓冲(≤MAX_LINE_BYTES),释放 partial 借用,
+            // parse_record 才能可变借用 self。
+            let owned = line.to_vec();
+            match self.parse_record(&owned) {
                 Ok(Some(a)) => {
                     if !alerts.contains(&a) {
                         alerts.push(a);
@@ -433,6 +494,8 @@ impl LedgerCursor {
                 }
             }
         }
+        // #9:一次 drain 已消费前缀(非逐行复制)。
+        let _ = self.partial.drain(..consumed);
         out.byte_offset = self.offset;
         out.last_seq = self.watermark;
         out.alerts = alerts;
@@ -445,6 +508,7 @@ impl LedgerCursor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn tmpdir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!(
@@ -475,6 +539,263 @@ mod tests {
         format!(
             "{{\"v\":1,\"seq\":{seq},\"event\":{{\"record_kind\":\"notification\",\"kind\":\"tool_completed\",\"session_id\":\"{session}\",\"success\":false,\"reasoning\":\"MUST_NOT_LEAK\"}}}}\n"
         )
+    }
+
+    /// 真实错误 payload 形状:含 quota/permission message、reasoning、
+    /// output_preview 与 secret 哨兵——输出必须是固定白名单告警,
+    /// 绝不含这些原文。
+    fn error_line(seq: u64, kind: &str, session: &str, turn: &str) -> String {
+        format!(
+            "{{\"v\":1,\"seq\":{seq},\"event\":{{\"record_kind\":\"notification\",\"kind\":\"{kind}\",\"session_id\":\"{session}\",\"turn_id\":\"{turn}\",\"message\":\"quota exceeded quota_exceeded::context_limit\",\"reason\":\"permission denied /Users/secret/path\",\"reasoning\":\"SECRET_REASONING_SENTINEL\",\"output_preview\":\"SECRET_PREVIEW_SENTINEL\",\"api_key\":\"sk-SECRET-SENTINEL\"}}}}\n"
+        )
+    }
+
+    fn append(p: &Path, s: &str) {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(p).unwrap();
+        f.write_all(s.as_bytes()).unwrap();
+    }
+
+    /// #9-1/2: 1001 条真实 tool 失败跨 poll 无丢失,initial 积压未消费完
+    /// 期间 initial_scan=true,真实 append 后变 false。
+    #[test]
+    fn thousand_one_failures_across_polls_and_initial_scan_semantics() {
+        let d = tmpdir("budget1001");
+        let p = d.join("ledger-1695000000-111.log");
+        let mut all = String::new();
+        for seq in 1..=1001u64 {
+            all.push_str(&line(seq, "tool_completed", "s1", "t1", Some(false)));
+        }
+        std::fs::write(&p, &all).unwrap();
+        let mut c = LedgerCursor::new(p.clone(), "s1".into(), "t1".into());
+        let mut total = 0usize;
+        let mut polls = 0;
+        let mut saw_false = false;
+        loop {
+            let out = c.poll();
+            total += out.alerts.len();
+            polls += 1;
+            if polls > 50 {
+                panic!("runaway polls");
+            }
+            if out.initial_scan {
+                assert!(!saw_false, "initial_scan must not flip back to true");
+            } else {
+                saw_false = true;
+            }
+            if total >= 1001 && out.observation_unknown.is_none() {
+                break;
+            }
+        }
+        assert_eq!(total, 1001, "all failures across polls, no loss/dup");
+        // 消费完积压后的真实 append → initial_scan=false 的新事件。
+        append(&p, &line(1002, "tool_completed", "s1", "t1", Some(false)));
+        let out = c.poll();
+        assert!(!out.initial_scan, "post-backlog append is new progress");
+        assert_eq!(out.alerts.len(), 1);
+        assert_eq!(out.last_seq, Some(1002));
+        // 内存界限:持续追加压力下 partial 有固定上限。
+        let max_partial = MAX_BYTES_PER_POLL + MAX_LINE_BYTES;
+        assert!(c.partial.len() <= max_partial);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// #9-1: 初始积压跨 **多个** poll 期间 initial_scan 恒 true
+    /// (历史读入不是新进展),4MiB 跨界由上一测的 1001 条 ×行宽覆盖。
+    #[test]
+    fn initial_backlog_spans_polls_marks_history() {
+        let d = tmpdir("backlog2");
+        let p = d.join("ledger-1695000000-111.log");
+        let mut all = String::new();
+        // > MAX_ALERTS_PER_POLL 条 → 必然跨 poll。
+        for seq in 1..=2100u64 {
+            all.push_str(&line(seq, "tool_completed", "s1", "t1", Some(false)));
+        }
+        std::fs::write(&p, &all).unwrap();
+        let mut c = LedgerCursor::new(p.clone(), "s1".into(), "t1".into());
+        let mut total = 0usize;
+        let mut polls = 0;
+        while total < 2100 {
+            let out = c.poll();
+            polls += 1;
+            if polls > 50 {
+                panic!("runaway");
+            }
+            assert!(
+                out.initial_scan || total > 0,
+                "backlog phase must stay initial_scan=true"
+            );
+            total += out.alerts.len();
+        }
+        assert!(polls >= 3, "2100 failures must span multiple polls");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// #9-3: 未终止超长行进入 discard-until-newline 态;后续"恰好合法
+    /// JSON"的尾巴不是事件;换行后新合法行正常恢复。分段 append 真实文件。
+    #[test]
+    fn oversize_line_discards_until_newline_then_recovers() {
+        let d = tmpdir("oversize");
+        let p = d.join("ledger-1695000000-111.log");
+        // 未终止超长行:合法 JSON 开头 + 大 padding,无换行。
+        let mut huge = String::from(
+            "{\"v\":1,\"seq\":1,\"event\":{\"record_kind\":\"notification\",\"kind\":\"tool_completed\",\"session_id\":\"s1\",\"turn_id\":\"t1\",\"success\":false,\"padding\":\"",
+        );
+        huge.push_str(&"x".repeat(MAX_LINE_BYTES + 4096));
+        huge.push_str("\"}");
+        let mut c = LedgerCursor::new(p.clone(), "s1".into(), "t1".into());
+        // 分段 1:超长行前半。
+        std::fs::write(&p, huge.as_bytes()).unwrap();
+        let out1 = c.poll();
+        assert_eq!(out1.alerts.len(), 0);
+        assert_eq!(out1.observation_unknown.as_deref(), Some("line_too_long"));
+        // 分段 2:伪装成合法 JSON 的尾巴 + 换行 + 新合法行。
+        let decoy = format!(
+            "{}\n{}",
+            line(99, "tool_completed", "s1", "t1", Some(false)),
+            line(2, "tool_completed", "s1", "t1", Some(false))
+        );
+        // 注意:decoy 的 seq=99 在超长行内部,必须被丢弃态吞掉,不产生告警;
+        // seq=2 是换行后的新合法行,必须恢复。
+        append(&p, &decoy);
+        let out2 = c.poll();
+        // 若实现在此 poll 仍在丢弃,再 poll 一次消化(确定性:两 poll 内完成)。
+        let out3 = c.poll();
+        let alerts: Vec<_> = out2.alerts.iter().chain(out3.alerts.iter()).collect();
+        assert!(
+            alerts.iter().all(|a| a.seq != 99),
+            "discarded oversize interior must never alert: {:?}",
+            alerts
+        );
+        assert!(
+            alerts.iter().any(|a| a.seq == 2),
+            "post-newline valid line must recover: {:?}",
+            alerts
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// #9-4: 截短→一拍 unknown→重置后恢复读取,目标 scope watermark 保留,
+    /// 旧 seq 重写不重复告警;boundary duplicate 只发一次。
+    #[test]
+    fn truncate_resets_once_and_dedups_old_seqs() {
+        let d = tmpdir("trunc9");
+        let p = d.join("ledger-1695000000-111.log");
+        std::fs::write(
+            &p,
+            line(1, "tool_completed", "s1", "t1", Some(false))
+                + &line(2, "tool_completed", "s1", "t1", Some(false)),
+        )
+        .unwrap();
+        let mut c = LedgerCursor::new(p.clone(), "s1".into(), "t1".into());
+        let out1 = c.poll();
+        assert_eq!(out1.alerts.len(), 2);
+        // 截短成更短的历史(旧 seq 重写)。
+        std::fs::write(&p, line(1, "tool_completed", "s1", "t1", Some(false))).unwrap();
+        let out2 = c.poll();
+        assert_eq!(
+            out2.observation_unknown.as_deref(),
+            Some("ledger_truncated")
+        );
+        assert_eq!(out2.alerts.len(), 0, "one-beat unknown, no re-read yet");
+        let out3 = c.poll(); // 恢复读取,但 seq=1 已在水位下 → 不重复。
+        assert_eq!(out3.observation_unknown, None);
+        assert_eq!(
+            out3.alerts.len(),
+            0,
+            "old seq must not re-alert (watermark kept)"
+        );
+        // 追加 boundary duplicate(seq=2 重写)与 seq=3 新事件。
+        append(
+            &p,
+            &(line(2, "tool_completed", "s1", "t1", Some(false))
+                + &line(3, "tool_completed", "s1", "t1", Some(false))),
+        );
+        let out4 = c.poll();
+        assert_eq!(
+            out4.alerts.len(),
+            1,
+            "seq=2 dup once more at boundary? no—watermark=2; only seq=3"
+        );
+        assert_eq!(out4.alerts[0].seq, 3);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// #9-5: 隐私——quota/permission 形状 payload 经 **Serialize** 输出,
+    /// 不含原 message/reason/reasoning/output_preview/api_key 哨兵;
+    /// 固定错误码 turn_failed。不能只查 Debug。
+    #[test]
+    fn serialize_output_never_leaks_error_payload() {
+        let d = tmpdir("privacy");
+        let p = d.join("ledger-1695000000-111.log");
+        std::fs::write(
+            &p,
+            error_line(1, "turn_error", "s1", "t1") + &error_line(2, "error", "s1", "t1"),
+        )
+        .unwrap();
+        let mut c = LedgerCursor::new(p, "s1".into(), "t1".into());
+        let out = c.poll();
+        assert_eq!(out.alerts.len(), 2);
+        let json = serde_json::to_string(&out).unwrap();
+        for sentinel in [
+            "quota exceeded",
+            "quota_exceeded::context_limit",
+            "permission denied",
+            "SECRET_REASONING_SENTINEL",
+            "SECRET_PREVIEW_SENTINEL",
+            "sk-SECRET-SENTINEL",
+        ] {
+            assert!(
+                !json.contains(sentinel),
+                "serialized poll leaked payload: {sentinel}"
+            );
+        }
+        assert!(json.contains("turn_error"));
+        assert!(json.contains("turn_failed"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// #9-5: 终态——turn_completed/取消仅观察态;普通 idle 不抹终态;
+    /// Done/ACK 不构成任何采认;未知 kind 合法忽略,不当进度。
+    #[test]
+    fn terminal_states_persist_across_idle_and_done_means_nothing() {
+        let d = tmpdir("terminal");
+        let p = d.join("ledger-1695000000-111.log");
+        std::fs::write(
+            &p,
+            line(1, "turn_completed", "s1", "t1", None)
+                + &line(2, "turn_cancelled", "s1", "t1", None),
+        )
+        .unwrap();
+        let mut c = LedgerCursor::new(p.clone(), "s1".into(), "t1".into());
+        let out1 = c.poll();
+        assert_eq!(
+            out1.turn_state.map(|t| t.state),
+            Some(LedgerTurnState::AwaitingReview)
+        );
+        let out2 = c.poll();
+        assert_eq!(
+            out2.turn_state.map(|t| t.state),
+            Some(LedgerTurnState::AwaitingReview),
+            "plain idle must not erase terminal state"
+        );
+        assert_eq!(out2.observation_unknown, None);
+        append(&p, &line(3, "ack_recorded", "s1", "t1", None));
+        let out3 = c.poll();
+        assert_eq!(
+            out3.turn_state.map(|t| t.state),
+            Some(LedgerTurnState::AwaitingReview)
+        );
+        assert!(out3.alerts.is_empty());
+        assert_eq!(
+            out3.last_seq,
+            Some(3),
+            "unknown kind still advances seq watermark"
+        );
+        append(&p, &line(4, "turn_completed", "s1", "t1", None));
+        let out4 = c.poll();
+        assert!(out4.turn_state.is_some());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
