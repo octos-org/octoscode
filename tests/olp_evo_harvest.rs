@@ -645,6 +645,22 @@ fn olp_evo_harvest_fails_before_writes_when_gnu_tools_missing() {
     // all-platform final validation must still fail BEFORE any write.
     let ok = sb.root.join("stubs-ok");
     std::fs::create_dir_all(&ok).unwrap();
+    // #7: SEALED PATH — no host /usr/bin:/bin fallback (a Linux host
+    // would satisfy flock from /usr/bin and the premise would not hold).
+    // General-purpose tools the script uses outside the probe, resolved
+    // from the host BEFORE the run (Linux /usr/bin is already GNU; on
+    // Darwin fall back to the brew gnubin dir the probe would discover).
+    let gnu_src = if Path::new("/opt/homebrew/opt/coreutils/libexec/gnubin").is_dir() {
+        PathBuf::from("/opt/homebrew/opt/coreutils/libexec/gnubin")
+    } else {
+        PathBuf::from("/usr/bin")
+    };
+    for name in [
+        "date", "dd", "od", "tr", "wc", "cut", "mkdir", "cat", "rm", "cp",
+    ] {
+        std::fs::copy(gnu_src.join(name), ok.join(name)).unwrap();
+        make_executable(&ok.join(name));
+    }
     for (name, body) in [
         (
             "stat",
@@ -659,14 +675,42 @@ fn olp_evo_harvest_fails_before_writes_when_gnu_tools_missing() {
             "#!/bin/sh\necho 0000000000000000000000000000000000000000000000000000000000000000  -\n",
         ),
         ("uname", "#!/bin/sh\necho Linux\n"),
+        ("python3", "#!/bin/sh\nexec /usr/bin/python3 \"$@\"\n"),
     ] {
         let p = ok.join(name);
         std::fs::write(&p, body).unwrap();
         make_executable(&p);
     }
+    // Fixture-internal sanity: the premise must hold inside the sealed
+    // PATH — flock absent, every other capability present.
+    let sealed_path = ok.display().to_string();
+    let sealed = Command::new("/bin/sh")
+        .arg("-c")
+        .arg("command -v flock; echo ---; stat -c '%s' /dev/null && realpath -m /dev/null && sha256sum /dev/null && python3 -X utf8 -c 'import sys'")
+        .env("PATH", &sealed_path)
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&sealed.stdout).starts_with('/'),
+        "flock must be absent in the sealed PATH"
+    );
+    assert!(
+        sealed.status.success(),
+        "all non-flock capabilities must work in the sealed PATH: {}",
+        String::from_utf8_lossy(&sealed.stderr)
+    );
     // flock deliberately NOT provided; the uname=Linux stub means no
-    // Darwin discovery can rescue the run.
-    let out = run_restricted(&ok);
+    // Darwin discovery can rescue the run. Launch via absolute /bin/bash
+    // so the script itself needs no PATH lookup.
+    let out = Command::new("/bin/bash")
+        .arg(script())
+        .arg(&sb.repo)
+        .env("PATH", &sealed_path)
+        .env("OLP_EVO_STATE", &sb.state_root)
+        .env("OLP_EVO_EVENTS", "")
+        .env("OLP_EVO_MCP_BOARD", "/nonexistent")
+        .output()
+        .unwrap();
     assert_eq!(
         out.status.code(),
         Some(2),

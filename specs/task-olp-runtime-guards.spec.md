@@ -36,7 +36,10 @@ ACK、不改回放夹具、不加 Cargo 依赖，并预留后续 runtime guards�
   coreutils gnubin（不自动安装、无禁用开关）；Linux/其他平台按 PATH 原样判定（缺 flock
   也在写入前失败）。已装 GNU 工具时直接启动脚本也能自动发现并成功。逻辑尽量复用/对齐
   `scripts/verify.sh`，只在必要处抽小型共享辅助。确定性负例：受限 PATH + `uname`→Linux
-  stub（绕开 Darwin 发现路径）+ 拒绝式能力 stub，以及仅缺 flock 的写入前失败用例。
+  stub（绕开 Darwin 发现路径）+ 拒绝式能力 stub；仅缺 flock 的用例用 **封闭 PATH**
+  （只含显式 stub 与预解析工具，无任何宿主 bin 回退——常规 Linux 的 /usr/bin/flock
+  会满足探测、前提不成立），fixture 内先验证 `command -v flock` 失败、其余能力成功，
+  脚本经绝对路径 /bin/bash 启动。
 - 字节偏移 identity/cursor、append-before-state 崩溃恢复语义逐字保持；外环
   `verify/jev-evo-locale-probe` 证据目录只读。
 - 预留扩展：本 spec 的 Rule 结构允许后续追加 completion/stall guard 场景，不挤占本切片
