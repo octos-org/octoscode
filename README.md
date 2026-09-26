@@ -147,6 +147,10 @@ cargo install octoscode
 A copy-pasteable, first-time walkthrough. By the end you have a local profile,
 an LLM provider, and a live coding session — no dashboard, no email OTP.
 
+> "Solo" here means one agent. For the two-agent setup — a cheap model working
+> under review by a strong one, with push authority held by the reviewer — see
+> [Dual loop: OctoLoop](#dual-loop-octoloop).
+
 ### 1. Install the TUI
 
 Install `octoscode` as shown in [Start here](#start-here) — that's all you need.
@@ -256,6 +260,108 @@ agents in parallel**, use the `octos chat` CLI in the main
 [octos](https://github.com/octos-org/octos) repo (`--sandbox`, `--yolo`,
 `--profile`, `--no-session-persistence`) — see its README's *Headless agent mode
 & code review* section.
+
+---
+
+## Dual loop: OctoLoop
+
+Everything above runs **one** agent. OctoLoop runs two, with different price
+tags and different authority: a cheap model does the work on the inside, and a
+strong model reviews it from the outside. The protocol underneath is **OLP**
+(Outer-Loop Protocol); **OctoLoop** is the packaged, one-command form of it.
+
+```
+┌─ OUTER loop (strong model: Claude Code / Codex / any CLI agent)
+│    read board → dispatch a numbered entry → independently re-verify → push
+│         ▲                                          │
+│    .octos/OUTER_LOOP_REVIEW.md (the blackboard)     │  herdr prompt / octos steer
+│         │                                          ▼
+└─ INNER loop (octoscode + octos serve, running a cheap model such as kimi)
+     read board → execute → commit (never push) → ACK(done|wontdo|blocked)
+```
+
+The two loops talk only through a file: an append-only blackboard at
+`.octos/OUTER_LOOP_REVIEW.md`. The inner loop takes the lowest-numbered entry
+that has no `ACK(` line, does it, commits, and writes back one of
+`ACK(done|wontdo|blocked): <notes>`. **Push authority belongs to the outer loop
+alone** — so nothing reaches your remote until a second, stronger model has
+re-run the tests itself, in an isolated worktree, from the CI workflow verbatim.
+
+That split is the point: you spend cheap tokens on the work, which you can
+re-run freely, and expensive tokens only on review and adjudication.
+
+### Set it up (one command)
+
+```bash
+cd your-project/
+curl -fsSL https://raw.githubusercontent.com/octos-org/octoscode/main/scripts/olp-init.sh | bash
+```
+
+It is idempotent and never overwrites an existing file. It lays down:
+
+| Artifact | What it is |
+|---|---|
+| `.octos/OUTER_LOOP_REVIEW.md` | the blackboard, gitignored — it is branch-independent, and tracking it causes cross-branch split brain |
+| `.octos/loop.md` | the inner loop's maintenance cycle |
+| `AGENTS.md` | the self-contained onboarding card (see below); `OLP_INIT_LANG=zh` for Chinese |
+| `~/.octos/outer/` | the board sentry and the atomic append helper |
+
+Then start the inner loop:
+
+```bash
+octoscode --stdio-command 'octos serve --stdio --solo --danger-full-access'
+```
+
+`--solo` is the safety gate for a single-person local box; without it serve
+refuses the permissive profile. `--danger-full-access` matters more than it
+looks: the lower permission tiers run the agent inside a filesystem sandbox
+where `~/.cargo` and `~/.rustup` are **invisible**, so every build command comes
+back "command not found" — this is the real cause behind an inner loop
+reporting "there is no cargo on this machine". Granting it is an operator
+decision; see [Agent permissions](#agent-permissions--code-review).
+
+### Hand an agent the card
+
+`AGENTS.md` is the card, and it is deliberately self-contained — any agent
+(Claude Code, Codex, whatever you have a subscription for) can read that one
+file and take a role without opening the rest of the docs. It covers role
+selection, the ACK grammar, dispatch, waking the inner loop, three-layer
+observation, isolated re-verification, and the red lines. It is also the
+protocol's own resident channel: octos injects `AGENTS.md` into every session.
+
+### Drive the inner loop from the outside
+
+The outer loop is not a chat window — it drives the inner one programmatically:
+
+```bash
+herdr agent list                       # find the inner pane
+herdr agent prompt <pane> '<one line>'  # wake it when idle (arrives as a user message)
+
+cd <project>                            # steer resolves the instance by cwd
+octos steer --session '<key>' --text '[external-reviewer] ...'   # mid-turn, no interrupt
+```
+
+[herdr](https://github.com/hagency-org/herdr) is a terminal workspace manager
+and is recommended, not required — without it, fall back to tmux `send-keys`.
+For observation, watch all three layers (screen, `events.jsonl`, and
+`octos goal status` / `ledger tail`): delivery, consumption and execution are
+three different things, and a goal that tripped its breaker is silent in
+exactly the same way as one that is still working.
+
+### OctoLoop docs
+
+| Doc | For |
+|---|---|
+| [`docs/OCTOLOOP_AGENTS.md`](docs/OCTOLOOP_AGENTS.md) | the self-contained card — hand this to an agent ([中文](docs/OCTOLOOP_AGENTS.zh-CN.md)) |
+| [`docs/OLP_QUICKSTART.en.md`](docs/OLP_QUICKSTART.en.md) | zero-to-running for a new project ([中文](docs/OLP_QUICKSTART.md)) |
+| [`docs/OUTER_LOOP_PROTOCOL.md`](docs/OUTER_LOOP_PROTOCOL.md) | the protocol in full: R1–R7, schemas, budgets, field lessons |
+| [`docs/OLP_OUTER_BOOT.md`](docs/OLP_OUTER_BOOT.md) | the outer operator card and tactics handbook |
+| [`docs/OCTOLOOP_GUIDE.md`](docs/OCTOLOOP_GUIDE.md) | full guide, mechanisms, platform matrix |
+| [`docs/OCTOLOOP_FEATURES.md`](docs/OCTOLOOP_FEATURES.md) | one-page capability panorama |
+
+On platforms: Linux is full power. macOS works with two gaps — the outer-duty
+authority lock is Linux-only, and the sandbox tiers do not apply. On Windows,
+use WSL2.
 
 ---
 

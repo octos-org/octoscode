@@ -6,7 +6,9 @@
 #   2. 生成 .octos/loop.md(内环维护循环)与 .octos/OUTER_LOOP_REVIEW.md
 #      (外环审查黑板,含 v1 ACK 定式说明);
 #   3. 黑板加入 .gitignore(分支无关,避免跨分支裂脑);
-#   4. 打印标准启动命令与下一步清单。
+#   4. 铺设 AGENTS.md 上岗卡(自包含,外来 agent 读它即可上岗;
+#      OLP_INIT_LANG=zh 取中文版,缺省英文);
+#   5. 打印标准启动命令与下一步清单。
 #
 # 刻意 **不做** 的事(操作者显式决策,脚本不代办):
 #   - 不写任何 API key;
@@ -108,6 +110,34 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 
 say ""
+say "== agent 上岗卡(AGENTS.md) =="
+# AGENTS.md 是 OLP 的常驻约束信道(R6):octos prompt_layer 每个 session 自动
+# 注入,外来 agent(Claude Code / Codex / 任意 CLI agent)读它即可自学双环。
+# 取卡三路:仓库内复制 → curl 拉取 → 如实报缺(绝不写半张卡)。
+case "${OLP_INIT_LANG:-en}" in
+  zh|zh-CN|zh_CN) CARD_NAME="OCTOLOOP_AGENTS.zh-CN.md" ;;
+  *)              CARD_NAME="OCTOLOOP_AGENTS.md" ;;
+esac
+CARD_URL="https://raw.githubusercontent.com/octos-org/octoscode/main/docs/$CARD_NAME"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
+CARD_SRC=""
+# 认仓库布局才复制:同目录须有 olp-init.sh 自身,避免 curl|bash 时 dirname 落在
+# 无关 cwd 上误取别的 docs/。
+if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/olp-init.sh" ] && [ -f "$SELF_DIR/../docs/$CARD_NAME" ]; then
+  CARD_SRC="$SELF_DIR/../docs/$CARD_NAME"
+fi
+if [ -f AGENTS.md ]; then
+  ok "AGENTS.md 已存在,跳过(如需上岗卡另存: curl -fsSL $CARD_URL -o OCTOLOOP_AGENTS.md)"
+elif [ -n "$CARD_SRC" ]; then
+  cp "$CARD_SRC" AGENTS.md && ok "生成 AGENTS.md($CARD_NAME)"
+elif command -v curl >/dev/null 2>&1 && curl -fsSL "$CARD_URL" -o AGENTS.md 2>/dev/null && [ -s AGENTS.md ]; then
+  ok "生成 AGENTS.md(自 $CARD_URL 拉取)"
+else
+  rm -f AGENTS.md
+  say "  [--] AGENTS.md 未铺设(离线或拉取失败)——手动: curl -fsSL $CARD_URL -o AGENTS.md"
+fi
+
+say ""
 say "== 外环侦听哨(~/.octos/outer/watch-board.sh) =="
 OUTER_DIR="$HOME/.octos/outer"
 SENTINEL_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/olp-watch-board.sh"
@@ -123,6 +153,21 @@ else
   say "  [--] 未找到 olp-watch-board.sh(curl 单文件运行时不装;从仓库运行 scripts/olp-init.sh 会安装)"
 fi
 
+# 原子追加助手:AGENTS.md 上岗卡指名要它(黑板唯一正道写入),外来项目
+# 没有本仓库 scripts/,所以随哨兵一并装到 ~/.octos/outer/。
+APPEND_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/olp-board-append.sh"
+if [ -f "$APPEND_SRC" ]; then
+  mkdir -p "$OUTER_DIR"
+  if [ -f "$OUTER_DIR/board-append.sh" ]; then
+    ok "board-append.sh 已存在,跳过(如需更新: cp $APPEND_SRC $OUTER_DIR/board-append.sh)"
+  else
+    cp "$APPEND_SRC" "$OUTER_DIR/board-append.sh" && chmod +x "$OUTER_DIR/board-append.sh"
+    ok "已安装 board-append.sh → $OUTER_DIR/"
+  fi
+else
+  say "  [--] 未找到 olp-board-append.sh(curl 单文件运行时不装;从仓库运行 scripts/olp-init.sh 会安装)"
+fi
+
 say ""
 say "== 下一步(按序) =="
 say "  1. 启动内环(标准命令;--solo 是单人盒子安全门):"
@@ -130,6 +175,7 @@ say "       octoscode --stdio-command 'octos serve --stdio --solo'"
 say "     需要跑构建/工具链时,操作者显式追加 --danger-full-access"
 say "     (权限档 1-4 是 bwrap 沙箱,~/.cargo 不可见——见 QUICKSTART 0b 节)。"
 say "  2. 首次进入 TUI 完成 onboarding(选 provider、贴 key)。"
-say "  3. 外环接入:读 docs/OLP_QUICKSTART.md 的『外环最小接入』三步。"
+say "  3. 外环接入:把本项目的 AGENTS.md 交给外环 agent(自包含上岗卡:"
+say "     身份选择、ACK 定式、派单/唤醒/观测/复验、红线全在卡内)。"
 [ "$MISSING" = 1 ] && { say ""; say "  ⚠ 存在缺失依赖(上方 [!!] 行),先补齐再启动。"; exit 2; }
 exit 0

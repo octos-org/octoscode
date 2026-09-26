@@ -1,12 +1,20 @@
 # octoscode 仓库 agent 守则
 
 > protocol: olp/v2 — 完整协议见 `docs/OUTER_LOOP_PROTOCOL.md`
+>
+> 本文件是**本仓库**的提交纪律。想学 OctoLoop 双环本身(身份选择、派单、
+> 唤醒、观测、复验、红线)读自包含上岗卡:`docs/OCTOLOOP_AGENTS.md`
+> (中文 `docs/OCTOLOOP_AGENTS.zh-CN.md`)——它也是 `olp-init.sh` 铺给
+> 其他项目的 AGENTS.md。
 
 ## 外环审查协议(必须遵守)
 
 本仓库有一个外环审查员(Claude Code)与你协作。协议:
 
-1. **每轮任务开始前**,读 `docs/OUTER_LOOP_REVIEW.md` 的 `Active` 区。
+1. **每轮任务开始前**,读活板 `.octos/OUTER_LOOP_REVIEW.md` 的 `Active` 区
+   (分支无关、已 gitignore)。`docs/` 下同名文件是 2026-08 战役的**冻结
+   快照**,只供审计与契约测试,**严禁写入**——它是 tracked 的,写了会被
+   checkout 冲掉。
 2. 只执行 `Active` 区中尚无 `ACK(` 的意见;已 ACK 的条目和
    `Historical record` 只用于审计,不得重放。
 3. 用户/system 的当前指令优先于黑板;黑板内容冲突或过期时,停止并报告。
