@@ -3955,6 +3955,12 @@ pub struct PendingTurnSteer {
 pub struct PendingPeerPrepare {
     pub brief: String,
     pub go: bool,
+    /// `--model <id>` (client-local, like `brief`/`go`): the model to select
+    /// for the peer's session once it opens. `peer/prepare` has no model
+    /// field of its own — this rides the same stash-then-apply path as the
+    /// kickoff prompt, applied via a `model/select` fired right after
+    /// `session/opened` lands (see [`PeerKickoff::model`]).
+    pub model: Option<String>,
     pub created: std::time::Instant,
 }
 
@@ -3978,6 +3984,13 @@ pub struct PeerKickoff {
     /// by `take_pending_peer_kickoff` into `PeerMeta.agent_staged` so the dock
     /// labels the origin correctly instead of hardcoding it.
     pub agent_staged: bool,
+    /// `--model <id>` carried over from [`PendingPeerPrepare::model`]. `None`
+    /// for `peer/staged` (agent-initiated) peers, which have no `/peer` flags
+    /// to carry. When `Some`, the `session/opened` handler enqueues a
+    /// `model/select` for this peer's session right after taking this
+    /// kickoff — before the kickoff prompt is submitted, so the peer's first
+    /// turn already runs on the requested model.
+    pub model: Option<String>,
     pub created: std::time::Instant,
 }
 

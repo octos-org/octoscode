@@ -11956,6 +11956,7 @@ mod tests {
                 brief_path: "/tmp/brief.md".into(),
                 go: false,
                 agent_staged: false,
+                model: None,
                 created: std::time::Instant::now(),
             },
         );
@@ -12000,6 +12001,7 @@ mod tests {
                 brief_path: "/tmp/brief.md".into(),
                 go: false,
                 agent_staged: false,
+                model: None,
                 created: std::time::Instant::now(),
             },
         );
@@ -12030,6 +12032,7 @@ mod tests {
                 brief_path: "/tmp/brief.md".into(),
                 go: false,
                 agent_staged: false,
+                model: None,
                 created: std::time::Instant::now(),
             },
         );
@@ -12070,6 +12073,7 @@ mod tests {
                 brief_path: "/tmp/brief.md".into(),
                 go: false,
                 agent_staged: false,
+                model: None,
                 created: std::time::Instant::now(),
             },
         );
@@ -12342,6 +12346,7 @@ mod tests {
                 brief_path: "/tmp/audit.md".into(),
                 go: true,
                 agent_staged: true,
+                model: None,
                 created: std::time::Instant::now(),
             },
         );

@@ -1024,9 +1024,11 @@ impl Store {
     /// `/peer <brief…>` (#395): spin off a peer agent session seeded with a
     /// durable brief. Grammar: `--` flags before the first non-flag token
     /// (`--go` switch focus once opened, `--worktree`, `--cwd <path>` which
-    /// consumes the next token); everything from the first non-flag token on
-    /// is the brief VERBATIM. Unknown flags, a `--cwd` with no value, and an
-    /// empty brief after flags all reject with the usage status. Bare `/peer`
+    /// consumes the next token, `--model <id>` which also consumes the next
+    /// token — see [`PendingPeerPrepare::model`]); everything from the first
+    /// non-flag token on is the brief VERBATIM. Unknown flags, a `--cwd`/
+    /// `--model` with no value, and an empty brief after flags all reject
+    /// with the usage status. Bare `/peer`
     /// prefills the composer for argument typing (the same
     /// `LocalAction::EditComposer` treatment the `/research` menu rows use).
     /// `/peer clear`: prune DONE peers (finished — not live, not blocked) from
@@ -1080,6 +1082,7 @@ impl Store {
         let mut worktree = false;
         let mut cwd: Option<String> = None;
         let mut n: Option<u32> = None;
+        let mut model: Option<String> = None;
         let mut cursor = rest;
         loop {
             let token_end = cursor.find(char::is_whitespace).unwrap_or(cursor.len());
@@ -1099,6 +1102,23 @@ impl Store {
                         return SlashDispatchOutcome::Rejected;
                     }
                     cwd = Some(value.to_owned());
+                    cursor = cursor[value_end..].trim_start();
+                }
+                // `--model <id>`: a raw model id (the same vocabulary the
+                // `/model` menu's `ModelSelectParams::model` already uses),
+                // not a new tier keyword — no catalog lookup or validation
+                // here, this only stashes the id; `apply_peer_prepared_event`
+                // carries it into the peer's `PeerKickoff`, and the
+                // `session/opened` handler fires the actual `model/select`
+                // once the peer's session id exists.
+                "--model" => {
+                    let value_end = cursor.find(char::is_whitespace).unwrap_or(cursor.len());
+                    let value = &cursor[..value_end];
+                    if value.is_empty() {
+                        self.state.status = t!("status.peer_usage").into_owned();
+                        return SlashDispatchOutcome::Rejected;
+                    }
+                    model = Some(value.to_owned());
                     cursor = cursor[value_end..].trim_start();
                 }
                 // octos#1801 v2: `--n <K>` stages a fleet of K peers from this
@@ -1160,6 +1180,7 @@ impl Store {
         self.state.pending_peer_prepare = Some(crate::model::PendingPeerPrepare {
             brief: brief.to_owned(),
             go,
+            model,
             created: std::time::Instant::now(),
         });
         self.state.status = t!("status.peer_preparing").into_owned();
@@ -1373,6 +1394,7 @@ impl Store {
                         brief_path: entry.brief_path.clone(),
                         go: pending.go && index == 0,
                         agent_staged: false,
+                        model: pending.model.clone(),
                         created: std::time::Instant::now(),
                     },
                 );
@@ -1413,6 +1435,7 @@ impl Store {
                 brief_path: result.brief_path,
                 go: pending.go,
                 agent_staged: false,
+                model: pending.model,
                 created: std::time::Instant::now(),
             },
         );
@@ -1481,6 +1504,7 @@ impl Store {
                 brief_path: event.brief_path,
                 go: false,
                 agent_staged: true,
+                model: None,
                 created: std::time::Instant::now(),
             },
         );
@@ -11915,6 +11939,26 @@ impl Store {
                 // Stale entries (>TTL, dead open) were pruned by the take — a
                 // late open then degrades to a normal focused session open.
                 let mut peer_kickoff = self.state.take_pending_peer_kickoff(&session_id);
+                // `--model <id>` (carried on the kickoff, not `peer/prepare`
+                // itself): fire the same `model/select` the `/model` menu
+                // uses, targeted at the just-minted peer session id. Queued
+                // on the generic follow-up queue rather than returned
+                // directly — this arm's own return value is claimed below by
+                // the kickoff prompt submission (or the generic session
+                // open), and both the background- and `--go`-peer branches
+                // need this applied identically, so it runs once here before
+                // either branches off.
+                if let Some(model) = peer_kickoff.as_ref().and_then(|k| k.model.clone()) {
+                    self.state
+                        .enqueue_autonomy_hydration(AppUiCommand::SelectModel(
+                            crate::model::ModelSelectParams {
+                                session_id: session_id.clone(),
+                                model,
+                                provider: None,
+                                route: None,
+                            },
+                        ));
+                }
                 // Restore the server-persisted per-session reasoning effort so
                 // /thinking + its menu reflect it after a full restart (the server
                 // is the source of truth; `None` means no override is stored).
@@ -17685,6 +17729,35 @@ mod tests {
     }
 
     #[test]
+    fn peer_slash_parses_model_flag() {
+        let mut store = peer_capable_store();
+        let command = store
+            .dispatch_peer_slash("/peer --go --model deepseek-v4-pro fix the thing")
+            .into_command();
+        let Some(AppUiCommand::PeerPrepare(params)) = command else {
+            panic!("expected a PeerPrepare command, got {command:?}");
+        };
+        assert_eq!(params.brief, "fix the thing");
+        // `--model` never crosses the wire in `peer/prepare` — like `--go`,
+        // it is stashed client-side and applied via `model/select` once the
+        // peer's session opens (see `peer_session_opened_with_model_...`).
+        let pending = store
+            .state
+            .pending_peer_prepare
+            .as_ref()
+            .expect("dispatch stashes the pending prepare");
+        assert_eq!(pending.model.as_deref(), Some("deepseek-v4-pro"));
+    }
+
+    #[test]
+    fn peer_slash_rejects_model_flag_without_value() {
+        let mut store = peer_capable_store();
+        let outcome = store.dispatch_peer_slash("/peer --model");
+        assert!(matches!(outcome, SlashDispatchOutcome::Rejected));
+        assert_eq!(store.state.status, t!("status.peer_usage"));
+    }
+
+    #[test]
     fn peer_slash_brief_keeps_internal_whitespace_and_later_dashes() {
         let mut store = peer_capable_store();
         // Flags stop at the first non-flag token; a later `--flag`-looking
@@ -17826,6 +17899,7 @@ mod tests {
             brief_path: "/repo/.octos/peers/fix-nav/BRIEF.md".into(),
             go: false,
             agent_staged: false,
+            model: None,
             created: std::time::Instant::now(),
         };
         store
@@ -17954,6 +18028,79 @@ mod tests {
         assert_eq!(
             store.state.status,
             t!("status.peer_switched", slug = "fix-nav")
+        );
+    }
+
+    /// `--model <id>` (no server-side `peer/prepare` field for it): landing
+    /// the peer session must queue a `model/select` targeted at the peer's
+    /// OWN session id on the generic follow-up queue, alongside — not instead
+    /// of — the kickoff prompt this arm already returns directly.
+    #[test]
+    fn peer_session_opened_with_model_enqueues_select_model() {
+        let mut store = peer_capable_store();
+        let peer_key = prepare_peer(&mut store, "/peer --go --model deepseek-v4-pro fix the nav");
+
+        let command = peer_session_opened(&mut store, &peer_key);
+        assert!(
+            matches!(command, Some(AppUiCommand::SubmitPrompt(_))),
+            "the kickoff prompt is still this arm's direct return value, got {command:?}"
+        );
+        assert!(
+            store
+                .state
+                .pending_autonomy_hydration
+                .iter()
+                .any(|queued| matches!(
+                    queued,
+                    AppUiCommand::SelectModel(params)
+                        if params.session_id == peer_key
+                            && params.model == "deepseek-v4-pro"
+                )),
+            "expected a queued model/select for the peer session, got {:?}",
+            store.state.pending_autonomy_hydration
+        );
+    }
+
+    /// Same wiring for a `--go`-less (background) peer — the model applies
+    /// regardless of whether the peer stole focus.
+    #[test]
+    fn peer_session_opened_without_go_still_enqueues_select_model() {
+        let mut store = peer_capable_store();
+        let peer_key = prepare_peer(&mut store, "/peer --model deepseek-v4-pro fix the nav");
+
+        peer_session_opened(&mut store, &peer_key);
+        assert!(
+            store
+                .state
+                .pending_autonomy_hydration
+                .iter()
+                .any(|queued| matches!(
+                    queued,
+                    AppUiCommand::SelectModel(params)
+                        if params.session_id == peer_key
+                            && params.model == "deepseek-v4-pro"
+                )),
+            "background peers get the requested model too, got {:?}",
+            store.state.pending_autonomy_hydration
+        );
+    }
+
+    /// No `--model` flag ⇒ no spurious `model/select` — the server's default
+    /// model for the profile is left alone.
+    #[test]
+    fn peer_session_opened_without_model_flag_enqueues_no_select_model() {
+        let mut store = peer_capable_store();
+        let peer_key = prepare_peer(&mut store, "/peer --go fix the nav");
+
+        peer_session_opened(&mut store, &peer_key);
+        assert!(
+            !store
+                .state
+                .pending_autonomy_hydration
+                .iter()
+                .any(|queued| matches!(queued, AppUiCommand::SelectModel(_))),
+            "no --model flag must not queue a model/select, got {:?}",
+            store.state.pending_autonomy_hydration
         );
     }
 
@@ -18124,6 +18271,7 @@ mod tests {
                 brief_path: "/repo/.octos/peers/fix-nav/BRIEF.md".into(),
                 go: false,
                 agent_staged: false,
+                model: None,
                 created: std::time::Instant::now(),
             },
         );
