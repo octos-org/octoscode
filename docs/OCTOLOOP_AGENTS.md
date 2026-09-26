@@ -299,6 +299,6 @@ editing config without a new session is paper insurance).
 - [`OUTER_LOOP_PROTOCOL.md`](https://github.com/octos-org/octoscode/blob/main/docs/OUTER_LOOP_PROTOCOL.md) — the protocol in full: R1–R7,
   `result.md` schema, multi-outer rules, budget governance, field lessons
 - [`OLP_OUTER_BOOT.md`](https://github.com/octos-org/octoscode/blob/main/docs/OLP_OUTER_BOOT.md) — the outer operator card and tactics handbook
-- [`OLP_QUICKSTART.md`](https://github.com/octos-org/octoscode/blob/main/docs/OLP_QUICKSTART.md) — zero-to-running for a new project
+- [`OLP_QUICKSTART.en.md`](https://github.com/octos-org/octoscode/blob/main/docs/OLP_QUICKSTART.en.md) — zero-to-running for a new project (中文: `OLP_QUICKSTART.md`)
 - [`OCTOLOOP_GUIDE.md`](https://github.com/octos-org/octoscode/blob/main/docs/OCTOLOOP_GUIDE.md) — full guide, mechanisms, platform matrix
 - [`OCTOLOOP_FEATURES.md`](https://github.com/octos-org/octoscode/blob/main/docs/OCTOLOOP_FEATURES.md) — one-page capability panorama

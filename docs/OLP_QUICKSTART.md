@@ -4,6 +4,9 @@
 审查"这套双环(OLP,[Outer-Loop Protocol](OUTER_LOOP_PROTOCOL.md))在自己
 机器上转起来。本文只讲最短路径;协议细节、纪律与实战教训见协议文档。
 
+> English: [OLP_QUICKSTART.en.md](OLP_QUICKSTART.en.md)
+> 首次上岗的 agent 请读自包含上岗卡 [`OCTOLOOP_AGENTS.zh-CN.md`](OCTOLOOP_AGENTS.zh-CN.md),不必读本页。
+
 ## 0. 这是什么(30 秒)
 
 ```
@@ -50,9 +53,15 @@ curl -fsSL https://raw.githubusercontent.com/octos-org/octoscode/main/scripts/ol
 octoscode --stdio-command 'octos serve --stdio --solo'
 ```
 
-`olp-init.sh` 做四件事:依赖体检(缺什么、怎么装,一屏说清)、生成
+`olp-init.sh` 做六件事:依赖体检(缺什么、怎么装,一屏说清)、生成
 `.octos/loop.md`(内环维护循环)与 `.octos/OUTER_LOOP_REVIEW.md`(黑板
-模板)、把黑板加进 `.gitignore`(分支无关,防跨分支裂脑)、打印启动命令。
+模板)、把黑板加进 `.gitignore`(分支无关,防跨分支裂脑)、铺 `AGENTS.md`
+自包含上岗卡(落地项目的 agent 读它即可上岗;`OLP_INIT_LANG=zh` 取中文
+版)、把黑板哨兵与原子追加助手装到 `~/.octos/outer/`、打印启动命令与下一步
+清单。
+
+从仓库 checkout 运行可得全部产物;`curl | bash` 单文件运行时助手脚本不装
+——脚本会在对应行如实说明,不假装装了。
 
 **一键的诚实边界**——两件事脚本刻意不代办,因为它们是操作者的显式决策:
 
