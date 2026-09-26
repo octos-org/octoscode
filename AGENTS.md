@@ -1,6 +1,11 @@
 # octoscode 仓库 agent 守则
 
 > protocol: olp/v2 — 完整协议见 `docs/OUTER_LOOP_PROTOCOL.md`
+>
+> 本文件是**本仓库**的提交纪律。想学 OctoLoop 双环本身(身份选择、派单、
+> 唤醒、观测、复验、红线)读自包含上岗卡:`docs/OCTOLOOP_AGENTS.md`
+> (中文 `docs/OCTOLOOP_AGENTS.zh-CN.md`)——它也是 `olp-init.sh` 铺给
+> 其他项目的 AGENTS.md。
 
 ## 外环审查协议(必须遵守)
 
