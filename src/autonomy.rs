@@ -111,6 +111,13 @@ pub enum GoalCommand {
     /// `/goal stop` — mark the goal complete (stops autonomous
     /// continuations for good; `clear` additionally forgets the record).
     Stop,
+    /// `/goal archive [--reason <text>]` — operator-only online archive.
+    /// Terminal, and unlike `stop` it also fences the scheduler on the
+    /// backend. Legal from any status except `archived`.
+    Archive { reason: Option<String> },
+    /// `/goal reopen [--reason <text>]` — operator-only un-archive back
+    /// to `active`, from `blocked` / `paused` / `budget_limited`.
+    Reopen { reason: Option<String> },
     /// `/goal clear`.
     Clear,
 }
@@ -196,6 +203,8 @@ pub enum AutonomyParseError {
     InvalidSpawnCount(String),
     /// `/agents spawn <N>` with no prompt text after the count.
     EmptySpawnPrompt,
+    /// `/goal archive|reopen --reason` with no text after the flag.
+    MissingReason { verb: &'static str },
 }
 
 impl std::fmt::Display for AutonomyParseError {
@@ -233,6 +242,9 @@ impl std::fmt::Display for AutonomyParseError {
             }
             Self::EmptySpawnPrompt => {
                 f.write_str("/agents spawn requires a prompt after the count")
+            }
+            Self::MissingReason { verb } => {
+                write!(f, "/goal {verb} --reason requires text after the flag")
             }
         }
     }
@@ -445,6 +457,19 @@ fn parse_goal(tail: &str) -> Result<GoalCommand, AutonomyParseError> {
         "clear" => return Ok(GoalCommand::Clear),
         _ => {}
     }
+    // Operator verbs take an OPTIONAL `--reason <text>`, deliberately
+    // flag-gated rather than free-tail. `/goal archive the 2025 logs` is
+    // an objective a user could plausibly mean, and silently reading it
+    // as "archive the current goal, reason: the 2025 logs" would retire
+    // a live goal behind their back. So the verb only binds when it
+    // stands alone or is followed by the flag; anything else falls
+    // through to `Set` exactly as it did before these verbs existed.
+    if let Some(reason) = parse_operator_verb(trimmed, "archive")? {
+        return Ok(GoalCommand::Archive { reason });
+    }
+    if let Some(reason) = parse_operator_verb(trimmed, "reopen")? {
+        return Ok(GoalCommand::Reopen { reason });
+    }
     // Pull an optional `--budget <value>` flag out of the remainder; the
     // rest is the objective. Setting a goal with a budget both creates a
     // fresh goal AND re-activates a budget_limited one (the dispatch
@@ -460,6 +485,54 @@ fn parse_goal(tail: &str) -> Result<GoalCommand, AutonomyParseError> {
             token_budget,
         })
     }
+}
+
+/// Recognize `/goal <verb>` and `/goal <verb> --reason <text>` for the
+/// operator verbs (`archive`, `reopen`).
+///
+/// The nesting is load-bearing:
+/// - `Ok(None)` — the input is not this verb; the caller keeps parsing
+///   (and ultimately treats the input as a goal objective).
+/// - `Ok(Some(None))` — the verb, with no `--reason`; the dispatch
+///   supplies a default reason.
+/// - `Ok(Some(Some(text)))` — the verb with an explicit reason.
+///
+/// `--reason=<text>` is accepted too, matching `--budget=<value>`. Text
+/// after the flag runs to the end of the input, so a reason may contain
+/// spaces without quoting.
+fn parse_operator_verb(
+    input: &str,
+    verb: &'static str,
+) -> Result<Option<Option<String>>, AutonomyParseError> {
+    let Some(rest) = input.strip_prefix(verb) else {
+        return Ok(None);
+    };
+    // `strip_prefix` alone would also match `archived-logs`; require the
+    // verb to be a whole word.
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return Ok(None);
+    }
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Ok(Some(None));
+    }
+    let reason = if let Some(value) = rest.strip_prefix("--reason=") {
+        value.trim()
+    } else if let Some(value) = rest.strip_prefix("--reason") {
+        // Guard against `--reasonable`: the flag must end the token.
+        if !value.is_empty() && !value.starts_with(char::is_whitespace) {
+            return Ok(None);
+        }
+        value.trim()
+    } else {
+        // Trailing text that is not the flag — this is an objective that
+        // merely starts with the verb, not the verb itself.
+        return Ok(None);
+    };
+    if reason.is_empty() {
+        return Err(AutonomyParseError::MissingReason { verb });
+    }
+    Ok(Some(Some(reason.to_string())))
 }
 
 /// Remove an optional `--budget <value>` / `--budget=<value>` flag from
@@ -816,6 +889,77 @@ mod tests {
         assert_eq!(
             parse_autonomy_slash("/turn wat").unwrap_err(),
             AutonomyParseError::UnknownTurnVerb("wat".into())
+        );
+    }
+
+    #[test]
+    fn goal_operator_verbs_parse_bare() {
+        assert_eq!(
+            parse_autonomy_slash("/goal archive").unwrap(),
+            Some(AutonomyCommand::Goal(GoalCommand::Archive { reason: None }))
+        );
+        assert_eq!(
+            parse_autonomy_slash("/goal reopen").unwrap(),
+            Some(AutonomyCommand::Goal(GoalCommand::Reopen { reason: None }))
+        );
+    }
+
+    #[test]
+    fn goal_operator_verbs_take_reason_flag() {
+        // The reason runs to end-of-input, so it needs no quoting.
+        assert_eq!(
+            parse_autonomy_slash("/goal archive --reason battle 33 wrapped up").unwrap(),
+            Some(AutonomyCommand::Goal(GoalCommand::Archive {
+                reason: Some("battle 33 wrapped up".into())
+            }))
+        );
+        assert_eq!(
+            parse_autonomy_slash("/goal reopen --reason=budget raised").unwrap(),
+            Some(AutonomyCommand::Goal(GoalCommand::Reopen {
+                reason: Some("budget raised".into())
+            }))
+        );
+    }
+
+    /// The anti-hijack guarantee: an objective that merely STARTS with an
+    /// operator verb is still an objective. Reading `/goal archive the
+    /// 2025 logs` as "archive the current goal" would silently retire a
+    /// live goal the user meant to create.
+    #[test]
+    fn goal_objective_starting_with_operator_verb_is_not_the_verb() {
+        assert_eq!(
+            parse_autonomy_slash("/goal archive the 2025 logs").unwrap(),
+            Some(AutonomyCommand::Goal(GoalCommand::Set {
+                objective: "archive the 2025 logs".into(),
+                token_budget: None,
+            }))
+        );
+        // Word-boundary, not prefix: `archived` is not `archive`.
+        assert_eq!(
+            parse_autonomy_slash("/goal archived-runs cleanup").unwrap(),
+            Some(AutonomyCommand::Goal(GoalCommand::Set {
+                objective: "archived-runs cleanup".into(),
+                token_budget: None,
+            }))
+        );
+        assert_eq!(
+            parse_autonomy_slash("/goal reopen the discussion with the team").unwrap(),
+            Some(AutonomyCommand::Goal(GoalCommand::Set {
+                objective: "reopen the discussion with the team".into(),
+                token_budget: None,
+            }))
+        );
+    }
+
+    #[test]
+    fn goal_operator_verb_empty_reason_errors() {
+        assert_eq!(
+            parse_autonomy_slash("/goal archive --reason").unwrap_err(),
+            AutonomyParseError::MissingReason { verb: "archive" }
+        );
+        assert_eq!(
+            parse_autonomy_slash("/goal reopen --reason=  ").unwrap_err(),
+            AutonomyParseError::MissingReason { verb: "reopen" }
         );
     }
 
