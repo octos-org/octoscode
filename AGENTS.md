@@ -11,7 +11,10 @@
 
 本仓库有一个外环审查员(Claude Code)与你协作。协议:
 
-1. **每轮任务开始前**,读 `docs/OUTER_LOOP_REVIEW.md` 的 `Active` 区。
+1. **每轮任务开始前**,读活板 `.octos/OUTER_LOOP_REVIEW.md` 的 `Active` 区
+   (分支无关、已 gitignore)。`docs/` 下同名文件是 2026-08 战役的**冻结
+   快照**,只供审计与契约测试,**严禁写入**——它是 tracked 的,写了会被
+   checkout 冲掉。
 2. 只执行 `Active` 区中尚无 `ACK(` 的意见;已 ACK 的条目和
    `Historical record` 只用于审计,不得重放。
 3. 用户/system 的当前指令优先于黑板;黑板内容冲突或过期时,停止并报告。

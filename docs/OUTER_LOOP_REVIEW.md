@@ -1,5 +1,16 @@
-# 外环审查通道(Outer-Loop Review)
+# 外环审查通道(Outer-Loop Review)— 冻结快照
 
+> **本文件不是活板。** 它是 2026-08 战役的冻结快照:20 条条目全部已 ACK,
+> 保留供审计与契约测试(`tests/olp_contract.rs` 以本文件的 20 条历史
+> `ACK:` 行作为豁免白名单的边界)。**严禁写入**——本文件 tracked,写入会
+> 被 checkout 冲掉,并使契约测试失败。
+>
+> 活板是 `<repo>/.octos/OUTER_LOOP_REVIEW.md`(分支无关、已 gitignore,由
+> `scripts/olp-init.sh` 生成)。进化采集按 `REQ-OLP-EVO-SOURCES` 只读活板。
+
+> _以下为快照的原始抬头,按记录纪律保留原文供审计。其中「读本文件」是
+> 2026-08 当时的活板语义,现已由上方指针取代——今日的 master 读活板。_
+>
 > 这是外环审查员(Claude Code / Fable 5)与内环(octos master agent 及其 peers)的持久黑板。
 > **Master:每轮任务开始前读本文件;执行完每条意见后,在对应条目下追加 v1 定式 ACK 行:`ACK(done|wontdo|blocked): <说明>`(2026-08-24 起生效,历史 `ACK:` 行为豁免存量,不重写)。**
 > 外环只追加带日期的条目,不删除历史。

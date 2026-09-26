@@ -31,7 +31,7 @@
 | 信道 | 载体 | 时效 | 用途 |
 |---|---|---|---|
 | 会话常驻约束 | `AGENTS.md`(octos prompt_layer 自动注入每个 session) | session boot | 纪律、协议本身的引导 |
-| 任务级指导 | `docs/OUTER_LOOP_REVIEW.md` 的 `Active` 区(带日期条目 + `ACK:` 行) | master 每轮读 | 审查意见、整改要求;历史区不可执行 |
+| 任务级指导 | `<repo>/.octos/OUTER_LOOP_REVIEW.md` 的 `Active` 区(带日期条目 + `ACK:` 行) | master 每轮读 | 审查意见、整改要求;历史区不可执行。`docs/` 下同名文件是冻结快照,严禁写入 |
 | 既成事实 | 原子 git commit | 立即 | 代修、基建修复 |
 | 事件提示 / **门铃** | inbox `<session-hash>.notes` | 下一 turn,阅后即焚 | 仅事件通知与**黑板指针**("第 N 条已更新,去读并执行");不承载指令内容本身 |
 | **TUI 注入** | `herdr agent prompt <pane> '<text>'`(需 herdr ≥ Ti-Agent-OS fork `fc414dd8`,含 octoscode manifest)或 tmux `send-keys` | ~8s 内开 turn | 唯一实证"读**且执行**"的即时下行通道——文本落在 composer 即用户消息层级,等价 operator 亲手输入;steer API(L2)落地前的事实标准 |
@@ -49,7 +49,8 @@
 
 ## 协议语义(核心规则)
 
-- **R1 — ACK 义务**:`docs/OUTER_LOOP_REVIEW.md` 的 `Active` 区中每条意见,runtime 侧执行后
+- **R1 — ACK 义务**:`<repo>/.octos/OUTER_LOOP_REVIEW.md`(活板,分支无关、已 gitignore;`docs/` 下
+  同名文件是冻结快照,严禁写入)的 `Active` 区中每条意见,runtime 侧执行后
   必须在条目下补一行 ACK。无 ACK 视为未读,outer 有权打回交付。
   **v1 起 ACK 行使用定式语法**(契约测试 `olp_ack_lines_match_v1_grammar` 钉住):
 
@@ -132,7 +133,7 @@
    同时 tail 两个日期文件;(c) 观测分三层——**投递**(notes 文件被清空)≠
    **消费**(turn prompt 读到)≠ **执行**(交付/ACK 落地),只看一层必误判,
    turn 心跳以日志里 `^` 锚定的时间戳行判定,勿取续行。
-3. 读本文件 + `docs/OUTER_LOOP_REVIEW.md` 的 `Active` 区了解当前指导;
+3. 读本文件 + `<repo>/.octos/OUTER_LOOP_REVIEW.md` 的 `Active` 区了解当前指导;
    `Historical record` 仅用于审计。
 4. 审查交付:`peers/*/result.md` → git diff → 独立复验(R2)。
 5. 写指导:黑板追加条目;紧急基建问题直接原子 commit(R4)。

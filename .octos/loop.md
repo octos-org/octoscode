@@ -1,8 +1,10 @@
-# 维护循环(外环协作版,protocol: olp/v0)
+# 维护循环(外环协作版,protocol: olp/v2)
 
 每次维护唤醒依次执行,全部完成才结束本轮:
 
-1. 读 `docs/OUTER_LOOP_REVIEW.md` 的 `Active` 区(外环审查黑板)。
+1. 读 `.octos/OUTER_LOOP_REVIEW.md` 的 `Active` 区(外环审查**活板**)。
+   `docs/OUTER_LOOP_REVIEW.md` 是 2026-08 战役的冻结快照(20 条全部
+   已 ACK),只供审计与契约测试,**不是活板、严禁写入**。
 2. 若 `Active` 存在**未 ACK 的条目**:取编号最小的一条,按其内容执行到完成
    (代码改动跑 `cargo test --all-targets` + fmt + clippy 后原子 commit,
    只 add 自己改的文件),然后在该条目下补
