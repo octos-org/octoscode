@@ -101,9 +101,11 @@ pub enum ProbeState {
     Unknown,
 }
 
-/// Hard deadline for one `ps` probe child before it is killed (probe child
-/// only — never a watched pid) and reported as `Unknown`.
-const PROBE_DEADLINE: Duration = Duration::from_secs(1);
+/// Hard deadline for one bounded probe child (ps/herdr) before it is killed
+/// (probe child only — never a watched pid) and reported as `Unknown`.
+/// 2s: fork/exec on a loaded macOS host was observed exceeding 1s under
+/// parallel test load, misclassifying healthy probes; still firmly bounded.
+const PROBE_DEADLINE: Duration = Duration::from_secs(2);
 /// Poll cadence while waiting for the probe child.
 const PROBE_POLL: Duration = Duration::from_millis(10);
 /// Upper bound on accepted ps output; a listing this large is a parse failure.
@@ -221,7 +223,7 @@ pub fn probe_pid(pid: u32) -> ProbeState {
             ProbeState::Unknown
         };
     }
-    if !status.success() || err_len > PROBE_MAX_OUTPUT as u64 {
+    if !status.success() || err_len > 0 {
         return ProbeState::Unknown;
     }
     parse_ps_listing(&out, pid).unwrap_or(ProbeState::Unknown)

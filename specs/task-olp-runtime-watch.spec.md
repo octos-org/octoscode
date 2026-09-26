@@ -59,6 +59,8 @@ Scenario: 零 PID/坏路径被拒，正常快照不含敏感负载
   Then 身份 NDJSON 输出且 task_accepted:false；无置真代码路径
 
 ### Rule: process-probe — 有界 ps 探测，缺失/僵尸/未知三分
+Scenario: 合法 stdout 但带任何 stderr => observation_unknown（绝不错判 alive/missing）
+  Test: ps_boundary_matrix_through_cli
 Scenario: 真实子进程终止 => process_missing；探测超时 => unknown 非死亡
   Test: terminated_agent_is_process_missing_never_acceptance
   Test: live_agent_alive_and_terminated_monitor_is_watcher_missing
@@ -66,6 +68,7 @@ Scenario: 真实子进程终止 => process_missing；探测超时 => unknown 非
   Test: identity_change_alert_lives_in_snapshot_and_repeats_per_role
   Test: hung_herdr_stub_yields_unknown_without_breaking_process_probes
   Test: herdr_whitelist_done_idle_unknown_and_mismatch_fixtures
+  Test: ps_boundary_matrix_through_cli
   Test: cmd::olp_runtime_watch::tests::parse_ps_listing_accepts_real_shape_and_rejects_garbage
   Test: cmd::olp_runtime_watch::tests::herdr_envelope_parses_agent_status_exact_name
   Given 测试自有子进程与 monitor 进程

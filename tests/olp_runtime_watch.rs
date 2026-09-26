@@ -83,6 +83,75 @@ fn collect_heartbeats_with_deadline(
     .expect("reader thread")
 }
 
+/// Bounded one-shot CLI run with a TEST-SIDE deadline: a reader thread drains
+/// stdout/stderr into pipes; we poll try_wait and kill the CLI (test-owned)
+/// if it exceeds the bound. Returns (success, stdout text, elapsed).
+fn bounded_cli_run(
+    cmd: &mut Command,
+    timeout: std::time::Duration,
+) -> (Option<i32>, String, String, std::time::Duration) {
+    use std::io::Read;
+    let started = std::time::Instant::now();
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn octoscode");
+    let mut out_pipe = child.stdout.take().unwrap();
+    let mut err_pipe = child.stderr.take().unwrap();
+    let mut out_buf = Vec::new();
+    let mut err_buf = Vec::new();
+    let deadline = started + timeout;
+    let status;
+    loop {
+        let mut tmp = [0u8; 8192];
+        // Drain a bit of both pipes each cycle so a chatty writer cannot
+        // fill the pipe buffer and block before our deadline fires.
+        match out_pipe.read(&mut tmp) {
+            Ok(0) => {}
+            Ok(n) => out_buf.extend_from_slice(&tmp[..n]),
+            Err(_) => {}
+        }
+        match err_pipe.read(&mut tmp) {
+            Ok(0) => {}
+            Ok(n) => err_buf.extend_from_slice(&tmp[..n]),
+            Err(_) => {}
+        }
+        match child.try_wait().unwrap() {
+            Some(s) => {
+                status = s;
+                break;
+            }
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("CLI run exceeded test deadline {timeout:?}");
+            }
+            None => {}
+        }
+    }
+    // Final drain after exit.
+    let mut tmp = [0u8; 8192];
+    while let Ok(n) = out_pipe.read(&mut tmp) {
+        if n == 0 {
+            break;
+        }
+        out_buf.extend_from_slice(&tmp[..n]);
+    }
+    while let Ok(n) = err_pipe.read(&mut tmp) {
+        if n == 0 {
+            break;
+        }
+        err_buf.extend_from_slice(&tmp[..n]);
+    }
+    (
+        status.code(),
+        String::from_utf8_lossy(&out_buf).into_owned(),
+        String::from_utf8_lossy(&err_buf).into_owned(),
+        started.elapsed(),
+    )
+}
+
 fn binary() -> Command {
     Command::new(env!("CARGO_BIN_EXE_octoscode"))
 }
@@ -130,7 +199,7 @@ fn parse_lines(stdout: &str) -> Vec<serde_json::Value> {
 
 #[test]
 fn live_agent_alive_and_terminated_monitor_is_watcher_missing() {
-    let mut agent = Command::new("sleep").arg("30").spawn().unwrap();
+    let agent = spawn_test_child();
     let mut monitor = Command::new("sleep").arg("30").spawn().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let mut cmd = binary();
@@ -140,14 +209,13 @@ fn live_agent_alive_and_terminated_monitor_is_watcher_missing() {
         .arg("--backend-pid")
         .arg(std::process::id().to_string())
         .arg("--monitor-pid")
-        .arg(monitor.id().to_string())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .arg(monitor.id().to_string());
     // Terminate only the monitor before the probe: watcher_missing expected.
     reap(&mut monitor);
-    let out = cmd.output().unwrap();
-    assert!(out.status.success());
-    let records = parse_lines(&String::from_utf8_lossy(&out.stdout));
+    let _ = &agent;
+    let (code, stdout, _err, _el) = bounded_cli_run(&mut cmd, std::time::Duration::from_secs(15));
+    assert_eq!(code, Some(0));
+    let records = parse_lines(&stdout);
     let last = records.last().expect("one observation record");
     assert_eq!(last["task_accepted"], serde_json::json!(false));
     assert_eq!(last["agent"]["state"], serde_json::json!("alive"));
@@ -155,7 +223,6 @@ fn live_agent_alive_and_terminated_monitor_is_watcher_missing() {
         last["monitors"][0]["state"]["state"],
         serde_json::json!("watcher_missing")
     );
-    reap(&mut agent);
 }
 
 #[test]
@@ -170,13 +237,10 @@ fn terminated_agent_is_process_missing_never_acceptance() {
         .arg(pid.to_string())
         .arg("--backend-pid")
         .arg(std::process::id().to_string())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let out = cmd.output().unwrap();
-    assert!(out.status.success());
-    let last = parse_lines(&String::from_utf8_lossy(&out.stdout))
-        .pop()
-        .expect("record");
+        .stdout(Stdio::piped());
+    let (code, stdout, _err, _el) = bounded_cli_run(&mut cmd, std::time::Duration::from_secs(15));
+    assert_eq!(code, Some(0));
+    let last = parse_lines(&stdout).pop().expect("record");
     assert_eq!(last["agent"]["state"], serde_json::json!("process_missing"));
     assert_eq!(last["task_accepted"], serde_json::json!(false));
 }
@@ -186,29 +250,29 @@ fn empty_task_is_rejected_with_usage_error() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("r")).unwrap();
     std::fs::write(dir.path().join("l.jsonl"), "x\n").unwrap();
-    let out = binary()
-        .args([
-            "olp-runtime-watch",
-            "--once",
-            "--agent",
-            "a",
-            "--agent-pid",
-            "1",
-            "--backend-pid",
-            "2",
-            "--repo",
-            dir.path().join("r").to_str().unwrap(),
-            "--ledger",
-            dir.path().join("l.jsonl").to_str().unwrap(),
-            "--session",
-            "s",
-            "--turn-id",
-            "t",
-        ])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(2));
-    assert!(!out.stderr.is_empty());
+    let mut cmd = binary();
+    cmd.args([
+        "olp-runtime-watch",
+        "--once",
+        "--agent",
+        "a",
+        "--agent-pid",
+        "1",
+        "--backend-pid",
+        "2",
+        "--repo",
+        dir.path().join("r").to_str().unwrap(),
+        "--ledger",
+        dir.path().join("l.jsonl").to_str().unwrap(),
+        "--session",
+        "s",
+        "--turn-id",
+        "t",
+    ]);
+    let (code, _stdout, stderr, _el) =
+        bounded_cli_run(&mut cmd, std::time::Duration::from_secs(15));
+    assert_eq!(code, Some(2));
+    assert!(!stderr.is_empty());
 }
 
 /// Real-ps multi-heartbeat: same live pid across >=3 cycles must produce NO
@@ -453,7 +517,7 @@ fn hung_herdr_stub_yields_unknown_without_breaking_process_probes() {
     std::fs::write(&herdr, "#!/bin/sh\nexec sleep 30\n").unwrap();
     make_executable(&herdr);
 
-    let mut agent = Command::new("sleep").arg("30").spawn().unwrap();
+    let agent = spawn_test_child();
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("r")).unwrap();
     std::fs::write(dir.path().join("l.jsonl"), "x\n").unwrap();
@@ -486,18 +550,15 @@ fn hung_herdr_stub_yields_unknown_without_breaking_process_probes() {
     )
     .stdout(Stdio::piped())
     .stderr(Stdio::null());
-    let started = std::time::Instant::now();
-    let out = cmd.output().unwrap();
-    let elapsed = started.elapsed();
-    assert!(out.status.success());
+    let (code, stdout, _stderr, elapsed) =
+        bounded_cli_run(&mut cmd, std::time::Duration::from_secs(15));
+    assert_eq!(code, Some(0));
     // Both the hung herdr probe (1s deadline) and the run finished quickly.
     assert!(
         elapsed.as_secs() < 10,
         "hung herdr blocked the run: {elapsed:?}"
     );
-    let last = parse_lines(&String::from_utf8_lossy(&out.stdout))
-        .pop()
-        .expect("record");
+    let last = parse_lines(&stdout).pop().expect("record");
     assert_eq!(
         last["agent_status"],
         serde_json::json!({"state": "observation_unknown"})
@@ -509,7 +570,6 @@ fn hung_herdr_stub_yields_unknown_without_breaking_process_probes() {
     // Process probes were NOT aborted by the herdr failure.
     assert_eq!(last["agent"]["state"], serde_json::json!("alive"));
     assert_eq!(last["task_accepted"], serde_json::json!(false));
-    reap(&mut agent);
 }
 
 /// A herdr stub emitting the REAL envelope must surface agent_status only
@@ -552,12 +612,10 @@ fn herdr_stub_real_envelope_surfaces_agent_status_only() {
     .env(
         "PATH",
         format!("{}:/usr/bin:/bin", stub_dir.path().display()),
-    )
-    .stdout(Stdio::piped())
-    .stderr(Stdio::null());
-    let out = cmd.output().unwrap();
-    assert!(out.status.success());
-    let text = String::from_utf8_lossy(&out.stdout);
+    );
+    let (code, text, stderr, _elapsed) =
+        bounded_cli_run(&mut cmd, std::time::Duration::from_secs(15));
+    assert_eq!(code, Some(0), "cli failed: code={code:?} stderr={stderr}");
     let last = parse_lines(&text).pop().expect("record");
     assert_eq!(
         last["agent_status"],
@@ -584,29 +642,29 @@ fn zero_pid_is_rejected_with_usage_error() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("r")).unwrap();
     std::fs::write(dir.path().join("l.jsonl"), "x\n").unwrap();
-    let out = binary()
-        .args([
-            "olp-runtime-watch",
-            "--once",
-            "--agent",
-            "a",
-            "--agent-pid",
-            "0",
-            "--backend-pid",
-            "1",
-            "--repo",
-            dir.path().join("r").to_str().unwrap(),
-            "--ledger",
-            dir.path().join("l.jsonl").to_str().unwrap(),
-            "--session",
-            "s",
-            "--turn-id",
-            "t",
-        ])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(2));
-    assert!(!out.stderr.is_empty());
+    let mut cmd = binary();
+    cmd.args([
+        "olp-runtime-watch",
+        "--once",
+        "--agent",
+        "a",
+        "--agent-pid",
+        "0",
+        "--backend-pid",
+        "1",
+        "--repo",
+        dir.path().join("r").to_str().unwrap(),
+        "--ledger",
+        dir.path().join("l.jsonl").to_str().unwrap(),
+        "--session",
+        "s",
+        "--turn-id",
+        "t",
+    ]);
+    let (code, _stdout, stderr, _el) =
+        bounded_cli_run(&mut cmd, std::time::Duration::from_secs(15));
+    assert_eq!(code, Some(2));
+    assert!(!stderr.is_empty());
 }
 
 /// CLI-level Herdr whitelist fixtures: done/idle => completion_unverified +
@@ -642,37 +700,34 @@ fn herdr_whitelist_done_idle_unknown_and_mismatch_fixtures() {
         std::fs::write(&herdr, format!("#!/bin/sh\ncat <<'JSON'\n{body}JSON\n")).unwrap();
         make_executable(&herdr);
 
-        let out = binary()
-            .args([
-                "olp-runtime-watch",
-                "--once",
-                "--agent",
-                "inner_test",
-                "--agent-pid",
-                &agent.id().to_string(),
-                "--backend-pid",
-                &std::process::id().to_string(),
-                "--repo",
-                dir.path().join("r").to_str().unwrap(),
-                "--ledger",
-                dir.path().join("l.jsonl").to_str().unwrap(),
-                "--session",
-                "s",
-                "--turn-id",
-                "t",
-                "--task",
-                "guard",
-            ])
-            .env(
-                "PATH",
-                format!("{}:/usr/bin:/bin", stub_dir.path().display()),
-            )
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "{label}: exit ok");
-        let text = String::from_utf8_lossy(&out.stdout);
+        let mut cmd = binary();
+        cmd.args([
+            "olp-runtime-watch",
+            "--once",
+            "--agent",
+            "inner_test",
+            "--agent-pid",
+            &agent.id().to_string(),
+            "--backend-pid",
+            &std::process::id().to_string(),
+            "--repo",
+            dir.path().join("r").to_str().unwrap(),
+            "--ledger",
+            dir.path().join("l.jsonl").to_str().unwrap(),
+            "--session",
+            "s",
+            "--turn-id",
+            "t",
+            "--task",
+            "guard",
+        ])
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", stub_dir.path().display()),
+        );
+        let (code, text, _stderr, _elapsed) =
+            bounded_cli_run(&mut cmd, std::time::Duration::from_secs(15));
+        assert_eq!(code, Some(0), "{label}: exit ok");
         let last = parse_lines(&text).pop().expect("record");
         assert_eq!(
             last["agent_status"]["state"],
@@ -701,5 +756,124 @@ fn herdr_whitelist_done_idle_unknown_and_mismatch_fixtures() {
                 serde_json::json!("awaiting_review")
             );
         }
+    }
+}
+
+/// Real OS boundary matrix through the production CLI path (PATH-stubbed ps).
+/// Each case: the observed sleep child must be ALIVE before and after — the
+/// watcher never kills observed pids. Covers #5 item 3 gaps.
+#[test]
+fn ps_boundary_matrix_through_cli() {
+    let self_pid = std::process::id();
+    // (label, ps stub body, expected agent.state)
+    let ok_row = "printf '%s %s S\\n' \"$pid\" 'Thu Sep 17 19:39:15 2026'".to_string();
+    let cases: &[(&str, String, &str)] = &[
+        (
+            "valid_stdout_plus_stderr_is_unknown",
+            format!("#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in -p) : ;; [0-9]*) pid=$a ;; esac; done\n{ok_row}\necho warning >&2\nexit 0"),
+            "observation_unknown",
+        ),
+        (
+            "exit42_is_unknown",
+            "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in -p) : ;; [0-9]*) pid=$a ;; esac; done\necho boom >&2\nexit 42".to_string(),
+            "observation_unknown",
+        ),
+        (
+            "multiline_stdout_is_unknown",
+            format!("#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in -p) : ;; [0-9]*) pid=$a ;; esac; done\n{ok_row}\n{ok_row}\n"),
+            "observation_unknown",
+        ),
+        (
+            "wrong_pid_is_unknown",
+            "#!/bin/sh\nprintf '%s %s S\\n' 999999 'Thu Sep 17 19:39:15 2026'\n".to_string(),
+            "observation_unknown",
+        ),
+        (
+            "invalid_time_is_unknown",
+            "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in -p) : ;; [0-9]*) pid=$a ;; esac; done\nprintf '%s %s S\\n' \"$pid\" 'Thu Sep 17 99:99:99 2026'\n".to_string(),
+            "observation_unknown",
+        ),
+        (
+            "oversized_stdout_is_unknown",
+            "#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in -p) : ;; [0-9]*) pid=$a ;; esac; done\nhead -c 20000 /dev/zero | tr '\\0' 'a'\nexit 0".to_string(),
+            "observation_unknown",
+        ),
+        (
+            "oversized_stderr_is_unknown",
+            format!("#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in -p) : ;; [0-9]*) pid=$a ;; esac; done\nhead -c 20000 /dev/zero | tr '\\0' 'e' >&2\n{ok_row}\n"),
+            "observation_unknown",
+        ),
+        (
+            // Grandchild holds the inherited write fd while the direct ps
+            // child exits 0 with EMPTY output: temp-file redirection means
+            // no pipe can block us, and the contract classifies it Missing.
+            // Grandchild is short-lived (2s) so it self-cleans after the
+            // probe; it is a stub-owned descendant, never the observed pid.
+            "grandchild_holds_fd_is_bounded",
+            "#!/bin/sh\n(sleep 2) &\nfor a in \"$@\"; do case \"$a\" in -p) : ;; [0-9]*) pid=$a ;; esac; done\nexit 0".to_string(),
+            "process_missing",
+        ),
+        (
+            "ps_timeout_is_unknown",
+            "#!/bin/sh\nexec sleep 30".to_string(),
+            "observation_unknown",
+        ),
+    ];
+
+    for (label, body, want) in cases {
+        let mut agent = spawn_test_child(); // observed child: must stay alive
+        let stub_dir = tempfile::tempdir().unwrap();
+        let ps = stub_dir.path().join("ps");
+        std::fs::write(&ps, body).unwrap();
+        make_executable(&ps);
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("r")).unwrap();
+        std::fs::write(dir.path().join("l.jsonl"), "x\n").unwrap();
+        let mut cmd = binary();
+        cmd.args([
+            "olp-runtime-watch",
+            "--once",
+            "--agent",
+            "inner_test",
+            "--agent-pid",
+            &agent.id().to_string(),
+            "--backend-pid",
+            &self_pid.to_string(),
+            "--repo",
+            dir.path().join("r").to_str().unwrap(),
+            "--ledger",
+            dir.path().join("l.jsonl").to_str().unwrap(),
+            "--session",
+            "s",
+            "--turn-id",
+            "t",
+            "--task",
+            "guard",
+        ])
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", stub_dir.path().display()),
+        );
+
+        let (code, stdout, _stderr, elapsed) =
+            bounded_cli_run(&mut cmd, std::time::Duration::from_secs(15));
+        assert_eq!(code, Some(0), "{label}: CLI exited failing");
+        assert!(
+            elapsed.as_secs() < 12,
+            "{label}: exceeded bound ({elapsed:?}) — a bounded probe hung"
+        );
+        let last = parse_lines(&stdout).pop().expect("record");
+        assert_eq!(
+            last["agent"]["state"],
+            serde_json::json!(want),
+            "{label}: wrong agent state"
+        );
+        assert_eq!(last["task_accepted"], serde_json::json!(false));
+        // The OBSERVED child was never killed by the watcher.
+        assert!(
+            matches!(agent.try_wait(), Ok(None)),
+            "{label}: observed child died during watch"
+        );
     }
 }
