@@ -153,6 +153,60 @@ pub enum LoopCommand {
     FireNow(String),
 }
 
+/// Parsed `/monitor` subcommand (octos#1977).
+///
+/// Create always requires a literal `--` before the probe command. A monitor
+/// name is free text and its argv is a list, so without a separator
+/// `/monitor watch build cargo build` cannot be split back into
+/// `name="build"` + `argv=["cargo","build"]` without guessing. `--` also
+/// keeps every future flag unambiguous against verbs and ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MonitorCommand {
+    /// `/monitor`, `/monitor list`.
+    ///
+    /// Bare `/monitor` lists rather than creating (the inverse of bare
+    /// `/loop`, which creates a maintenance loop): a monitor has no
+    /// server-resolvable default probe, so there is nothing a bare create
+    /// could arm.
+    List,
+    /// `/monitor watch <name> [match <regex>] -- <argv...>` (stream mode) and
+    /// `/monitor poll <name> [every <interval>] [match <regex>] -- <argv...>`.
+    Create {
+        name: String,
+        argv: Vec<String>,
+        /// `None` = let the server default it. Never guessed: octos rejects an
+        /// unknown mode outright rather than falling back, so inventing one
+        /// would arm a different watcher than the user asked for.
+        mode: Option<MonitorMode>,
+        filter_regex: Option<String>,
+        interval: Option<Duration>,
+    },
+    /// `/monitor pause <id>`.
+    Pause(String),
+    /// `/monitor resume <id>`.
+    Resume(String),
+    /// `/monitor delete <id>`.
+    Delete(String),
+}
+
+/// How a monitor observes its target. Mirrors octos `MonitorMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonitorMode {
+    /// Re-run the probe on a cadence; matched lines wake the master.
+    Poll,
+    /// Keep the probe running and stream its filtered stdout.
+    Stream,
+}
+
+impl MonitorMode {
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Poll => "poll",
+            Self::Stream => "stream",
+        }
+    }
+}
+
 /// Top-level parsed autonomy command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutonomyCommand {
@@ -162,6 +216,7 @@ pub enum AutonomyCommand {
     Turn(TurnCommand),
     Goal(GoalCommand),
     Loop(LoopCommand),
+    Monitor(MonitorCommand),
 }
 
 /// Errors the parser can raise. Each carries enough context that the
@@ -184,6 +239,14 @@ pub enum AutonomyParseError {
     MissingId { command: &'static str },
     /// `/loop` create with empty prompt.
     EmptyLoopPrompt,
+    /// `/monitor watch|poll` without the required `--` separator.
+    MonitorMissingCommand,
+    /// `/monitor watch|poll` with a separator but no probe argv after it.
+    MonitorEmptyCommand,
+    /// `/monitor watch|poll` with no name before the separator.
+    MonitorMissingName,
+    /// `/monitor <verb>` where verb is not a known verb and not a create form.
+    UnknownMonitorVerb(String),
     /// `/goal <objective>` with empty objective (after stripping
     /// whitespace).
     EmptyGoalObjective,
@@ -218,6 +281,14 @@ impl std::fmt::Display for AutonomyParseError {
                 write!(f, "{command} requires an id argument")
             }
             Self::EmptyLoopPrompt => f.write_str("/loop requires a prompt"),
+            Self::MonitorMissingCommand => f.write_str(
+                "/monitor create needs `-- <command>` (e.g. `/monitor watch build -- cargo build`)",
+            ),
+            Self::MonitorEmptyCommand => f.write_str("/monitor create needs a command after `--`"),
+            Self::MonitorMissingName => f.write_str("/monitor create needs a name before `--`"),
+            Self::UnknownMonitorVerb(verb) => {
+                write!(f, "unknown /monitor verb `{verb}`")
+            }
             Self::EmptyGoalObjective => f.write_str("/goal requires an objective"),
             Self::InvalidBudget(raw) => {
                 write!(
@@ -259,6 +330,7 @@ pub fn parse_autonomy_slash(input: &str) -> Result<Option<AutonomyCommand>, Auto
         "turn" => Ok(Some(AutonomyCommand::Turn(parse_turn(tail)?))),
         "goal" => Ok(Some(AutonomyCommand::Goal(parse_goal(tail)?))),
         "loop" => Ok(Some(AutonomyCommand::Loop(parse_loop(tail)?))),
+        "monitor" | "monitors" => Ok(Some(AutonomyCommand::Monitor(parse_monitor(tail)?))),
         other => Err(AutonomyParseError::UnknownCommand(other.to_string())),
     }
 }
@@ -631,6 +703,105 @@ fn parse_loop_create(body: &str) -> Result<LoopCommand, AutonomyParseError> {
         prompt: body.to_string(),
         cadence: LoopCadence::SelfPaced,
     })
+}
+
+fn parse_monitor(tail: &str) -> Result<MonitorCommand, AutonomyParseError> {
+    let trimmed = tail.trim();
+    // Bare `/monitor` lists. Unlike `/loop`, there is no server-resolvable
+    // default probe to arm, so creating on empty input would have to invent
+    // a command.
+    if trimmed.is_empty() {
+        return Ok(MonitorCommand::List);
+    }
+    let (verb, args) = split_head(trimmed);
+    match verb {
+        "list" => Ok(MonitorCommand::List),
+        "pause" => Ok(MonitorCommand::Pause(require_id("/monitor pause", args)?)),
+        "resume" => Ok(MonitorCommand::Resume(require_id("/monitor resume", args)?)),
+        "delete" => Ok(MonitorCommand::Delete(require_id("/monitor delete", args)?)),
+        "watch" => parse_monitor_create(args, Some(MonitorMode::Stream)),
+        "poll" => parse_monitor_create(args, Some(MonitorMode::Poll)),
+        // No bare-create fallback: an unrecognised verb is far more likely a
+        // typo than a monitor name, and silently treating `/monitor lst` as a
+        // create would arm a probe the user never asked for.
+        other => Err(AutonomyParseError::UnknownMonitorVerb(other.to_string())),
+    }
+}
+
+/// `<name> [every <interval>] [match <regex>] -- <argv...>`
+///
+/// Split on the FIRST ` -- `. The header before it is a short, closed grammar
+/// (name plus optional `every`/`match`); everything after is argv VERBATIM,
+/// which is what lets a probe carry its own separator — `cargo test --
+/// --nocapture` is the common case, and splitting on the last one instead
+/// would strand `--nocapture` as the whole command.
+fn parse_monitor_create(
+    body: &str,
+    mode: Option<MonitorMode>,
+) -> Result<MonitorCommand, AutonomyParseError> {
+    let body = body.trim();
+    let (header, command) =
+        split_monitor_separator(body).ok_or(AutonomyParseError::MonitorMissingCommand)?;
+    let argv: Vec<String> = command.split_whitespace().map(str::to_string).collect();
+    if argv.is_empty() {
+        return Err(AutonomyParseError::MonitorEmptyCommand);
+    }
+
+    let (name, mut rest) = split_head(header.trim());
+    if name.is_empty() {
+        return Err(AutonomyParseError::MonitorMissingName);
+    }
+
+    let mut interval = None;
+    let mut filter_regex = None;
+    // `match` is greedy to the end of the header, so it must be parsed last;
+    // `every` is a fixed two-token form and is parsed first when present.
+    loop {
+        let (head, tail) = split_head(rest);
+        match head {
+            "every" => {
+                let (raw, remainder) = split_head(tail);
+                if raw.is_empty() {
+                    return Err(AutonomyParseError::InvalidInterval(String::new()));
+                }
+                interval = Some(parse_interval(raw)?);
+                rest = remainder;
+            }
+            "match" => {
+                let pattern = tail.trim();
+                if pattern.is_empty() {
+                    return Err(AutonomyParseError::UnknownMonitorVerb("match".into()));
+                }
+                filter_regex = Some(pattern.to_string());
+                rest = "";
+            }
+            "" => break,
+            other => return Err(AutonomyParseError::UnknownMonitorVerb(other.to_string())),
+        }
+        if rest.trim().is_empty() {
+            break;
+        }
+    }
+
+    Ok(MonitorCommand::Create {
+        name: name.to_string(),
+        argv,
+        mode,
+        filter_regex,
+        interval,
+    })
+}
+
+/// Find the separator that divides the spec header from the probe argv.
+///
+/// FIRST occurrence: everything after it belongs to the probe, separators
+/// included. A `match <regex>` containing a literal ` -- ` would be truncated
+/// here, which is the accepted trade for probe commands round-tripping intact.
+fn split_monitor_separator(body: &str) -> Option<(&str, &str)> {
+    if let Some((head, tail)) = body.split_once(" -- ") {
+        return Some((head, tail));
+    }
+    body.strip_suffix(" --").map(|head| (head, ""))
 }
 
 fn try_parse_interval_token(token: &str) -> Option<Duration> {
@@ -1187,6 +1358,119 @@ mod tests {
         assert_eq!(
             parse_autonomy_slash("/agents spawn 4294967296 prompt").unwrap_err(),
             AutonomyParseError::InvalidSpawnCount("4294967296".into())
+        );
+    }
+
+    fn monitor(input: &str) -> MonitorCommand {
+        match parse_autonomy_slash(input).unwrap().unwrap() {
+            AutonomyCommand::Monitor(cmd) => cmd,
+            other => panic!("expected a monitor command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_monitor_lists_rather_than_creating() {
+        // The inverse of bare `/loop`, which creates a maintenance loop: a
+        // monitor has no server-resolvable default probe, so a bare create
+        // would have to invent a command to run.
+        assert_eq!(monitor("/monitor"), MonitorCommand::List);
+        assert_eq!(monitor("/monitor list"), MonitorCommand::List);
+        assert_eq!(monitor("/monitors"), MonitorCommand::List);
+    }
+
+    #[test]
+    fn monitor_control_verbs_take_an_id() {
+        assert_eq!(
+            monitor("/monitor pause m1"),
+            MonitorCommand::Pause("m1".into())
+        );
+        assert_eq!(
+            monitor("/monitor resume m1"),
+            MonitorCommand::Resume("m1".into())
+        );
+        assert_eq!(
+            monitor("/monitor delete m1"),
+            MonitorCommand::Delete("m1".into())
+        );
+        assert_eq!(
+            parse_autonomy_slash("/monitor pause").unwrap_err(),
+            AutonomyParseError::MissingId {
+                command: "/monitor pause"
+            }
+        );
+    }
+
+    #[test]
+    fn monitor_watch_creates_a_stream_probe() {
+        assert_eq!(
+            monitor("/monitor watch build -- cargo build"),
+            MonitorCommand::Create {
+                name: "build".into(),
+                argv: vec!["cargo".into(), "build".into()],
+                mode: Some(MonitorMode::Stream),
+                filter_regex: None,
+                interval: None,
+            }
+        );
+    }
+
+    #[test]
+    fn monitor_poll_accepts_an_interval_and_a_filter() {
+        assert_eq!(
+            monitor("/monitor poll disk every 30s match ERROR|WARN -- df -h"),
+            MonitorCommand::Create {
+                name: "disk".into(),
+                argv: vec!["df".into(), "-h".into()],
+                mode: Some(MonitorMode::Poll),
+                filter_regex: Some("ERROR|WARN".into()),
+                interval: Some(Duration::from_secs(30)),
+            }
+        );
+    }
+
+    /// A filter regex may contain spaces, so `match` runs to the separator.
+    #[test]
+    fn monitor_filter_regex_may_contain_spaces() {
+        let MonitorCommand::Create { filter_regex, .. } =
+            monitor("/monitor watch t match error: .* failed -- tail -f log")
+        else {
+            panic!("expected create");
+        };
+        assert_eq!(filter_regex.as_deref(), Some("error: .* failed"));
+    }
+
+    /// Split on the LAST separator: `cargo test -- --nocapture` is the common
+    /// probe shape, and splitting on the first would silently drop its tail.
+    #[test]
+    fn monitor_command_may_itself_contain_a_separator() {
+        let MonitorCommand::Create { argv, name, .. } =
+            monitor("/monitor watch t -- cargo test -- --nocapture")
+        else {
+            panic!("expected create");
+        };
+        assert_eq!(name, "t");
+        assert_eq!(argv, vec!["cargo", "test", "--", "--nocapture"]);
+    }
+
+    #[test]
+    fn monitor_create_requires_a_separator_and_a_command() {
+        assert_eq!(
+            parse_autonomy_slash("/monitor watch build cargo build").unwrap_err(),
+            AutonomyParseError::MonitorMissingCommand
+        );
+        assert_eq!(
+            parse_autonomy_slash("/monitor watch build --").unwrap_err(),
+            AutonomyParseError::MonitorEmptyCommand
+        );
+    }
+
+    /// An unrecognised verb is far likelier a typo than a monitor name, so it
+    /// must not fall through to create and arm a probe nobody asked for.
+    #[test]
+    fn unknown_monitor_verb_is_rejected_rather_than_treated_as_a_name() {
+        assert_eq!(
+            parse_autonomy_slash("/monitor lst").unwrap_err(),
+            AutonomyParseError::UnknownMonitorVerb("lst".into())
         );
     }
 }
