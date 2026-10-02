@@ -45,9 +45,22 @@
 npm install -g @octos-org/octoscode
 
 # ② 在你的项目目录铺 OLP 脚手架(幂等,绝不覆盖已有文件)
+# 方案 A：默认 legacy
 cd your-project/
 curl -fsSL https://raw.githubusercontent.com/octos-org/octoscode/main/scripts/olp-init.sh | bash
-#   (或 clone 本仓库后运行 scripts/olp-init.sh)
+
+# ③ 启动内环
+octoscode --stdio-command 'octos serve --stdio --solo'
+```
+
+若新项目要启用实验结构化黑板，请在**第一次 init 前**选择下面的方案 B，
+不要先执行方案 A；结构化工具必须来自本地 octoscode checkout 的绝对路径：
+
+```bash
+# 方案 B：structured（替代方案 A，不要依次执行）
+cd your-project/
+OCTOSCODE_REPO=/absolute/path/to/octoscode
+OLP_BOARD_MODE=structured bash "$OCTOSCODE_REPO/scripts/olp-init.sh"
 
 # ③ 启动内环
 octoscode --stdio-command 'octos serve --stdio --solo'
@@ -67,6 +80,19 @@ octoscode --stdio-command 'octos serve --stdio --solo'
 
 1. **API key**:首次进 TUI 的 onboarding 向导里自己粘贴(三个字段,五分钟);
 2. **免沙箱授权**:见下一节。
+
+### 2.5 可选结构化黑板
+
+方案 A 与方案 B 二选一；`OLP_BOARD_MODE=structured` 必须在第一次 init 时设置。
+它只作用于新生成文件，安装四个相邻 Python 工具并
+生成 receive→执行→ack loop、无裸 ACK 占位的新板和独立锁。既有文件绝不覆盖，
+无 Python 时明确降级且旧 shell 仍可用。先看 init 生成的 structured loop/板头，
+再用 `olp-board-event.py state --board <规范板路径>`；新板在首事件前仍返回 legacy，
+但显式 opt-in 的第一条派单就用 item。普通 legacy 板继续旧流程；
+structured/mixed 走 item→receive→ack→review。查询/等待用 inbox，正信号观察用
+sentinel（文字唤醒、账本判定），`events.jsonl` 负哨照旧。DRIFT 必须先停自动
+调度，再按精确字节 evidence 以 recovery 或 void 收口。完整命令和安全边界见
+[`OLP_STRUCTURED_BOARD.md`](OLP_STRUCTURED_BOARD.md)。
 
 ### 0b. 权限档语义(第一次必读,少走两天弯路)
 
@@ -156,7 +182,8 @@ herdr 用户另有驾驶舱注入:`herdr agent list` 看窗格,
 ## 5. 冒烟验证(两分钟)
 
 1. TUI 里发个 hello,确认主档模型回话;
-2. 黑板首条(olp-init 生成的"黑板启用")让内环 ACK 掉——读写闭环即通;
+2. legacy 模式让内环 ACK init 生成的第一条条目；structured 模式用安装后的
+   event CLI 完成一轮 item→receive→ack→review——两者都闭合读写链路;
 3. 有 herdr 的话:`herdr agent list` 应显示 `octoscode | <pane> | idle`。
 
 ## 6. 故障速查
@@ -174,4 +201,5 @@ herdr 用户另有驾驶舱注入:`herdr agent list` 看窗格,
 
 - [OUTER_LOOP_PROTOCOL.md](OUTER_LOOP_PROTOCOL.md) — 协议全文:ACK 语法、
   result.md schema、多外环规则、预算治理、实战教训全集
+- [OLP_STRUCTURED_BOARD.md](OLP_STRUCTURED_BOARD.md) — 可选结构化账本、迁移、DRIFT/recovery/void
 - README「Quickstart (solo onboarding)」— 单环(不带外环)的逐屏引导
