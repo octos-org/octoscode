@@ -1,7 +1,6 @@
 use std::io;
 #[cfg(all(unix, not(test)))]
 use std::sync::Arc;
-#[cfg(all(unix, not(test)))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -14,8 +13,9 @@ use crossterm::{
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableBracketedPaste, EnableFocusChange, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
-        MouseEventKind,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+        MouseButton, MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{
@@ -105,6 +105,82 @@ impl SuspendFlags {
     }
 }
 
+/// The kitty keyboard protocol's "disambiguate escape codes" level. The
+/// legacy encoding folds Shift+Enter into a bare Enter, so the composer's
+/// Shift+Enter newline (`handle_key`) only fired in terminals that report the
+/// modifier unasked. Terminals that answer the protocol query (Ghostty, kitty,
+/// WezTerm, the Makepad terminal) get this level for the TUI's lifetime;
+/// others (Terminal.app, tmux without passthrough) stay legacy and keep Ctrl+J
+/// and Alt+Enter. `OCTOSCODE_LEGACY_KEYBOARD=1` opts out.
+const KEYBOARD_ENHANCEMENT: KeyboardEnhancementFlags =
+    KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
+
+/// Set once at startup when the terminal supports the protocol and the person
+/// did not opt out: suspend and local-shell hand-offs pop the flags, and this
+/// says whether to push them again on the way back.
+static KEYBOARD_ENHANCEMENT_WANTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether the active screen's flags are pushed right now. Screen switches
+/// pop the old screen before pushing the new one: kitty keeps independent
+/// stacks for the main and alternate screens. The panic hook has no guard.
+static KEYBOARD_ENHANCEMENT_PUSHED: AtomicBool = AtomicBool::new(false);
+
+fn keyboard_enhancement_supported() -> bool {
+    let opted_out = std::env::var_os("OCTOSCODE_LEGACY_KEYBOARD")
+        .map(|value| !value.is_empty() && value != "0")
+        .unwrap_or(false);
+    !opted_out && crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false)
+}
+
+fn push_keyboard_enhancement<W: io::Write>(
+    out: &mut W,
+    wanted: &AtomicBool,
+    pushed: &AtomicBool,
+) -> io::Result<()> {
+    if !wanted.load(Ordering::Acquire) || pushed.swap(true, Ordering::AcqRel) {
+        return Ok(());
+    }
+    execute!(out, PushKeyboardEnhancementFlags(KEYBOARD_ENHANCEMENT))
+        .inspect_err(|_| pushed.store(false, Ordering::Release))
+}
+
+fn pop_keyboard_enhancement<W: io::Write>(out: &mut W, pushed: &AtomicBool) {
+    if pushed.swap(false, Ordering::AcqRel) {
+        let _ = execute!(out, PopKeyboardEnhancementFlags);
+    }
+}
+
+/// Push the flags again after a hand-off, if the session uses them.
+fn resume_keyboard_enhancement<W: io::Write>(out: &mut W) -> io::Result<()> {
+    push_keyboard_enhancement(
+        out,
+        &KEYBOARD_ENHANCEMENT_WANTED,
+        &KEYBOARD_ENHANCEMENT_PUSHED,
+    )
+}
+
+/// Pop the flags if they are pushed. Every path that gives the terminal back
+/// (exit, panic, suspend, local shell) calls this before leaving raw mode.
+pub fn release_keyboard_enhancement<W: io::Write>(out: &mut W) {
+    pop_keyboard_enhancement(out, &KEYBOARD_ENHANCEMENT_PUSHED);
+}
+
+fn switch_screen_with_keyboard_enhancement<W: io::Write>(
+    out: &mut W,
+    mode: RenderMode,
+    wanted: &AtomicBool,
+    pushed: &AtomicBool,
+) -> io::Result<()> {
+    // A push belongs to the screen on which it was emitted. Retire that push
+    // before switching, then enable enhanced input on the newly active screen.
+    pop_keyboard_enhancement(out, pushed);
+    match mode {
+        RenderMode::Inline => execute!(out, LeaveAlternateScreen)?,
+        RenderMode::AltScreen => execute!(out, EnterAlternateScreen)?,
+    }
+    push_keyboard_enhancement(out, wanted, pushed)
+}
+
 /// Bring the terminal back to a sane interactive state WITHOUT unwinding, so
 /// the shell is usable while we are stopped by SIGTSTP (OUTER_LOOP_REVIEW
 /// #10.1). This is the teardown half of `TerminalGuard::drop`, minus the
@@ -121,6 +197,7 @@ fn restore_terminal_for_suspend(guard: &mut TerminalGuard) {
         let _ = execute!(stdout, DisableMouseCapture);
         guard.mouse_captured = false;
     }
+    release_keyboard_enhancement(&mut stdout);
     if guard.mode == RenderMode::AltScreen {
         let _ = execute!(stdout, LeaveAlternateScreen);
         guard.mode = RenderMode::Inline;
@@ -172,6 +249,7 @@ where
     let mut stdout = io::stdout();
     enable_raw_mode()?;
     execute!(stdout, EnableBracketedPaste, EnableFocusChange)?;
+    resume_keyboard_enhancement(&mut stdout)?;
     if app::wants_mouse_capture(&store.state) {
         execute!(stdout, EnableMouseCapture)?;
         guard.mouse_captured = true;
@@ -206,6 +284,10 @@ pub fn run(cli: Cli) -> Result<()> {
     // NO app mode key. We also deliberately do NOT `EnableMouseCapture`, which
     // would route click-drag to the app and defeat native selection.
     execute!(stdout, EnableBracketedPaste, EnableFocusChange)?;
+    // After the OSC probe above (it reads /dev/tty itself) and before the
+    // input loop: the query's reply must not reach the composer.
+    KEYBOARD_ENHANCEMENT_WANTED.store(keyboard_enhancement_supported(), Ordering::Release);
+    resume_keyboard_enhancement(&mut stdout)?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = InlineTerminal::new(backend)?;
     let mut guard = TerminalGuard {
@@ -887,6 +969,8 @@ where
 
     #[cfg(not(test))]
     {
+        // The child gets the terminal's legacy keys, as any shell expects.
+        release_keyboard_enhancement(terminal.backend_mut());
         disable_raw_mode()?;
         if let Err(error) = execute!(
             terminal.backend_mut(),
@@ -903,6 +987,7 @@ where
                 EnableBracketedPaste,
                 EnableFocusChange
             );
+            let _ = resume_keyboard_enhancement(terminal.backend_mut());
             return Err(error.into());
         }
     }
@@ -929,6 +1014,11 @@ where
             EnableBracketedPaste,
             EnableFocusChange
         ) && restore_error.is_none()
+        {
+            restore_error = Some(error.into());
+        }
+        if let Err(error) = resume_keyboard_enhancement(terminal.backend_mut())
+            && restore_error.is_none()
         {
             restore_error = Some(error.into());
         }
@@ -3491,6 +3581,7 @@ impl TerminalGuard {
         if self.mouse_captured {
             let _ = execute!(stdout, DisableMouseCapture);
         }
+        release_keyboard_enhancement(stdout);
         if self.mode == RenderMode::AltScreen {
             let _ = execute!(stdout, LeaveAlternateScreen);
         }
@@ -3547,7 +3638,12 @@ impl TerminalGuard {
         // was laid out for, restored by `leave_alt_screen` so the next inline
         // draw can detect any resize that happened while the overlay was up.
         self.saved_inline_screen_size = Some(terminal.last_known_screen_size);
-        execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+        switch_screen_with_keyboard_enhancement(
+            terminal.backend_mut(),
+            RenderMode::AltScreen,
+            &KEYBOARD_ENHANCEMENT_WANTED,
+            &KEYBOARD_ENHANCEMENT_PUSHED,
+        )?;
         let size = terminal.size()?;
         terminal.set_viewport_area(ratatui::layout::Rect::new(0, 0, size.width, size.height));
         terminal.clear_visible_screen()?;
@@ -3569,7 +3665,12 @@ impl TerminalGuard {
         if self.mode == RenderMode::Inline {
             return Ok(());
         }
-        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+        switch_screen_with_keyboard_enhancement(
+            terminal.backend_mut(),
+            RenderMode::Inline,
+            &KEYBOARD_ENHANCEMENT_WANTED,
+            &KEYBOARD_ENHANCEMENT_PUSHED,
+        )?;
         let fallback = {
             let size = terminal.size()?;
             ratatui::layout::Rect::new(0, size.height.saturating_sub(1), size.width, 1)
@@ -3611,6 +3712,88 @@ impl Drop for TerminalGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyboard_enhancement_pushes_once_and_pops_once() {
+        let wanted = AtomicBool::new(true);
+        let pushed = AtomicBool::new(false);
+        let mut out = Vec::new();
+        push_keyboard_enhancement(&mut out, &wanted, &pushed).unwrap();
+        push_keyboard_enhancement(&mut out, &wanted, &pushed).unwrap();
+        assert_eq!(out, b"\x1b[>1u", "the disambiguate level, pushed once");
+        out.clear();
+        pop_keyboard_enhancement(&mut out, &pushed);
+        pop_keyboard_enhancement(&mut out, &pushed);
+        assert_eq!(out, b"\x1b[<1u", "popped exactly once");
+    }
+
+    #[test]
+    fn keyboard_enhancement_stays_off_when_unsupported_or_never_pushed() {
+        let wanted = AtomicBool::new(false);
+        let pushed = AtomicBool::new(false);
+        let mut out = Vec::new();
+        push_keyboard_enhancement(&mut out, &wanted, &pushed).unwrap();
+        pop_keyboard_enhancement(&mut out, &pushed);
+        assert!(
+            out.is_empty(),
+            "a legacy terminal sees no protocol bytes at all"
+        );
+    }
+
+    #[test]
+    fn keyboard_enhancement_tracks_independent_screen_stacks() {
+        let wanted = AtomicBool::new(true);
+        let pushed = AtomicBool::new(false);
+        let mut out = Vec::new();
+        push_keyboard_enhancement(&mut out, &wanted, &pushed).unwrap();
+        for mode in [
+            RenderMode::AltScreen,
+            RenderMode::Inline,
+            RenderMode::AltScreen,
+        ] {
+            switch_screen_with_keyboard_enhancement(&mut out, mode, &wanted, &pushed).unwrap();
+        }
+        // Exit while the pager owns the alternate screen, as Drop/panic/suspend
+        // do: pop its flags before restoring the normal screen.
+        pop_keyboard_enhancement(&mut out, &pushed);
+        execute!(out, LeaveAlternateScreen).unwrap();
+
+        // Replay the actual emitted commands against two independent stacks,
+        // preserving pre-existing flags as a parent terminal application would.
+        let mut stacks = [vec![8], vec![4]];
+        let mut screen = 0;
+        let mut enhanced_screens = Vec::new();
+        for command in out
+            .split(|byte| *byte == b'\x1b')
+            .filter(|part| !part.is_empty())
+        {
+            match command {
+                b"[>1u" => {
+                    stacks[screen].push(1);
+                    enhanced_screens.push(screen);
+                }
+                b"[<1u" => assert_eq!(stacks[screen].pop(), Some(1)),
+                b"[?1049h" => screen = 1,
+                b"[?1049l" => screen = 0,
+                _ => panic!("unexpected terminal command: {command:?}"),
+            }
+        }
+        assert_eq!(enhanced_screens, vec![0, 1, 0, 1]);
+        assert_eq!(stacks, [vec![8], vec![4]], "both parent modes are restored");
+        assert!(!pushed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn keyboard_enhancement_screen_switches_preserve_legacy_mode() {
+        let wanted = AtomicBool::new(false);
+        let pushed = AtomicBool::new(false);
+        let mut out = Vec::new();
+        for mode in [RenderMode::AltScreen, RenderMode::Inline] {
+            switch_screen_with_keyboard_enhancement(&mut out, mode, &wanted, &pushed).unwrap();
+        }
+        assert_eq!(out, b"\x1b[?1049h\x1b[?1049l");
+    }
+
     use crate::model::{ActivityKind, AppState, LiveReply, SessionView, TaskView};
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     use octos_core::{

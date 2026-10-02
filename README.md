@@ -755,6 +755,10 @@ the model.
 
 The composer is multi-line: **Enter** sends, **Shift+Enter** (or **Ctrl+J** as a
 portable fallback) inserts a newline, and the box grows as you add lines.
+Shift+Enter needs a terminal that can tell it from Enter: octoscode turns on the
+kitty keyboard protocol where the terminal supports it (Ghostty, kitty, WezTerm,
+the Makepad terminal), and elsewhere (Terminal.app, tmux without passthrough)
+Ctrl+J is the newline key.
 
 Arrow **Up** from an **empty** composer recalls your command history —
 newest first, persisted across sessions, shell-style; once browsing, **Down**
@@ -822,6 +826,7 @@ source/fallback locale, so any untranslated string falls back to English.
 | `OCTOSCODE_NO_AUTO_INSTALL` | Disables backend auto-install (a missing `octos` then errors). |
 | `OCTOSCODE_NO_SPLASH` | Disables the startup logo animation (same as `--no-splash`). |
 | `OCTOSCODE_SPLASH_EFFECT` | Pins the splash to one curated effect, e.g. `matrix`. |
+| `OCTOSCODE_LEGACY_KEYBOARD` | `1` keeps the terminal's legacy key encoding (no kitty keyboard protocol); Shift+Enter then submits like Enter, and Ctrl+J inserts a newline. |
 
 > **Renamed from `octos-tui`.** Every `OCTOS_TUI_*` variable is now
 > `OCTOSCODE_*`. The one exception that still works is
