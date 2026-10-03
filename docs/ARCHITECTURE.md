@@ -3,9 +3,12 @@
 ## Scope
 
 `octoscode` is a standalone terminal client for the Octos UI Protocol.
-In protocol mode it does not run the Octos agent, execute tools, approve
-commands, maintain the durable ledger, or own provider/model configuration.
-Those responsibilities belong to the `octos serve` process.
+The `octos serve` process owns agent execution, model-requested tools, approval
+policy, the durable ledger, and provider/model configuration. The TUI presents
+approval requests and forwards the user's decisions.
+
+The accepted [architecture decisions](../knowledge/decisions/README.md) record
+this ownership boundary and the implemented transport choices.
 
 The TUI owns:
 
@@ -14,12 +17,14 @@ The TUI owns:
 - optimistic display of the user's submitted prompt
 - local slash commands such as `/ps`, `/stop`, and `/help`
 - translation between user interactions and stable `AppUiCommand` values
+- backend provisioning/startup for the default local transport
+- explicit `!command` shell escapes on the TUI host, intercepted before RPC
 
 The server owns:
 
 - session creation and session cwd validation
 - agent/runtime execution
-- shell/tool execution and sandbox policy
+- model-requested shell/tool execution and sandbox policy
 - approval requests, approval decisions, and approval scopes
 - task supervisor state and background task registry
 - durable UI event ledger, replay, and `protocol/replay_lossy` reporting
@@ -37,9 +42,9 @@ octoscode
   src/app.rs              ratatui panes, markdown, tasks, diffs, approvals
   src/transport.rs        mock or protocol backend
   |
-  | AppUiCommand -> JSON-RPC over WebSocket
+  | AppUiCommand -> JSON-RPC over stdio (default) or WebSocket
   v
-ws://HOST:PORT/api/ui-protocol/ws
+octos serve --stdio --solo  OR  ws://HOST:PORT/api/ui-protocol/ws
   |
   v
 octos serve
@@ -56,11 +61,17 @@ Octos runtime
 octoscode Store -> AppState -> ratatui render
 ```
 
-`octoscode` and `octos-app` should both depend on the AppUI contract, not on
-M9 or future M10 implementation details. As long as the AppUI API remains
-compatible, client behavior should survive server-internal milestone changes.
+`octoscode` and its browser sibling `octoscode-web` depend on the AppUI
+contract. Server internals can evolve independently of client presentation;
+connected-server capabilities determine which protocol operations are available.
 
-## Server Endpoints
+## Transports and Server Endpoints
+
+A bare launch defaults to `octos serve --stdio --solo`.
+`src/backend_ensure.rs` locates or provisions the backend before the terminal
+event loop starts. `--stdio-command` selects an explicit child command;
+`--endpoint` selects a WebSocket server. They are mutually exclusive. Both
+implementations live behind the AppUI backend interface in `src/transport.rs`.
 
 The AppUI endpoint is:
 
@@ -72,12 +83,9 @@ That route is implemented in the Octos repo under
 `crates/octos-cli/src/api/ui_protocol.rs`. It accepts JSON-RPC messages over a
 WebSocket and translates protocol commands into runtime actions.
 
-WebSocket is the current deployed transport, not the Octos UI Protocol itself. The
-transport refactor milestone is documented in the parent Octos repo at
-`api/APPUI_TRANSPORT_PROTOCOL_REFACTOR_MILESTONE.md`. The intended long-term
-shape is that the same `AppUiCommand` and `AppUiEvent` contract can run over
-WebSocket, stdio, Unix sockets, local TCP streams, named pipes, or in-process
-test channels.
+Stdio and WebSocket are implemented live transports for the same UI Protocol.
+Mock mode provides an explicit fixture backend. Unix sockets and named pipes
+are not additional transport choices in the current CLI.
 
 The older endpoint:
 
@@ -90,11 +98,13 @@ is the legacy web chat/gateway WebSocket. It is not the AppUI contract used by
 
 ## Shared API Types
 
-The client consumes shared Rust types from the sibling Octos repo:
+The client consumes shared Rust types from the Octos repository through the
+exact `octos-core` git revision in `Cargo.toml`. A sibling checkout is not
+required. Source definitions live at:
 
 ```text
-../octos/crates/octos-core/src/app_ui.rs
-../octos/crates/octos-core/src/ui_protocol.rs
+octos/crates/octos-core/src/app_ui.rs
+octos/crates/octos-core/src/ui_protocol.rs
 ```
 
 `app_ui.rs` is the app-facing API layer. `ui_protocol.rs` is the JSON-RPC wire
