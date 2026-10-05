@@ -11640,9 +11640,16 @@ mod tests {
         // Drain until the reconnect happens: the dead writer makes the next
         // send/poll fail, the disconnect is reported, and the backend
         // reconnects (server accepts connection 2 and captures 3 requests).
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // Both outcomes are required before leaving the loop: the reconnect's
+        // capabilities frame reaching the test server does NOT imply the
+        // disconnect status was already popped from the backend's event queue
+        // — which side wins is scheduler-dependent, and the Windows CI runner
+        // under full-suite load routinely delivers the frame first. Generous
+        // deadline for the same reason; isolated runs finish in <1s.
+        let deadline = Instant::now() + Duration::from_secs(30);
         let mut saw_disconnect = false;
-        while Instant::now() < deadline {
+        let mut saw_reconnect = false;
+        while Instant::now() < deadline && !(saw_disconnect && saw_reconnect) {
             match backend.next_event() {
                 Ok(Some(ClientEvent::App(event))) => {
                     if let AppUiEvent::Status(status) = *event {
@@ -11659,16 +11666,29 @@ mod tests {
                     session_id: SessionKey("local:test".into()),
                 },
             ));
-            if let Ok(frame) = server.received.recv_timeout(Duration::from_millis(50)) {
-                // First reconnect request must be the capabilities refresh.
-                assert_eq!(
-                    frame["method"],
-                    crate::model::APPUI_METHOD_CONFIG_CAPABILITIES_LIST
-                );
-                break;
+            // Only the FIRST reconnect frame is consumed here; the replayed
+            // launch/resolve and the session reopen stay queued for the
+            // recv_json assertions below.
+            if !saw_reconnect {
+                if let Ok(frame) = server.received.recv_timeout(Duration::from_millis(50)) {
+                    // First reconnect request must be the capabilities refresh.
+                    assert_eq!(
+                        frame["method"],
+                        crate::model::APPUI_METHOD_CONFIG_CAPABILITIES_LIST
+                    );
+                    saw_reconnect = true;
+                }
+            } else {
+                // Keep iterations paced while waiting for the disconnect
+                // status; recv_timeout no longer provides the 50ms pause.
+                thread::sleep(Duration::from_millis(50));
             }
         }
-        assert!(saw_disconnect, "the dead connection was reported");
+        assert!(
+            saw_disconnect && saw_reconnect,
+            "the dead connection was reported and the reconnect happened \
+             (saw_disconnect={saw_disconnect}, saw_reconnect={saw_reconnect})"
+        );
 
         // The REPLAYED launch/resolve lands BEFORE the session reopen.
         let replayed = server.recv_json();
