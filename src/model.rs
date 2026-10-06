@@ -1198,10 +1198,12 @@ pub struct ModelSelectResult {
     pub selected: ModelStatus,
     #[serde(default)]
     pub applied: bool,
-    /// The selection was persisted, but the currently running profile is
-    /// startup-pinned and cannot use it until the backend restarts.
     #[serde(default)]
     pub restart_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_disposition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_policy_stamp: Option<RuntimePolicyStamp>,
 }

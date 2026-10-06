@@ -4582,12 +4582,18 @@ fn model_select_event(
     result: ModelSelectResult,
     initiating_session: Option<SessionKey>,
 ) -> ClientEvent {
-    let prefix = if result.restart_required && result.applied {
+    let prefix = if result.restart_required {
         "Model saved; restart required"
-    } else if result.applied {
-        "Model selected"
     } else {
-        "Model unchanged"
+        match result.runtime_disposition.as_deref() {
+            Some("reloaded") => "Model saved. Your next message uses",
+            Some("restart_required") => "Model saved; restart required",
+            Some("deferred") => "Model saved; runtime activation pending",
+            Some("persisted_but_not_live") => "Model saved, but not live",
+            Some("unchanged") => "Model unchanged",
+            _ if result.applied => "Model saved; runtime activation unconfirmed",
+            _ => "Model unchanged",
+        }
     };
     ClientEvent::ModelSelect(ModelSelectClientEvent {
         message: format!(
@@ -5716,6 +5722,8 @@ impl AppUiBackend for MockAppUiBackend {
                         selected,
                         applied: true,
                         restart_required: false,
+                        runtime_disposition: Some("reloaded".into()),
+                        runtime_error: None,
                         runtime_policy_stamp: None,
                     },
                     Some(params.session_id),
@@ -5749,6 +5757,8 @@ impl AppUiBackend for MockAppUiBackend {
                         selected,
                         applied: true,
                         restart_required: false,
+                        runtime_disposition: Some("reloaded".into()),
+                        runtime_error: None,
                         runtime_policy_stamp: None,
                     },
                     Some(initiating),
@@ -6732,6 +6742,43 @@ fn mock_diff_preview(session_id: SessionKey, preview_id: PreviewId) -> DiffPrevi
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn model_select_messages_report_runtime_disposition() {
+        for (disposition, expected) in [
+            ("reloaded", "next message"),
+            ("restart_required", "restart required"),
+            ("deferred", "pending"),
+            ("persisted_but_not_live", "not live"),
+            ("legacy", "unconfirmed"),
+            ("unchanged", "unchanged"),
+        ] {
+            let mut raw = serde_json::json!({
+                "session_id":"local:a", "selected":{"model":"new", "provider":"openai", "selected":true}, "applied":true
+            });
+            if disposition != "legacy" {
+                raw["runtime_disposition"] = disposition.into();
+            }
+            let ClientEvent::ModelSelect(event) =
+                model_select_event(serde_json::from_value(raw).unwrap(), None)
+            else {
+                panic!("model event")
+            };
+            assert!(
+                event.message.contains(expected),
+                "{disposition}: {}",
+                event.message
+            );
+        }
+        let result = serde_json::from_value(serde_json::json!({
+            "session_id":"local:a", "selected":{"model":"new", "provider":"openai", "selected":true},
+            "applied":true, "restart_required":true
+        })).unwrap();
+        let ClientEvent::ModelSelect(event) = model_select_event(result, None) else {
+            panic!("model event")
+        };
+        assert!(event.message.contains("restart required"));
+    }
+
     use super::*;
     use crate::model::{
         AgentArtifactReadParams, ConfigCapabilitiesListParams, McpConfigDeleteParams,
