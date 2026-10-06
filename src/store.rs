@@ -10216,11 +10216,10 @@ impl Store {
             .iter_mut()
             .find(|status| status.session_id == session_id)
         {
-            // A startup-pinned profile accepted the persisted selection but
-            // did not rebuild its live provider chain. Keep the footer on the
-            // effective model until reconnect instead of claiming the saved
-            // model is already serving this session.
-            if !result.restart_required {
+            // Persistence alone does not mean the runtime changed. Older
+            // servers may save the default but keep serving the boot model.
+            if !result.restart_required && result.runtime_disposition.as_deref() == Some("reloaded")
+            {
                 status.model = Some(result.selected.clone());
                 if let Some(stamp) = result.runtime_policy_stamp.clone() {
                     status.runtime_policy_stamp = Some(stamp);
@@ -10228,6 +10227,7 @@ impl Store {
             }
         }
         if !result.restart_required
+            && result.runtime_disposition.as_deref() != Some("restart_required")
             && let Some(catalog) = self
                 .state
                 .session_model_catalogs
@@ -10236,10 +10236,13 @@ impl Store {
         {
             for model in &mut catalog.models {
                 model.selected = model.model == result.selected.model
-                    && model.provider == result.selected.provider;
+                    && model.provider == result.selected.provider
+                    && model.route == result.selected.route;
             }
             if !catalog.models.iter().any(|model| {
-                model.model == result.selected.model && model.provider == result.selected.provider
+                model.model == result.selected.model
+                    && model.provider == result.selected.provider
+                    && model.route == result.selected.route
             }) {
                 catalog.models.push(result.selected);
             }
@@ -31389,6 +31392,68 @@ now analyzing the bus module"
         assert_eq!(store.state.run_state.label(), "done");
     }
 
+    #[test]
+    fn model_select_keeps_saved_and_runtime_models_distinct() {
+        for disposition in [
+            "restart_required",
+            "deferred",
+            "persisted_but_not_live",
+            "legacy",
+            "reloaded",
+        ] {
+            let mut store = store_with_two_sessions("local:a", "local:b");
+            let session = SessionKey("local:a".into());
+            let status: crate::model::SessionStatusReadResult = serde_json::from_value(serde_json::json!({
+                "session_id": "local:a", "model": {"model":"old", "provider":"openai", "selected":true}
+            })).unwrap();
+            store.state.session_runtime_statuses.push(status.into());
+            store
+                .state
+                .set_model_catalog(crate::model::SessionModelCatalog {
+                    session_id: session.clone(),
+                    models: vec![],
+                });
+            let mut raw = serde_json::json!({
+                "session_id":"local:a", "selected":{"model":"new", "provider":"openai", "selected":true},
+                "applied":true,
+                "runtime_policy_stamp":{"model": if disposition == "reloaded" {"new"} else {"old"}, "provider":"openai"}
+            });
+            if disposition != "legacy" {
+                raw["runtime_disposition"] = disposition.into();
+            }
+            store.apply_client_event(ClientEvent::ModelSelect(
+                crate::client_event::ModelSelectClientEvent {
+                    result: serde_json::from_value(raw).unwrap(),
+                    message: "saved".into(),
+                    initiating_session: Some(session.clone()),
+                },
+            ));
+            let expected = if disposition == "reloaded" {
+                "new"
+            } else {
+                "old"
+            };
+            assert_eq!(
+                store.state.session_runtime_statuses[0]
+                    .model
+                    .as_ref()
+                    .unwrap()
+                    .model,
+                expected,
+                "{disposition}"
+            );
+            let models = &store.state.model_catalog_for(&session).unwrap().models;
+            if disposition == "restart_required" {
+                assert!(
+                    models.is_empty(),
+                    "pending restart waits for catalog readback"
+                );
+            } else {
+                assert_eq!(models[0].model, "new");
+            }
+        }
+    }
+
     /// A select result carries its initiating session (correlated by request
     /// id in the transport) and lands exactly there — even if the user
     /// switched sessions meanwhile; an unattributed result is ignored.
@@ -31446,6 +31511,8 @@ now analyzing the bus module"
                     },
                     applied: true,
                     restart_required: false,
+                    runtime_disposition: Some("reloaded".into()),
+                    runtime_error: None,
                     runtime_policy_stamp: None,
                 },
                 message: "Model selected".into(),
@@ -31545,6 +31612,8 @@ now analyzing the bus module"
                     },
                     applied: true,
                     restart_required: true,
+                    runtime_disposition: None,
+                    runtime_error: None,
                     runtime_policy_stamp: Some(RuntimePolicyStamp {
                         model: Some("deepseek-chat".into()),
                         provider: Some("deepseek".into()),
@@ -31660,6 +31729,8 @@ now analyzing the bus module"
                     },
                     applied: true,
                     restart_required: false,
+                    runtime_disposition: Some("reloaded".into()),
+                    runtime_error: None,
                     runtime_policy_stamp: None,
                 },
                 message: "Model selected".into(),
