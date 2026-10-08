@@ -43,3 +43,7 @@ Scenario: concurrent attachment verifies process identity
 Scenario: simultaneous cold starts share a real backend
   Test: shared_discovery_two_cold_launches_start_one_real_server
   Explicit integration run with OCTOS_WORKSPACE_TEST_BINARY verifies two concurrent launches share one authenticated server and one database-owner lock.
+
+Scenario: simultaneous first-use activation stays in separate conversations
+  Test: workspace_activation_menus_and_profile_switch_keep_clients_distinct
+  Activate and cross-profile menus use the same per-client launch identity; profile switching cannot collapse independent clients into the legacy coding topic.

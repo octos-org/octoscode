@@ -714,6 +714,8 @@ pub struct MenuContext<'a> {
 
 #[derive(Debug, Clone, Default)]
 pub struct MenuAppSnapshot<'a> {
+    /// Capability-gated per-client identity for activation menu session opens.
+    pub workspace_launch_topic: Option<&'a str>,
     pub status: Option<&'a str>,
     pub target: Option<&'a str>,
     pub cwd: Option<&'a str>,

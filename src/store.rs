@@ -3094,7 +3094,12 @@ impl Store {
         // kind/message, not the request's profile id.
         self.state.onboarding.profile_id = Some(id.to_owned());
         let cwd = self.current_switch_cwd();
-        let session_id = octos_core::SessionKey::with_profile_topic(id, "local", "tui", "coding");
+        let session_id = octos_core::SessionKey::with_profile_topic(
+            id,
+            "local",
+            "tui",
+            self.workspace_launch_topic(),
+        );
         self.state.status = t!("status.switching_profile", profile = id.to_string()).into_owned();
         Some(AppUiCommand::OpenSession(
             octos_core::ui_protocol::SessionOpenParams {
@@ -5284,16 +5289,7 @@ impl Store {
         {
             self.state.workspace.root = canonical.clone();
         }
-        let topic = if self
-            .state
-            .capabilities
-            .as_ref()
-            .is_some_and(|caps| caps.supports_method(crate::workspace_team::LIST))
-        {
-            self.state.workspace_launch_topic.as_str()
-        } else {
-            "coding"
-        };
+        let topic = self.workspace_launch_topic();
         let session_id =
             octos_core::SessionKey::with_profile_topic(&profile_id, "local", "tui", topic);
         self.state.status = t!("status.opening_coding_session", profile = profile_id).into_owned();
@@ -6532,6 +6528,7 @@ impl Store {
             mcp_config_catalog: self.state.mcp_config_catalog.as_ref(),
             tool_config_catalog: self.state.tool_config_catalog.as_ref(),
             onboarding: Some(&self.state.onboarding),
+            workspace_launch_topic: Some(self.workspace_launch_topic()),
             selected_session_id: selected_session.map(|session| &session.id),
             selected_session_title: selected_session.map(|session| session.title.as_str()),
             selected_task_title: selected_task.map(|task| task.title.as_str()),
@@ -10274,10 +10271,10 @@ impl Store {
         }
     }
 
-    /// Build the `session/open` command for a launch-resolved profile, attaching
-    /// the workspace cwd so the session lands in this folder's per-project store.
-    fn open_resolved_launch_session(&mut self, profile_id: String) -> Option<AppUiCommand> {
-        let topic = if self
+    /// Every fresh launch route shares the same per-client conversation identity.
+    /// Explicit history/resume targets bypass this choice.
+    fn workspace_launch_topic(&self) -> &str {
+        if self
             .state
             .capabilities
             .as_ref()
@@ -10286,7 +10283,13 @@ impl Store {
             self.state.workspace_launch_topic.as_str()
         } else {
             "coding"
-        };
+        }
+    }
+
+    /// Build the `session/open` command for a launch-resolved profile, attaching
+    /// the workspace cwd so the session lands in this folder's per-project store.
+    fn open_resolved_launch_session(&mut self, profile_id: String) -> Option<AppUiCommand> {
+        let topic = self.workspace_launch_topic();
         let session_id =
             octos_core::SessionKey::with_profile_topic(&profile_id, "local", "tui", topic);
         // Preserve the target across a rejected `session/open`; AppUiError does
@@ -24767,6 +24770,47 @@ now analyzing the bus module"
             panic!("open")
         };
         assert_eq!(old.session_id.topic(), Some("coding"));
+    }
+
+    #[test]
+    fn workspace_activation_menus_and_profile_switch_keep_clients_distinct() {
+        use crate::model::{LaunchDecisionKind, LaunchPromptState};
+        fn activate(store: &mut Store, decision: LaunchDecisionKind) -> SessionKey {
+            store.state.workspace.root = "/tmp/shared-new-folder".into();
+            store.state.onboarding.launch_prompt = Some(LaunchPromptState {
+                decision,
+                resolved_profile: "dev".into(),
+                existing_profiles: vec!["other".into()],
+                cwd: "/tmp/shared-new-folder".into(),
+            });
+            store.open_menu(MenuId::from(crate::menu::registry::MENU_LAUNCH_PROMPT));
+            let Some(AppUiCommand::OpenSession(params)) = store.accept_active_menu_item() else {
+                panic!("activation must open the menu's workspace");
+            };
+            assert_eq!(params.cwd.as_deref(), Some("/tmp/shared-new-folder"));
+            params.session_id
+        }
+        let mut a = protocol_store_with_methods(&[crate::workspace_team::LIST]);
+        let mut b = protocol_store_with_methods(&[crate::workspace_team::LIST]);
+        let first = activate(&mut a, LaunchDecisionKind::Activate);
+        let second = activate(&mut b, LaunchDecisionKind::Activate);
+        assert_ne!(
+            first, second,
+            "concurrent first-use confirmations need separate chats"
+        );
+        assert_eq!(first, activate(&mut a, LaunchDecisionKind::CrossProfile));
+        let Some(AppUiCommand::OpenSession(switched)) = a.dispatch_switch_to_profile("dev") else {
+            panic!("profile switch must open a session");
+        };
+        assert_eq!(
+            first, switched.session_id,
+            "switch back stays in this client's chat"
+        );
+        let mut legacy = protocol_store_with_methods(&[]);
+        assert_eq!(
+            activate(&mut legacy, LaunchDecisionKind::Activate).topic(),
+            Some("coding")
+        );
     }
 
     #[test]
