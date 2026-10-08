@@ -200,6 +200,27 @@ Notes:
   `--profile-id` on a true first run — it selects an existing profile and skips
   onboarding.
 
+### Multiple agents in one folder
+
+With a matching workspace-team backend build, bare `octoscode` launches share
+one local WebSocket server. Each launch creates its own conversation. Closing
+a client leaves the server and other sessions running. Use `/resume` to reopen
+an existing conversation instead of starting a new member.
+
+- `/agents` opens the workspace member list and coordinator picker.
+- `/agents leader workspace-2` selects a coordinator after listing the team.
+- `/agents message workspace-2 <text>` sends a peer message.
+- `/agents broadcast <text>` sends to every other member.
+
+The first member is the initial coordinator. A user can select another in the
+picker. Models use the existing peer tools; only the current coordinator gets
+`peer_assign`. File edits still require coordination between agents. Web and
+native clients can join the same server through OUP; this does not synchronize
+folders between machines. An older private stdio server must be stopped before
+the shared server can take ownership of its runtime directory. This source
+change requires the corresponding Octos backend change before release; the
+previous published backend does not support `serve --shared`.
+
 ### 3. Create your local profile
 
 On the welcome screen, fill the three fields (the email is local metadata only —

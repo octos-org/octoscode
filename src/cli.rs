@@ -112,10 +112,10 @@ impl Lang {
     }
 }
 
-/// The stdio backend command a bare launch defaults to (and that
-/// `backend_ensure` auto-provisions). Mirrors the documented
-/// `octos serve --stdio --solo`.
-pub const DEFAULT_STDIO_COMMAND: &str = "octos serve --stdio --solo";
+/// The local backend command a bare launch defaults to. The legacy field
+/// name is retained for config compatibility; --shared selects WebSocket
+/// discovery instead of a private stdio child.
+pub const DEFAULT_STDIO_COMMAND: &str = "octos serve --shared --solo";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cli {
@@ -837,9 +837,9 @@ mod tests {
     }
 
     #[test]
-    fn should_default_bare_launch_to_stdio_protocol() {
+    fn should_default_bare_launch_to_shared_protocol() {
         // A bare launch (no mode, no transport, no config) now connects to the
-        // real backend over stdio (auto-provisioned) instead of the mock demo.
+        // shared local backend (auto-provisioned) instead of the mock demo.
         let cli = Cli::try_parse_from(["octoscode"]).expect("cli parses");
 
         assert_eq!(cli.mode, Mode::Protocol);

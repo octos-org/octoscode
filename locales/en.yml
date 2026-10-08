@@ -1122,7 +1122,7 @@ command:
   add_model:
     desc: Add or change the profile's AI model (family, model, and provider route).
   agents:
-    desc: Inspect or interrupt backend-owned subagents.
+    desc: See workspace agents, choose a coordinator, send messages, or inspect subagents.
   aliases_label: 'Aliases:'
   btw:
     desc: Ask a quick aside question while the current turn keeps working.
@@ -1990,3 +1990,17 @@ menu:
     title: Tool Settings
     unavailable_title: Tool settings unavailable
   unavailable: Menu unavailable
+
+workspace_team:
+  title: "Workspace agents"
+  you: " · you"
+  coordinator: "coordinator"
+  member: "member"
+  running: "running"
+  idle: "idle"
+  connected: "connected"
+  detached: "detached"
+  make_coordinator: "Make %{agent} coordinator"
+  refresh: "Refresh agents"
+  hint: "↑/↓ select · Enter message or assign coordinator · Esc close"
+  list_first: "Run /agents first, then select a coordinator."

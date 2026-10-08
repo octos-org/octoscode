@@ -33,6 +33,12 @@ use std::time::Duration;
 /// Parsed `/agents` subcommand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentsCommand {
+    Leader(String),
+    Message {
+        agent_id: String,
+        text: String,
+    },
+    Broadcast(String),
     /// `/agents` (no subcommand) or `/agents list`.
     List,
     /// `/agents status [<agent_id>]`. `None` ⇒ show all.
@@ -52,7 +58,10 @@ pub enum AgentsCommand {
     /// `/agents close <agent_id>`.
     Close(String),
     /// `/agents spawn <N> <prompt>` — request the LLM spawn N parallel agents.
-    Spawn { count: u32, prompt: String },
+    Spawn {
+        count: u32,
+        prompt: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -291,6 +300,23 @@ fn parse_agents(tail: &str) -> Result<AgentsCommand, AutonomyParseError> {
                 Ok(AgentsCommand::Status(Some(id.to_string())))
             }
         }
+        "leader" => Ok(AgentsCommand::Leader(require_id("/agents leader", args)?)),
+        "message" => {
+            let (agent_id, text) = split_head(args);
+            if agent_id.is_empty() || text.trim().is_empty() {
+                return Err(AutonomyParseError::MissingId {
+                    command: "/agents message <id> <text>",
+                });
+            }
+            Ok(AgentsCommand::Message {
+                agent_id: agent_id.into(),
+                text: text.into(),
+            })
+        }
+        "broadcast" => Ok(AgentsCommand::Broadcast(require_id(
+            "/agents broadcast",
+            args,
+        )?)),
         "output" => Ok(AgentsCommand::Output(require_id("/agents output", args)?)),
         "artifacts" => Ok(AgentsCommand::Artifacts(require_id(
             "/agents artifacts",
@@ -672,6 +698,28 @@ fn parse_interval(raw: &str) -> Result<Duration, AutonomyParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_agents_parse_leader_message_broadcast_and_reject_empty() {
+        assert_eq!(
+            parse_agents("leader workspace-2").unwrap(),
+            AgentsCommand::Leader("workspace-2".into())
+        );
+        assert_eq!(
+            parse_agents("message workspace-2 fix the tests").unwrap(),
+            AgentsCommand::Message {
+                agent_id: "workspace-2".into(),
+                text: "fix the tests".into()
+            }
+        );
+        assert_eq!(
+            parse_agents("broadcast reserve src/api").unwrap(),
+            AgentsCommand::Broadcast("reserve src/api".into())
+        );
+        for input in ["leader", "message", "message workspace-2", "broadcast"] {
+            assert!(parse_agents(input).is_err(), "{input}");
+        }
+    }
 
     #[test]
     fn agents_list_is_default() {

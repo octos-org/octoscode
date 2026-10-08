@@ -2149,7 +2149,61 @@ impl Store {
         use crate::autonomy::AgentsCommand;
         let session_id = self.active_autonomy_session_id()?;
         match cmd {
+            AgentsCommand::Leader(agent_id) => {
+                if !self.require_mutating_appui_method(crate::workspace_team::LEADER) {
+                    return None;
+                }
+                let Some(team) = self.state.workspace_teams.get(&session_id) else {
+                    self.state.status = t!("workspace_team.list_first").into_owned();
+                    return None;
+                };
+                Some(AppUiCommand::WorkspaceTeam(
+                    crate::workspace_team::Command::Leader {
+                        session_id,
+                        agent_id,
+                        expected_revision: team.revision,
+                    },
+                ))
+            }
+            AgentsCommand::Message { agent_id, text } => {
+                if !self.require_mutating_appui_method(crate::workspace_team::MESSAGE) {
+                    return None;
+                }
+                Some(AppUiCommand::WorkspaceTeam(
+                    crate::workspace_team::Command::Message {
+                        session_id,
+                        agent_id: Some(agent_id),
+                        message: text,
+                        broadcast: false,
+                        occurrence_id: crate::workspace_team::occurrence(),
+                    },
+                ))
+            }
+            AgentsCommand::Broadcast(text) => {
+                if !self.require_mutating_appui_method(crate::workspace_team::MESSAGE) {
+                    return None;
+                }
+                Some(AppUiCommand::WorkspaceTeam(
+                    crate::workspace_team::Command::Message {
+                        session_id,
+                        agent_id: None,
+                        message: text,
+                        broadcast: true,
+                        occurrence_id: crate::workspace_team::occurrence(),
+                    },
+                ))
+            }
             AgentsCommand::List => {
+                if self
+                    .state
+                    .capabilities
+                    .as_ref()
+                    .is_some_and(|caps| caps.supports_method(crate::workspace_team::LIST))
+                {
+                    return Some(AppUiCommand::WorkspaceTeam(
+                        crate::workspace_team::Command::List { session_id },
+                    ));
+                }
                 if !self.require_appui_method(crate::model::APPUI_METHOD_AGENT_LIST) {
                     return None;
                 }
@@ -5230,8 +5284,18 @@ impl Store {
         {
             self.state.workspace.root = canonical.clone();
         }
+        let topic = if self
+            .state
+            .capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.supports_method(crate::workspace_team::LIST))
+        {
+            self.state.workspace_launch_topic.as_str()
+        } else {
+            "coding"
+        };
         let session_id =
-            octos_core::SessionKey::with_profile_topic(&profile_id, "local", "tui", "coding");
+            octos_core::SessionKey::with_profile_topic(&profile_id, "local", "tui", topic);
         self.state.status = t!("status.opening_coding_session", profile = profile_id).into_owned();
         Some(AppUiCommand::OpenSession(SessionOpenParams {
             session_id,
@@ -6323,10 +6387,22 @@ impl Store {
             theme_name: Some(self.state.theme.as_str()),
             selected_path: &path,
         };
-        let result = filter_menu_result_for_search(
-            core_menu_registry().build(&frame.id, &ctx),
-            &frame.search_query,
-        );
+        let build = if frame.id.as_str() == crate::workspace_team::MENU {
+            self.state
+                .active_session()
+                .and_then(|session| self.state.workspace_teams.get(&session.id))
+                .map(|team| crate::workspace_team::menu(team, self.state.readonly))
+                .unwrap_or_else(|| {
+                    MenuBuildResult::Unavailable(crate::menu::MenuStatusSpec::new(
+                        crate::workspace_team::MENU,
+                        "Workspace agents",
+                        "Run /agents to refresh this session's team.",
+                    ))
+                })
+        } else {
+            core_menu_registry().build(&frame.id, &ctx)
+        };
+        let result = filter_menu_result_for_search(build, &frame.search_query);
         let len = active_menu_item_len(Some(&result));
         if len > 0
             && let Some(frame) = self.state.menu_stack.active_mut()
@@ -8676,6 +8752,45 @@ impl Store {
                 self.refresh_active_menu_if_open();
                 self.tool_config_list_command()
             }
+            ClientEvent::WorkspaceTeamUpdated(team) => {
+                self.state
+                    .workspace_teams
+                    .insert(team.session_id.clone(), team);
+                self.refresh_active_menu_if_open();
+                None
+            }
+            ClientEvent::WorkspaceTeam(team) => {
+                let active = self
+                    .state
+                    .active_session()
+                    .is_some_and(|s| s.id == team.session_id);
+                self.state
+                    .workspace_teams
+                    .insert(team.session_id.clone(), team);
+                if active {
+                    self.open_menu(MenuId::from(crate::workspace_team::MENU));
+                }
+                None
+            }
+            ClientEvent::WorkspaceMessage(result) => {
+                self.state.status = result
+                    .receipts
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            "{}: {}{}",
+                            r.agent_id,
+                            r.status,
+                            r.error
+                                .as_ref()
+                                .map(|e| format!(" ({e})"))
+                                .unwrap_or_default()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                None
+            }
             ClientEvent::Autonomy(event) => self.apply_autonomy_result(event),
             ClientEvent::LocalShellResult(event) => {
                 self.apply_local_shell_result(event);
@@ -10162,8 +10277,18 @@ impl Store {
     /// Build the `session/open` command for a launch-resolved profile, attaching
     /// the workspace cwd so the session lands in this folder's per-project store.
     fn open_resolved_launch_session(&mut self, profile_id: String) -> Option<AppUiCommand> {
+        let topic = if self
+            .state
+            .capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.supports_method(crate::workspace_team::LIST))
+        {
+            self.state.workspace_launch_topic.as_str()
+        } else {
+            "coding"
+        };
         let session_id =
-            octos_core::SessionKey::with_profile_topic(&profile_id, "local", "tui", "coding");
+            octos_core::SessionKey::with_profile_topic(&profile_id, "local", "tui", topic);
         // Preserve the target across a rejected `session/open`; AppUiError does
         // not carry request params, and profile-unconfigured recovery needs the
         // id to open model setup for the correct profile.
@@ -24615,6 +24740,79 @@ now analyzing the bus module"
             !store.state.is_turn_errored(&a, &stopped),
             "an interrupt commits the streamed text itself and is not an error"
         );
+    }
+
+    #[test]
+    fn workspace_launches_are_distinct_but_bootstrap_retry_keeps_identity() {
+        let mut a = protocol_store_with_methods(&[crate::workspace_team::LIST]);
+        let mut b = protocol_store_with_methods(&[crate::workspace_team::LIST]);
+        let Some(AppUiCommand::OpenSession(first)) = a.open_resolved_launch_session("dev".into())
+        else {
+            panic!("open")
+        };
+        let Some(AppUiCommand::OpenSession(retry)) = a.open_resolved_launch_session("dev".into())
+        else {
+            panic!("open")
+        };
+        let Some(AppUiCommand::OpenSession(second)) = b.open_resolved_launch_session("dev".into())
+        else {
+            panic!("open")
+        };
+        assert_eq!(first.session_id, retry.session_id);
+        assert_ne!(first.session_id, second.session_id);
+        let mut legacy = protocol_store_with_methods(&[]);
+        let Some(AppUiCommand::OpenSession(old)) =
+            legacy.open_resolved_launch_session("dev".into())
+        else {
+            panic!("open")
+        };
+        assert_eq!(old.session_id.topic(), Some("coding"));
+    }
+
+    #[test]
+    fn workspace_agent_controls_require_capability_revision_and_mutable_client() {
+        use crate::autonomy::AgentsCommand;
+        use crate::workspace_team::{Command, LEADER, LIST, MESSAGE, Snapshot};
+        let mut store = protocol_store_with_methods(&[LIST, LEADER, MESSAGE]);
+        assert!(matches!(
+            store.dispatch_agents_command(AgentsCommand::List),
+            Some(AppUiCommand::WorkspaceTeam(Command::List { .. }))
+        ));
+        assert!(
+            store
+                .dispatch_agents_command(AgentsCommand::Leader("workspace-2".into()))
+                .is_none()
+        );
+        let session = store.state.active_session().unwrap().id.clone();
+        store.state.workspace_teams.insert(
+            session.clone(),
+            Snapshot {
+                session_id: session,
+                workspace: "/repo".into(),
+                revision: 7,
+                leader: "workspace-1".into(),
+                members: vec![],
+            },
+        );
+        assert!(matches!(
+            store.dispatch_agents_command(AgentsCommand::Leader("workspace-2".into())),
+            Some(AppUiCommand::WorkspaceTeam(Command::Leader {
+                expected_revision: 7,
+                ..
+            }))
+        ));
+        store.state.readonly = true;
+        assert!(
+            store
+                .dispatch_agents_command(AgentsCommand::Broadcast("hi".into()))
+                .is_none()
+        );
+        assert!(
+            store
+                .dispatch_agents_command(AgentsCommand::Leader("workspace-2".into()))
+                .is_none()
+        );
+        assert!(store.dispatch_agents_command(AgentsCommand::List).is_some());
     }
 
     fn protocol_store_with_methods(methods: &[&str]) -> Store {

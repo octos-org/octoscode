@@ -25,6 +25,7 @@ pub mod olp_mcp;
 pub mod outer_duty;
 pub mod profiles;
 pub mod sanitize;
+mod shared_instance;
 pub mod splash;
 pub mod store;
 pub mod terminal_probe;
@@ -32,6 +33,7 @@ pub mod theme;
 pub mod transport;
 pub mod tui_terminal;
 pub mod viewport;
+pub mod workspace_team;
 
 #[cfg(test)]
 mod i18n_tests {
