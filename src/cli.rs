@@ -127,6 +127,8 @@ pub struct Cli {
     pub base_url: Option<String>,
     /// UI Protocol v1 stdio child command.
     pub stdio_command: Option<String>,
+    /// True only when no transport was provided by CLI or configuration.
+    pub implicit_local_transport: bool,
     /// Session id to open first.
     pub session: Option<String>,
     /// Profile id to use for the session.
@@ -410,18 +412,20 @@ impl Cli {
         // lone `--mode protocol`) gets the default stdio command, which
         // `backend_ensure` provisions. An explicit `--endpoint`/`--stdio-command`
         // is honored as-is; Mock needs no transport.
-        let stdio_command =
-            if mode == Mode::Protocol && stdio_command.is_none() && base_url.is_none() {
-                Some(DEFAULT_STDIO_COMMAND.to_string())
-            } else {
-                stdio_command
-            };
+        let implicit_local_transport =
+            mode == Mode::Protocol && stdio_command.is_none() && base_url.is_none();
+        let stdio_command = if implicit_local_transport {
+            Some(DEFAULT_STDIO_COMMAND.to_string())
+        } else {
+            stdio_command
+        };
 
         Ok(Self {
             config: args.config,
             mode,
             base_url,
             stdio_command,
+            implicit_local_transport,
             session: args.session.or(file_config.session),
             profile_id: args.profile_id.or(file_config.profile_id),
             cwd: args.cwd.or(file_config.cwd),

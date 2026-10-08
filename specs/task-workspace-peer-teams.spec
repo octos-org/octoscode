@@ -47,3 +47,11 @@ Scenario: simultaneous cold starts share a real backend
 Scenario: simultaneous first-use activation stays in separate conversations
   Test: workspace_activation_menus_and_profile_switch_keep_clients_distinct
   Activate and cross-profile menus use the same per-client launch identity; profile switching cannot collapse independent clients into the legacy coding topic.
+
+Scenario: older installed backends still launch
+  Test: implicit_launch_probes_shared_support_and_preserves_explicit_transport
+  Only implicit launches probe serve --help; matching backends use shared mode, older backends retain private stdio with a notice, and explicit/configured transports are unchanged.
+
+Scenario: inherited data root selects the server's profile registry
+  Test: inherited_octos_home_matches_server_profile_and_runtime_roots
+  Implicit shared launches honor inherited OCTOS_HOME for profile discovery and runtime placement; an explicit data-dir still wins, and remote launches do not scan local profiles.

@@ -10745,6 +10745,7 @@ mod tests {
     #[test]
     fn launch_from_cli_uses_stdio_endpoint_when_requested() {
         let cli = Cli {
+            implicit_local_transport: false,
             config: None,
             mode: crate::cli::Mode::Protocol,
             base_url: None,
@@ -12672,6 +12673,7 @@ mod tests {
     #[test]
     fn launch_from_cli_defaults_cwd_to_process_current_dir() {
         let cli = Cli {
+            implicit_local_transport: false,
             config: None,
             mode: crate::cli::Mode::Protocol,
             base_url: Some("wss://example.test/ui-protocol".into()),

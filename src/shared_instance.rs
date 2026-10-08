@@ -140,6 +140,10 @@ fn spawn(launch: &Launch, dir: &Path) -> Result<std::process::Child> {
         .arg("--instance-data-dir")
         .arg(dir)
         .current_dir(&launch.cwd);
+    // Unix provisioning already rewrites an off-PATH backend to its absolute
+    // path. Preserve PATH order here so an older installer copy cannot shadow
+    // the backend whose shared-server support we just checked.
+    #[cfg(windows)]
     if let Some(bin) = crate::backend_ensure::install_bin_dir() {
         let mut paths = vec![bin];
         if let Some(path) = std::env::var_os("PATH") {
