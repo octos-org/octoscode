@@ -112,10 +112,10 @@ impl Lang {
     }
 }
 
-/// The stdio backend command a bare launch defaults to (and that
-/// `backend_ensure` auto-provisions). Mirrors the documented
-/// `octos serve --stdio --solo`.
-pub const DEFAULT_STDIO_COMMAND: &str = "octos serve --stdio --solo";
+/// The local backend command a bare launch defaults to. The legacy field
+/// name is retained for config compatibility; --shared selects WebSocket
+/// discovery instead of a private stdio child.
+pub const DEFAULT_STDIO_COMMAND: &str = "octos serve --shared --solo";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cli {
@@ -127,6 +127,8 @@ pub struct Cli {
     pub base_url: Option<String>,
     /// UI Protocol v1 stdio child command.
     pub stdio_command: Option<String>,
+    /// True only when no transport was provided by CLI or configuration.
+    pub implicit_local_transport: bool,
     /// Session id to open first.
     pub session: Option<String>,
     /// Profile id to use for the session.
@@ -410,18 +412,20 @@ impl Cli {
         // lone `--mode protocol`) gets the default stdio command, which
         // `backend_ensure` provisions. An explicit `--endpoint`/`--stdio-command`
         // is honored as-is; Mock needs no transport.
-        let stdio_command =
-            if mode == Mode::Protocol && stdio_command.is_none() && base_url.is_none() {
-                Some(DEFAULT_STDIO_COMMAND.to_string())
-            } else {
-                stdio_command
-            };
+        let implicit_local_transport =
+            mode == Mode::Protocol && stdio_command.is_none() && base_url.is_none();
+        let stdio_command = if implicit_local_transport {
+            Some(DEFAULT_STDIO_COMMAND.to_string())
+        } else {
+            stdio_command
+        };
 
         Ok(Self {
             config: args.config,
             mode,
             base_url,
             stdio_command,
+            implicit_local_transport,
             session: args.session.or(file_config.session),
             profile_id: args.profile_id.or(file_config.profile_id),
             cwd: args.cwd.or(file_config.cwd),
@@ -837,9 +841,9 @@ mod tests {
     }
 
     #[test]
-    fn should_default_bare_launch_to_stdio_protocol() {
+    fn should_default_bare_launch_to_shared_protocol() {
         // A bare launch (no mode, no transport, no config) now connects to the
-        // real backend over stdio (auto-provisioned) instead of the mock demo.
+        // shared local backend (auto-provisioned) instead of the mock demo.
         let cli = Cli::try_parse_from(["octoscode"]).expect("cli parses");
 
         assert_eq!(cli.mode, Mode::Protocol);

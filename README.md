@@ -49,12 +49,11 @@ provider, paste its API key, and open your first coding chat. The
 > replies — no server, connected to nothing. Plain `octoscode` is the real
 > thing.
 
-> **Want it in a browser too?** The solo launch above talks to its server over
-> stdio, which serves exactly one client. Run the server on a port instead and
-> the terminal and
-> [octoscode-web](https://github.com/octos-org/octoscode-web) can both attach —
-> to the same sessions, at the same time. See
-> [Two ways to run](#two-ways-to-run).
+> **Want it in a browser too?** With a matching backend, the local launch uses
+> an authenticated WebSocket server that the terminal and
+> [octoscode-web](https://github.com/octos-org/octoscode-web) can both use.
+> Older backends fall back to private stdio; start an explicit WebSocket server
+> to connect multiple clients. See [Local and remote transports](#local-and-remote-transports).
 
 ### If something looks wrong
 
@@ -200,6 +199,31 @@ Notes:
   `--profile-id` on a true first run — it selects an existing profile and skips
   onboarding.
 
+### Multiple agents in one folder
+
+With a matching workspace-team backend build, bare `octoscode` launches share
+one local WebSocket server. Each launch creates its own conversation. Closing
+a client leaves the server and other sessions running. Use `/resume` to reopen
+an existing conversation instead of starting a new member.
+The TUI and server both honor inherited `OCTOS_HOME` for the profile registry;
+an explicit `--data-dir` in a launch command takes precedence.
+
+- `/agents` opens the workspace member list and coordinator picker.
+- `/agents leader workspace-2` selects a coordinator after listing the team.
+- `/agents message workspace-2 <text>` sends a peer message.
+- `/agents broadcast <text>` sends to every other member.
+
+The first member is the initial coordinator. A user can select another in the
+picker. Models use the existing peer tools; only the current coordinator gets
+`peer_assign`. File edits still require coordination between agents. Web and
+native clients can join the same server through OUP; this does not synchronize
+folders between machines. An older private stdio server must be stopped before
+the shared server can take ownership of its runtime directory. With an older
+backend (including the currently pinned auto-install release), an implicit
+launch reports that shared sessions are unavailable and keeps using private
+stdio. Upgrade the backend to enable workspace teams. Explicit transport
+commands are preserved.
+
 ### 3. Create your local profile
 
 On the welcome screen, fill the three fields (the email is local metadata only —
@@ -253,7 +277,7 @@ workspace. How much it may do is a **per-session** setting you change live with
 So for a review, run `/permissions` → **Read-only** and ask the agent to review
 the diff; for hands-on changes, switch to **Workspace-write** (or **Full
 Access**). The TUI only *requests* the mode — the backend applies it, and **Full
-Access is offered only on solo/local backends**, never on a shared `octos serve`.
+Access is offered only on solo/local backends**, never on a multi-user `octos serve`.
 
 For **headless / scripted** code review and for running **many review or edit
 agents in parallel**, use the `octos chat` CLI in the main
@@ -367,23 +391,23 @@ use WSL2.
 
 ## Other ways to run
 
-### Two ways to run
+### Local and remote transports
 
 The TUI never contains the agent — `octos serve` does. What changes is how the
 two talk, and that decides whether anything else can join.
 
-| | **Solo (stdio)** | **Server (WebSocket)** |
-| --- | --- | --- |
-| Start it with | `octoscode` | `octos serve --host … --port …`, then `octoscode --endpoint …` |
-| Who runs the server | the TUI spawns and auto-provisions it | you do, and it outlives the client |
-| How many clients | exactly one | as many as you point at it |
-| Browser client | no | yes — [octoscode-web](https://github.com/octos-org/octoscode-web) |
-| Setup | none | a port and a shared token |
+| | **Shared local (WebSocket)** | **Private (stdio)** | **Explicit server (WebSocket)** |
+| --- | --- | --- | --- |
+| Start it with | `octoscode` with a matching backend | `octoscode --stdio-command "octos serve --stdio --solo"` | Start `octos serve`, then `octoscode --endpoint …` |
+| Who runs the server | the TUI discovers or starts it; it outlives clients | the TUI starts a private child | you do; it outlives clients |
+| How many clients | multiple sessions share one runtime | exactly one | multiple clients can connect |
+| Browser client | yes, with the local endpoint and authentication | no | yes — [octoscode-web](https://github.com/octos-org/octoscode-web) |
+| Setup | automatic discovery | explicit command, or fallback with an older backend | endpoint and authentication |
 
-Solo is the default because it is the shortest path to a working session.
-`--stdio` runs the protocol over the child's stdin and stdout *instead of*
-binding HTTP, so there is no port for anything else to reach — a browser cannot
-attach to a solo launch, however it is configured.
+Bare launches use shared local mode when the backend supports it, and otherwise
+retain private stdio with an upgrade notice. `--stdio` communicates through the
+child's stdin and stdout without an HTTP listener, so browser clients cannot
+attach to that transport.
 
 ### Connect to a running `octos serve` over WebSocket
 

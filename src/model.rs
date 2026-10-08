@@ -921,6 +921,7 @@ pub enum AppUiCommand {
     ProfileSkillsRemove(ProfileSkillsRemoveParams),
     // M15-E backend-owned autonomy surface (UPCR-2026-021).
     ListAgents(AgentListParams),
+    WorkspaceTeam(crate::workspace_team::Command),
     ReadAgentStatus(AgentStatusReadParams),
     ReadAgentOutput(AgentOutputReadParams),
     ListAgentArtifacts(AgentArtifactListParams),
@@ -1024,6 +1025,7 @@ impl AppUiCommand {
             Self::ProfileSkillsInstall(_) => APPUI_METHOD_PROFILE_SKILLS_INSTALL,
             Self::ProfileSkillsRemove(_) => APPUI_METHOD_PROFILE_SKILLS_REMOVE,
             Self::ListAgents(_) => APPUI_METHOD_AGENT_LIST,
+            Self::WorkspaceTeam(command) => command.method(),
             Self::ReadAgentStatus(_) => APPUI_METHOD_AGENT_STATUS_READ,
             Self::ReadAgentOutput(_) => APPUI_METHOD_AGENT_OUTPUT_READ,
             Self::ListAgentArtifacts(_) => APPUI_METHOD_AGENT_ARTIFACT_LIST,
@@ -4685,6 +4687,8 @@ impl ScrollToBottomHit {
 
 #[derive(Debug, Clone)]
 pub struct AppState {
+    pub workspace_teams: std::collections::HashMap<SessionKey, crate::workspace_team::Snapshot>,
+    pub workspace_launch_topic: String,
     /// Active TUI palette, chosen at launch (`--theme`/config) and switchable
     /// at runtime via `/theme`. The event loop derives the per-frame `Palette`
     /// from this field, so a `/theme` change repaints on the next frame; it
@@ -7248,6 +7252,8 @@ impl AppState {
             active_menu: None,
             capabilities: None,
             onboarding: OnboardingWizardState::default(),
+            workspace_teams: std::collections::HashMap::new(),
+            workspace_launch_topic: format!("coding-{}", crate::workspace_team::occurrence()),
             permission_profiles: Vec::new(),
             session_runtime_statuses: Vec::new(),
             profile_llm_catalog: None,

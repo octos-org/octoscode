@@ -2249,8 +2249,12 @@ fn launch_prompt_menu(ctx: &MenuContext<'_>) -> MenuBuildResult {
     };
 
     let open_session = |profile: &str| -> MenuAction {
-        let session_id =
-            octos_core::SessionKey::with_profile_topic(profile, "local", "tui", "coding");
+        let session_id = octos_core::SessionKey::with_profile_topic(
+            profile,
+            "local",
+            "tui",
+            ctx.app.workspace_launch_topic.unwrap_or("coding"),
+        );
         MenuAction::send_appui(AppUiCommand::OpenSession(
             octos_core::ui_protocol::SessionOpenParams {
                 session_id,

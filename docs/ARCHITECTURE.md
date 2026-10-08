@@ -248,6 +248,7 @@ it by hand.
 
 | AppUI command | Wire method |
 |---|---|
+| `WorkspaceTeam` | `peer/team/list`, `peer/team/leader/set`, `peer/team/message` |
 | `PeerGather` | `peer/gather` |
 | `PeerPrepare` | `peer/prepare` |
 
@@ -472,6 +473,7 @@ This list is kept complete by `tests/docs_drift.rs`.
 | Notification | Wire method |
 |---|---|
 | `PeerStaged` | `peer/staged` |
+| `WorkspaceTeamUpdated` | `peer/team/updated` |
 
 ## Client Layers
 
@@ -509,6 +511,8 @@ added without a row here.
 
 | File | Lines | Responsibility |
 |---|---:|---|
+| `src/shared_instance.rs` | 280 | Authenticated shared local WebSocket server discovery, startup locking and detached launch. |
+| `src/workspace_team.rs` | 160 | Workspace peer team wire types and the `/agents` member/coordinator picker. |
 | `src/backend_ensure.rs` | 1140 | Auto-provision the `octos` server backend so a fresh octoscode install |
 | `src/profiles.rs` | 544 | Phase 3 startup profile discovery. |
 | `src/transport.rs` | 10721 | `AppUiBackend`, the mock and protocol backends, WebSocket/stdio framing, auth, reconnect status and in-memory cursors. |

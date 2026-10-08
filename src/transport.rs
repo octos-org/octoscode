@@ -207,6 +207,11 @@ pub struct AppUiLaunch {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppUiEndpoint {
+    SharedLocal {
+        command: String,
+        cwd: std::path::PathBuf,
+        profile_id: Option<String>,
+    },
     WebSocket {
         url: String,
         auth_token: Option<String>,
@@ -247,7 +252,7 @@ impl AppUiEndpoint {
     pub fn label(&self) -> &str {
         match self {
             Self::WebSocket { url, .. } => url,
-            Self::Stdio { command } => command,
+            Self::Stdio { command } | Self::SharedLocal { command, .. } => command,
         }
     }
 }
@@ -296,6 +301,17 @@ fn launch_from_cli(cli: &Cli) -> AppUiLaunch {
 
 fn endpoint_from_cli(cli: &Cli, auth_token: Option<String>) -> Option<AppUiEndpoint> {
     if let Some(command) = &cli.stdio_command {
+        if shlex::split(command).is_some_and(|words| words.iter().any(|w| w == "--shared")) {
+            return Some(AppUiEndpoint::SharedLocal {
+                command: command.clone(),
+                cwd: cli
+                    .cwd
+                    .clone()
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_default(),
+                profile_id: cli.profile_id.clone(),
+            });
+        }
         return Some(AppUiEndpoint::stdio(command.clone()));
     }
 
@@ -636,6 +652,7 @@ enum TransportEvent {
 }
 
 struct WebSocketTransportDriver {
+    shared: Option<crate::shared_instance::Launch>,
     endpoint: String,
     auth_token: Option<String>,
     profile_id: Option<String>,
@@ -788,6 +805,19 @@ impl ProtocolExchange {
 impl ProtocolTransportDriver {
     fn from_endpoint(endpoint: &AppUiEndpoint) -> Result<Self> {
         match endpoint {
+            AppUiEndpoint::SharedLocal {
+                command,
+                cwd,
+                profile_id,
+            } => {
+                let mut driver =
+                    WebSocketTransportDriver::new(command.clone(), None, profile_id.clone());
+                driver.shared = Some(crate::shared_instance::Launch {
+                    command: command.clone(),
+                    cwd: cwd.clone(),
+                });
+                Ok(Self::WebSocket(driver))
+            }
             AppUiEndpoint::WebSocket {
                 url,
                 auth_token,
@@ -859,6 +889,7 @@ impl ProtocolTransportDriver {
 impl WebSocketTransportDriver {
     fn new(endpoint: String, auth_token: Option<String>, profile_id: Option<String>) -> Self {
         Self {
+            shared: None,
             endpoint,
             auth_token,
             profile_id,
@@ -884,6 +915,11 @@ impl WebSocketTransportDriver {
 
         self.disconnect();
 
+        if let Some(shared) = &self.shared {
+            let instance = runtime.block_on(crate::shared_instance::discover(shared))?;
+            self.endpoint = instance.endpoint;
+            self.auth_token = Some(instance.auth_token);
+        }
         let request = websocket_request(
             &self.endpoint,
             self.auth_token.as_deref(),
@@ -2518,6 +2554,7 @@ impl ProtocolAppUiBackend {
                 // hydration depends on these, and `--readonly` users
                 // still want to see backend agent/goal/loop state.
                 | AppUiCommand::ListAgents(_)
+                | AppUiCommand::WorkspaceTeam(crate::workspace_team::Command::List { .. })
                 | AppUiCommand::ReadAgentStatus(_)
                 | AppUiCommand::ReadAgentOutput(_)
                 | AppUiCommand::ListAgentArtifacts(_)
@@ -2737,6 +2774,7 @@ impl ProtocolAppUiBackend {
             // "unexpectedly blocked read-style" readonly_policy bug.
             | AppUiCommand::SessionRollback(_)
             | AppUiCommand::StartReview(_)
+            | AppUiCommand::WorkspaceTeam(_)
             | AppUiCommand::SelectModel(_)
             | AppUiCommand::CancelTask(_)
             | AppUiCommand::RestartTaskFromNode(_)
@@ -3500,6 +3538,7 @@ fn rpc_request_from_command(
         AppUiCommand::ProfileSkillsInstall(params) => serde_json::to_value(params),
         AppUiCommand::ProfileSkillsRemove(params) => serde_json::to_value(params),
         AppUiCommand::ListAgents(params) => serde_json::to_value(params),
+        AppUiCommand::WorkspaceTeam(params) => serde_json::to_value(params),
         AppUiCommand::ReadAgentStatus(params) => serde_json::to_value(params),
         AppUiCommand::ReadAgentOutput(params) => serde_json::to_value(params),
         AppUiCommand::ListAgentArtifacts(params) => serde_json::to_value(params),
@@ -3612,6 +3651,16 @@ fn rpc_value_to_app_event(
         };
 
         let params = frame.get("params").cloned().unwrap_or(Value::Null);
+        if method == "peer/team/updated" {
+            return Ok(Some(match serde_json::from_value(params) {
+                Ok(team) => ClientEvent::WorkspaceTeamUpdated(team),
+                Err(error) => app_error(
+                    "invalid_params",
+                    format!("invalid workspace team update: {error}"),
+                )
+                .into(),
+            }));
+        }
         if method == "server/heartbeat" {
             return Ok(None);
         }
@@ -4371,6 +4420,26 @@ fn success_response_to_app_event(
         // M15-E autonomy results. We decode and forward as
         // ClientEvent::Autonomy so the store can update the per-session
         // mirror.
+        crate::workspace_team::LIST | crate::workspace_team::LEADER => {
+            match serde_json::from_value::<crate::workspace_team::Snapshot>(result) {
+                Ok(team) => Ok(Some(ClientEvent::WorkspaceTeam(team))),
+                Err(error) => Ok(Some(
+                    app_error("invalid_result", format!("invalid workspace team: {error}")).into(),
+                )),
+            }
+        }
+        crate::workspace_team::MESSAGE => {
+            match serde_json::from_value::<crate::workspace_team::MessageResult>(result) {
+                Ok(receipt) => Ok(Some(ClientEvent::WorkspaceMessage(receipt))),
+                Err(error) => Ok(Some(
+                    app_error(
+                        "invalid_result",
+                        format!("invalid peer message receipt: {error}"),
+                    )
+                    .into(),
+                )),
+            }
+        }
         crate::model::APPUI_METHOD_AGENT_LIST => {
             match serde_json::from_value::<crate::model::AgentListResult>(result) {
                 Ok(result) => Ok(Some(autonomy_event(AutonomyResult::AgentList(result)))),
@@ -6742,6 +6811,32 @@ fn mock_diff_preview(session_id: SessionKey, preview_id: PreviewId) -> DiffPrevi
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn workspace_default_launch_is_shared_and_explicit_transports_are_preserved() {
+        let local = Cli::try_parse_from(["octoscode"]).unwrap();
+        assert!(matches!(
+            endpoint_from_cli(&local, None),
+            Some(AppUiEndpoint::SharedLocal { .. })
+        ));
+        let stdio =
+            Cli::try_parse_from(["octoscode", "--stdio-command", "octos serve --stdio --solo"])
+                .unwrap();
+        assert!(matches!(
+            endpoint_from_cli(&stdio, None),
+            Some(AppUiEndpoint::Stdio { .. })
+        ));
+        let remote = Cli::try_parse_from([
+            "octoscode",
+            "--endpoint",
+            "ws://example.test/api/ui-protocol/ws",
+        ])
+        .unwrap();
+        assert!(matches!(
+            endpoint_from_cli(&remote, None),
+            Some(AppUiEndpoint::WebSocket { .. })
+        ));
+    }
+
     #[test]
     fn model_select_messages_report_runtime_disposition() {
         for (disposition, expected) in [
@@ -10650,6 +10745,7 @@ mod tests {
     #[test]
     fn launch_from_cli_uses_stdio_endpoint_when_requested() {
         let cli = Cli {
+            implicit_local_transport: false,
             config: None,
             mode: crate::cli::Mode::Protocol,
             base_url: None,
@@ -12577,6 +12673,7 @@ mod tests {
     #[test]
     fn launch_from_cli_defaults_cwd_to_process_current_dir() {
         let cli = Cli {
+            implicit_local_transport: false,
             config: None,
             mode: crate::cli::Mode::Protocol,
             base_url: Some("wss://example.test/ui-protocol".into()),
