@@ -125,17 +125,20 @@ fn saved_config_roundtrips_through_loader() {
     store.state.theme = ThemeName::Solarized;
     store.state.pinned_scroll = false;
 
-    run_saveconfig(&mut store);
+    for steering in [true, false] {
+        store.state.steer_mid_turn = steering;
+        run_saveconfig(&mut store);
 
-    let config = load_config_file(&path).expect("reparse");
-    assert_eq!(config.theme, Some(ThemeName::Solarized));
-    assert_eq!(config.scroll_mode, Some(ScrollMode::Native));
-    assert!(config.lang.is_some(), "lang persisted too");
-    assert_eq!(
-        config.steer_mid_turn,
-        Some(false),
-        "/saveconfig persists the steer-mid-turn toggle alongside the other UI settings"
-    );
+        let config = load_config_file(&path).expect("reparse");
+        assert_eq!(config.theme, Some(ThemeName::Solarized));
+        assert_eq!(config.scroll_mode, Some(ScrollMode::Native));
+        assert!(config.lang.is_some(), "lang persisted too");
+        assert_eq!(
+            config.steer_mid_turn,
+            Some(steering),
+            "/saveconfig persists both steering preferences alongside the other UI settings"
+        );
+    }
 }
 
 #[test]
