@@ -4871,11 +4871,10 @@ pub struct AppState {
     /// key is read, so it is stale by at most one frame — the same discipline as
     /// [`AppState::agent_view_scroll_max`]).
     pub goal_objective_folded_effective: std::cell::Cell<bool>,
-    /// `--scroll-mode pinned`: capture the mouse in the chat flow so wheel-up
-    /// auto-enters the pager (composer stays pinned) and wheel-down at the
-    /// pager bottom drops back to the inline tail. False = `native` (default):
-    /// the wheel belongs to the terminal and native selection/copy stay intact.
-    pub pinned_scroll: bool,
+    /// Chat presentation, seeded from launch settings by the event loop.
+    pub scroll_mode: crate::cli::ScrollMode,
+    /// Read-only expansion of the fixed question; separate from chat scrolling.
+    pub question_detail: QuestionDetailState,
     /// Vim modal editing for the composer (opt-in via `--vim-mode`/config
     /// `vim-mode`/`/vimmode`). When false the composer behaves exactly as a
     /// plain text field (equivalent to always-Insert); `composer_mode` is only
@@ -6020,6 +6019,15 @@ impl UserQuestionPickerState {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QuestionDetailState {
+    pub active: bool,
+    pub title: String,
+    pub content: String,
+    pub scroll: usize,
+    pub max_scroll: std::cell::Cell<usize>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaskOutputDetailState {
     pub active: bool,
     pub session_id: Option<SessionKey>,
@@ -7155,7 +7163,10 @@ impl AppState {
             peer_dock_collapsed: false,
             goal_objective_fold: GoalObjectiveFold::default(),
             goal_objective_folded_effective: std::cell::Cell::new(false),
-            pinned_scroll: false,
+            // Keep the transport/model constructor presentation-neutral. The
+            // event loop applies the resolved CLI/config mode before drawing.
+            scroll_mode: crate::cli::ScrollMode::Native,
+            question_detail: QuestionDetailState::default(),
             vim_mode: false,
             steer_mid_turn: true,
             composer_mode: ComposerMode::Insert,
@@ -9247,6 +9258,7 @@ impl AppState {
         self.stash_pending_messages_for_selected_session();
         self.composer_history.reset_navigation(); // end history browse on switch
         self.selected_session = index;
+        self.question_detail = QuestionDetailState::default();
         self.selected_task = 0;
         // The new session has its own (or no) sub-agents; a carried-over agent
         // selection would point at the wrong session's agent.

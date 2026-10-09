@@ -27,9 +27,11 @@ spec 以 `inherits: project` 继承。
 
 - 禁止无正当理由新增 crate 依赖。
 - 禁止 unsafe 代码（全仓 `unsafe_code = "deny"`）。
-- 禁止破坏 inline scrollback 模型的三条设计不变量：普通 chat 不常驻
-  alternate screen；普通 chat 在默认 `native` scroll-mode 下不启用鼠标捕获（保住原生选择/复制；`--scroll-mode pinned` 为用户显式 opt-in 豁免）；
-  空闲时不重绘终端（redraw on change，保住用户选区）。
+- `native` 模式继续保持 inline scrollback 不变量：普通 chat 不常驻
+  alternate screen、不启用鼠标捕获（保住原生选择/复制）。默认 `sticky`
+  模式使用 alternate screen，将最新问题与输入框固定，中间内容由应用滚动；
+  `pinned` 保留只固定输入框的滚动行为。见 task-sticky-question-header.spec。
+  所有模式空闲时不重绘终端（redraw on change，保住用户选区）。
 
 ## 验收标准
 

@@ -252,10 +252,10 @@ pub fn run(cli: Cli) -> Result<()> {
     // `/theme` menu mutates this field, so the palette below is recomputed each
     // frame from `store.state.theme` rather than captured once at startup.
     store.state.theme = cli.theme;
-    // `--scroll-mode pinned` opts into app-side wheel handling (composer stays
-    // pinned); the default `native` keeps the wheel on the terminal so native
-    // selection/copy survive. Seeded once at launch, read-only afterwards.
-    store.state.pinned_scroll = cli.scroll_mode == crate::cli::ScrollMode::Pinned;
+    // Sticky fixes the latest question and composer; explicit native/pinned
+    // preferences keep their existing behavior. /scrollmode can change this
+    // presentation setting at runtime.
+    store.state.scroll_mode = cli.scroll_mode;
     // Retain the launch config path so `/saveconfig` can persist runtime UI
     // settings (theme/lang/scroll-mode/vim-mode) back into it.
     store.state.config_path = cli.config.clone();
@@ -514,8 +514,10 @@ where
 {
     let palette = Palette::for_theme(store.state.theme);
 
-    if app::wants_fullscreen_overlay(&store.state) {
-        // Transient overlay → alternate screen, full legacy render.
+    if app::wants_fullscreen_overlay(&store.state)
+        || store.state.scroll_mode == crate::cli::ScrollMode::Sticky
+    {
+        // Sticky chat and transient overlays use the alternate screen.
         guard.enter_alt_screen(terminal)?;
         guard.sync_mouse_capture(terminal, app::wants_mouse_capture(&store.state))?;
         let size = terminal.size()?;
@@ -1206,7 +1208,9 @@ fn handle_mouse(store: &mut Store, mouse: MouseEvent) -> KeyAction {
     // scrolling, and multiplying each by 4 makes the transcript jump instead
     // of glide. Other surfaces (modals, workspace/git panes) keep the coarser
     // step that suits clicky wheel mice.
-    let lines = if store.state.transcript_pager_active {
+    let lines = if store.state.transcript_pager_active
+        || store.state.scroll_mode == crate::cli::ScrollMode::Sticky
+    {
         1
     } else {
         MOUSE_SCROLL_LINES
@@ -1215,7 +1219,11 @@ fn handle_mouse(store: &mut Store, mouse: MouseEvent) -> KeyAction {
         MouseEventKind::ScrollUp => scroll_current_surface_up(store, lines),
         MouseEventKind::ScrollDown => scroll_current_surface_down(store, lines),
         MouseEventKind::Down(MouseButton::Left)
-            if store.state.transcript_pager_active
+            if !modal_owns_keyboard(store)
+                && !store.state.menu_stack.is_active()
+                && !app::agent_view_active(&store.state)
+                && (store.state.transcript_pager_active
+                    || store.state.scroll_mode == crate::cli::ScrollMode::Sticky)
                 && store
                     .state
                     .scroll_to_bottom_button
@@ -1226,6 +1234,20 @@ fn handle_mouse(store: &mut Store, mouse: MouseEvent) -> KeyAction {
             // live tail. The pager gate prevents a stale hit rect from eating
             // clicks after close while pinned mode keeps capture enabled.
             store.state.scroll_transcript_to_latest();
+        }
+        MouseEventKind::Down(MouseButton::Left) if question_header_available(store) => {
+            let area = ratatui::layout::Rect::new(
+                0,
+                0,
+                store.state.last_terminal_width,
+                store.state.last_terminal_height,
+            );
+            if app::chat_layout_areas(&store.state, area)
+                .question
+                .contains(ratatui::layout::Position::new(mouse.column, mouse.row))
+            {
+                app::pinned_question::open(&mut store.state);
+            }
         }
         _ => {}
     }
@@ -1270,6 +1292,18 @@ fn modal_owns_keyboard(store: &Store) -> bool {
         || store.state.thread_graph_detail.active
         || store.state.turn_state_detail.active
         || store.state.diff_preview.overlay_active()
+        || store.state.question_detail.active
+}
+
+fn question_header_available(store: &Store) -> bool {
+    store.state.scroll_mode == crate::cli::ScrollMode::Sticky
+        && !modal_owns_keyboard(store)
+        && !store.state.menu_stack.is_active()
+        && matches!(
+            store.state.focus,
+            FocusPane::Composer | FocusPane::Transcript
+        )
+        && !app::agent_view_active(&store.state)
 }
 
 pub(crate) fn handle_key(store: &mut Store, key: KeyEvent) -> KeyAction {
@@ -1318,6 +1352,34 @@ pub(crate) fn handle_key(store: &mut Store, key: KeyEvent) -> KeyAction {
     // Any other key press means the user moved on — the next idle Ctrl+C
     // hints again instead of quitting out from under them.
     store.state.ctrl_c_quit_armed = false;
+
+    // A read-only question viewer must not leak edits or sends into the draft.
+    // Incoming approval/question dialogs take priority over this reader.
+    if app::pinned_question::detail_visible(&store.state) {
+        let detail = &mut store.state.question_detail;
+        match key.code {
+            KeyCode::Esc | KeyCode::F(2) | KeyCode::Enter => *detail = Default::default(),
+            KeyCode::Up | KeyCode::Char('k') => detail.scroll = detail.scroll.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => {
+                detail.scroll = detail.scroll.saturating_add(1).min(detail.max_scroll.get())
+            }
+            KeyCode::PageUp => detail.scroll = detail.scroll.saturating_sub(10),
+            KeyCode::PageDown => {
+                detail.scroll = detail
+                    .scroll
+                    .saturating_add(10)
+                    .min(detail.max_scroll.get())
+            }
+            KeyCode::Home => detail.scroll = 0,
+            KeyCode::End => detail.scroll = detail.max_scroll.get(),
+            _ => {}
+        }
+        return KeyAction::Continue;
+    }
+    if key.code == KeyCode::F(2) && question_header_available(store) {
+        app::pinned_question::open(&mut store.state);
+        return KeyAction::Continue;
+    }
 
     // A live sub-agent peek OWNS the keyboard, exactly like a modal: routed here
     // — after the always-on quit/interrupt keys but BEFORE every composer /
@@ -2148,7 +2210,9 @@ fn handle_plain_key(store: &mut Store, key: KeyEvent) -> KeyAction {
             // press opens the pager (at the bottom) instead; inside the pager
             // it pages through the full transcript.
             _ => {
-                if transcript_pager_available(&store.state) {
+                if store.state.scroll_mode != crate::cli::ScrollMode::Sticky
+                    && transcript_pager_available(&store.state)
+                {
                     store.state.enter_transcript_pager();
                 } else {
                     store.state.scroll_transcript_up(8);
@@ -3338,6 +3402,14 @@ fn toggle_transcript_pager(store: &mut Store) {
 }
 
 fn scroll_current_surface_down(store: &mut Store, lines: usize) {
+    if app::pinned_question::detail_visible(&store.state) {
+        let detail = &mut store.state.question_detail;
+        detail.scroll = detail
+            .scroll
+            .saturating_add(lines)
+            .min(detail.max_scroll.get());
+        return;
+    }
     // See `scroll_current_surface_up` for the surface precedence.
     if app::agent_view_active(&store.state) {
         store.state.scroll_agent_view_down(lines);
@@ -3379,7 +3451,7 @@ fn scroll_current_surface_down(store: &mut Store, lines: usize) {
         // always pinned, the wheel just moves the content" illusion. A pager
         // opened manually in native mode keeps its position instead.
         _ => {
-            if store.state.pinned_scroll
+            if store.state.scroll_mode == crate::cli::ScrollMode::Pinned
                 && store.state.transcript_pager_active
                 && store.state.transcript_scroll == 0
             {
@@ -3392,6 +3464,11 @@ fn scroll_current_surface_down(store: &mut Store, lines: usize) {
 }
 
 fn scroll_current_surface_up(store: &mut Store, lines: usize) {
+    if app::pinned_question::detail_visible(&store.state) {
+        store.state.question_detail.scroll =
+            store.state.question_detail.scroll.saturating_sub(lines);
+        return;
+    }
     // A live peek is a full-screen overlay above everything, so it takes the
     // wheel first. When a real modal is up the peek yields (agent_view_active is
     // false) and the surface precedence below applies: detail modals (rendered on
@@ -3437,7 +3514,9 @@ fn scroll_current_surface_up(store: &mut Store, lines: usize) {
         // wheel then scrolls inside it. Native mode keeps the wheel on the
         // terminal, so this arm only sees synthetic/test events there.
         _ => {
-            if store.state.pinned_scroll && transcript_pager_available(&store.state) {
+            if store.state.scroll_mode == crate::cli::ScrollMode::Pinned
+                && transcript_pager_available(&store.state)
+            {
                 store.state.enter_transcript_pager();
             } else {
                 store.state.scroll_transcript_up(lines);

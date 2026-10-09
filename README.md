@@ -611,7 +611,7 @@ so plain `octoscode` is the real thing, not the mock.
 --readonly / --no-readonly   open as a view-only session, or force read-write
 --theme <name>           codex | claude | slate | solarized | terminal
 --lang en|zh             UI language; falls back to OCTOS_LANG / LANG. Default: en
---scroll-mode <mode>     native (terminal scrollback, default) | pinned (composer pinned)
+--scroll-mode <mode>     sticky (fixed question and composer, default) | native | pinned
 --vim-mode               enable Vim modal editing in the composer (default off)
 --steer-mid-turn         inject a prompt typed mid-turn into the RUNNING turn
                          (default on; Tab queues a separate turn, and a saved
@@ -639,7 +639,7 @@ path with `octoscode config path`.
   "readonly": false,
   "theme": "codex",
   "lang": "en",
-  "scroll-mode": "native",
+  "scroll-mode": "sticky",
   "vim-mode": false,
   "steer-mid-turn": true
 }
@@ -729,7 +729,7 @@ q          quit
 /theme      switch the TUI palette at runtime (menu, or /theme claude)
 /lang       switch the UI language (menu, or /lang zh) — English / 中文
 /thinking   set reasoning effort for thinking models, per session (menu, or /thinking high)
-/scrollmode switch wheel-scroll behavior (toggle, or /scrollmode native|pinned)
+/scrollmode switch wheel-scroll behavior (toggle, or /scrollmode sticky|native|pinned)
 /vimmode    toggle Vim modal editing in the composer (Normal/Insert)
 /saveconfig persist the active theme / language / scroll-mode / vim-mode / steer-mode to the config file
 /steer      switch what Enter means mid-turn: on (default) steers the running turn, off queues FIFO
@@ -803,11 +803,27 @@ counts (`3dd`) are out of scope.
 
 ### Scrolling and the transcript pager
 
-By default (`native` scroll-mode) the wheel scrolls the terminal's own
-scrollback, so native selection/copy stay intact and the composer scrolls away
-with the screen. Press **Ctrl+T** (or **PageUp**) to open a full-screen
-**transcript pager** where history scrolls in the upper pane while the composer
-stays pinned to the bottom; **Esc** (or Ctrl+T again) closes it.
+By default (`sticky` scroll-mode), the latest submitted question stays at the
+screen's top and the composer stays at the bottom. Answers and tool activity
+scroll between them. The question remains after completion and changes on the
+next submission; queued questions show **Queued**. Switching sessions restores
+that session's question and queue. Draft edits do not replace the header.
+
+The header shows up to three wrapped lines. Press **F2** or click it to read the
+complete question; arrows, PageUp/PageDown, Home/End and the wheel scroll that
+reader. **Esc**, F2 or Enter closes it without sending or changing the draft.
+Use **Shift+drag** for terminal text selection in application scroll modes.
+
+`/scrollmode native` (or `--scroll-mode native`) restores terminal scrollback and
+native selection/copy. In native mode, **Ctrl+T** or **PageUp** opens the
+full-screen transcript pager; **Esc** or Ctrl+T closes it. `/scrollmode sticky`
+returns to the fixed question. Bare `/scrollmode` toggles sticky/native.
+`/saveconfig` persists the choice; an explicit existing preference is respected.
+
+中文：默认 `sticky` 模式将最新提交的问题固定在顶部，输入框固定在底部，
+回答和工具活动在中间滚动。任务结束后问题仍保留；下一次提交时更新，排队问题
+显示“已排队”。F2 或点击问题可查看完整内容，Esc/F2/Enter 关闭且不发送草稿。
+`/scrollmode native` 恢复终端原生滚动，`/saveconfig` 保存当前选择。
 
 `--scroll-mode pinned` (or `/scrollmode pinned`) opts into app-side wheel
 handling: the wheel always scrolls the transcript and the composer never moves,

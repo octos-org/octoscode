@@ -603,10 +603,11 @@ saveconfig:
   failed: "Could not save config: %{error}"
   no_path: "No config path available to save to."
 scrollmode:
+  set_sticky: "Scroll mode: sticky — latest question fixed at the top, composer at the bottom. F2 expands the question."
   current: "(current: %{mode})"
   set_pinned: "Scroll mode: pinned — the wheel scrolls the transcript, composer stays at the bottom (Shift+drag to select)."
   set_native: "Scroll mode: native — the wheel belongs to the terminal again (Ctrl+T opens the pager)."
-  unknown: "Unknown scroll mode '%{value}'. Available: native, pinned."
+  unknown: "Unknown scroll mode '%{value}'. Available: sticky, native, pinned."
 vimmode:
   enabled: "Vim mode: on — Esc for Normal, i to insert (Insert mode now)."
   disabled: "Vim mode: off — the composer is a plain text field again."
@@ -1193,7 +1194,7 @@ command:
   saveconfig:
     desc: "Save the active appearance, language, scroll-mode, vim-mode and steer-mode to the config file."
   scrollmode:
-    desc: 'Switch wheel-scroll behavior: /scrollmode [native|pinned] (bare toggles).'
+    desc: 'Switch wheel-scroll behavior: /scrollmode [sticky|native|pinned] (bare toggles).'
   vimmode:
     desc: "Toggle Vim modal editing in the composer (Normal/Insert)."
   steer:
@@ -2004,3 +2005,10 @@ workspace_team:
   refresh: "Refresh agents"
   hint: "↑/↓ select · Enter message or assign coordinator · Esc close"
   list_first: "Run /agents first, then select a coordinator."
+
+question_header:
+  latest: "You"
+  queued: "Queued"
+  sending: "Sending"
+  expand: " F2 · Full question "
+  close: " ↑↓/PgUp/PgDn scroll · Esc/F2 close "
