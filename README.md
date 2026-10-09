@@ -74,7 +74,8 @@ short onboarding menu — your starting point for the walkthrough below.
 `octoscode` is intentionally separate from `octos-cli`: the `octos` repo owns
 the server/runtime and the shared `octos-core` protocol types; this repo owns
 the terminal client. Architecture and ownership boundaries live in
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), with the rationale recorded in
+[architecture decisions](knowledge/decisions/README.md).
 
 ---
 
