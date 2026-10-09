@@ -68,6 +68,31 @@ ACK(done|wontdo|blocked): <explanation>
 The grammar is pinned by the contract test `olp_ack_lines_match_v1_grammar`.
 A new bare `ACK:` line fails that test.
 
+### 2.0 Optional structured board
+
+Some newly initialized projects explicitly opt in to the experimental
+`schema="olp-board/v1"` extension. Check the generated structured loop/board
+header, then query `olp-board-event.py state --board <canonical-board>`. A fresh
+opt-in board reports legacy before its first event, but its first dispatch still
+uses `item`. Ordinary legacy mode keeps the four rules above; structured/mixed mode replaces hand-written normative records
+with the installed event CLI. The outer loop writes `item`; the inner loop writes
+`receive` before executing and `ack` after committing; the outer loop writes
+`review`, and uses `withdraw` (unreceived item), `resolve` (after a human
+decision on an escalation) and `void` (quarantine bytes that are not a record)
+to close things out. Query with `olp-board-inbox.py`; pass `--since-head` with
+the last head you handled so open work you chose to leave does not wake you.
+
+`received_pending` is restart reconciliation evidence, never automatic
+re-execution authority. For positive observation, `olp-board-sentinel.py` uses
+text only to wake and ledger replay to decide; keep the `events.jsonl` negative
+sentry. DRIFT (a malformed event line, an unpaired item/ACK, or a quoted,
+bulleted or headed hand-written ACK) blocks automatic dispatch until an exact
+byte-evidence recovery or `void` closes it. Never fuzzy-match or ignore drift,
+and keep examples inside closed code fences. The extension does not
+authenticate actors or enforce the R7 lease. Full commands, receipts,
+migration, and rejection cases are in `docs/OLP_STRUCTURED_BOARD.en.md`; do not
+assume every project has migrated.
+
 ### 2.1 Honest verification declaration (R2)
 
 Every delivery declares exactly one level:
@@ -213,6 +238,12 @@ Mount **two sentries**, not one: a positive-signal sentry (ACK lands on the
 board) *and* a negative-signal sentry (`goal_transition blocked` / `escalation`
 in `events.jsonl`).
 
+For an opted-in structured/mixed board, use `olp-board-sentinel.py` for the
+positive sentry and `olp-board-inbox.py --for outer` as the ledger decision.
+The text signal alone is not completion. Stop on DRIFT and follow the exact
+recovery/void procedure in `docs/OLP_STRUCTURED_BOARD.en.md`. Legacy boards keep
+the existing watcher and ACK workflow.
+
 ### 3.5 Re-verify, then push
 
 An inner-loop self-verification claim **is not trustworthy on its own** — there
@@ -298,6 +329,7 @@ editing config without a new session is paper insurance).
 
 - [`OUTER_LOOP_PROTOCOL.md`](https://github.com/octos-org/octoscode/blob/main/docs/OUTER_LOOP_PROTOCOL.md) — the protocol in full: R1–R7,
   `result.md` schema, multi-outer rules, budget governance, field lessons
+- [`OLP_STRUCTURED_BOARD.en.md`](https://github.com/octos-org/octoscode/blob/main/docs/OLP_STRUCTURED_BOARD.en.md) — optional structured ledger, DRIFT and reconciliation (中文: `OLP_STRUCTURED_BOARD.md`)
 - [`OLP_OUTER_BOOT.md`](https://github.com/octos-org/octoscode/blob/main/docs/OLP_OUTER_BOOT.md) — the outer operator card and tactics handbook
 - [`OLP_QUICKSTART.en.md`](https://github.com/octos-org/octoscode/blob/main/docs/OLP_QUICKSTART.en.md) — zero-to-running for a new project (中文: `OLP_QUICKSTART.md`)
 - [`OCTOLOOP_GUIDE.md`](https://github.com/octos-org/octoscode/blob/main/docs/OCTOLOOP_GUIDE.md) — full guide, mechanisms, platform matrix

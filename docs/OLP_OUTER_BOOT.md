@@ -142,6 +142,21 @@ sub_providers 多模型车道(配置法见 configuration.md),给 octoscode
 
 ## 7. 外环战术手册(实战沉淀,按场景查)
 
+### 可选结构化黑板
+
+项目若显式 opt-in `schema="olp-board/v1"`，不要手写规范 item/ACK：外环用
+`~/.octos/outer/olp-board-event.py item`，runtime 依次用 receive、ack，外环
+用 review；收口用 withdraw、resolve、void。查询走 `olp-board-inbox.py`，
+带上上次处理完的 `--since-head`。先看 loop/板头声明（`<!-- olp-board/v1 -->`）
+再查 state；新板在首事件前仍返回 legacy，但第一条派单必须用 item。普通 legacy
+继续旧流程。
+
+正信号改用 `olp-board-sentinel.py`：文字只唤醒，完成与在途判定看账本；
+DRIFT 立即停止自动调度，按精确 recovery 或 void 收口；引用、列表、标题形式的
+手写 ACK 也会报 DRIFT，示例一律放进已闭合代码围栏。sentinel 不自动开 turn、派单或
+执行，也不替代 `events.jsonl` 的 blocked/escalation 负哨。恢复、归档与完整
+命令见 `OLP_STRUCTURED_BOARD.md`。
+
 ### 进化环批注定式
 
 改判(作废既有条目)必须落在**新的未 ACK 编号条目**(R1/R5),已闭环
