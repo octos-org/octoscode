@@ -253,7 +253,7 @@ app:
     re_entering: "重新进入"
     working: "运行中"
   composer_hint:
-    queued_messages: "已排队 %{count} 条消息（当前任务结束后发送）| Esc 中断/发送 | Ctrl+U 清空"
+    queued_messages: "已排队 %{count} 条消息（当前任务结束后发送）| Ctrl+X 立即发送 | Ctrl+U 清空"
     large_paste: "大段粘贴已折叠 | Enter 发送全文 | Ctrl+U 清空"
     multiline_tail_lines: "多行输入 | 显示末尾，已隐藏 %{count} 行 | Enter 发送全文 | Ctrl+U 清空"
     multiline_tail_line: "多行输入 | 显示超长行末尾 | Enter 发送全文 | Ctrl+U 清空"
@@ -645,7 +645,7 @@ command:
   vimmode:
     desc: "切换输入框的 Vim 模态编辑（Normal/Insert）。"
   steer:
-    desc: "切换运行中按 Enter 的含义：/steer [on|off] —— on 注入当前轮次，off（默认）按顺序排队。"
+    desc: "切换运行中按 Enter 的含义：/steer [on|off] —— on（默认）引导当前轮次；Tab 或 off 按顺序排队。"
   thinking:
     desc: 设置思考模型的思考强度：/thinking low|medium|high|max|default
   threads:
@@ -1529,7 +1529,7 @@ status:
   # --- 运行时状态/活动消息 (store.rs) ---
   list_more: "，+%{count} 项更多"
   no_session_send_prompt: "没有打开的编码会话。发送提示前请运行 /onboard open-session。"
-  message_staged: "消息已暂存；将在当前回合结束后提交。按 Esc 可中断/发送。"
+  message_staged: "消息已暂存；将在当前回合结束后提交。按 Ctrl+X 可中断并立即发送。"
   steered_into_turn: "已插入正在运行的回合。"
   steer_restaged_after_turn_end: "回合在你插入的消息被采纳前就结束了——已重新入队，作为新回合发送。"
   steer_returned_by_server: "服务端返还了 %{count} 条未被采纳的插入消息（%{reason}）——已重新入队。"

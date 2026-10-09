@@ -265,7 +265,7 @@ app:
     re_entering: "Re-entering"
     working: "Working"
   composer_hint:
-    queued_messages: "Queued messages (%{count}) after active turn | Esc interrupt/send | Ctrl+U clear"
+    queued_messages: "Queued messages (%{count}) after active turn | Ctrl+X send now | Ctrl+U clear"
     large_paste: "Large paste collapsed | Enter sends full text | Ctrl+U clear"
     multiline_tail_lines: "Multiline input | showing tail, %{count} earlier line(s) hidden | Enter sends full text | Ctrl+U clear"
     multiline_tail_line: "Multiline input | showing tail of long line | Enter sends full text | Ctrl+U clear"
@@ -720,7 +720,7 @@ status:
   # --- Runtime status/activity messages (store.rs) ---
   list_more: ", +%{count} more"
   no_session_send_prompt: "No coding session open. Run /onboard open-session before sending a prompt."
-  message_staged: "Message staged; it will submit after the active turn. Press Esc to interrupt/send."
+  message_staged: "Message staged; it will submit after the active turn. Press Ctrl+X to interrupt/send."
   steered_into_turn: "Steered into the running turn."
   steer_restaged_after_turn_end: "The turn ended before your steered message was taken up — it was re-queued and is sending as a new turn."
   steer_returned_by_server: "Server returned %{count} steered message(s) it never took up (%{reason}) — re-queued."
@@ -1197,7 +1197,7 @@ command:
   vimmode:
     desc: "Toggle Vim modal editing in the composer (Normal/Insert)."
   steer:
-    desc: "Switch what Enter means mid-turn: /steer [on|off] — on injects into the running turn, off (default) queues FIFO."
+    desc: "Switch what Enter means mid-turn: /steer [on|off] — on (default) steers the running turn; Tab or off queues FIFO."
   thinking:
     desc: 'Set reasoning effort for thinking models: /thinking low|medium|high|max|default.'
   threads:
