@@ -279,8 +279,8 @@ struct CliArgs {
     pub vim_mode: bool,
 
     /// Steer a prompt typed mid-turn into the RUNNING turn (octos#1807)
-    /// instead of queueing it. Off by default: queued prompts each run as
-    /// their own turn, in the order typed. Also toggled at runtime with
+    /// instead of queueing it. On by default; Tab queues a separate turn.
+    /// A saved false preference disables steering. Also toggled at runtime with
     /// `/steer` (persist with `/saveconfig`).
     #[arg(long = "steer-mid-turn")]
     pub steer_mid_turn: bool,
@@ -455,7 +455,7 @@ impl Cli {
             // "false"), so the CLI flag only force-enables; the config provides
             // the default when the flag is absent.
             vim_mode: args.vim_mode || file_config.vim_mode.unwrap_or(false),
-            steer_mid_turn: args.steer_mid_turn || file_config.steer_mid_turn.unwrap_or(false),
+            steer_mid_turn: args.steer_mid_turn || file_config.steer_mid_turn.unwrap_or(true),
             // Flag + OCTOSCODE_NO_SPLASH env only — no config-file key
             // (CliFileConfig is deny_unknown_fields; spec gates via these two).
             no_splash: args.no_splash,

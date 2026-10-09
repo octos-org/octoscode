@@ -614,8 +614,8 @@ so plain `octoscode` is the real thing, not the mock.
 --scroll-mode <mode>     native (terminal scrollback, default) | pinned (composer pinned)
 --vim-mode               enable Vim modal editing in the composer (default off)
 --steer-mid-turn         inject a prompt typed mid-turn into the RUNNING turn
-                         (default off: mid-turn prompts queue FIFO and each runs
-                         as its own turn, in the order typed)
+                         (default on; Tab queues a separate turn, and a saved
+                         false preference keeps Enter queueing FIFO)
 --no-splash              skip the startup logo animation
 ```
 
@@ -641,7 +641,7 @@ path with `octoscode config path`.
   "lang": "en",
   "scroll-mode": "native",
   "vim-mode": false,
-  "steer-mid-turn": false
+  "steer-mid-turn": true
 }
 ```
 
@@ -702,7 +702,9 @@ internal error silently falls through to a normal launch.
 ### In-session keys and slash commands
 
 ```text
-Tab        peek a running sub-agent's output; Tab/Shift+Tab cycle main↔agents, Esc returns to chat
+Enter      steer compatible text into the active turn (or start a turn when idle)
+Tab        queue a nonempty draft while working; otherwise peek/cycle sub-agents
+Ctrl+X     interrupt and send pending messages; preserve the unfinished draft (diff view: stage hunk)
 PgUp/PgDn  scroll the transcript (PgUp also opens the pager)
 y / s / n  approve once / approve for session / deny a pending tool approval
 Alt+A      re-show the pending approval prompt
@@ -730,7 +732,7 @@ q          quit
 /scrollmode switch wheel-scroll behavior (toggle, or /scrollmode native|pinned)
 /vimmode    toggle Vim modal editing in the composer (Normal/Insert)
 /saveconfig persist the active theme / language / scroll-mode / vim-mode / steer-mode to the config file
-/steer      switch what Enter means mid-turn: on injects into the running turn, off (default) queues FIFO
+/steer      switch what Enter means mid-turn: on (default) steers the running turn, off queues FIFO
 /onboard    set onboarding fields inline (name, username, email, key, ...)
 /copy       copy the last assistant reply to the clipboard (works over SSH)
 /status     snapshot-backed session, runtime, and connection status

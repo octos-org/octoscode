@@ -464,6 +464,14 @@ impl Store {
     }
 
     pub fn compose_command(&mut self) -> Option<AppUiCommand> {
+        self.compose_with_delivery(false)
+    }
+
+    pub fn queue_composer_command(&mut self) -> Option<AppUiCommand> {
+        self.compose_with_delivery(true)
+    }
+
+    fn compose_with_delivery(&mut self, queue_only: bool) -> Option<AppUiCommand> {
         let prompt = self.state.composer.trim().to_string();
         // `looks_like_slash_command`, not `starts_with('/')`: a prompt that
         // merely BEGINS with a path (`/Users/me/Downloads/notes.md is broken,
@@ -532,6 +540,11 @@ impl Store {
             // A settled `/btw` aside is ephemeral — the next prompt dismisses
             // it (an answering one stays; its result may still land).
             self.state.clear_settled_btw_aside(&session_id);
+        }
+        if queue_only && self.turn_in_progress() {
+            self.state.pending_messages.push(prompt);
+            self.state.status = t!("status.message_staged").into_owned();
+            return None;
         }
         self.queue_or_start_prompt_turn(prompt, t!("status.queued_turn_start").into_owned())
     }
@@ -743,15 +756,9 @@ impl Store {
     /// prompt is stashed FIFO in `pending_turn_steers` so an attributed
     /// steer failure can re-stage it (the text must never be lost).
     fn try_steer_live_turn(&mut self, prompt: &str) -> Option<AppUiCommand> {
-        // Steering is OPT-IN (`steer_mid_turn` config / --steer-mid-turn).
-        // The default answers "what does Enter mean while the agent works?"
-        // with FIFO: stage the prompt and run it as its OWN turn after the
-        // current one finishes, in the order typed. A steer is delivered as
-        // a bare user message into the RUNNING loop, and the model treats
-        // the newest instruction as superseding the work in progress — an
-        // effective interrupt-and-pivot. Right tool for a course
-        // correction; wrong default for "also do this next".
-        if !self.state.steer_mid_turn {
+        // Enter steers by default; Tab explicitly queues. Unsupported servers
+        // retain FIFO behavior, and a saved /steer off preference is respected.
+        if !self.state.steer_mid_turn || !Self::image_media_from_prompt(prompt).is_empty() {
             return None;
         }
         if self.state.readonly {
@@ -7047,7 +7054,27 @@ impl Store {
             return None;
         }
 
-        let command = self.interrupt_command();
+        self.send_pending_now_command()
+    }
+
+    pub fn send_pending_now_command(&mut self) -> Option<AppUiCommand> {
+        let (session_id, turn_id) = self.state.active_turn()?;
+        if self.state.turn_locally_interrupted(session_id, turn_id)
+            || self
+                .state
+                .pending_turn_steers
+                .iter()
+                .any(|s| &s.session_id == session_id)
+            || !(self.state.has_pending_messages()
+                || self
+                    .state
+                    .retained_steers
+                    .iter()
+                    .any(|s| &s.session_id == session_id && &s.turn_id == turn_id))
+        {
+            return None;
+        }
+        let command = self.interrupt_with_restore(false);
         if command.is_some() {
             self.state.status = t!("status.interrupt_staged_submit").into_owned();
         }
@@ -7055,6 +7082,10 @@ impl Store {
     }
 
     pub fn interrupt_command(&mut self) -> Option<AppUiCommand> {
+        self.interrupt_with_restore(true)
+    }
+
+    fn interrupt_with_restore(&mut self, restore_prompt: bool) -> Option<AppUiCommand> {
         let Some((session_id, turn_id)) = self
             .state
             .active_turn()
@@ -7071,6 +7102,12 @@ impl Store {
             return None;
         };
 
+        if !restore_prompt {
+            self.state
+                .pending_interrupt_restores
+                .retain(|pending| pending.session_id != session_id || pending.turn_id != turn_id);
+        }
+
         // A user Esc/Ctrl+C is a "stop and let me edit/resend" gesture, so the
         // interrupted turn's prompt comes back to the composer — but only once
         // the turn actually SETTLES (its terminal arrives), not here at
@@ -7085,7 +7122,8 @@ impl Store {
         // typed (the apply site re-checks). This is the single user-initiated
         // interrupt chokepoint (both Esc and Ctrl+C route here), so the stash
         // is always user-driven; genuine turn errors never arm it.
-        if self.state.composer.is_empty()
+        if restore_prompt
+            && self.state.composer.is_empty()
             && let Some(prompt) = self.state.submitted_prompt_for_turn(&session_id, &turn_id)
             && !prompt.trim().is_empty()
         {
@@ -19245,23 +19283,15 @@ mod tests {
         params.turn_id
     }
 
-    /// The DEFAULT for a prompt typed while the agent is working: stage FIFO
-    /// and run it as its OWN turn after the current one finishes — even when
-    /// the server advertises `turn/steer`. A steer is delivered as a bare
-    /// user message into the RUNNING loop, where the model treats the newest
-    /// instruction as superseding the work in progress — an effective
-    /// interrupt-and-pivot. That redirection is opt-in (`steer_mid_turn`);
-    /// plain Enter means "next, in order", and every prompt gets processed.
+    /// A saved /steer off preference still uses FIFO even on a capable server.
     #[test]
-    fn mid_turn_prompts_stage_fifo_by_default_even_when_steer_capable() {
+    fn mid_turn_prompts_stage_fifo_when_steering_disabled() {
         let mut store = store_with_empty_session();
+        assert!(store.state.steer_mid_turn);
+        store.state.steer_mid_turn = false;
         store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods([
             crate::model::APPUI_METHOD_TURN_STEER,
         ]));
-        assert!(
-            !store.state.steer_mid_turn,
-            "precondition: steering is opt-in, off by default"
-        );
         let session_id = store.state.sessions[0].id.clone();
         let first_turn = start_live_turn(&mut store, "review the design");
 
@@ -19281,7 +19311,7 @@ mod tests {
         );
         assert!(
             store.state.pending_turn_steers.is_empty(),
-            "nothing may enter the steer stash by default"
+            "nothing may enter the steer stash when disabled"
         );
         assert_eq!(
             store.state.pending_messages,
@@ -38580,6 +38610,20 @@ now analyzing the bus module"
                 .and_then(|activity| activity.detail.as_deref()),
             Some("modify src/lib.rs | diff preview ready")
         );
+    }
+
+    #[test]
+    fn image_prompt_stays_queued_when_mid_turn_steering_is_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("shot.png");
+        std::fs::write(&img, b"image bytes").unwrap();
+        let mut store = steer_capable_store();
+        start_live_turn(&mut store, "work");
+        let prompt = format!("inspect @{}", img.display());
+        store.state.set_composer_text(&prompt);
+        assert!(store.compose_command().is_none());
+        assert_eq!(store.state.pending_messages, vec![prompt]);
+        assert!(store.state.pending_turn_steers.is_empty());
     }
 
     #[test]

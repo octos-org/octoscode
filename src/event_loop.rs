@@ -1494,6 +1494,15 @@ pub(crate) fn handle_key(store: &mut Store, key: KeyEvent) -> KeyAction {
         return KeyAction::Continue;
     }
 
+    if is_ctrl_char(&key, 'x')
+        && store.state.focus == FocusPane::Composer
+        && !store.state.transcript_pager_active
+    {
+        return store
+            .send_pending_now_command()
+            .map_or(KeyAction::Continue, KeyAction::send);
+    }
+
     // ONE key, cycling. `select_next_hunk` wraps ((current + 1) % len), so a
     // single bind reaches every hunk and no "previous" key is needed.
     //
@@ -1944,6 +1953,18 @@ fn handle_plain_key(store: &mut Store, key: KeyEvent) -> KeyAction {
     // the composer is focused.
     if let Some(action) = handle_composer_vim_key(store, &key) {
         return action;
+    }
+
+    if key.code == KeyCode::Tab
+        && key.modifiers.is_empty()
+        && store.state.focus == FocusPane::Composer
+        && !store.state.transcript_pager_active
+        && store.state.active_turn().is_some()
+        && !store.state.composer.trim().is_empty()
+    {
+        return store
+            .queue_composer_command()
+            .map_or(KeyAction::Continue, KeyAction::send);
     }
 
     match key.code {
@@ -7767,6 +7788,62 @@ done
         };
         assert_eq!(params.turn_id, turn_id);
         assert_eq!(store.state.status, "Interrupt requested for active turn");
+    }
+
+    #[test]
+    fn ctrl_x_sends_pending_once_and_preserves_composer_draft() {
+        let mut store = store_with_sessions(1);
+        let turn_id = TurnId::new();
+        store.state.sessions[0].live_reply = Some(LiveReply {
+            turn_id: turn_id.clone(),
+            text: "working".into(),
+        });
+        store.state.pending_messages.push("next task".into());
+        store.state.set_composer_text("unfinished draft");
+        let action = handle_key(
+            &mut store,
+            modified_key(KeyCode::Char('x'), KeyModifiers::CONTROL),
+        );
+        assert!(
+            matches!(sent_command(action), AppUiCommand::InterruptTurn(p) if p.turn_id == turn_id)
+        );
+        assert_eq!(store.state.composer, "unfinished draft");
+        assert!(store.state.pending_interrupt_restores.is_empty());
+        assert_eq!(store.state.pending_messages, vec!["next task"]);
+        assert!(matches!(
+            handle_key(
+                &mut store,
+                modified_key(KeyCode::Char('x'), KeyModifiers::CONTROL)
+            ),
+            KeyAction::Continue
+        ));
+    }
+
+    #[test]
+    fn tab_queues_draft_even_when_enter_steers_by_default() {
+        let mut store = store_with_sessions(1);
+        store.state.sessions[0].live_reply = Some(LiveReply {
+            turn_id: TurnId::new(),
+            text: "working".into(),
+        });
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods([
+            crate::model::APPUI_METHOD_TURN_STEER,
+        ]));
+        assert!(store.state.steer_mid_turn);
+        store.state.set_composer_text("do this later");
+        assert!(matches!(
+            handle_key(&mut store, key(KeyCode::Tab)),
+            KeyAction::Continue
+        ));
+        assert_eq!(store.state.pending_messages, vec!["do this later"]);
+        assert!(store.state.composer.is_empty());
+        assert!(store.state.pending_turn_steers.is_empty());
+        store.state.pending_messages.clear();
+        store.state.set_composer_text("correct the current work");
+        assert!(matches!(
+            sent_command(handle_key(&mut store, key(KeyCode::Enter))),
+            AppUiCommand::TurnSteer(_)
+        ));
     }
 
     #[test]
