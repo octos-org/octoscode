@@ -239,19 +239,21 @@ fn incoming_approval_keeps_priority_over_the_question_reader() {
     s.state.set_composer_text("KEEP_DRAFT");
     render(&mut s, 80, 24);
     key(&mut s, KeyCode::F(2));
-    s.state.approval = Some(octoscode::model::ApprovalModalState {
-        session_id: SessionKey("A".into()),
-        approval_id: octos_core::ui_protocol::ApprovalId::new(),
-        turn_id: TurnId::new(),
-        tool_name: "shell".into(),
-        title: "APPROVAL_PRIORITY".into(),
-        body: "May I run it?".into(),
-        approval_kind: None,
-        risk: None,
-        typed_details: None,
-        render_hints: None,
-        visible: true,
-    });
+    s.state.scroll_transcript_up(50);
+    assert!(s.state.transcript_scroll > 0);
+    s.apply_event(AppUiEvent::Protocol(
+        octos_core::ui_protocol::UiNotification::ApprovalRequested(
+            octos_core::ui_protocol::ApprovalRequestedEvent::generic(
+                SessionKey("A".into()),
+                octos_core::ui_protocol::ApprovalId::new(),
+                TurnId::new(),
+                "shell",
+                "APPROVAL_PRIORITY",
+                "May I run it?",
+            ),
+        ),
+    ));
+    assert_eq!(s.state.transcript_scroll, 0, "arrival reveals the decision");
     assert!(
         render(&mut s, 80, 24)
             .join("\n")

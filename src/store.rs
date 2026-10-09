@@ -7498,6 +7498,14 @@ impl Store {
         }
     }
 
+    /// A decision taking keyboard focus must also enter the visible pane.
+    fn reveal_pending_decision(&mut self) {
+        self.state.diff_preview.expanded = false;
+        if self.state.scroll_mode == crate::cli::ScrollMode::Sticky {
+            self.state.scroll_transcript_to_latest();
+        }
+    }
+
     pub fn show_pending_approval(&mut self) -> bool {
         let title = {
             let Some(approval) = self.state.approval.as_mut() else {
@@ -7513,7 +7521,7 @@ impl Store {
         // overlays, yet takes key priority over all of them — an expanded
         // diff overlay left up would cover the very dialog now receiving
         // approve/deny keys. Collapse it (keep the preview open inline).
-        self.state.diff_preview.expanded = false;
+        self.reveal_pending_decision();
         self.state.approval_auto_open = true;
         self.state.focus = FocusPane::Composer;
         self.state.status = t!("status.approval_shown", title = title).into_owned();
@@ -7703,7 +7711,7 @@ impl Store {
         // Same as `show_pending_approval`: the picker takes key priority over
         // the expanded diff overlay but renders beneath it — collapse the
         // overlay so the user answers a dialog they can actually see.
-        self.state.diff_preview.expanded = false;
+        self.reveal_pending_decision();
         self.state.user_question_auto_open = true;
         self.state.focus = FocusPane::Composer;
         self.state.status = t!("status.question_shown", title = title).into_owned();
@@ -11272,7 +11280,7 @@ impl Store {
             // A visible approval takes key priority over the expanded diff
             // overlay but renders beneath it — collapse the overlay so the
             // dialog receiving approve/deny keys is on screen.
-            self.state.diff_preview.expanded = false;
+            self.reveal_pending_decision();
         }
         self.state.approval = Some(approval);
         self.state.focus = FocusPane::Composer;
@@ -11333,7 +11341,7 @@ impl Store {
             // A visible question owns the keyboard before the expanded diff
             // overlay, but renders below it. Collapse the overlay so hydrate
             // cannot leave the user answering an invisible dialog.
-            self.state.diff_preview.expanded = false;
+            self.reveal_pending_decision();
         }
         self.state.user_question = Some(picker);
         self.state.focus = FocusPane::Composer;
@@ -12546,7 +12554,7 @@ impl Store {
                     // A visible approval takes key priority over the expanded
                     // diff overlay but renders beneath it — collapse the
                     // overlay so approve/deny keys act on a visible dialog.
-                    self.state.diff_preview.expanded = false;
+                    self.reveal_pending_decision();
                 }
                 let diff_preview_id = approval.diff_preview_id();
                 let diff_preview_turn_id = approval.turn_id.clone();
@@ -14290,7 +14298,7 @@ impl Store {
         // The picker takes key priority over the expanded diff overlay but
         // renders beneath it — collapse the overlay so the question is
         // answered on a visible dialog.
-        self.state.diff_preview.expanded = false;
+        self.reveal_pending_decision();
         self.state.user_question_auto_open = true;
         self.state.user_question = Some(picker);
         // Salience (spec task-approval-ux-salience): a live decision arrival

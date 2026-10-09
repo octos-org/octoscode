@@ -56,5 +56,6 @@ Scenario: Launch settings precedence
 
 Scenario: Incoming approval owns rendering and input above the question reader
   Test: incoming_approval_keeps_priority_over_the_question_reader
-  An approval received while reading the question becomes visible and accepts
-  the deny key without changing the draft or dismissing the question reader.
+  An approval received while reading the question becomes visible even when
+  the transcript was scrolled into history. It accepts the deny key without
+  changing the draft or dismissing the question reader.
