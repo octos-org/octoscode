@@ -1031,9 +1031,11 @@ impl Store {
     /// `/peer <brief…>` (#395): spin off a peer agent session seeded with a
     /// durable brief. Grammar: `--` flags before the first non-flag token
     /// (`--go` switch focus once opened, `--worktree`, `--cwd <path>` which
-    /// consumes the next token); everything from the first non-flag token on
-    /// is the brief VERBATIM. Unknown flags, a `--cwd` with no value, and an
-    /// empty brief after flags all reject with the usage status. Bare `/peer`
+    /// consumes the next token, `--model <id>` which also consumes the next
+    /// token — see [`PendingPeerPrepare::model`]); everything from the first
+    /// non-flag token on is the brief VERBATIM. Unknown flags, a `--cwd`/
+    /// `--model` with no value, and an empty brief after flags all reject
+    /// with the usage status. Bare `/peer`
     /// prefills the composer for argument typing (the same
     /// `LocalAction::EditComposer` treatment the `/research` menu rows use).
     /// `/peer clear`: prune DONE peers (finished — not live, not blocked) from
@@ -1087,6 +1089,7 @@ impl Store {
         let mut worktree = false;
         let mut cwd: Option<String> = None;
         let mut n: Option<u32> = None;
+        let mut model: Option<String> = None;
         let mut cursor = rest;
         loop {
             let token_end = cursor.find(char::is_whitespace).unwrap_or(cursor.len());
@@ -1106,6 +1109,18 @@ impl Store {
                         return SlashDispatchOutcome::Rejected;
                     }
                     cwd = Some(value.to_owned());
+                    cursor = cursor[value_end..].trim_start();
+                }
+                // The server resolves the configured model and persists it
+                // during preparation, before the peer can start its first turn.
+                "--model" => {
+                    let value_end = cursor.find(char::is_whitespace).unwrap_or(cursor.len());
+                    let value = &cursor[..value_end];
+                    if value.is_empty() || value.starts_with("--") {
+                        self.state.status = t!("status.peer_usage").into_owned();
+                        return SlashDispatchOutcome::Rejected;
+                    }
+                    model = Some(value.to_owned());
                     cursor = cursor[value_end..].trim_start();
                 }
                 // octos#1801 v2: `--n <K>` stages a fleet of K peers from this
@@ -1137,6 +1152,12 @@ impl Store {
         let brief = cursor.trim_end();
         if brief.is_empty() {
             self.state.status = t!("status.peer_usage").into_owned();
+            return SlashDispatchOutcome::Rejected;
+        }
+
+        if model.is_some()
+            && !self.require_appui_feature(crate::model::APPUI_FEATURE_PEER_MODEL_OVERRIDE_V1)
+        {
             return SlashDispatchOutcome::Rejected;
         }
 
@@ -1172,6 +1193,7 @@ impl Store {
         self.state.status = t!("status.peer_preparing").into_owned();
         SlashDispatchOutcome::accepted(Some(AppUiCommand::PeerPrepare(
             crate::model::PeerPrepareParams {
+                model_override: model.map(|model_id| crate::model::PeerModelOverride { model_id }),
                 brief: brief.to_owned(),
                 n,
                 title: None,
@@ -17662,9 +17684,10 @@ mod tests {
 
     fn peer_capable_store() -> Store {
         let mut store = store_with_empty_session();
-        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods([
-            crate::model::APPUI_METHOD_PEER_PREPARE,
-        ]));
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods_and_features(
+            [crate::model::APPUI_METHOD_PEER_PREPARE],
+            [crate::model::APPUI_FEATURE_PEER_MODEL_OVERRIDE_V1],
+        ));
         store
     }
 
@@ -17851,6 +17874,37 @@ mod tests {
             .expect("dispatch stashes the pending prepare");
         assert!(pending.go);
         assert_eq!(pending.brief, "fix the thing");
+    }
+
+    #[test]
+    fn peer_slash_parses_model_flag() {
+        let mut store = peer_capable_store();
+        let command = store
+            .dispatch_peer_slash("/peer --go --model deepseek-v4-pro fix the thing")
+            .into_command();
+        let Some(AppUiCommand::PeerPrepare(params)) = command else {
+            panic!("expected a PeerPrepare command, got {command:?}");
+        };
+        assert_eq!(params.brief, "fix the thing");
+        assert_eq!(
+            params
+                .model_override
+                .as_ref()
+                .map(|choice| choice.model_id.as_str()),
+            Some("deepseek-v4-pro")
+        );
+        assert_eq!(
+            serde_json::to_value(&params).unwrap()["model_override"],
+            serde_json::json!({"model_id": "deepseek-v4-pro"})
+        );
+    }
+
+    #[test]
+    fn peer_slash_rejects_model_flag_without_value() {
+        let mut store = peer_capable_store();
+        let outcome = store.dispatch_peer_slash("/peer --model");
+        assert!(matches!(outcome, SlashDispatchOutcome::Rejected));
+        assert_eq!(store.state.status, t!("status.peer_usage"));
     }
 
     #[test]
@@ -18123,6 +18177,89 @@ mod tests {
         assert_eq!(
             store.state.status,
             t!("status.peer_switched", slug = "fix-nav")
+        );
+    }
+
+    #[test]
+    fn peer_session_opened_with_model_never_changes_profile_model() {
+        for go in ["", "--go "] {
+            let mut store = peer_capable_store();
+            let peer_key = prepare_peer(
+                &mut store,
+                &format!("/peer {go}--model deepseek-v4-pro fix the nav"),
+            );
+            let command = peer_session_opened(&mut store, &peer_key);
+            assert!(matches!(command, Some(AppUiCommand::SubmitPrompt(_))));
+            assert!(
+                !store
+                    .state
+                    .pending_autonomy_hydration
+                    .iter()
+                    .any(|queued| matches!(queued, AppUiCommand::SelectModel(_)))
+            );
+        }
+    }
+
+    #[test]
+    fn peer_slash_model_requires_backend_support_before_staging() {
+        let mut store = peer_capable_store();
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods([
+            crate::model::APPUI_METHOD_PEER_PREPARE,
+        ]));
+        let outcome = store.dispatch_peer_slash("/peer --model strong fix it");
+        assert!(matches!(outcome, SlashDispatchOutcome::Rejected));
+        assert!(store.state.pending_peer_prepare.is_none());
+        assert!(
+            store
+                .state
+                .status
+                .contains(crate::model::APPUI_FEATURE_PEER_MODEL_OVERRIDE_V1)
+        );
+        assert!(matches!(
+            store.dispatch_peer_slash("/peer fix it").into_command(),
+            Some(AppUiCommand::PeerPrepare(_))
+        ));
+    }
+
+    #[test]
+    fn peer_slash_model_rejects_another_flag_as_value() {
+        let mut store = peer_capable_store();
+        assert!(matches!(
+            store.dispatch_peer_slash("/peer --model --go fix it"),
+            SlashDispatchOutcome::Rejected
+        ));
+        assert!(store.state.pending_peer_prepare.is_none());
+    }
+
+    #[test]
+    fn peer_slash_model_is_part_of_fleet_preparation() {
+        let mut store = peer_capable_store();
+        let Some(AppUiCommand::PeerPrepare(params)) = store
+            .dispatch_peer_slash("/peer --n 3 --model strong review it")
+            .into_command()
+        else {
+            panic!("expected peer preparation");
+        };
+        assert_eq!(params.n, Some(3));
+        assert_eq!(params.model_override.unwrap().model_id, "strong");
+    }
+
+    /// No `--model` flag ⇒ no spurious `model/select` — the server's default
+    /// model for the profile is left alone.
+    #[test]
+    fn peer_session_opened_without_model_flag_enqueues_no_select_model() {
+        let mut store = peer_capable_store();
+        let peer_key = prepare_peer(&mut store, "/peer --go fix the nav");
+
+        peer_session_opened(&mut store, &peer_key);
+        assert!(
+            !store
+                .state
+                .pending_autonomy_hydration
+                .iter()
+                .any(|queued| matches!(queued, AppUiCommand::SelectModel(_))),
+            "no --model flag must not queue a model/select, got {:?}",
+            store.state.pending_autonomy_hydration
         );
     }
 

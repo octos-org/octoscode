@@ -662,7 +662,7 @@ status:
   task_output_cursor: "Task output @%{offset}"
   paste_ignored_dialog_open: "Paste ignored while a dialog is open"
   undo_no_session: "No active session to undo in."
-  peer_usage: "Usage: /peer [--go] [--worktree] [--cwd <path>] [--n <2-8>] <brief>"
+  peer_usage: "Usage: /peer [--go] [--worktree] [--cwd <path>] [--n <2-8>] [--model <id>] <brief>"
   peer_preparing: "Preparing peer session…"
   session_blocked_hint: "%{session} is waiting on you: %{reason} — Ctrl+S/Alt+S to answer."
   peer_prepare_in_flight: "A peer is already being prepared — wait for it to open (or ~30s) before starting another."
@@ -1159,7 +1159,7 @@ command:
   undo:
     desc: Roll workspace files back to a pre-mutation snapshot (#1768).
   peer:
-    desc: "Spin off a peer agent session with a durable brief: /peer [--go] [--worktree] [--cwd <path>] [--n <2-8>] <brief>."
+    desc: "Spin off a peer agent session with a durable brief: /peer [--go] [--worktree] [--cwd <path>] [--n <2-8>] [--model <id>] <brief>."
   gather:
     desc: "Gather peer results from the blackboard into this session: /gather [all | <slug> …]."
   research:
