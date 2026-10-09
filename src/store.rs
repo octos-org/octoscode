@@ -3541,11 +3541,7 @@ impl Store {
             self.state.status = t!("saveconfig.no_path").into_owned();
             return;
         };
-        let scroll_mode = if self.state.pinned_scroll {
-            crate::cli::ScrollMode::Pinned
-        } else {
-            crate::cli::ScrollMode::Native
-        };
+        let scroll_mode = self.state.scroll_mode;
         let lang =
             crate::cli::Lang::from_env_value(&rust_i18n::locale()).unwrap_or(crate::cli::Lang::En);
         match crate::cli::save_ui_settings(
@@ -3620,25 +3616,30 @@ impl Store {
     }
 
     /// `/scrollmode` — runtime switch of the wheel-scroll model. Bare command
-    /// toggles; `native`/`pinned` set explicitly. Mouse capture follows on the
-    /// next frame (the draw loop re-syncs capture from `wants_mouse_capture`).
+    /// toggles sticky/native; all three modes can be set explicitly. Mouse
+    /// capture follows on the next frame (re-synced by `wants_mouse_capture`).
     fn dispatch_set_scrollmode(&mut self, inline_args: &str) {
         let arg = inline_args.trim().to_ascii_lowercase();
-        let pinned = match arg.as_str() {
-            "" => !self.state.pinned_scroll,
-            "pinned" | "pin" => true,
-            "native" | "default" => false,
+        use crate::cli::ScrollMode;
+        let mode = match arg.as_str() {
+            "" if self.state.scroll_mode == ScrollMode::Native => ScrollMode::Sticky,
+            "" | "native" => ScrollMode::Native,
+            "pinned" | "pin" => ScrollMode::Pinned,
+            "sticky" => ScrollMode::Sticky,
+            "default" => ScrollMode::default(),
             other => {
                 self.state.status =
                     t!("scrollmode.unknown", value = other.to_string()).into_owned();
                 return;
             }
         };
-        self.state.pinned_scroll = pinned;
-        self.state.status = if pinned {
-            t!("scrollmode.set_pinned").into_owned()
-        } else {
-            t!("scrollmode.set_native").into_owned()
+        self.state.scroll_mode = mode;
+        self.state.exit_transcript_pager();
+        self.state.question_detail = Default::default();
+        self.state.status = match mode {
+            ScrollMode::Pinned => t!("scrollmode.set_pinned").into_owned(),
+            ScrollMode::Native => t!("scrollmode.set_native").into_owned(),
+            ScrollMode::Sticky => t!("scrollmode.set_sticky").into_owned(),
         };
     }
 
@@ -6551,7 +6552,7 @@ impl Store {
                     )
                 })
                 .count(),
-            pinned_scroll: self.state.pinned_scroll,
+            scroll_mode: self.state.scroll_mode,
             resume_sessions: &self.state.resume_sessions,
             resume_list_loaded: self.state.resume_list_loaded,
             rewind_turns: &self.state.rewind_turns,
@@ -7497,6 +7498,14 @@ impl Store {
         }
     }
 
+    /// A decision taking keyboard focus must also enter the visible pane.
+    fn reveal_pending_decision(&mut self) {
+        self.state.diff_preview.expanded = false;
+        if self.state.scroll_mode == crate::cli::ScrollMode::Sticky {
+            self.state.scroll_transcript_to_latest();
+        }
+    }
+
     pub fn show_pending_approval(&mut self) -> bool {
         let title = {
             let Some(approval) = self.state.approval.as_mut() else {
@@ -7512,7 +7521,7 @@ impl Store {
         // overlays, yet takes key priority over all of them — an expanded
         // diff overlay left up would cover the very dialog now receiving
         // approve/deny keys. Collapse it (keep the preview open inline).
-        self.state.diff_preview.expanded = false;
+        self.reveal_pending_decision();
         self.state.approval_auto_open = true;
         self.state.focus = FocusPane::Composer;
         self.state.status = t!("status.approval_shown", title = title).into_owned();
@@ -7702,7 +7711,7 @@ impl Store {
         // Same as `show_pending_approval`: the picker takes key priority over
         // the expanded diff overlay but renders beneath it — collapse the
         // overlay so the user answers a dialog they can actually see.
-        self.state.diff_preview.expanded = false;
+        self.reveal_pending_decision();
         self.state.user_question_auto_open = true;
         self.state.focus = FocusPane::Composer;
         self.state.status = t!("status.question_shown", title = title).into_owned();
@@ -9419,7 +9428,7 @@ impl Store {
                 // scroll mode (otherwise a launch `--scroll-mode`/`/scrollmode`
                 // reverts to native).
                 let config_path = self.state.config_path.clone();
-                let pinned_scroll = self.state.pinned_scroll;
+                let scroll_mode = self.state.scroll_mode;
                 // Local-only Vim editing settings the server never echoes: the
                 // launch/runtime vim toggle and the current Normal/Insert mode
                 // (otherwise a reconnect drops you out of Vim mid-edit).
@@ -9541,7 +9550,7 @@ impl Store {
                 state.session_reasoning_display = session_reasoning_display;
                 state.theme = theme;
                 state.config_path = config_path;
-                state.pinned_scroll = pinned_scroll;
+                state.scroll_mode = scroll_mode;
                 state.vim_mode = vim_mode;
                 state.composer_mode = composer_mode;
                 state.resume_sessions = resume_sessions;
@@ -11271,7 +11280,7 @@ impl Store {
             // A visible approval takes key priority over the expanded diff
             // overlay but renders beneath it — collapse the overlay so the
             // dialog receiving approve/deny keys is on screen.
-            self.state.diff_preview.expanded = false;
+            self.reveal_pending_decision();
         }
         self.state.approval = Some(approval);
         self.state.focus = FocusPane::Composer;
@@ -11332,7 +11341,7 @@ impl Store {
             // A visible question owns the keyboard before the expanded diff
             // overlay, but renders below it. Collapse the overlay so hydrate
             // cannot leave the user answering an invisible dialog.
-            self.state.diff_preview.expanded = false;
+            self.reveal_pending_decision();
         }
         self.state.user_question = Some(picker);
         self.state.focus = FocusPane::Composer;
@@ -12545,7 +12554,7 @@ impl Store {
                     // A visible approval takes key priority over the expanded
                     // diff overlay but renders beneath it — collapse the
                     // overlay so approve/deny keys act on a visible dialog.
-                    self.state.diff_preview.expanded = false;
+                    self.reveal_pending_decision();
                 }
                 let diff_preview_id = approval.diff_preview_id();
                 let diff_preview_turn_id = approval.turn_id.clone();
@@ -14289,7 +14298,7 @@ impl Store {
         // The picker takes key priority over the expanded diff overlay but
         // renders beneath it — collapse the overlay so the question is
         // answered on a visible dialog.
-        self.state.diff_preview.expanded = false;
+        self.reveal_pending_decision();
         self.state.user_question_auto_open = true;
         self.state.user_question = Some(picker);
         // Salience (spec task-approval-ux-salience): a live decision arrival
@@ -23827,7 +23836,7 @@ now analyzing the bus module"
         // launch config path and the wheel scroll mode are the same class of
         // local-only setting and must survive the replay too.
         store.state.config_path = Some(std::path::PathBuf::from("/tmp/launch-config.json"));
-        store.state.pinned_scroll = true;
+        store.state.scroll_mode = crate::cli::ScrollMode::Pinned;
         let sessions = store.state.sessions.clone();
         store.apply_event(AppUiEvent::Snapshot(AppUiSnapshot {
             sessions,
@@ -23847,7 +23856,7 @@ now analyzing the bus module"
             "launch config path must survive snapshot replay so /saveconfig keeps targeting it"
         );
         assert!(
-            store.state.pinned_scroll,
+            store.state.scroll_mode == crate::cli::ScrollMode::Pinned,
             "wheel scroll mode must survive snapshot replay"
         );
     }

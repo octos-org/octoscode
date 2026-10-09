@@ -59,6 +59,7 @@ fn peek_yields_to_modal(app: &AppState) -> bool {
         || app.artifact_detail.active
         || app.thread_graph_detail.active
         || app.turn_state_detail.active
+        || app.question_detail.active
 }
 
 /// True when the main pane is peeking a still-present sub-agent AND no modal is
@@ -104,6 +105,7 @@ pub fn wants_fullscreen_overlay(app: &AppState) -> bool {
         || app.artifact_detail.active
         || app.thread_graph_detail.active
         || app.turn_state_detail.active
+        || app.question_detail.active
         // Ctrl+O on a diff preview expands to a full-screen scrollable detail:
         // the inline live-tail viewport is bounded (it must leave scrollback
         // rows above), so a fully-expanded diff has nowhere to render and no
@@ -119,13 +121,14 @@ pub fn wants_fullscreen_overlay(app: &AppState) -> bool {
 /// capture would drop even though the modal is a full-screen wheel target.
 fn scrollable_detail_modal_active(app: &AppState) -> bool {
     app.task_output.active
+        || app.question_detail.active
         || app.artifact_detail.active
         || app.thread_graph_detail.active
         || app.turn_state_detail.active
         || app.diff_preview.overlay_active()
 }
 
-/// Mouse capture policy. In the default `native` scroll-mode, capture is on
+/// Mouse capture policy. In `native` scroll-mode, capture is on
 /// ONLY while a full-screen overlay is up — the transcript pager, a sub-agent
 /// peek, or a detail modal — so the wheel scrolls that overlay while the inline
 /// chat flow keeps native terminal selection/copy untouched (these overlays are
@@ -134,7 +137,7 @@ fn scrollable_detail_modal_active(app: &AppState) -> bool {
 /// always scrolls the app (composer pinned), so capture stays on.
 pub fn wants_mouse_capture(app: &AppState) -> bool {
     app.transcript_pager_active
-        || app.pinned_scroll
+        || app.scroll_mode != crate::cli::ScrollMode::Native
         || agent_view_active(app)
         || scrollable_detail_modal_active(app)
 }
@@ -499,6 +502,7 @@ pub struct CommittedFingerprint {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChatLayoutAreas {
+    pub question: Rect,
     /// #324: session strip across the top (0-height with a single session).
     pub session_strip: Rect,
     pub transcript: Rect,
@@ -512,6 +516,7 @@ pub struct ChatLayoutAreas {
     /// Sub-agent selector strip, directly under the composer (0-height when the
     /// session has no sub-agents).
     pub agent_strip: Rect,
+    pub peer_strip: Rect,
     pub status: Rect,
 }
 
@@ -688,50 +693,99 @@ fn chat_layout_areas_for_menu(
     area: Rect,
     active_menu: Option<&menu_render::MenuSurface>,
 ) -> ChatLayoutAreas {
-    let session_strip_height = session_strip_height(app);
-    let composer_height = composer_height_for_size(app, area.width, area.height);
+    let sticky = app.scroll_mode == crate::cli::ScrollMode::Sticky;
+    let mut session_strip_height = session_strip_height(app);
+    let mut question_height = pinned_question::header_height(app, area.width, area.height);
+    let mut composer_height = composer_height_for_size(app, area.width, area.height);
     let desired_menu_height = menu_height_hint(active_menu, area.width, area.height);
-    let autonomy_height = autonomy_indicator_height(app, area.width);
-    let harness_height = harness_status_height(app);
-    let decision_height = decision_banner_height(app);
-    let agent_strip_height = agent_strip_height(app, area.height);
-    let status_height = render::status_bar_height(app, area.width);
+    let mut autonomy_height = autonomy_indicator_height(app, area.width);
+    let mut harness_height = harness_status_height(app);
+    let mut decision_height = decision_banner_height(app);
+    let mut agent_strip_height = agent_strip_height(app, area.height);
+    let mut peer_strip_height = if sticky {
+        peer_strip_height(app, area.height)
+    } else {
+        0
+    };
+    let mut status_height = render::status_bar_height(app, area.width);
+    if sticky {
+        // Avoid competing fixed Length constraints clipping the actual input
+        // off a short screen. Reserve the editable composer, one question row
+        // and one answer row first; optional chrome uses only the surplus.
+        let question_min = u16::from(question_height > 0);
+        composer_height = composer_height.min(area.height.saturating_sub(question_min + 2));
+        status_height = status_height.min(
+            area.height
+                .saturating_sub(composer_height + question_min + 1),
+        );
+        question_height = question_height.min(
+            area.height
+                .saturating_sub(composer_height + status_height + 1),
+        );
+        let mut spare = area
+            .height
+            .saturating_sub(composer_height + status_height + question_height + 1);
+        for rows in [
+            &mut decision_height,
+            &mut session_strip_height,
+            &mut autonomy_height,
+            &mut harness_height,
+            &mut agent_strip_height,
+            &mut peer_strip_height,
+        ] {
+            *rows = (*rows).min(spare);
+            spare = spare.saturating_sub(*rows);
+        }
+    }
     let surface_budget = area.height.saturating_sub(
-        min_transcript_height(area.height)
+        (if sticky {
+            1
+        } else {
+            min_transcript_height(area.height)
+        }) + question_height
             + session_strip_height
             + composer_height
             + autonomy_height
             + harness_height
             + decision_height
             + agent_strip_height
+            + peer_strip_height
             + status_height,
     );
     let menu_height = desired_menu_height.min(surface_budget);
     let root = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(question_height),
             Constraint::Length(session_strip_height),
-            Constraint::Min(8),
+            Constraint::Min(if app.scroll_mode == crate::cli::ScrollMode::Sticky {
+                1
+            } else {
+                8
+            }),
             Constraint::Length(menu_height),
             Constraint::Length(autonomy_height),
             Constraint::Length(harness_height),
             Constraint::Length(decision_height),
             Constraint::Length(composer_height),
             Constraint::Length(agent_strip_height),
+            Constraint::Length(peer_strip_height),
             Constraint::Length(status_height),
         ])
         .split(area);
 
     ChatLayoutAreas {
-        session_strip: root[0],
-        transcript: root[1],
-        menu: root[2],
-        autonomy: root[3],
-        harness: root[4],
-        decision: root[5],
-        composer: root[6],
-        agent_strip: root[7],
-        status: root[8],
+        question: root[0],
+        session_strip: root[1],
+        transcript: root[2],
+        menu: root[3],
+        autonomy: root[4],
+        harness: root[5],
+        decision: root[6],
+        composer: root[7],
+        agent_strip: root[8],
+        peer_strip: root[9],
+        status: root[10],
     }
 }
 
@@ -6339,6 +6393,7 @@ pub use transcript_build::{
     finalized_history_lines_range_dedup_live, finalized_late_activity_lines_for_coverages,
     finalized_live_turn_lines_between, live_ui_height, live_ui_height_with_finalization,
 };
+pub(crate) mod pinned_question;
 mod transcript_build;
 #[allow(unused_imports)]
 pub(crate) use transcript_build::*;

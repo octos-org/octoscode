@@ -641,7 +641,7 @@ command:
   saveconfig:
     desc: "把当前主题/语言/滚动模式/Vim 模式/转向模式保存到配置文件。"
   scrollmode:
-    desc: "切换滚轮滚动模式：/scrollmode [native|pinned]（不带参数为切换）。"
+    desc: "切换滚轮滚动模式：/scrollmode [sticky|native|pinned]（不带参数为切换）。"
   vimmode:
     desc: "切换输入框的 Vim 模态编辑（Normal/Insert）。"
   steer:
@@ -1917,10 +1917,11 @@ saveconfig:
   failed: "保存配置失败：%{error}"
   no_path: "没有可用的配置路径可保存。"
 scrollmode:
+  set_sticky: "滚动模式：sticky —— 最新问题固定在顶部，输入框固定在底部。F2 查看完整问题。"
   current: "（当前：%{mode}）"
   set_pinned: "滚动模式：pinned —— 滚轮滚动会话内容，输入框钉在底部（选择文本用 Shift+拖选）。"
   set_native: "滚动模式：native —— 滚轮归还终端（Ctrl+T 进入回看）。"
-  unknown: "未知滚动模式 '%{value}'。可用：native、pinned。"
+  unknown: "未知滚动模式 '%{value}'。可用：sticky、native、pinned。"
 vimmode:
   enabled: "Vim 模式：开 —— Esc 进 Normal，i 进 Insert（当前 Insert）。"
   disabled: "Vim 模式：关 —— 输入框恢复为普通文本框。"
@@ -1951,3 +1952,10 @@ workspace_team:
   refresh: "刷新智能体列表"
   hint: "↑/↓ 选择 · Enter 发消息或指定协调者 · Esc 关闭"
   list_first: "请先运行 /agents，再选择协调者。"
+
+question_header:
+  latest: "你的问题"
+  queued: "已排队"
+  sending: "发送中"
+  expand: " F2 · 完整问题 "
+  close: " ↑↓/PgUp/PgDn 滚动 · Esc/F2 关闭 "

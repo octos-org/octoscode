@@ -1,7 +1,7 @@
 //! Contract tests for the `scroll-mode` launch option
 //! (`specs/task-pinned-scroll-mode.spec`).
 //!
-//! `native` (default) keeps the wheel on the terminal: native selection/copy
+//! `native` keeps the wheel on the terminal: native selection/copy
 //! survive and the composer scrolls away with the screen (the pager is the
 //! pinned view, entered via Ctrl+T / PageUp). `pinned` is the explicit opt-in
 //! that captures the mouse so wheel-up auto-enters the pager (composer pinned)
@@ -45,7 +45,11 @@ fn chat_store(message_count: usize, pinned: bool) -> Store {
             false,
         ),
     };
-    store.state.pinned_scroll = pinned;
+    store.state.scroll_mode = if pinned {
+        octoscode::cli::ScrollMode::Pinned
+    } else {
+        octoscode::cli::ScrollMode::Native
+    };
     store
 }
 
@@ -92,10 +96,13 @@ fn rendered_rows(state: &AppState, width: u16, height: u16) -> Vec<String> {
 }
 
 #[test]
-fn native_mode_default_keeps_mouse_capture_off() {
+fn native_mode_keeps_mouse_capture_off() {
     let store = chat_store(6, false);
 
-    assert!(!store.state.pinned_scroll, "native is the default");
+    assert!(
+        store.state.scroll_mode == octoscode::cli::ScrollMode::Native,
+        "explicit native preference is retained"
+    );
     assert!(
         !app::wants_mouse_capture(&store.state),
         "native mode must never request mouse capture in the chat flow"
@@ -227,7 +234,7 @@ fn scroll_mode_parses_from_config_file() {
     let config = load_config_file(&empty_path).expect("config parses");
     assert_eq!(
         config.scroll_mode, None,
-        "unset key stays None so the launch default resolves to native"
+        "unset key stays None so the launch default resolves to sticky"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

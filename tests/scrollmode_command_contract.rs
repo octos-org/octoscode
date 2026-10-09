@@ -38,16 +38,19 @@ fn run_command(store: &mut Store, command: &str) {
 #[test]
 fn bare_scrollmode_toggles() {
     let mut store = chat_store();
-    assert!(!store.state.pinned_scroll);
+    assert!(store.state.scroll_mode == octoscode::cli::ScrollMode::Native);
 
     run_command(&mut store, "/scrollmode");
     assert!(
-        store.state.pinned_scroll,
-        "bare command toggles native → pinned"
+        store.state.scroll_mode == octoscode::cli::ScrollMode::Sticky,
+        "bare command toggles native → sticky"
     );
 
     run_command(&mut store, "/scrollmode");
-    assert!(!store.state.pinned_scroll, "and back to native");
+    assert!(
+        store.state.scroll_mode == octoscode::cli::ScrollMode::Native,
+        "and back to native"
+    );
 }
 
 #[test]
@@ -55,14 +58,14 @@ fn explicit_argument_sets_mode() {
     let mut store = chat_store();
 
     run_command(&mut store, "/scrollmode pinned");
-    assert!(store.state.pinned_scroll);
+    assert_eq!(store.state.scroll_mode, octoscode::cli::ScrollMode::Pinned);
     assert!(
         app::wants_mouse_capture(&store.state),
         "mouse capture policy follows immediately (draw re-syncs next frame)"
     );
 
     run_command(&mut store, "/scrollmode native");
-    assert!(!store.state.pinned_scroll);
+    assert!(store.state.scroll_mode == octoscode::cli::ScrollMode::Native);
     assert!(!app::wants_mouse_capture(&store.state));
 }
 
@@ -73,7 +76,7 @@ fn unknown_argument_keeps_mode() {
     run_command(&mut store, "/scrollmode banana");
 
     assert!(
-        !store.state.pinned_scroll,
+        store.state.scroll_mode == octoscode::cli::ScrollMode::Native,
         "unknown argument must not change the mode"
     );
     assert!(
@@ -91,7 +94,7 @@ fn scrollmode_registered_in_command_registry() {
     run_command(&mut store, "/scroll-mode pinned");
 
     assert!(
-        store.state.pinned_scroll,
+        store.state.scroll_mode == octoscode::cli::ScrollMode::Pinned,
         "the alias resolves to the same SetScrollMode action"
     );
 }
@@ -126,8 +129,8 @@ fn popup_enter_dispatches_optional_arg_command() {
         "dispatch clears the composer instead of completing into it"
     );
     assert!(
-        store.state.pinned_scroll,
-        "bare dispatch executes the toggle (native -> pinned)"
+        store.state.scroll_mode == octoscode::cli::ScrollMode::Sticky,
+        "bare dispatch executes the toggle (native -> sticky)"
     );
     assert!(
         !store.state.menu_stack.is_active(),
@@ -146,8 +149,8 @@ fn popup_enter_dispatches_optional_arg_command() {
         Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
     );
     assert!(
-        !store.state.pinned_scroll,
-        "the typed argument applies (pinned -> native)"
+        store.state.scroll_mode == octoscode::cli::ScrollMode::Native,
+        "the typed argument applies (sticky -> native)"
     );
     assert!(
         !store.state.menu_stack.is_active(),
