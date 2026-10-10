@@ -690,7 +690,10 @@ impl ProtocolExchange {
             AppUiCommand::HydrateSession(params) => Some(params.session_id.clone()),
             _ => None,
         };
-        let request_id = self.next_request_id();
+        let request_id = match &command {
+            AppUiCommand::GetWorkspaceDiff { request_id, .. } => request_id.clone(),
+            _ => self.next_request_id(),
+        };
         let request = rpc_request_from_command(request_id.clone(), command)?;
 
         self.pending_requests.insert(
@@ -2530,6 +2533,7 @@ impl ProtocolAppUiBackend {
                 | AppUiCommand::ListMcpConfig(_)
                 | AppUiCommand::ListToolConfig(_)
                 | AppUiCommand::GetDiffPreview(_)
+                | AppUiCommand::GetWorkspaceDiff { .. }
                 | AppUiCommand::ReadTaskOutput(_)
                 | AppUiCommand::ReadTaskArtifact(_)
                 | AppUiCommand::HydrateSession(_)
@@ -3500,6 +3504,9 @@ fn rpc_request_from_command(
         AppUiCommand::DeleteToolConfig(params) => serde_json::to_value(params),
         AppUiCommand::TestToolConfig(params) => serde_json::to_value(params),
         AppUiCommand::GetDiffPreview(params) => serde_json::to_value(params),
+        AppUiCommand::GetWorkspaceDiff { session_id, .. } => {
+            Ok(serde_json::json!({"session_id": session_id}))
+        }
         AppUiCommand::ListTasks(params) => serde_json::to_value(params),
         AppUiCommand::CancelTask(params) => serde_json::to_value(params),
         AppUiCommand::RestartTaskFromNode(params) => serde_json::to_value(params),
@@ -4162,6 +4169,19 @@ fn success_response_to_app_event(
                 )),
             }
         }
+        "diff/workspace/get" => match serde_json::from_value::<DiffPreviewGetResult>(result) {
+            Ok(result) => Ok(Some(ClientEvent::WorkspaceDiff {
+                request_id: id,
+                result,
+            })),
+            Err(err) => Ok(Some(
+                app_error(
+                    "invalid_result",
+                    format!("diff/workspace/get request {id}: {err}"),
+                )
+                .into(),
+            )),
+        },
         methods::DIFF_PREVIEW_GET => match serde_json::from_value::<DiffPreviewGetResult>(result) {
             Ok(result) => Ok(Some(ClientEvent::DiffPreview(result))),
             Err(err) => Ok(Some(
@@ -6169,6 +6189,23 @@ impl AppUiBackend for MockAppUiBackend {
                     }));
                 Ok(())
             }
+            AppUiCommand::GetWorkspaceDiff {
+                session_id,
+                request_id,
+            } => {
+                self.queue.push_back(ClientEvent::WorkspaceDiff {
+                    request_id,
+                    result: DiffPreviewGetResult {
+                        status: "ready".into(),
+                        source: "pending_store".into(),
+                        preview: mock_diff_preview(
+                            session_id,
+                            octos_core::ui_protocol::PreviewId::new(),
+                        ),
+                    },
+                });
+                Ok(())
+            }
             AppUiCommand::GetDiffPreview(params) => {
                 self.queue
                     .push_back(ClientEvent::DiffPreview(DiffPreviewGetResult {
@@ -7857,6 +7894,34 @@ mod tests {
         );
         assert_eq!(result.threads[0].thread_id, "thread-1");
         assert_eq!(result.orphans, vec![99]);
+    }
+
+    #[test]
+    fn workspace_diff_wire_carries_only_session_and_preserves_local_request_identity() {
+        let mut exchange = ProtocolExchange::default();
+        let request = exchange
+            .build_tracked_request(AppUiCommand::GetWorkspaceDiff {
+                session_id: SessionKey("s".into()),
+                request_id: "diff-request".into(),
+            })
+            .unwrap();
+        assert_eq!(request.method, "diff/workspace/get");
+        assert_eq!(
+            serde_json::to_value(&request).unwrap()["params"],
+            serde_json::json!({"session_id":"s"})
+        );
+        let reply = serde_json::json!({"jsonrpc":"2.0", "id":request.id, "result":{
+            "status":"ready", "source":"pending_store", "preview":{
+                "session_id":"s", "preview_id":octos_core::ui_protocol::PreviewId::new(), "files":[]
+            }
+        }});
+        let event = exchange
+            .decode_rpc_text(&reply.to_string())
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(event, ClientEvent::WorkspaceDiff { request_id, .. } if request_id == "diff-request")
+        );
     }
 
     #[test]

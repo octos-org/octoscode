@@ -183,13 +183,11 @@ app:
       operation: "operation"
       preview: "preview"
   diff:
+    workspace: "Workspace uncommitted changes"
+    turn: "Session change preview"
     title: "Diff Preview"
     inline_patch: "Inline patch"
     loading: "Loading diff preview..."
-    select_stage_hint: "Alt+H/Ctrl+N next hunk | Alt+C/Ctrl+X stage selected diff context"
-    toggle_side_by_side_hint: "Alt+V/Ctrl+V side-by-side"
-    toggle_unified_hint: "Alt+V/Ctrl+V unified"
-    side_by_side_too_narrow: "side-by-side needs %{min}+ cols"
     more_files_hidden: "+%{count} more file(s) hidden"
     line_unavailable: "line diff unavailable for this mutation"
     more_lines_hidden: "%{count} more diff line(s) hidden (Ctrl+O expand)"
@@ -311,7 +309,8 @@ app:
     ctrl_o_expand: "Ctrl+O expand"
     task_output_modal: "o read more | PgUp/PgDn | Esc close"
     scroll_modal: "PgUp/PgDn | Esc close"
-    diff_preview_modal: "j/k scroll | PgUp/PgDn | [/] hunk | v view | c stage | Esc collapse"
+    diff_files: "↑↓ select · Enter open · Tab scope · r refresh · Esc close"
+    diff_preview_modal: "↑↓ scroll · c quote in question · Tab scope · Esc back"
   plan:
     live: "live"
   workspace:
@@ -962,6 +961,7 @@ status:
   task_control_unavailable: "Task control is not available on this server; cancel is disabled"
   requested_cancel: "Requested cancel: %{title}"
   no_session_for_diff: "No active session for diff preview"
+  workspace_diff_unavailable: "This server does not support workspace changes; update Octos."
   no_diff_preview_id: "No diff preview id is available for the selected task"
   requested_diff_preview: "Requested diff preview"
   approval_pane_hidden: "Approval pane hidden; auto-open disabled until approval is shown again"
@@ -980,7 +980,6 @@ status:
   diff_view_too_narrow: "Terminal too narrow for side-by-side diff (needs %{min}+ cols)"
   diff_overlay_expanded: "Expanded diff preview to full screen (Esc collapses)"
   diff_overlay_collapsed: "Collapsed diff preview to inline"
-  staged_diff_context: "Staged selected diff hunk context for next turn: %{path}"
   added_diff_context: "Added selected diff hunk context to composer: %{path}"
   accepted: "accepted"
   rejected: "rejected"
@@ -1176,6 +1175,8 @@ command:
     desc: Configure profile-owned LLM providers and routes.
   ps:
     desc: Show background task and process status.
+  diff:
+    desc: "Browse changed files (/diff [turn|workspace])"
   review:
     desc: Start the backend-owned code review workflow.
   skills:
