@@ -3504,9 +3504,11 @@ fn rpc_request_from_command(
         AppUiCommand::DeleteToolConfig(params) => serde_json::to_value(params),
         AppUiCommand::TestToolConfig(params) => serde_json::to_value(params),
         AppUiCommand::GetDiffPreview(params) => serde_json::to_value(params),
-        AppUiCommand::GetWorkspaceDiff { session_id, .. } => {
-            Ok(serde_json::json!({"session_id": session_id}))
-        }
+        AppUiCommand::GetWorkspaceDiff {
+            session_id,
+            profile_id,
+            ..
+        } => Ok(serde_json::json!({"session_id": session_id, "profile_id": profile_id})),
         AppUiCommand::ListTasks(params) => serde_json::to_value(params),
         AppUiCommand::CancelTask(params) => serde_json::to_value(params),
         AppUiCommand::RestartTaskFromNode(params) => serde_json::to_value(params),
@@ -6192,6 +6194,7 @@ impl AppUiBackend for MockAppUiBackend {
             AppUiCommand::GetWorkspaceDiff {
                 session_id,
                 request_id,
+                ..
             } => {
                 self.queue.push_back(ClientEvent::WorkspaceDiff {
                     request_id,
@@ -7897,18 +7900,19 @@ mod tests {
     }
 
     #[test]
-    fn workspace_diff_wire_carries_only_session_and_preserves_local_request_identity() {
+    fn workspace_diff_wire_carries_session_profile_and_preserves_local_request_identity() {
         let mut exchange = ProtocolExchange::default();
         let request = exchange
             .build_tracked_request(AppUiCommand::GetWorkspaceDiff {
                 session_id: SessionKey("s".into()),
+                profile_id: Some("coding".into()),
                 request_id: "diff-request".into(),
             })
             .unwrap();
         assert_eq!(request.method, "diff/workspace/get");
         assert_eq!(
             serde_json::to_value(&request).unwrap()["params"],
-            serde_json::json!({"session_id":"s"})
+            serde_json::json!({"session_id":"s", "profile_id":"coding"})
         );
         let reply = serde_json::json!({"jsonrpc":"2.0", "id":request.id, "result":{
             "status":"ready", "source":"pending_store", "preview":{

@@ -837,6 +837,7 @@ pub enum AppUiCommand {
     GetDiffPreview(DiffPreviewGetParams),
     GetWorkspaceDiff {
         session_id: SessionKey,
+        profile_id: Option<String>,
         request_id: String,
     },
     ListTasks(TaskListParams),

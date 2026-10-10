@@ -7888,6 +7888,7 @@ impl Store {
             };
             AppUiCommand::GetWorkspaceDiff {
                 session_id,
+                profile_id: self.active_session_profile_id(),
                 request_id,
             }
         } else {
@@ -36912,6 +36913,7 @@ now analyzing the bus module"
         let AppUiCommand::GetWorkspaceDiff {
             request_id: old_id,
             session_id,
+            ..
         } = first
         else {
             panic!("workspace read")
