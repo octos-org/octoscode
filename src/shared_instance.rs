@@ -307,10 +307,14 @@ mod tests {
                 });
             }
         });
+        // Quote with the host's convention, not POSIX `shlex::try_quote`:
+        // on Windows a quoted path keeps its backslashes literal, while POSIX
+        // double-quote escaping doubles them into an invalid path (the same
+        // corruption `profiles::command_tokens` documents).
         let launch = Launch {
             command: format!(
-                "program-that-must-not-be-spawned serve --shared --solo --data-dir {}",
-                shlex::try_quote(dir.to_str().unwrap()).unwrap()
+                "program-that-must-not-be-spawned serve --shared --solo --data-dir \"{}\"",
+                dir.display()
             ),
             cwd: dir.clone(),
         };
