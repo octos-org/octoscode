@@ -287,11 +287,7 @@ fn help_menu(ctx: &MenuContext<'_>) -> MenuSpec {
             if command.name == "scrollmode" {
                 // Surface the CURRENT mode so the user knows what a toggle
                 // would do before running it.
-                let mode = if ctx.app.pinned_scroll {
-                    "pinned"
-                } else {
-                    "native"
-                };
+                let mode = ctx.app.scroll_mode.as_str();
                 description = format!("{description} {}", t!("scrollmode.current", mode = mode));
             }
             let mut item = MenuItem::new(command.name, command.slash_name(), action)
@@ -2249,8 +2245,12 @@ fn launch_prompt_menu(ctx: &MenuContext<'_>) -> MenuBuildResult {
     };
 
     let open_session = |profile: &str| -> MenuAction {
-        let session_id =
-            octos_core::SessionKey::with_profile_topic(profile, "local", "tui", "coding");
+        let session_id = octos_core::SessionKey::with_profile_topic(
+            profile,
+            "local",
+            "tui",
+            ctx.app.workspace_launch_topic.unwrap_or("coding"),
+        );
         MenuAction::send_appui(AppUiCommand::OpenSession(
             octos_core::ui_protocol::SessionOpenParams {
                 session_id,

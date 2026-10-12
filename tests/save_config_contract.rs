@@ -53,7 +53,7 @@ fn saveconfig_writes_runtime_settings() {
     let mut store = chat_store();
     store.state.config_path = Some(path.clone());
     store.state.theme = ThemeName::Claude;
-    store.state.pinned_scroll = true;
+    store.state.scroll_mode = octoscode::cli::ScrollMode::Pinned;
 
     run_saveconfig(&mut store);
 
@@ -123,19 +123,22 @@ fn saved_config_roundtrips_through_loader() {
     let mut store = chat_store();
     store.state.config_path = Some(path.clone());
     store.state.theme = ThemeName::Solarized;
-    store.state.pinned_scroll = false;
+    store.state.scroll_mode = octoscode::cli::ScrollMode::Native;
 
-    run_saveconfig(&mut store);
+    for steering in [true, false] {
+        store.state.steer_mid_turn = steering;
+        run_saveconfig(&mut store);
 
-    let config = load_config_file(&path).expect("reparse");
-    assert_eq!(config.theme, Some(ThemeName::Solarized));
-    assert_eq!(config.scroll_mode, Some(ScrollMode::Native));
-    assert!(config.lang.is_some(), "lang persisted too");
-    assert_eq!(
-        config.steer_mid_turn,
-        Some(false),
-        "/saveconfig persists the steer-mid-turn toggle alongside the other UI settings"
-    );
+        let config = load_config_file(&path).expect("reparse");
+        assert_eq!(config.theme, Some(ThemeName::Solarized));
+        assert_eq!(config.scroll_mode, Some(ScrollMode::Native));
+        assert!(config.lang.is_some(), "lang persisted too");
+        assert_eq!(
+            config.steer_mid_turn,
+            Some(steering),
+            "/saveconfig persists both steering preferences alongside the other UI settings"
+        );
+    }
 }
 
 #[test]

@@ -37,8 +37,8 @@ enum DataDirResolution {
 
 /// Resolve `<data_dir>/profiles` from the launch command. An explicit
 /// `--data-dir` wins over an `OCTOS_HOME=` prefix, which wins over the
-/// conventional `~/.octos`. Returns `None` (no profiles dir) when there is no
-/// launch command, or when the command names an override we cannot resolve —
+/// inherited `OCTOS_HOME` or conventional `~/.octos`. Returns `None` (no profiles
+/// dir) when there is no launch command, or an override we cannot resolve —
 /// the latter degrades the picker to onboarding rather than offering profiles
 /// from the wrong server.
 pub fn solo_profiles_dir(stdio_command: Option<&str>) -> Option<PathBuf> {
@@ -319,7 +319,10 @@ fn cwd_hash(cwd: &Path) -> String {
 }
 
 fn default_octos_home() -> Option<PathBuf> {
-    home_dir().map(|home| home.join(".octos"))
+    std::env::var_os("OCTOS_HOME")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|home| home.join(".octos")))
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -366,6 +369,52 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn inherited_octos_home_matches_server_profile_and_runtime_roots() {
+        const CHILD_ROOT: &str = "OCTOSCODE_PROFILE_ENV_TEST_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let root = PathBuf::from(root);
+            let command = Some("octos serve --shared --solo");
+            assert_eq!(solo_profiles_dir(command), Some(root.join("profiles")));
+            assert_eq!(discover_local_profile_ids(command), vec!["fixture-peer"]);
+            let runtime = instance_data_dir_for_launch(command, &root).unwrap();
+            assert_eq!(runtime.parent(), Some(root.join("instances").as_path()));
+            let explicit = root.join("explicit");
+            let command = format!(
+                "octos serve --data-dir {}",
+                shlex::try_quote(explicit.to_str().unwrap()).unwrap()
+            );
+            assert_eq!(
+                solo_profiles_dir(Some(&command)),
+                Some(explicit.join("profiles"))
+            );
+            assert!(solo_profiles_dir(None).is_none());
+            return;
+        }
+        // Run with a private environment instead of mutating this test process,
+        // whose other profile/discovery tests run concurrently.
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("profiles")).unwrap();
+        fs::write(dir.path().join("profiles/fixture-peer.json"), "{}").unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "profiles::tests::inherited_octos_home_matches_server_profile_and_runtime_roots",
+                "--nocapture",
+            ])
+            .env("OCTOS_HOME", dir.path())
+            .env(CHILD_ROOT, dir.path())
+            .env_remove("OCTOSCODE_SHARED_INSTANCE")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -438,7 +487,7 @@ mod tests {
         );
         assert_ne!(a1, b1, "different cwds must diverge (concurrent windows)");
         assert!(
-            a1.parent().is_some_and(|p| p.ends_with(".octos/instances")),
+            a1.parent() == Some(default_octos_home().unwrap().join("instances").as_path()),
             "instance dir must sit under <base>/instances, got {}",
             a1.display()
         );

@@ -929,6 +929,15 @@ pub(super) fn transcript_render_model(
             .approval
             .as_ref()
             .is_some_and(|approval| approval.visible);
+        // Sticky chat renders the entire history. A decision must follow even
+        // committed assistant output, queued prompts and local reports, or it
+        // can own the keyboard while those later rows push it off screen.
+        let decision_at_tail = app.scroll_mode == crate::cli::ScrollMode::Sticky
+            && (approval_visible
+                || app
+                    .user_question
+                    .as_ref()
+                    .is_some_and(|picker| picker.visible));
         let turn_flow_visible = should_show_turn_flow(app, session);
         let latest_user_index = session
             .messages
@@ -965,21 +974,22 @@ pub(super) fn transcript_render_model(
                 );
             }
 
-            if turn_flow_visible && Some(idx) == latest_user_index {
+            if turn_flow_visible && Some(idx) == latest_user_index && !decision_at_tail {
                 approval_context_start = Some(message_start);
                 push_turn_flow(&mut lines, palette, app, session, wrap_width, None);
                 turn_flow_rendered = true;
             }
         }
 
-        if !turn_flow_rendered
+        if !decision_at_tail
+            && !turn_flow_rendered
             && approval_visible
             && let Some(prompt) = latest_user_message(session)
         {
             approval_context_start = Some(lines.len());
             push_recent_user_context(&mut lines, palette, prompt, wrap_width);
             push_turn_flow(&mut lines, palette, app, session, wrap_width, None);
-        } else if !turn_flow_rendered {
+        } else if !decision_at_tail && !turn_flow_rendered {
             push_turn_flow(&mut lines, palette, app, session, wrap_width, None);
         }
 
@@ -987,6 +997,9 @@ pub(super) fn transcript_render_model(
             push_pending_messages_block(&mut lines, palette, &app.pending_messages, wrap_width);
         }
         push_report_section(&mut lines, palette, app, wrap_width);
+        if decision_at_tail {
+            push_turn_flow(&mut lines, palette, app, session, wrap_width, None);
+        }
     } else if flow_report_items(app).is_empty() {
         lines.push(Line::from(Span::styled(
             t!("app.empty.no_session").to_string(),
@@ -1030,21 +1043,22 @@ pub(super) fn transcript_render_model(
     // would flip the whole screen to the theme color mid-scroll (the
     // user-reported "screen went black"). Other full-screen surfaces
     // (inspector, detail-modal backdrops) keep `surface_alt`.
-    let block_style = if app.transcript_pager_active {
-        // Span-level backgrounds (message-block "bubbles") must go too:
-        // committed history in native scrollback renders without them, so
-        // keeping them here paints text-shaped theme-color stripes over the
-        // terminal background the moment the user scrolls into the pager.
-        for line in &mut lines {
-            line.style.bg = None;
-            for span in &mut line.spans {
-                span.style.bg = None;
+    let block_style =
+        if app.transcript_pager_active || app.scroll_mode == crate::cli::ScrollMode::Sticky {
+            // Span-level backgrounds (message-block "bubbles") must go too:
+            // committed history in native scrollback renders without them, so
+            // keeping them here paints text-shaped theme-color stripes over the
+            // terminal background the moment the user scrolls into the pager.
+            for line in &mut lines {
+                line.style.bg = None;
+                for span in &mut line.spans {
+                    span.style.bg = None;
+                }
             }
-        }
-        Style::default().fg(palette.text)
-    } else {
-        Style::default().fg(palette.text).bg(palette.surface_alt)
-    };
+            Style::default().fg(palette.text)
+        } else {
+            Style::default().fg(palette.text).bg(palette.surface_alt)
+        };
 
     let paragraph = Paragraph::new(Text::from(lines))
         .block(

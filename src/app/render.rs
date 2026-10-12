@@ -4,6 +4,10 @@
 use super::*;
 
 pub fn render(frame: &mut impl FrameLike, app: &AppState, palette: Palette) {
+    if pinned_question::detail_visible(app) {
+        pinned_question::render_detail(frame, app, palette);
+        return;
+    }
     if app.activity_navigator.active {
         render_activity_navigator_overlay(frame, app, palette);
         return;
@@ -339,6 +343,8 @@ pub(super) fn render_chat_layout(frame: &mut impl FrameLike, app: &AppState, pal
     let active_menu = active_menu_surface(app);
     let areas = chat_layout_areas_for_menu(app, frame.area(), active_menu.as_ref());
 
+    pinned_question::render_header(frame, app, palette, areas.question);
+
     if areas.session_strip.height > 0 {
         frame.render_widget(
             render_session_strip(app, palette, areas.session_strip.width),
@@ -352,7 +358,7 @@ pub(super) fn render_chat_layout(frame: &mut impl FrameLike, app: &AppState, pal
         let transcript = transcript_render_model(app, palette, areas.transcript);
         let metrics = transcript.metrics;
         frame.render_widget(transcript.paragraph, areas.transcript);
-        if app.transcript_pager_active {
+        if app.transcript_pager_active || app.scroll_mode == crate::cli::ScrollMode::Sticky {
             render_pager_scrollbar(frame, metrics, areas.transcript, palette);
             render_scroll_to_bottom_button(frame, app, metrics, areas.transcript, palette);
         }
@@ -383,6 +389,17 @@ pub(super) fn render_chat_layout(frame: &mut impl FrameLike, app: &AppState, pal
         frame.render_widget(
             render_agent_strip(app, palette, areas.agent_strip.height.saturating_sub(1)),
             areas.agent_strip,
+        );
+    }
+    if areas.peer_strip.height > 0 {
+        frame.render_widget(
+            Paragraph::new(peer_strip_lines(
+                app,
+                palette,
+                areas.peer_strip.height.saturating_sub(1),
+            ))
+            .style(Style::default().bg(palette.surface)),
+            areas.peer_strip,
         );
     }
     frame.render_widget(render_status(app, palette), areas.status);

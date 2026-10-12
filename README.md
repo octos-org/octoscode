@@ -49,12 +49,11 @@ provider, paste its API key, and open your first coding chat. The
 > replies — no server, connected to nothing. Plain `octoscode` is the real
 > thing.
 
-> **Want it in a browser too?** The solo launch above talks to its server over
-> stdio, which serves exactly one client. Run the server on a port instead and
-> the terminal and
-> [octoscode-web](https://github.com/octos-org/octoscode-web) can both attach —
-> to the same sessions, at the same time. See
-> [Two ways to run](#two-ways-to-run).
+> **Want it in a browser too?** With a matching backend, the local launch uses
+> an authenticated WebSocket server that the terminal and
+> [octoscode-web](https://github.com/octos-org/octoscode-web) can both use.
+> Older backends fall back to private stdio; start an explicit WebSocket server
+> to connect multiple clients. See [Local and remote transports](#local-and-remote-transports).
 
 ### If something looks wrong
 
@@ -200,6 +199,31 @@ Notes:
   `--profile-id` on a true first run — it selects an existing profile and skips
   onboarding.
 
+### Multiple agents in one folder
+
+With a matching workspace-team backend build, bare `octoscode` launches share
+one local WebSocket server. Each launch creates its own conversation. Closing
+a client leaves the server and other sessions running. Use `/resume` to reopen
+an existing conversation instead of starting a new member.
+The TUI and server both honor inherited `OCTOS_HOME` for the profile registry;
+an explicit `--data-dir` in a launch command takes precedence.
+
+- `/agents` opens the workspace member list and coordinator picker.
+- `/agents leader workspace-2` selects a coordinator after listing the team.
+- `/agents message workspace-2 <text>` sends a peer message.
+- `/agents broadcast <text>` sends to every other member.
+
+The first member is the initial coordinator. A user can select another in the
+picker. Models use the existing peer tools; only the current coordinator gets
+`peer_assign`. File edits still require coordination between agents. Web and
+native clients can join the same server through OUP; this does not synchronize
+folders between machines. An older private stdio server must be stopped before
+the shared server can take ownership of its runtime directory. With an older
+backend (including the currently pinned auto-install release), an implicit
+launch reports that shared sessions are unavailable and keeps using private
+stdio. Upgrade the backend to enable workspace teams. Explicit transport
+commands are preserved.
+
 ### 3. Create your local profile
 
 On the welcome screen, fill the three fields (the email is local metadata only —
@@ -253,7 +277,7 @@ workspace. How much it may do is a **per-session** setting you change live with
 So for a review, run `/permissions` → **Read-only** and ask the agent to review
 the diff; for hands-on changes, switch to **Workspace-write** (or **Full
 Access**). The TUI only *requests* the mode — the backend applies it, and **Full
-Access is offered only on solo/local backends**, never on a shared `octos serve`.
+Access is offered only on solo/local backends**, never on a multi-user `octos serve`.
 
 For **headless / scripted** code review and for running **many review or edit
 agents in parallel**, use the `octos chat` CLI in the main
@@ -367,23 +391,23 @@ use WSL2.
 
 ## Other ways to run
 
-### Two ways to run
+### Local and remote transports
 
 The TUI never contains the agent — `octos serve` does. What changes is how the
 two talk, and that decides whether anything else can join.
 
-| | **Solo (stdio)** | **Server (WebSocket)** |
-| --- | --- | --- |
-| Start it with | `octoscode` | `octos serve --host … --port …`, then `octoscode --endpoint …` |
-| Who runs the server | the TUI spawns and auto-provisions it | you do, and it outlives the client |
-| How many clients | exactly one | as many as you point at it |
-| Browser client | no | yes — [octoscode-web](https://github.com/octos-org/octoscode-web) |
-| Setup | none | a port and a shared token |
+| | **Shared local (WebSocket)** | **Private (stdio)** | **Explicit server (WebSocket)** |
+| --- | --- | --- | --- |
+| Start it with | `octoscode` with a matching backend | `octoscode --stdio-command "octos serve --stdio --solo"` | Start `octos serve`, then `octoscode --endpoint …` |
+| Who runs the server | the TUI discovers or starts it; it outlives clients | the TUI starts a private child | you do; it outlives clients |
+| How many clients | multiple sessions share one runtime | exactly one | multiple clients can connect |
+| Browser client | yes, with the local endpoint and authentication | no | yes — [octoscode-web](https://github.com/octos-org/octoscode-web) |
+| Setup | automatic discovery | explicit command, or fallback with an older backend | endpoint and authentication |
 
-Solo is the default because it is the shortest path to a working session.
-`--stdio` runs the protocol over the child's stdin and stdout *instead of*
-binding HTTP, so there is no port for anything else to reach — a browser cannot
-attach to a solo launch, however it is configured.
+Bare launches use shared local mode when the backend supports it, and otherwise
+retain private stdio with an upgrade notice. `--stdio` communicates through the
+child's stdin and stdout without an HTTP listener, so browser clients cannot
+attach to that transport.
 
 ### Connect to a running `octos serve` over WebSocket
 
@@ -587,11 +611,11 @@ so plain `octoscode` is the real thing, not the mock.
 --readonly / --no-readonly   open as a view-only session, or force read-write
 --theme <name>           codex | claude | slate | solarized | terminal
 --lang en|zh             UI language; falls back to OCTOS_LANG / LANG. Default: en
---scroll-mode <mode>     native (terminal scrollback, default) | pinned (composer pinned)
+--scroll-mode <mode>     sticky (fixed question and composer, default) | native | pinned
 --vim-mode               enable Vim modal editing in the composer (default off)
 --steer-mid-turn         inject a prompt typed mid-turn into the RUNNING turn
-                         (default off: mid-turn prompts queue FIFO and each runs
-                         as its own turn, in the order typed)
+                         (default on; Tab queues a separate turn, and a saved
+                         false preference keeps Enter queueing FIFO)
 --no-splash              skip the startup logo animation
 ```
 
@@ -615,9 +639,9 @@ path with `octoscode config path`.
   "readonly": false,
   "theme": "codex",
   "lang": "en",
-  "scroll-mode": "native",
+  "scroll-mode": "sticky",
   "vim-mode": false,
-  "steer-mid-turn": false
+  "steer-mid-turn": true
 }
 ```
 
@@ -678,7 +702,9 @@ internal error silently falls through to a normal launch.
 ### In-session keys and slash commands
 
 ```text
-Tab        peek a running sub-agent's output; Tab/Shift+Tab cycle main↔agents, Esc returns to chat
+Enter      steer compatible text into the active turn (or start a turn when idle)
+Tab        queue a nonempty draft while working; otherwise peek/cycle sub-agents
+Ctrl+X     interrupt and send pending messages; preserve the unfinished draft (diff view: stage hunk)
 PgUp/PgDn  scroll the transcript (PgUp also opens the pager)
 y / s / n  approve once / approve for session / deny a pending tool approval
 Alt+A      re-show the pending approval prompt
@@ -703,10 +729,10 @@ q          quit
 /theme      switch the TUI palette at runtime (menu, or /theme claude)
 /lang       switch the UI language (menu, or /lang zh) — English / 中文
 /thinking   set reasoning effort for thinking models, per session (menu, or /thinking high)
-/scrollmode switch wheel-scroll behavior (toggle, or /scrollmode native|pinned)
+/scrollmode switch wheel-scroll behavior (toggle, or /scrollmode sticky|native|pinned)
 /vimmode    toggle Vim modal editing in the composer (Normal/Insert)
 /saveconfig persist the active theme / language / scroll-mode / vim-mode / steer-mode to the config file
-/steer      switch what Enter means mid-turn: on injects into the running turn, off (default) queues FIFO
+/steer      switch what Enter means mid-turn: on (default) steers the running turn, off queues FIFO
 /onboard    set onboarding fields inline (name, username, email, key, ...)
 /copy       copy the last assistant reply to the clipboard (works over SSH)
 /status     snapshot-backed session, runtime, and connection status
@@ -777,11 +803,27 @@ counts (`3dd`) are out of scope.
 
 ### Scrolling and the transcript pager
 
-By default (`native` scroll-mode) the wheel scrolls the terminal's own
-scrollback, so native selection/copy stay intact and the composer scrolls away
-with the screen. Press **Ctrl+T** (or **PageUp**) to open a full-screen
-**transcript pager** where history scrolls in the upper pane while the composer
-stays pinned to the bottom; **Esc** (or Ctrl+T again) closes it.
+By default (`sticky` scroll-mode), the latest submitted question stays at the
+screen's top and the composer stays at the bottom. Answers and tool activity
+scroll between them. The question remains after completion and changes on the
+next submission; queued questions show **Queued**. Switching sessions restores
+that session's question and queue. Draft edits do not replace the header.
+
+The header shows up to three wrapped lines. Press **F2** or click it to read the
+complete question; arrows, PageUp/PageDown, Home/End and the wheel scroll that
+reader. **Esc**, F2 or Enter closes it without sending or changing the draft.
+Use **Shift+drag** for terminal text selection in application scroll modes.
+
+`/scrollmode native` (or `--scroll-mode native`) restores terminal scrollback and
+native selection/copy. In native mode, **Ctrl+T** or **PageUp** opens the
+full-screen transcript pager; **Esc** or Ctrl+T closes it. `/scrollmode sticky`
+returns to the fixed question. Bare `/scrollmode` toggles sticky/native.
+`/saveconfig` persists the choice; an explicit existing preference is respected.
+
+中文：默认 `sticky` 模式将最新提交的问题固定在顶部，输入框固定在底部，
+回答和工具活动在中间滚动。任务结束后问题仍保留；下一次提交时更新，排队问题
+显示“已排队”。F2 或点击问题可查看完整内容，Esc/F2/Enter 关闭且不发送草稿。
+`/scrollmode native` 恢复终端原生滚动，`/saveconfig` 保存当前选择。
 
 `--scroll-mode pinned` (or `/scrollmode pinned`) opts into app-side wheel
 handling: the wheel always scrolls the transcript and the composer never moves,
