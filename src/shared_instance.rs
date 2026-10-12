@@ -273,6 +273,17 @@ mod tests {
         instance = record(Path::new("/another/runtime"));
         assert!(validate_record(&instance, dir.path()).is_err());
     }
+    #[test]
+    fn lock_contention_is_recognized_on_the_host_platform() {
+        let dir = tempfile::tempdir().unwrap();
+        let holder = open_lock(&dir.path().join(".probe.lock")).unwrap();
+        holder.try_lock_exclusive().unwrap();
+        let contender = open_lock(&dir.path().join(".probe.lock")).unwrap();
+        let error = contender.try_lock_exclusive().unwrap_err();
+        assert!(is_lock_contention(&error), "contention was: {error}");
+        // A non-contention error must not be misread as contention.
+        assert!(!is_lock_contention(&std::io::Error::from_raw_os_error(5)));
+    }
     #[tokio::test]
     async fn shared_discovery_checks_server_identity_and_concurrent_clients_reuse_owner() {
         let dir = tempfile::tempdir().unwrap();
