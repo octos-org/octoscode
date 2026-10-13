@@ -8,7 +8,9 @@
 #   3. 黑板加入 .gitignore(分支无关,避免跨分支裂脑);
 #   4. 铺设 AGENTS.md 上岗卡(自包含,外来 agent 读它即可上岗;
 #      OLP_INIT_LANG=zh 取中文版,缺省英文);
-#   5. 打印标准启动命令与下一步清单。
+#   5. 安装旧 shell 工具,并在可用时安装四个结构化 Python 工具;
+#   6. 仅在 OLP_BOARD_MODE=structured 且文件为新建时生成结构化模板与独立锁;
+#   7. 打印标准启动命令与后续检查清单。
 #
 # 刻意 **不做** 的事(操作者显式决策,脚本不代办):
 #   - 不写任何 API key;
@@ -20,6 +22,41 @@ say()  { printf '%s\n' "$*"; }
 ok()   { printf '  [ok] %s\n' "$*"; }
 todo() { printf '  [!!] %s\n' "$*"; MISSING=1; }
 MISSING=0
+INIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
+STRUCTURED_TOOLS="olp-board-append.py olp-board-event.py olp-board-inbox.py olp-board-sentinel.py"
+
+BOARD_MODE="${OLP_BOARD_MODE:-legacy}"
+case "$BOARD_MODE" in
+  legacy|structured) ;;
+  *)
+    say "  [!!] OLP_BOARD_MODE must be legacy or structured"
+    exit 2
+    ;;
+esac
+
+STRUCTURED_ENABLED=0
+if [ "$BOARD_MODE" = structured ]; then
+  STRUCTURED_ENABLED=1
+  if ! command -v python3 >/dev/null 2>&1; then
+    say "  [--] structured board tools unavailable: python3 was not found; continuing with the legacy scaffold"
+    STRUCTURED_ENABLED=0
+  fi
+  for tool in $STRUCTURED_TOOLS; do
+    if [ ! -f "$INIT_DIR/$tool" ]; then
+      say "  [--] structured board tools unavailable: $tool was not found beside olp-init.sh; continuing with the legacy scaffold"
+      STRUCTURED_ENABLED=0
+    fi
+  done
+  if [ "$STRUCTURED_ENABLED" = 0 ]; then
+    BOARD_MODE=legacy
+  fi
+fi
+
+STRUCTURED_MIGRATION_ONLY=0
+if [ "$STRUCTURED_ENABLED" = 1 ] \
+  && { [ -e .octos/loop.md ] || [ -e .octos/OUTER_LOOP_REVIEW.md ]; }; then
+  STRUCTURED_MIGRATION_ONLY=1
+fi
 
 say "== OLP init: 依赖体检 =="
 command -v git >/dev/null 2>&1 && ok "git" || todo "git 未安装——请先安装 git"
@@ -43,6 +80,32 @@ mkdir -p .octos
 
 if [ -f .octos/loop.md ]; then
   ok ".octos/loop.md 已存在,跳过"
+  if [ "$STRUCTURED_ENABLED" = 1 ]; then
+    say "  [--] Structured migration: existing .octos/loop.md was not overwritten; update it manually from docs/OLP_STRUCTURED_BOARD.md"
+  fi
+elif [ "$STRUCTURED_MIGRATION_ONLY" = 1 ]; then
+  say "  [--] Structured migration: .octos/loop.md was not generated beside existing OLP files; migrate the project manually"
+elif [ "$STRUCTURED_ENABLED" = 1 ]; then
+  cat > .octos/loop.md <<'LOOP'
+# Structured maintenance loop (opt-in olp-board/v1)
+
+Each maintenance turn must complete these steps in order:
+
+1. Query the canonical board with
+   `python3 -B "$HOME/.octos/outer/olp-board-inbox.py" --board .octos/OUTER_LOOP_REVIEW.md --for runtime --actor runtime`.
+2. For the earliest `unreceived` item in ledger event order, record consumption before work:
+   `python3 -B "$HOME/.octos/outer/olp-board-event.py" receive --board .octos/OUTER_LOOP_REVIEW.md --actor runtime --item <event-id>`.
+3. Execute the item, run the full tests plus format and lint for code changes,
+   then make one atomic commit that stages only files changed for this item.
+4. Write the terminal result through `olp-board-event.py ack` with the original
+   item id, an honest R2 value, and an explanation body file. Never hand-write
+   a replacement ACK line.
+
+`received_pending` is reconciliation evidence after a restart, not permission
+to execute the item again. Stop on DRIFT or a replay error and ask the outer
+loop to reconcile the board. Commit only; never push.
+LOOP
+  ok "generated .octos/loop.md (structured opt-in)"
 else
   cat > .octos/loop.md <<'LOOP'
 # 维护循环(内环 master 每轮唤醒执行)
@@ -64,6 +127,25 @@ fi
 
 if [ -f .octos/OUTER_LOOP_REVIEW.md ]; then
   ok ".octos/OUTER_LOOP_REVIEW.md 已存在,跳过"
+  if [ "$STRUCTURED_ENABLED" = 1 ]; then
+    say "  [--] Structured migration: existing board was not overwritten; reconcile legacy text before the first structured item"
+  fi
+elif [ "$STRUCTURED_MIGRATION_ONLY" = 1 ]; then
+  say "  [--] Structured migration: the board was not generated beside existing OLP files; migrate the project manually"
+elif [ "$STRUCTURED_ENABLED" = 1 ]; then
+  cat > .octos/OUTER_LOOP_REVIEW.md <<'BOARD'
+# Outer-Loop Review Channel
+
+<!-- olp-board/v1 -->
+> This board opted in to the experimental `olp-board/v1` extension.
+> Record items, receipts, ACKs, reviews and reconciliation only with the
+> installed event CLI. The text is for humans; completion is decided by
+> ledger replay. Do not hand-write item headings or ACK lines, and keep
+> examples inside closed code fences.
+
+---
+BOARD
+  ok "generated .octos/OUTER_LOOP_REVIEW.md (structured opt-in)"
 else
   cat > .octos/OUTER_LOOP_REVIEW.md <<'BOARD'
 # 外环审查通道(Outer-Loop Review)
@@ -87,6 +169,15 @@ BOARD
   ok "生成 .octos/OUTER_LOOP_REVIEW.md"
 fi
 
+if [ "$STRUCTURED_ENABLED" = 1 ] && [ "$STRUCTURED_MIGRATION_ONLY" = 0 ]; then
+  if [ -e .octos/OUTER_LOOP_REVIEW.md.lock ]; then
+    ok ".octos/OUTER_LOOP_REVIEW.md.lock already exists; skipped"
+  else
+    (umask 077 && : > .octos/OUTER_LOOP_REVIEW.md.lock)
+    ok "generated independent regular lock .octos/OUTER_LOOP_REVIEW.md.lock"
+  fi
+fi
+
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   if ! git check-ignore -q .octos/OUTER_LOOP_REVIEW.md 2>/dev/null; then
     printf '\n# OLP 黑板:分支无关的工作文件,不入库(防跨分支裂脑)\n.octos/OUTER_LOOP_REVIEW.md\n' >> .gitignore
@@ -107,6 +198,16 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   else
     ok "进化黑板已被忽略"
   fi
+  # The structured lock is a per-checkout runtime file like the board: a
+  # tracked copy would be rewritten on checkout and change its inode.
+  if [ "$STRUCTURED_ENABLED" = 1 ] && [ "$STRUCTURED_MIGRATION_ONLY" = 0 ] \
+    && ! git check-ignore -q .octos/OUTER_LOOP_REVIEW.md.lock 2>/dev/null; then
+    if [ -s .gitignore ] && [ "$(tail -c 1 .gitignore | od -An -tuC | tr -d ' ')" != "10" ]; then
+      printf '\n' >> .gitignore
+    fi
+    printf '.octos/OUTER_LOOP_REVIEW.md.lock\n' >> .gitignore
+    ok "structured board lock added to .gitignore"
+  fi
 fi
 
 say ""
@@ -119,7 +220,7 @@ case "${OLP_INIT_LANG:-en}" in
   *)              CARD_NAME="OCTOLOOP_AGENTS.md" ;;
 esac
 CARD_URL="https://raw.githubusercontent.com/octos-org/octoscode/main/docs/$CARD_NAME"
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
+SELF_DIR="$INIT_DIR"
 CARD_SRC=""
 # 认仓库布局才复制:同目录须有 olp-init.sh 自身,避免 curl|bash 时 dirname 落在
 # 无关 cwd 上误取别的 docs/。
@@ -169,6 +270,30 @@ else
 fi
 
 say ""
+say "== Structured board tools (optional) =="
+if command -v python3 >/dev/null 2>&1; then
+  STRUCTURED_READY=1
+  for tool in $STRUCTURED_TOOLS; do
+    src="$INIT_DIR/$tool"
+    dst="$OUTER_DIR/$tool"
+    if [ ! -f "$src" ]; then
+      say "  [--] $tool was not found beside olp-init.sh; structured board tools unavailable"
+      STRUCTURED_READY=0
+    elif [ -e "$dst" ]; then
+      ok "$tool already exists; skipped without overwriting the local copy"
+    else
+      cp "$src" "$dst" && chmod +x "$dst"
+      ok "installed $tool → $OUTER_DIR/"
+    fi
+  done
+  if [ "$STRUCTURED_READY" = 1 ]; then
+    ok "structured board tools ready (Python 3.9+)"
+  fi
+else
+  say "  [--] structured board tools unavailable: python3 was not found; legacy shell tools remain available"
+fi
+
+say ""
 say "== 下一步(按序) =="
 say "  1. 启动内环(标准命令;--solo 是单人盒子安全门):"
 say "       octoscode --stdio-command 'octos serve --stdio --solo'"
@@ -177,5 +302,10 @@ say "     (权限档 1-4 是 bwrap 沙箱,~/.cargo 不可见——见 QUICKSTART
 say "  2. 首次进入 TUI 完成 onboarding(选 provider、贴 key)。"
 say "  3. 外环接入:把本项目的 AGENTS.md 交给外环 agent(自包含上岗卡:"
 say "     身份选择、ACK 定式、派单/唤醒/观测/复验、红线全在卡内)。"
+if [ "$STRUCTURED_ENABLED" = 1 ]; then
+  say "  4. Structured opt-in is active for newly generated files; read docs/OLP_STRUCTURED_BOARD.md before migration."
+else
+  say "  4. Legacy board mode remains active. To opt in for a new project, run with OLP_BOARD_MODE=structured."
+fi
 [ "$MISSING" = 1 ] && { say ""; say "  ⚠ 存在缺失依赖(上方 [!!] 行),先补齐再启动。"; exit 2; }
 exit 0

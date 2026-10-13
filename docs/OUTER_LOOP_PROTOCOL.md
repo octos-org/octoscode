@@ -104,6 +104,33 @@
 - **R6 — 版本协商**:本文件头部 `protocol: olp/vN`;`AGENTS.md` 引用同版本。
   信道语义变更必须升版本。
 
+## 结构化黑板（实验性可选扩展）
+
+`schema="olp-board/v1"` 是附加在同一块文字黑板上的 opt-in 账本，不把本文件
+主版本从 `olp/v2` 升级，也不改变未迁移项目。事件行固定为
+`> OLP-EVENT <canonical JSON>`，生命周期事件为 item、receive、ack、review，
+收口事件为 withdraw、resolve、void；正文、事件和 UTC 时间在同一把 `<板>.lock`
+下成对追加。回执保存固定字节区间并可用
+`verify` 复验。完整 CLI、schema、生命周期、迁移和 recovery 示例见
+[`OLP_STRUCTURED_BOARD.md`](OLP_STRUCTURED_BOARD.md)。
+
+本扩展把状态投影为 unreceived、received_pending、unreviewed_ack、escalated。
+`receive` 只证明 runtime 已消费 item，`received_pending` 永远不授权自动重执行；
+return 和解除 blocked 另开 item，wontdo 只能 accept/escalate，escalate 不算
+批准，由作者在人工裁定后 resolve；作者可 withdraw 尚未 receive 的 item。普通无事件板返回 legacy，继续用 R1 的文字 ACK 判定；init 新生成的 opt-in
+板在首事件前也返回 legacy，但其 structured loop 与板头已要求第一条派单使用 item。
+
+结构化模式只追加，历史字节不物理移动；完成状态由回放得出。它与 R1 的
+“无 ACK 即未读”及 R5 的“ACK 后移入历史区”存在明确语义差异，是否纳入主协议
+须由维护者在合并前裁定。仓库 tracked `.octos/loop.md` 不自动迁移。
+
+同锁成对追加只约束合作写者，不是掉电事务。`may_have_appended=true` 时先核现场，
+不得盲目重试或截断。坏事件行、opt-in 后未配对的规范 item/ACK 与引用、列表、
+标题等疑似手写 ACK 都是 DRIFT，阻止自动调度但不让回放失败；只有已闭合围栏内的
+示例不算。收口只追加：同类型 item/ack 以精确 offset/length/hash 的 recovery 补录，
+或以 void 隔离不属于账本的字节，原字节和审计证据都保留；重复、语义不同或 opt-in
+前引用均由生产校验拒绝。逻辑 actor 不是 OS 身份认证，也不替代 R7 lease。
+
 ## 接入清单(一个新的 outer agent 需要知道的全部)
 
 0. 启动命令注意:单人本地盒子要给 serve 带 **`--solo`**
