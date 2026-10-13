@@ -607,7 +607,7 @@ command:
   undo:
     desc: 将工作区文件回滚到修改前的快照（#1768）。
   peer:
-    desc: "派生一个带持久任务简报的同伴智能体会话：/peer [--go] [--worktree] [--cwd <path>] [--n <2-8>] <brief>。"
+    desc: "派生一个带持久任务简报的同伴智能体会话：/peer [--go] [--worktree] [--cwd <path>] [--n <2-8>] [--model <id>] <brief>。"
   gather:
     desc: "把黑板上的同伴结果汇总进当前会话：/gather [all | <slug> …]。"
   research:
@@ -1480,7 +1480,7 @@ status:
   task_output_cursor: "任务输出 @%{offset}"
   paste_ignored_dialog_open: "对话框打开时已忽略粘贴内容"
   undo_no_session: "没有可撤销的活动会话。"
-  peer_usage: "用法：/peer [--go] [--worktree] [--cwd <path>] [--n <2-8>] <brief>"
+  peer_usage: "用法：/peer [--go] [--worktree] [--cwd <path>] [--n <2-8>] [--model <id>] <brief>"
   peer_preparing: "正在准备同伴会话…"
   session_blocked_hint: "%{session} 正在等待你的确认：%{reason} —— 按 Ctrl+S/Alt+S 处理。"
   peer_prepare_in_flight: "已有同伴会话正在准备中 —— 请等它打开（或约 30 秒后）再发起新的。"

@@ -3421,6 +3421,9 @@ fn tui_capabilities() -> UiProtocolCapabilities {
             .supported_features
             .push(crate::model::APPUI_FEATURE_CONTEXT_SEMANTIC_CACHE_V1.into());
     }
+    capabilities
+        .supported_features
+        .push(crate::model::APPUI_FEATURE_PEER_MODEL_OVERRIDE_V1.into());
     for method in [
         crate::model::APPUI_METHOD_CONFIG_CAPABILITIES_LIST,
         crate::model::APPUI_METHOD_SESSION_STATUS_READ,
@@ -8799,6 +8802,22 @@ mod tests {
         assert_eq!(event.result.skills[0].status.as_deref(), Some("installed"));
     }
 
+    #[test]
+    fn peer_prepare_model_override_encodes_before_session_open() {
+        let params: crate::model::PeerPrepareParams = serde_json::from_value(serde_json::json!({
+            "brief": "review it", "model_override": {"model_id": "strong"}
+        }))
+        .unwrap();
+        let request =
+            rpc_request_from_command("peer-model".into(), AppUiCommand::PeerPrepare(params))
+                .unwrap();
+        assert_eq!(request.method, crate::model::APPUI_METHOD_PEER_PREPARE);
+        assert_eq!(
+            request.params["model_override"],
+            serde_json::json!({"model_id": "strong"})
+        );
+    }
+
     /// #395: `peer/prepare` requests encode brief/worktree/cwd/session_id and
     /// omit the unused optionals; results decode into the typed
     /// `ClientEvent::PeerPrepared` carrying the tui-local result struct.
@@ -8807,6 +8826,7 @@ mod tests {
         let request = rpc_request_from_command(
             "peer-1".into(),
             AppUiCommand::PeerPrepare(crate::model::PeerPrepareParams {
+                model_override: None,
                 brief: "fix the nav flicker".into(),
                 n: None,
                 title: None,
@@ -8817,6 +8837,7 @@ mod tests {
             }),
         )
         .expect("peer/prepare request encodes");
+        assert!(request.params.get("model_override").is_none());
         assert_eq!(request.method, crate::model::APPUI_METHOD_PEER_PREPARE);
         assert_eq!(request.params["brief"], "fix the nav flicker");
         assert_eq!(request.params["worktree"], true);
@@ -8886,6 +8907,7 @@ mod tests {
         let request = rpc_request_from_command(
             "peer-2".into(),
             AppUiCommand::PeerPrepare(crate::model::PeerPrepareParams {
+                model_override: None,
                 brief: "fix the nav".into(),
                 n: Some(3),
                 title: None,
@@ -9717,6 +9739,7 @@ mod tests {
             // #395: `peer/prepare` writes the brief file (and may create a
             // worktree) server-side — a mutation, blocked in read-only mode.
             AppUiCommand::PeerPrepare(crate::model::PeerPrepareParams {
+                model_override: None,
                 brief: "fix the thing".into(),
                 n: None,
                 title: None,
@@ -9841,6 +9864,7 @@ mod tests {
             // #395: `/peer`'s prepare RPC — a labeled readonly block, not the
             // "unexpectedly blocked read-style" policy-bug arm.
             AppUiCommand::PeerPrepare(crate::model::PeerPrepareParams {
+                model_override: None,
                 brief: "fix the thing".into(),
                 n: None,
                 title: None,
