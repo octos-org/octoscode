@@ -1034,6 +1034,17 @@ pub fn core_command_specs() -> Vec<CommandSpec> {
             entry: CommandEntry::LocalAction(LocalAction::Custom("autonomy")),
         },
         CommandSpec {
+            name: "diff",
+            aliases: &["changes"],
+            description: "command.diff.desc",
+            category: CommandCategory::Runtime,
+            availability: CommandAvailability::app_ui_read(&[])
+                .with_session(SessionRequirement::Any)
+                .with_required_methods_any(&["diff/preview/get", "diff/workspace/get"]),
+            inline_args: InlineArgMode::Optional,
+            entry: CommandEntry::LocalAction(LocalAction::Custom("diff")),
+        },
+        CommandSpec {
             name: "review",
             aliases: &["code-review"],
             description: "command.review.desc",

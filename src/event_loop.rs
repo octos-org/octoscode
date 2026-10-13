@@ -1511,19 +1511,8 @@ pub(crate) fn handle_key(store: &mut Store, key: KeyEvent) -> KeyAction {
     // NOT Alt+D — the composer readline layer claims it as
     // delete-word-forward (see the Agent Dock note below).
     //
-    // Ctrl+V/X/N are the portable twins (see `is_ctrl_char`): macOS Terminal.app
-    // only emits ALT with "Use Option as Meta key" enabled, so without a Ctrl
-    // alias this whole family is unreachable there. Remapping the chars Option
-    // *does* produce (Option+V → `√`, Option+C → `ç`) is not an option — `å`,
-    // `ç` and `ß` are ordinary letter keys on Nordic, French and German
-    // layouts, and stealing them would make those letters untypable.
-    //
-    // Ctrl+V/X/N are the only free slots left: the composer readline layer runs
-    // first and claims Ctrl+A/B/D/E/F/H/J/K/W, and Ctrl+C/G/L/O/P/Q/R/S/T/U/Y
-    // are bound above. Ctrl+I/M are Tab/Return at the wire level.
-    //
-    // Alt+Y/Alt+N (peer approve/deny) get no twin — no slot is left. Reach a
-    // peer's approval with Ctrl+S and answer y/n in the modal instead.
+    // Ctrl+V and Ctrl+N remain portable alternatives for terminals without
+    // Option-as-Meta. Ctrl+X belongs exclusively to Send now.
     if is_alt_char(&key, 'v') || is_ctrl_char(&key, 'v') {
         if store.state.diff_preview.active {
             store.toggle_diff_view_mode();
@@ -1543,8 +1532,8 @@ pub(crate) fn handle_key(store: &mut Store, key: KeyEvent) -> KeyAction {
         return KeyAction::Continue;
     }
 
-    // Ctrl+X, not Ctrl+C — Ctrl+C is the interrupt and is claimed at the top.
-    if (is_alt_char(&key, 'c') || is_ctrl_char(&key, 'x')) && store.state.diff_preview.active {
+    // Quoting is secondary; Ctrl+X is reserved for sending pending input now.
+    if is_alt_char(&key, 'c') && store.state.diff_preview.active {
         // Same contract as the overlay's plain `c` (spec R6): staging lands
         // the hunk prompt in the composer, so a still-expanded overlay would
         // hide what just happened and keep swallowing plain keys over it.
@@ -3169,6 +3158,43 @@ fn clamp_diff_overlay_scroll(store: &mut Store) {
 /// scroll keys the other full-screen detail panes have, so a long diff is
 /// actually readable end-to-end.
 fn handle_diff_preview_key(store: &mut Store, key: KeyEvent) -> KeyAction {
+    if store.state.diff_preview.browsing {
+        if key.code == KeyCode::Tab || key.code == KeyCode::Char('r') {
+            let workspace = store.state.diff_preview.workspace ^ (key.code == KeyCode::Tab);
+            return store
+                .open_changes_command(if workspace { "workspace" } else { "turn" })
+                .map_or(KeyAction::Continue, KeyAction::send);
+        }
+        if key.code == KeyCode::Esc {
+            if store.state.diff_preview.files_open {
+                store.state.diff_preview.close();
+                store.state.focus = FocusPane::Composer;
+            } else {
+                store.state.diff_preview.files_open = true;
+                store.state.diff_preview.scroll = usize::MAX;
+            }
+            return KeyAction::Continue;
+        }
+        if store.state.diff_preview.files_open {
+            let diff = &mut store.state.diff_preview;
+            let count = diff.preview.as_ref().map_or(0, |p| p.files.len());
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') if count > 0 => {
+                    diff.selected_file = (diff.selected_file + 1) % count
+                }
+                KeyCode::Up | KeyCode::Char('k') if count > 0 => {
+                    diff.selected_file = (diff.selected_file + count - 1) % count
+                }
+                KeyCode::Enter if count > 0 => {
+                    diff.files_open = false;
+                    diff.selected_hunk = 0;
+                    diff.scroll = usize::MAX;
+                }
+                _ => {}
+            }
+            return KeyAction::Continue;
+        }
+    }
     match key.code {
         KeyCode::Esc => {
             // Collapse back to the inline preview (keep the preview open);
@@ -3204,10 +3230,8 @@ fn handle_diff_preview_key(store: &mut Store, key: KeyEvent) -> KeyAction {
             store.select_prev_diff_hunk();
         }
         KeyCode::Char('c') => {
-            // Staging lands the hunk prompt in the composer (or the pending
-            // queue) — collapse so the user can SEE what just happened; a
-            // still-open overlay would keep swallowing their typing over an
-            // invisible composer. Stays open when there was nothing to stage.
+            // Quote into the composer, then reveal it so the user can edit
+            // and send the question. Never automatically queue the quotation.
             let had_context = store.state.diff_preview.selected_hunk_context().is_some();
             store.stage_selected_diff_context();
             if had_context {
@@ -7872,6 +7896,11 @@ done
     #[test]
     fn ctrl_x_sends_pending_once_and_preserves_composer_draft() {
         let mut store = store_with_sessions(1);
+        let session = store.state.sessions[0].id.clone();
+        store
+            .state
+            .diff_preview
+            .apply_result(diff_result_with_two_hunks(session));
         let turn_id = TurnId::new();
         store.state.sessions[0].live_reply = Some(LiveReply {
             turn_id: turn_id.clone(),
@@ -8789,7 +8818,7 @@ done
     }
 
     #[test]
-    fn ctrl_x_stages_the_selected_hunk_from_composer_focus() {
+    fn ctrl_x_never_quotes_diff_from_composer_focus() {
         let mut store = store_with_sessions(1);
         store.state.focus = FocusPane::Composer;
         let session_id = store.state.sessions[0].id.clone();
@@ -8804,10 +8833,50 @@ done
         );
 
         assert!(
-            store.state.composer.contains("src/lib.rs"),
-            "Ctrl+X must stage the hunk like Alt+C, got: {:?}",
+            store.state.composer.is_empty(),
+            "Ctrl+X must remain Send now, got: {:?}",
             store.state.composer
         );
+    }
+
+    #[test]
+    fn changes_browser_lists_opens_quotes_and_returns_to_files() {
+        let mut store = store_with_sessions(1);
+        store.state.target = Some("ws://127.0.0.1:1".into());
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods([
+            "diff/workspace/get",
+        ]));
+        let session = store.state.sessions[0].id.clone();
+        store.state.set_composer_text("/diff");
+        let action = handle_key(&mut store, key(KeyCode::Enter));
+        assert!(
+            matches!(action, KeyAction::Send(_)),
+            "{}",
+            store.state.status
+        );
+        let command = sent_command(action);
+        let AppUiCommand::GetWorkspaceDiff { request_id, .. } = command else {
+            panic!("workspace read")
+        };
+        let mut result = diff_result_with_two_hunks(session);
+        let mut second = result.preview.files[0].clone();
+        second.path = "second.rs".into();
+        result.preview.files.push(second);
+        store.apply_client_event(ClientEvent::WorkspaceDiff { request_id, result });
+        assert!(store.state.diff_preview.overlay_active());
+        assert!(store.state.diff_preview.files_open);
+        handle_key(&mut store, key(KeyCode::Down));
+        assert_eq!(store.state.diff_preview.selected_file, 1);
+        handle_key(&mut store, key(KeyCode::Enter));
+        assert!(!store.state.diff_preview.files_open);
+        handle_key(&mut store, key(KeyCode::Esc));
+        assert!(store.state.diff_preview.files_open);
+        handle_key(&mut store, key(KeyCode::Enter));
+        handle_key(&mut store, key(KeyCode::Char('c')));
+        assert!(store.state.composer.contains("second.rs"));
+        assert!(store.state.pending_messages.is_empty());
+        assert!(!store.state.diff_preview.overlay_active());
+        assert_eq!(store.state.focus, FocusPane::Composer);
     }
 
     #[test]

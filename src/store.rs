@@ -3011,6 +3011,9 @@ impl Store {
                 num_turns,
                 prefill,
             } => self.rewind_to_turn_command(session_id, num_turns, prefill),
+            LocalAction::Custom("diff") => {
+                self.open_changes_command(inline_args.unwrap_or_default())
+            }
             LocalAction::Custom(name) => {
                 self.state.status = t!("status.local_action_not_wired", name = name).into_owned();
                 None
@@ -7837,6 +7840,77 @@ impl Store {
         ))
     }
 
+    /// Explicit Changes browser. Workspace reads never acquire a turn identity.
+    pub fn open_changes_command(&mut self, scope: &str) -> Option<AppUiCommand> {
+        if !matches!(scope.trim(), "" | "turn" | "workspace") {
+            self.state.status = "/diff [turn|workspace]".into();
+            return None;
+        }
+        let session_id = self.active_session()?.id.clone();
+        let has_preview = self
+            .state
+            .approval
+            .as_ref()
+            .and_then(ApprovalModalState::diff_preview_id)
+            .or_else(|| self.state.active_diff_preview_id())
+            .is_some();
+        let workspace = scope.trim() == "workspace" || (scope.trim().is_empty() && !has_preview);
+        if !workspace && !has_preview {
+            self.state.diff_preview = crate::model::DiffPreviewPaneState {
+                active: true,
+                expanded: true,
+                browsing: true,
+                files_open: true,
+                error: Some(t!("status.no_diff_preview_id").into_owned()),
+                ..Default::default()
+            };
+            self.state.focus = FocusPane::Transcript;
+            return None;
+        }
+        let command = if workspace {
+            if !self
+                .state
+                .capabilities
+                .as_ref()
+                .is_some_and(|c| c.supports_method("diff/workspace/get"))
+            {
+                self.state.status = t!("status.workspace_diff_unavailable").into_owned();
+                self.state.diff_preview = crate::model::DiffPreviewPaneState {
+                    active: true,
+                    expanded: true,
+                    browsing: true,
+                    files_open: true,
+                    workspace: true,
+                    error: Some(self.state.status.clone()),
+                    ..Default::default()
+                };
+                self.state.focus = FocusPane::Transcript;
+                return None;
+            }
+            let request_id = format!("diff-{}", octos_core::ui_protocol::PreviewId::new().0);
+            self.state.diff_preview = crate::model::DiffPreviewPaneState {
+                active: true,
+                loading: true,
+                workspace: true,
+                workspace_request_id: Some(request_id.clone()),
+                ..Default::default()
+            };
+            AppUiCommand::GetWorkspaceDiff {
+                session_id,
+                profile_id: self.active_session_profile_id(),
+                request_id,
+            }
+        } else {
+            self.read_diff_preview_command()?
+        };
+        self.close_all_menus();
+        self.state.diff_preview.expanded = true;
+        self.state.diff_preview.browsing = true;
+        self.state.diff_preview.files_open = true;
+        self.state.focus = FocusPane::Transcript;
+        Some(command)
+    }
+
     pub fn read_diff_preview_command(&mut self) -> Option<AppUiCommand> {
         let Some(session_id) = self.active_session().map(|session| session.id.clone()) else {
             self.state.status = t!("status.no_session_for_diff").into_owned();
@@ -7990,17 +8064,12 @@ impl Store {
         let path = context.path.clone();
         let prompt = diff_hunk_context_prompt(&context);
 
-        if self.state.active_turn().is_some() {
-            self.state.pending_messages.push(prompt);
-            self.state.status = t!("status.staged_diff_context", path = path).into_owned();
-        } else {
-            if !self.state.composer.trim().is_empty() {
-                self.state.composer_cursor = None;
-                self.state.insert_composer_text("\n\n");
-            }
-            self.state.insert_composer_text(&prompt);
-            self.state.status = t!("status.added_diff_context", path = path).into_owned();
+        if !self.state.composer.trim().is_empty() {
+            self.state.composer_cursor = None;
+            self.state.insert_composer_text("\n\n");
         }
+        self.state.insert_composer_text(&prompt);
+        self.state.status = t!("status.added_diff_context", path = path).into_owned();
 
         self.state.focus = FocusPane::Composer;
         self.state.scroll_transcript_to_latest();
@@ -8012,6 +8081,20 @@ impl Store {
     /// re-running the hydrate matcher would take the unattributed clear-all
     /// fallback on the re-emitted message.
     fn apply_non_hydrate_error(&mut self, code: String, message: String) -> Option<AppUiCommand> {
+        if self.state.diff_preview.workspace
+            && self.state.diff_preview.loading
+            && message.contains("diff/workspace/get")
+            && (!message.contains(" request ")
+                || self
+                    .state
+                    .diff_preview
+                    .workspace_request_id
+                    .as_ref()
+                    .is_some_and(|id| message.contains(id)))
+        {
+            self.state.diff_preview.loading = false;
+            self.state.diff_preview.error = Some(message.clone());
+        }
         let error = AppUiError { code, message };
         match AppUiEvent::Error(error) {
             AppUiEvent::Error(error) => {
@@ -8497,6 +8580,17 @@ impl Store {
                 let follow_up = self.apply_launch_resolve_event(result);
                 self.refresh_active_menu_if_open();
                 follow_up
+            }
+            ClientEvent::WorkspaceDiff { request_id, result } => {
+                if self.state.diff_preview.workspace_request_id.as_ref() == Some(&request_id)
+                    && self
+                        .active_session()
+                        .is_some_and(|s| s.id == result.preview.session_id)
+                {
+                    self.state.diff_preview.apply_result(result);
+                    self.state.diff_preview.scroll = usize::MAX;
+                }
+                None
             }
             ClientEvent::DiffPreview(result) => {
                 self.apply_diff_preview_result(result);
@@ -10094,6 +10188,13 @@ impl Store {
     }
 
     pub fn apply_diff_preview_result(&mut self, result: DiffPreviewGetResult) {
+        if self.state.diff_preview.workspace
+            || (self.state.diff_preview.browsing
+                && self.state.diff_preview.requested_preview_id.as_ref()
+                    != Some(&result.preview.preview_id))
+        {
+            return;
+        }
         let title = result.preview.title.clone().unwrap_or_else(|| {
             t!("status.file_diff_count", count = result.preview.files.len()).into_owned()
         });
@@ -11983,6 +12084,9 @@ impl Store {
         }
 
         if let Some((operation, path, preview_id)) = diff_preview_request {
+            if self.state.diff_preview.overlay_active() {
+                return None;
+            }
             let request_already_in_flight = self.state.diff_preview.loading
                 && self.state.diff_preview.requested_preview_id.as_ref() == Some(&preview_id);
             self.state
@@ -12566,6 +12670,9 @@ impl Store {
                 self.state.set_run_state_blocked(title.clone());
                 self.state.status = t!("status.approval_requested", title = title).into_owned();
                 if let Some(preview_id) = diff_preview_id {
+                    if self.state.diff_preview.overlay_active() {
+                        return None;
+                    }
                     let request_already_in_flight = self.state.diff_preview.loading
                         && self.state.diff_preview.requested_preview_id.as_ref()
                             == Some(&preview_id);
@@ -36806,7 +36913,63 @@ now analyzing the bus module"
     }
 
     #[test]
-    fn selected_diff_hunk_context_can_be_staged_for_next_turn() {
+    fn workspace_diff_drops_old_scope_and_session_responses() {
+        let mut store = store_with_live_reply(TurnId::new(), "working");
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods([
+            "diff/workspace/get",
+        ]));
+        let first = store.open_changes_command("workspace").unwrap();
+        let AppUiCommand::GetWorkspaceDiff {
+            request_id: old_id,
+            session_id,
+            ..
+        } = first
+        else {
+            panic!("workspace read")
+        };
+        let second = store.open_changes_command("workspace").unwrap();
+        let AppUiCommand::GetWorkspaceDiff { request_id, .. } = second else {
+            panic!("workspace read")
+        };
+        let result = DiffPreviewGetResult {
+            status: "ready".into(),
+            source: "pending_store".into(),
+            preview: crate::model::DiffPreview {
+                session_id,
+                preview_id: PreviewId::new(),
+                title: None,
+                files: vec![],
+            },
+        };
+        store.apply_client_event(ClientEvent::WorkspaceDiff {
+            request_id: old_id,
+            result: result.clone(),
+        });
+        assert!(store.state.diff_preview.loading);
+        store.apply_client_event(ClientEvent::DiffPreview(result.clone()));
+        assert!(store.state.diff_preview.loading);
+        let mut foreign = result.clone();
+        foreign.preview.session_id = SessionKey("other".into());
+        store.apply_client_event(ClientEvent::WorkspaceDiff {
+            request_id: request_id.clone(),
+            result: foreign,
+        });
+        assert!(store.state.diff_preview.loading);
+        store.apply_client_event(ClientEvent::WorkspaceDiff {
+            request_id: request_id.clone(),
+            result: result.clone(),
+        });
+        assert!(
+            store.state.diff_preview.overlay_active(),
+            "empty workspace remains closable"
+        );
+        store.state.diff_preview.close();
+        store.apply_client_event(ClientEvent::WorkspaceDiff { request_id, result });
+        assert!(!store.state.diff_preview.active);
+    }
+
+    #[test]
+    fn selected_diff_hunk_context_is_quoted_without_autoqueue_during_live_turn() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id, "working");
         let preview_id = PreviewId::new();
@@ -36844,14 +37007,11 @@ now analyzing the bus module"
 
         store.stage_selected_diff_context();
 
-        assert_eq!(store.state.pending_messages.len(), 1);
-        assert!(store.state.pending_messages[0].contains("file: src/lib.rs"));
-        assert!(store.state.pending_messages[0].contains("-old"));
-        assert!(store.state.pending_messages[0].contains("+new"));
-        assert_eq!(
-            store.state.status,
-            "Staged selected diff hunk context for next turn: src/lib.rs"
-        );
+        assert!(store.state.pending_messages.is_empty());
+        assert!(store.state.composer.contains("file: src/lib.rs"));
+        assert!(store.state.composer.contains("-old"));
+        assert!(store.state.composer.contains("+new"));
+        assert_eq!(store.state.focus, FocusPane::Composer);
     }
 
     #[test]
