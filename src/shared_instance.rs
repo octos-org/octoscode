@@ -115,6 +115,13 @@ async fn verify(record: &Instance) -> Result<()> {
     Err(eyre!("shared server closed before identity verification"))
 }
 
+/// fs2 reports lock contention per-platform: `WouldBlock` on unix but a raw
+/// `ERROR_LOCK_VIOLATION` on Windows — `lock_contended_error` carries the
+/// host's variant (the same idiom as `outer_duty`).
+fn is_lock_contention(error: &std::io::Error) -> bool {
+    error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+}
+
 fn open_lock(path: &Path) -> Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.create(true).truncate(false).read(true).write(true);
@@ -185,7 +192,7 @@ pub(crate) async fn discover(launch: &Launch) -> Result<Instance> {
     loop {
         match lock.try_lock_exclusive() {
             Ok(()) => break,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+            Err(e) if is_lock_contention(&e) && Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(100)).await
             }
             Err(e) => return Err(eyre!("waiting for shared server startup: {e}")),
@@ -212,7 +219,7 @@ pub(crate) async fn discover(launch: &Launch) -> Result<Instance> {
                 &dir,
             )?)
         }
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => None,
+        Err(error) if is_lock_contention(&error) => None,
         Err(error) => return Err(error.into()),
     };
     loop {
@@ -266,6 +273,17 @@ mod tests {
         instance = record(Path::new("/another/runtime"));
         assert!(validate_record(&instance, dir.path()).is_err());
     }
+    #[test]
+    fn lock_contention_is_recognized_on_the_host_platform() {
+        let dir = tempfile::tempdir().unwrap();
+        let holder = open_lock(&dir.path().join(".probe.lock")).unwrap();
+        holder.try_lock_exclusive().unwrap();
+        let contender = open_lock(&dir.path().join(".probe.lock")).unwrap();
+        let error = contender.try_lock_exclusive().unwrap_err();
+        assert!(is_lock_contention(&error), "contention was: {error}");
+        // A non-contention error must not be misread as contention.
+        assert!(!is_lock_contention(&std::io::Error::from_raw_os_error(5)));
+    }
     #[tokio::test]
     async fn shared_discovery_checks_server_identity_and_concurrent_clients_reuse_owner() {
         let dir = tempfile::tempdir().unwrap();
@@ -307,10 +325,14 @@ mod tests {
                 });
             }
         });
+        // Quote with the host's convention, not POSIX `shlex::try_quote`:
+        // on Windows a quoted path keeps its backslashes literal, while POSIX
+        // double-quote escaping doubles them into an invalid path (the same
+        // corruption `profiles::command_tokens` documents).
         let launch = Launch {
             command: format!(
-                "program-that-must-not-be-spawned serve --shared --solo --data-dir {}",
-                shlex::try_quote(dir.to_str().unwrap()).unwrap()
+                "program-that-must-not-be-spawned serve --shared --solo --data-dir \"{}\"",
+                dir.display()
             ),
             cwd: dir.clone(),
         };
