@@ -133,13 +133,20 @@ fn open_lock(path: &Path) -> Result<std::fs::File> {
     Ok(options.open(path)?)
 }
 
+/// Tokenize the launch command the way the host that executes it would —
+/// POSIX shlex treats Windows backslashes as escapes and would corrupt a
+/// `--data-dir C:\Users\me\data` path before the child is spawned (#680).
+fn launch_words(command: &str) -> Result<Vec<String>> {
+    let words = crate::profiles::command_tokens(command);
+    if words.is_empty() {
+        return Err(eyre!("invalid shared launch command"));
+    }
+    Ok(words)
+}
+
 fn spawn(launch: &Launch, dir: &Path) -> Result<std::process::Child> {
-    let words =
-        shlex::split(&launch.command).ok_or_else(|| eyre!("invalid shared launch command"))?;
-    let program = words
-        .first()
-        .ok_or_else(|| eyre!("empty shared launch command"))?;
-    let mut child = Command::new(program);
+    let words = launch_words(&launch.command)?;
+    let mut child = Command::new(&words[0]);
     child
         .args(&words[1..])
         .args(["--host", "127.0.0.1", "--port", "0", "--cwd"])
@@ -283,6 +290,35 @@ mod tests {
         assert!(is_lock_contention(&error), "contention was: {error}");
         // A non-contention error must not be misread as contention.
         assert!(!is_lock_contention(&std::io::Error::from_raw_os_error(5)));
+    }
+    #[test]
+    fn spawn_splits_the_launch_command_with_the_host_convention() {
+        #[cfg(windows)]
+        {
+            // POSIX shlex would eat the backslashes and hand the child a
+            // corrupted `C:Usersmedata`; the host convention keeps them
+            // literal.
+            let words =
+                launch_words("octos serve --shared --solo --data-dir C:\\Users\\me\\data").unwrap();
+            assert_eq!(words.last().unwrap(), "C:\\Users\\me\\data");
+            // A quoted path with spaces survives as one token.
+            let words =
+                launch_words("octos serve --shared --data-dir \"C:\\Users\\me\\my data\"").unwrap();
+            assert_eq!(words.last().unwrap(), "C:\\Users\\me\\my data");
+            // A trailing backslash before the closing quote stays literal
+            // (POSIX shlex would read `\"` as an escape and reject the
+            // command).
+            let words = launch_words("octos serve --shared --data-dir \"C:\\dir\\\"").unwrap();
+            assert_eq!(words.last().unwrap(), "C:\\dir\\");
+        }
+        #[cfg(not(windows))]
+        {
+            let words =
+                launch_words("octos serve --shared --solo --data-dir '/tmp/my data'").unwrap();
+            assert_eq!(words.last().unwrap(), "/tmp/my data");
+        }
+        assert!(launch_words("octos serve \"unterminated").is_err());
+        assert!(launch_words("").is_err());
     }
     #[tokio::test]
     async fn shared_discovery_checks_server_identity_and_concurrent_clients_reuse_owner() {
