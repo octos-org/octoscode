@@ -301,7 +301,10 @@ fn launch_from_cli(cli: &Cli) -> AppUiLaunch {
 
 fn endpoint_from_cli(cli: &Cli, auth_token: Option<String>) -> Option<AppUiEndpoint> {
     if let Some(command) = &cli.stdio_command {
-        if shlex::split(command).is_some_and(|words| words.iter().any(|w| w == "--shared")) {
+        if crate::profiles::command_tokens(command)
+            .iter()
+            .any(|w| w == "--shared")
+        {
             return Some(AppUiEndpoint::SharedLocal {
                 command: command.clone(),
                 cwd: cli
@@ -6847,6 +6850,24 @@ mod tests {
         assert!(matches!(
             endpoint_from_cli(&remote, None),
             Some(AppUiEndpoint::WebSocket { .. })
+        ));
+    }
+
+    /// POSIX shlex rejects a quoted path ending in a backslash (`\"` reads as
+    /// an escaped quote), which would silently misroute a `--shared` command
+    /// carrying a Windows backslash path to plain stdio.
+    #[cfg(windows)]
+    #[test]
+    fn shared_gate_tolerates_windows_backslash_paths() {
+        let cli = Cli::try_parse_from([
+            "octoscode",
+            "--stdio-command",
+            "octos serve --shared --solo --data-dir \"C:\\dir\\\"",
+        ])
+        .unwrap();
+        assert!(matches!(
+            endpoint_from_cli(&cli, None),
+            Some(AppUiEndpoint::SharedLocal { .. })
         ));
     }
 
