@@ -10790,6 +10790,50 @@ impl Store {
                             }
                         }
                     }
+                    // #651: a mid-turn backend recycle fails the latched turn
+                    // with a locally synthesized failure card (a replayed
+                    // `orphaned_by_restart` terminal, or the relaunch
+                    // reconcile's own `backend_relaunched` one), but the
+                    // server records that terminal as a ledger EVENT, not a
+                    // transcript row — this projection has no trace of it and
+                    // the wholesale replace above just wiped the card.
+                    // Restore it alongside the optimistic user rows — without
+                    // it an unattended pane shows a clean transcript with no
+                    // record of the lost turn. The match below also carries
+                    // switch-finalized partial text committed under the same
+                    // turn thread; keeping it is deliberate. Bounded by the
+                    // `errored_turns` per-session FIFO cap, like every other
+                    // consumer of that set.
+                    let lost_errored_turn_rows = previous_messages
+                        .iter()
+                        .filter(|message| {
+                            message.role == MessageRole::Assistant
+                                && message.thread_id.as_deref().is_some_and(|thread| {
+                                    self.state
+                                        .is_turn_errored_by_wire_ids(&session_id.0, thread)
+                                })
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if !lost_errored_turn_rows.is_empty() {
+                        let hydrated = self
+                            .find_session_mut(&session_id)
+                            .expect("hydrated session exists");
+                        for card in lost_errored_turn_rows {
+                            // Suppress only an identical row: a projected row
+                            // may legitimately share the turn's thread (a
+                            // partial assistant row committed before the child
+                            // died) — that is not the failure card, and the
+                            // card must still be restored next to it.
+                            if !hydrated.messages.iter().any(|message| {
+                                message.role == MessageRole::Assistant
+                                    && message.thread_id == card.thread_id
+                                    && message.content == card.content
+                            }) {
+                                hydrated.messages.push(card);
+                            }
+                        }
+                    }
                     let rendered_history_changed = !hydrated_history_preserves_rendered_prefix(
                         &previous_messages,
                         &self
@@ -24663,6 +24707,163 @@ workspace_root: None,
             .iter()
             .filter(|message| message.content.contains(&*note))
             .count()
+    }
+
+    /// #651: a mid-turn backend recycle fails the latched turn with a locally
+    /// synthesized `backend_relaunched` failure card, but the post-reconnect
+    /// `session/hydrate` then replaces the transcript with the server
+    /// projection — and the server has no trace of the lost turn (its
+    /// in-flight rows were never committed). The card must be restored
+    /// alongside the optimistic user rows, or an unattended pane shows a
+    /// clean transcript with no record of the lost turn.
+    #[test]
+    fn relaunch_failure_card_survives_the_reconnect_hydrate() {
+        let mut store = store_with_two_sessions("local:a", "local:b");
+        let session_id = SessionKey("local:a".into());
+        let dead_turn = TurnId::new();
+        store.state.sessions[0].live_reply = Some(LiveReply {
+            turn_id: dead_turn.clone(),
+            text: "partial answer from the dead child".into(),
+        });
+
+        store.apply_client_event(ClientEvent::BackendRelaunched);
+        assert_eq!(
+            relaunch_failure_cards(&store, 0),
+            1,
+            "the relaunch reconcile pushes the failure card"
+        );
+
+        // The replacement child's hydrate serves committed history only: the
+        // lost turn has neither messages nor a turns entry.
+        let hydrate: SessionHydrateResult = serde_json::from_value(serde_json::json!({
+            "session_id": session_id.0,
+            "cursor": {"stream": "session", "seq": 1},
+            "messages": [],
+            "turns": [],
+        }))
+        .expect("hydrate result decodes");
+        store.apply_client_event(ClientEvent::SessionHydrate(hydrate));
+
+        assert_eq!(
+            relaunch_failure_cards(&store, 0),
+            1,
+            "the failure card must survive the reconnect hydrate"
+        );
+    }
+
+    /// The real v2.0.3 reconnect path from the #651 soak: the replacement
+    /// child's ledger recovery synthesizes a durable
+    /// `turn_error(orphaned_by_restart)` — so the hydrate `turns` list DOES
+    /// know the terminal — but that terminal is a ledger event, not a
+    /// transcript row, so the `messages` projection still has no trace of the
+    /// lost turn. The replayed terminal's failure card must survive the
+    /// hydrate regardless of the `turns` entry.
+    #[test]
+    fn relaunch_failure_card_survives_a_server_known_terminal_without_a_projected_row() {
+        let mut store = store_with_two_sessions("local:a", "local:b");
+        let session_id = SessionKey("local:a".into());
+        let dead_turn = TurnId::new();
+        store.state.sessions[0].live_reply = Some(LiveReply {
+            turn_id: dead_turn.clone(),
+            text: "partial answer from the dead child".into(),
+        });
+
+        store.apply_client_event(ClientEvent::BackendRelaunched);
+        assert_eq!(relaunch_failure_cards(&store, 0), 1);
+
+        let hydrate: SessionHydrateResult = serde_json::from_value(serde_json::json!({
+            "session_id": session_id.0,
+            "cursor": {"stream": "session", "seq": 1},
+            "messages": [],
+            "turns": [{"turn_id": dead_turn.0.to_string(), "state": "errored"}],
+        }))
+        .expect("hydrate result decodes");
+        store.apply_client_event(ClientEvent::SessionHydrate(hydrate));
+
+        assert_eq!(
+            relaunch_failure_cards(&store, 0),
+            1,
+            "a ledger-only terminal projects no transcript row — the card must survive"
+        );
+    }
+
+    /// The restore must be idempotent: every later re-hydrate of the same
+    /// session (post-dispatch reconnect, /resume) re-appends the card exactly
+    /// once rather than stacking duplicates.
+    #[test]
+    fn relaunch_failure_card_restore_is_idempotent_across_rehydrates() {
+        let mut store = store_with_two_sessions("local:a", "local:b");
+        let session_id = SessionKey("local:a".into());
+        let dead_turn = TurnId::new();
+        store.state.sessions[0].live_reply = Some(LiveReply {
+            turn_id: dead_turn.clone(),
+            text: "partial answer from the dead child".into(),
+        });
+
+        store.apply_client_event(ClientEvent::BackendRelaunched);
+        assert_eq!(relaunch_failure_cards(&store, 0), 1);
+
+        for _ in 0..3 {
+            let hydrate: SessionHydrateResult = serde_json::from_value(serde_json::json!({
+                "session_id": session_id.0,
+                "cursor": {"stream": "session", "seq": 1},
+                "messages": [],
+                "turns": [],
+            }))
+            .expect("hydrate result decodes");
+            store.apply_client_event(ClientEvent::SessionHydrate(hydrate));
+        }
+
+        assert_eq!(
+            relaunch_failure_cards(&store, 0),
+            1,
+            "three re-hydrates must leave exactly one restored card"
+        );
+    }
+
+    /// A child that died mid-stream may still have committed a partial
+    /// assistant row for the lost turn, and hydrated rows can carry the turn
+    /// id as their thread. That partial row is not the failure card: the
+    /// restore must keep the card AND leave the projected partial untouched.
+    #[test]
+    fn relaunch_failure_card_is_restored_alongside_a_projected_partial_row() {
+        let mut store = store_with_two_sessions("local:a", "local:b");
+        let session_id = SessionKey("local:a".into());
+        let dead_turn = TurnId::new();
+        store.state.sessions[0].live_reply = Some(LiveReply {
+            turn_id: dead_turn.clone(),
+            text: "partial answer from the dead child".into(),
+        });
+
+        store.apply_client_event(ClientEvent::BackendRelaunched);
+        assert_eq!(relaunch_failure_cards(&store, 0), 1);
+
+        let hydrate: SessionHydrateResult = serde_json::from_value(serde_json::json!({
+            "session_id": session_id.0,
+            "cursor": {"stream": "session", "seq": 1},
+            "messages": [
+                {"seq": 0, "role": "assistant", "content": "partial answer from the dead child",
+                 "thread_id": dead_turn.0.to_string(), "persisted_at": chrono::Utc::now()},
+            ],
+            "turns": [{"turn_id": dead_turn.0.to_string(), "state": "errored"}],
+        }))
+        .expect("hydrate result decodes");
+        store.apply_client_event(ClientEvent::SessionHydrate(hydrate));
+
+        let messages = &store.state.sessions[0].messages;
+        assert_eq!(
+            relaunch_failure_cards(&store, 0),
+            1,
+            "a projected partial row must not suppress the failure card"
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.content == "partial answer from the dead child")
+                .count(),
+            1,
+            "the projected partial row must not be duplicated"
+        );
     }
 
     /// P1-3: the replacement stdio child can resume a durable continuation
