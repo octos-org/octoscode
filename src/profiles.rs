@@ -96,8 +96,9 @@ fn data_dir_from_command(command: &str) -> DataDirResolution {
 /// Split the configured stdio command using the quoting rules of the host that
 /// will execute it. POSIX shlex treats backslashes as escapes, which corrupts
 /// ordinary Windows paths such as `C:\octos\data` before profile discovery can
-/// inspect `--data-dir`.
-fn command_tokens(command: &str) -> Vec<String> {
+/// inspect `--data-dir`. An empty result means the command was absent or
+/// malformed; callers that must spawn it should treat that as an error.
+pub(crate) fn command_tokens(command: &str) -> Vec<String> {
     #[cfg(windows)]
     {
         split_windows_command_line(command).unwrap_or_default()
@@ -108,9 +109,10 @@ fn command_tokens(command: &str) -> Vec<String> {
     }
 }
 
-/// Minimal Windows command-line splitter for inspecting launch configuration.
-/// Double quotes group whitespace and are removed; backslashes remain literal.
-/// The real command is still executed by the platform shell elsewhere.
+/// Minimal Windows command-line splitter for launch configuration. Double
+/// quotes group whitespace and are removed; backslashes remain literal.
+/// The tokens feed `std::process::Command` directly (no shell re-parses
+/// them), so shell metacharacters in the command are not interpreted.
 #[cfg(windows)]
 fn split_windows_command_line(command: &str) -> Option<Vec<String>> {
     let mut tokens = Vec::new();
