@@ -61,6 +61,24 @@ ACK(done|wontdo|blocked): <说明>
 语法由契约测试 `olp_ack_lines_match_v1_grammar` 钉住。新增裸 `ACK:` 行
 会让该测试失败。
 
+### 2.0 可选结构化黑板
+
+部分新项目会显式采用实验扩展 `schema="olp-board/v1"`。先看生成的 structured
+loop/板头，再运行 `olp-board-event.py state --board <规范板路径>`。新 opt-in 板在
+首事件前仍返回 legacy，但第一条派单仍必须用 item；普通 legacy 才继续上面四条。
+structured/mixed 模式不再手写规范记录。外环用 event CLI 写 item，内环
+执行前写 receive、提交后写 ack，外环再写 review；收口用 withdraw（撤回未
+receive 的 item）、resolve（人工裁定后关闭 escalate）和 void（隔离不属于账本的
+字节）。查询用 `olp-board-inbox.py`，带上上次处理完的 `--since-head`，自己有意
+暂留的待办就不会反复唤醒。
+
+`received_pending` 只是重启对账证据，绝不授权自动重执行。正信号观察用
+`olp-board-sentinel.py`（文字只唤醒、账本回放判定），`events.jsonl` 负哨
+继续挂。DRIFT（坏事件行、未配对 item/ACK、引用/列表/标题形式的疑似手写 ACK）
+会阻止自动调度，必须以精确字节证据 recovery 或 void 收口；禁止模糊匹配或口头
+忽略，示例一律放进已闭合代码围栏。扩展不认证 actor，也不校验 R7 lease。完整命令、回执、
+迁移与拒绝场景见 `docs/OLP_STRUCTURED_BOARD.md`；不得假定所有项目已经迁移。
+
 ### 2.1 诚实验证声明(R2)
 
 每个交付必须声明且只声明一级:
@@ -188,6 +206,11 @@ octos goal status --json ; octos ledger tail --json ; octos peer list  # 三、�
 挂**双哨**而非单哨:正信号哨(ACK 落板)**加**负信号哨
 (`events.jsonl` 里的 `goal_transition blocked` / `escalation`)。
 
+显式采用 structured/mixed 的板，正哨改用 `olp-board-sentinel.py`，完成判定
+用 `olp-board-inbox.py --for outer`；文字信号本身不代表完成。遇 DRIFT 立即停，
+按 `docs/OLP_STRUCTURED_BOARD.md` 的 recovery/void 流程处理。legacy 板继续原 watcher
+和 ACK 流程。
+
 ### 3.5 复验,然后代推
 
 内环的自验声明**本身不可信**——"clippy 净"两连虚报、"测试绿"靠 wrapper
@@ -264,6 +287,7 @@ octoscode --stdio-command 'octos serve --stdio --solo --danger-full-access'
 
 - [`OUTER_LOOP_PROTOCOL.md`](https://github.com/octos-org/octoscode/blob/main/docs/OUTER_LOOP_PROTOCOL.md) — 协议全文:R1–R7、
   `result.md` schema、多外环规则、预算治理、实战沉淀
+- [`OLP_STRUCTURED_BOARD.md`](https://github.com/octos-org/octoscode/blob/main/docs/OLP_STRUCTURED_BOARD.md) — 可选结构化账本与恢复
 - [`OLP_OUTER_BOOT.md`](https://github.com/octos-org/octoscode/blob/main/docs/OLP_OUTER_BOOT.md) — 外环操作面与战术手册
 - [`OLP_QUICKSTART.md`](https://github.com/octos-org/octoscode/blob/main/docs/OLP_QUICKSTART.md) — 新项目从零到跑通
 - [`OCTOLOOP_GUIDE.md`](https://github.com/octos-org/octoscode/blob/main/docs/OCTOLOOP_GUIDE.md) — 完整指南、机制篇、平台矩阵
