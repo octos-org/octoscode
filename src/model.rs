@@ -4877,11 +4877,10 @@ pub struct AppState {
     /// key is read, so it is stale by at most one frame — the same discipline as
     /// [`AppState::agent_view_scroll_max`]).
     pub goal_objective_folded_effective: std::cell::Cell<bool>,
-    /// `--scroll-mode pinned`: capture the mouse in the chat flow so wheel-up
-    /// auto-enters the pager (composer stays pinned) and wheel-down at the
-    /// pager bottom drops back to the inline tail. False = `native` (default):
-    /// the wheel belongs to the terminal and native selection/copy stay intact.
-    pub pinned_scroll: bool,
+    /// Chat presentation, seeded from launch settings by the event loop.
+    pub scroll_mode: crate::cli::ScrollMode,
+    /// Read-only expansion of the fixed question; separate from chat scrolling.
+    pub question_detail: QuestionDetailState,
     /// Vim modal editing for the composer (opt-in via `--vim-mode`/config
     /// `vim-mode`/`/vimmode`). When false the composer behaves exactly as a
     /// plain text field (equivalent to always-Insert); `composer_mode` is only
@@ -6023,6 +6022,15 @@ impl UserQuestionPickerState {
             .collect();
         UserQuestionRespondParams::new(self.session_id.clone(), self.question_id.clone(), answers)
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QuestionDetailState {
+    pub active: bool,
+    pub title: String,
+    pub content: String,
+    pub scroll: usize,
+    pub max_scroll: std::cell::Cell<usize>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -7169,7 +7177,10 @@ impl AppState {
             peer_dock_collapsed: false,
             goal_objective_fold: GoalObjectiveFold::default(),
             goal_objective_folded_effective: std::cell::Cell::new(false),
-            pinned_scroll: false,
+            // Keep the transport/model constructor presentation-neutral. The
+            // event loop applies the resolved CLI/config mode before drawing.
+            scroll_mode: crate::cli::ScrollMode::Native,
+            question_detail: QuestionDetailState::default(),
             vim_mode: false,
             steer_mid_turn: true,
             composer_mode: ComposerMode::Insert,
@@ -9264,6 +9275,7 @@ impl AppState {
         self.stash_pending_messages_for_selected_session();
         self.composer_history.reset_navigation(); // end history browse on switch
         self.selected_session = index;
+        self.question_detail = QuestionDetailState::default();
         self.selected_task = 0;
         // The new session has its own (or no) sub-agents; a carried-over agent
         // selection would point at the wrong session's agent.
@@ -12094,6 +12106,7 @@ mod tests {
         use octos_core::ui_protocol::SessionOpenParams;
         let open = |id: &str| {
             AppUiCommand::OpenSession(SessionOpenParams {
+                client_commands: None,
                 session_id: SessionKey(id.into()),
                 topic: None,
                 profile_id: None,
@@ -12105,6 +12118,7 @@ mod tests {
         let mut state = AppState::new(Vec::new(), 0, "ready".into(), None, false);
         for _ in 0..16 {
             state.enqueue_autonomy_hydration(AppUiCommand::ListSessions(SessionListParams {
+                profile_id: None,
                 cwd: None,
             }));
         }
@@ -12145,12 +12159,14 @@ mod tests {
         let mut state = AppState::new(Vec::new(), 0, "ready".into(), None, false);
         for _ in 0..15 {
             state.enqueue_autonomy_hydration(AppUiCommand::ListSessions(SessionListParams {
+                profile_id: None,
                 cwd: None,
             }));
         }
         state
             .pending_autonomy_hydration
             .push_front(AppUiCommand::OpenSession(SessionOpenParams {
+                client_commands: None,
                 session_id: session_id.clone(),
                 topic: None,
                 profile_id: None,
@@ -12165,6 +12181,7 @@ mod tests {
         );
 
         state.enqueue_autonomy_hydration(AppUiCommand::SubmitPrompt(TurnStartParams {
+            origin: None,
             tool_context: None,
             session_id: session_id.clone(),
             turn_id: TurnId::new(),
@@ -12209,6 +12226,7 @@ mod tests {
         let mut state = AppState::new(Vec::new(), 0, "ready".into(), None, false);
         for index in 0..16 {
             state.enqueue_autonomy_hydration(AppUiCommand::OpenSession(SessionOpenParams {
+                client_commands: None,
                 session_id: SessionKey(format!("local:{index}")),
                 topic: None,
                 profile_id: None,
@@ -12258,6 +12276,7 @@ mod tests {
             }));
         }
         state.enqueue_local_session_open_front(AppUiCommand::OpenSession(SessionOpenParams {
+            client_commands: None,
             session_id: SessionKey("local:active".into()),
             topic: None,
             profile_id: None,
@@ -13211,7 +13230,10 @@ mod tests {
         // historical empty object `{}`, byte-identical to what old clients
         // sent, so an OLD server (no per-project session storage) still
         // deserializes it unchanged (`cwd: None` -> legacy global listing).
-        let params = SessionListParams { cwd: None };
+        let params = SessionListParams {
+            profile_id: None,
+            cwd: None,
+        };
         let wire = serde_json::to_value(&params).expect("SessionListParams serializes");
         assert_eq!(wire, serde_json::json!({}));
     }
@@ -13223,6 +13245,7 @@ mod tests {
         // `session.workspace_cwd.v1` feature) honors to scope the listing to
         // the project rooted at that path.
         let params = SessionListParams {
+            profile_id: None,
             cwd: Some("/tmp/project".into()),
         };
         let wire = serde_json::to_value(&params).expect("SessionListParams serializes");

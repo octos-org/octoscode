@@ -77,6 +77,9 @@ fn session_hydrate_result_replaces_durable_messages() {
         context_state: None,
         replayed_tool_envelopes: None,
         messages: Some(vec![HydratedMessage {
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+            tool_name: None,
             seq: 1,
             role: "assistant".into(),
             content: "authoritative answer".into(),

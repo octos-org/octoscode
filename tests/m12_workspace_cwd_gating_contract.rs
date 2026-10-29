@@ -42,6 +42,7 @@ fn session_open_must_not_include_cwd_without_feature() {
 #[test]
 fn scrub_session_open_cwd_when_feature_absent() {
     let params = SessionOpenParams {
+        client_commands: None,
         session_id: SessionKey("local:test".into()),
         topic: None,
         profile_id: Some("ada-server".into()),
@@ -64,6 +65,7 @@ fn scrub_session_open_cwd_when_feature_absent() {
 #[test]
 fn scrub_session_open_cwd_passthrough_when_feature_present() {
     let params = SessionOpenParams {
+        client_commands: None,
         session_id: SessionKey("local:test".into()),
         topic: None,
         profile_id: Some("ada-server".into()),

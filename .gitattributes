@@ -1,0 +1,4 @@
+# LF in every working tree: tests parse docs/fixtures with literal "\n"
+# sequences, and Git for Windows defaults to core.autocrlf=true (CRLF
+# checkout), which breaks those lookups on Windows clones.
+* text=auto eol=lf

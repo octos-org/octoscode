@@ -53,7 +53,7 @@ fn saveconfig_writes_runtime_settings() {
     let mut store = chat_store();
     store.state.config_path = Some(path.clone());
     store.state.theme = ThemeName::Claude;
-    store.state.pinned_scroll = true;
+    store.state.scroll_mode = octoscode::cli::ScrollMode::Pinned;
 
     run_saveconfig(&mut store);
 
@@ -123,7 +123,7 @@ fn saved_config_roundtrips_through_loader() {
     let mut store = chat_store();
     store.state.config_path = Some(path.clone());
     store.state.theme = ThemeName::Solarized;
-    store.state.pinned_scroll = false;
+    store.state.scroll_mode = octoscode::cli::ScrollMode::Native;
 
     for steering in [true, false] {
         store.state.steer_mid_turn = steering;

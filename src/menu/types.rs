@@ -347,8 +347,8 @@ pub enum LocalAction {
     /// the runtime `AppState.vim_mode`; the composer resets to Insert.
     ToggleVimMode,
     /// Switch the wheel-scroll behavior at runtime (`/scrollmode` toggles,
-    /// `/scrollmode <native|pinned>` sets). Only flips the runtime
-    /// `AppState.pinned_scroll`; the launch config stays the default source.
+    /// `/scrollmode <sticky|native|pinned>` sets). Only changes the runtime
+    /// `AppState.scroll_mode`; the launch config stays the default source.
     SetScrollMode,
     SetSteerMidTurn,
     /// Copy the last assistant reply for the active session to the system
@@ -748,7 +748,7 @@ pub struct MenuAppSnapshot<'a> {
     pub background_task_count: usize,
     /// Current wheel-scroll mode, so the `/scrollmode` help entry can show
     /// which mode is active before the user toggles blindly.
-    pub pinned_scroll: bool,
+    pub scroll_mode: crate::cli::ScrollMode,
     /// Prior sessions fetched via `session/list`, mirrored from
     /// `AppState::resume_sessions` so the `/resume` picker (`resume_menu`) can
     /// render one row per session. Empty until the first fetch lands (the menu

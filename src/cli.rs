@@ -54,7 +54,10 @@ impl ThemeName {
 
 /// How scrolling interacts with the chat composer.
 ///
-/// `Native` (default) keeps the terminal's own scrollback authoritative: the
+/// `Sticky` (default) uses app-managed scrolling with the latest question
+/// above the transcript and the composer below it.
+///
+/// `Native` keeps the terminal's own scrollback authoritative: the
 /// wheel scrolls the terminal, native selection/copy work untouched, and the
 /// composer scrolls away with the screen (the transcript pager via Ctrl+T /
 /// PageUp is the pinned view). `Pinned` opts into app-side mouse capture so
@@ -64,9 +67,11 @@ impl ThemeName {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ScrollMode {
-    #[default]
     Native,
     Pinned,
+    /// Full-screen chat with the latest question fixed above the transcript.
+    #[default]
+    Sticky,
 }
 
 impl ScrollMode {
@@ -76,6 +81,7 @@ impl ScrollMode {
         match self {
             ScrollMode::Native => "native",
             ScrollMode::Pinned => "pinned",
+            ScrollMode::Sticky => "sticky",
         }
     }
 }
@@ -266,10 +272,9 @@ struct CliArgs {
     #[arg(long, value_enum)]
     pub lang: Option<Lang>,
 
-    /// Wheel-scroll behavior: `native` keeps terminal scrollback + native
-    /// selection (default); `pinned` captures the mouse so the wheel scrolls
-    /// the transcript pager and the composer stays pinned to the bottom
-    /// (native selection then needs Shift+drag).
+    /// Chat layout: `sticky` (default) fixes the latest question and composer;
+    /// `native` keeps terminal scrollback and selection; `pinned` fixes only
+    /// the composer while scrolling. App scrolling uses Shift+drag to select.
     #[arg(long = "scroll-mode", value_enum)]
     pub scroll_mode: Option<ScrollMode>,
 
@@ -838,6 +843,29 @@ mod tests {
         );
         assert_eq!(cli.auth_token.as_deref(), Some("secret-token"));
         assert!(cli.readonly);
+    }
+
+    #[test]
+    fn sticky_scroll_default_respects_saved_and_explicit_preferences() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, "{}").unwrap();
+        let args = ["octoscode", "--config", path.to_str().unwrap()];
+        assert_eq!(
+            Cli::try_parse_from(args).unwrap().scroll_mode,
+            super::ScrollMode::Sticky
+        );
+        std::fs::write(&path, r#"{"scroll-mode":"native"}"#).unwrap();
+        assert_eq!(
+            Cli::try_parse_from(args).unwrap().scroll_mode,
+            super::ScrollMode::Native
+        );
+        assert_eq!(
+            Cli::try_parse_from(args.into_iter().chain(["--scroll-mode", "sticky"]))
+                .unwrap()
+                .scroll_mode,
+            super::ScrollMode::Sticky
+        );
     }
 
     #[test]

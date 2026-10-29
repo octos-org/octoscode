@@ -172,3 +172,27 @@ OctosCode 重启本地 OUP stdio 子进程时，必须先完成带原 workspace 
   假设 队列中 16 项全是 OpenSession
   当 再入队任意命令
   那么 该命令被丢弃、没有 open 被淘汰、状态栏显示队列已满
+
+场景: 重连 hydrate 不抹掉丢失 turn 的失败卡片
+  测试: relaunch_failure_card_survives_the_reconnect_hydrate
+  假设 旧 child 代次 latch 的 turn 被 relaunch reconcile 判死并推出失败卡片
+  当 replacement child 的 hydrate 投影里既没有该 turn 的消息也没有 turns 记录
+  那么 失败卡片在 hydrate 后仍在 transcript 中
+
+场景: server 已知终态但无投影行时失败卡片仍存活
+  测试: relaunch_failure_card_survives_a_server_known_terminal_without_a_projected_row
+  假设 replacement child 的 ledger 恢复合成了 durable turn_error(orphaned_by_restart)
+  当 hydrate 的 turns 列表显示该 turn 为 errored 但 messages 投影没有它的任何行
+  那么 失败卡片在 hydrate 后仍在 transcript 中
+
+场景: 失败卡片恢复跨重复 hydrate 幂等
+  测试: relaunch_failure_card_restore_is_idempotent_across_rehydrates
+  假设 失败卡片已随一次 hydrate 恢复
+  当 同一 session 再经历多次相同 hydrate
+  那么 transcript 中始终只有一张该 turn 的失败卡片
+
+场景: 投影里的 partial 行不压制失败卡片也不被复制
+  测试: relaunch_failure_card_is_restored_alongside_a_projected_partial_row
+  假设 濒死 child 已为丢失的 turn 提交 partial assistant 行且其 thread 为 turn id
+  当 hydrate 投影包含该 partial 行且 turns 显示该 turn 为 errored
+  那么 失败卡片仍被恢复且 partial 行在 transcript 中恰好出现一次
