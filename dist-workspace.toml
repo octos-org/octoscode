@@ -5,6 +5,8 @@ members = ["cargo:."]
 [dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.32.0"
+# Preserve the MIT notice for the transcript wrapper adapted from ratatui.
+include = ["licenses/ratatui-word-wrapper-MIT.txt"]
 # CI backends to support
 ci = "github"
 # .github/workflows/release.yml is intentionally hand-edited (#415): prereleases

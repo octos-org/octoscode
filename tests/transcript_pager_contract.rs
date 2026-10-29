@@ -13,9 +13,9 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use octos_core::ui_protocol::TurnId;
 use octos_core::{Message, SessionKey};
 use octoscode::app;
-use octoscode::cli::ThemeName;
+use octoscode::cli::{ScrollMode, ThemeName};
 use octoscode::event_loop::{KeyAction, handle_terminal_event};
-use octoscode::model::{AppState, AppUiCommand, LiveReply, SessionView};
+use octoscode::model::{AppState, AppUiCommand, FocusPane, LiveReply, SessionView};
 use octoscode::store::Store;
 use octoscode::theme::Palette;
 use octoscode::tui_terminal::FrameLike;
@@ -109,6 +109,59 @@ fn rendered_rows(state: &AppState, width: u16, height: u16) -> Vec<String> {
     let mut frame = BufferFrame::new(width, height);
     app::render(&mut frame, state, Palette::for_theme(ThemeName::default()));
     frame.rows()
+}
+
+fn long_history_store(mode: ScrollMode) -> Store {
+    let mut store = chat_store(0);
+    store.state.sessions[0].messages = vec![
+        Message::user("LONGHISTORYQUESTION"),
+        Message::assistant(
+            (0..70_000)
+                .map(|index| format!("- HISTORY{index:05} 中文"))
+                .chain(std::iter::once("- HISTORYTAILMARKER".to_string()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+    ];
+    store.state.scroll_mode = mode;
+    store.state.transcript_pager_active = mode != ScrollMode::Sticky;
+    store
+}
+
+fn assert_large_history_navigation(mode: ScrollMode) {
+    let mut store = long_history_store(mode);
+    let tail = rendered_rows(&store.state, 80, 24);
+    assert!(tail.iter().any(|row| row.contains("HISTORYTAILMARKER")));
+    assert!(store.state.transcript_scroll_max.get() > usize::from(u16::MAX));
+
+    handle_terminal_event(&mut store, key(KeyCode::PageUp));
+    let earlier = rendered_rows(&store.state, 80, 24);
+    assert_ne!(tail, earlier, "PageUp must move the visible transcript");
+    assert!(!earlier.iter().any(|row| row.contains("HISTORYTAILMARKER")));
+
+    store.state.scroll_transcript_up(usize::MAX);
+    let first = rendered_rows(&store.state, 80, 24);
+    assert!(first.iter().any(|row| row.contains("HISTORY00000")));
+    assert!(!first.iter().any(|row| row.contains("HISTORY69999")));
+
+    store.state.focus = FocusPane::Transcript;
+    handle_terminal_event(&mut store, key(KeyCode::End));
+    for (width, height) in [(32, 16), (100, 32)] {
+        let resized = rendered_rows(&store.state, width, height);
+        assert!(resized.iter().any(|row| row.contains("HISTORYTAILMARKER")));
+        assert!(resized.iter().any(|row| row.contains("Composer")));
+        assert_eq!(store.state.transcript_scroll, 0);
+    }
+}
+
+#[test]
+fn pager_large_history_reaches_tail_top_and_resizes_without_overflow() {
+    assert_large_history_navigation(ScrollMode::Pinned);
+}
+
+#[test]
+fn sticky_large_history_reaches_tail_top_and_resizes_without_overflow() {
+    assert_large_history_navigation(ScrollMode::Sticky);
 }
 
 fn row_index_containing(rows: &[String], needle: &str) -> usize {

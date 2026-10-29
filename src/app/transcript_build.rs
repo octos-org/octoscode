@@ -1011,8 +1011,17 @@ pub(super) fn transcript_render_model(
 
     collapse_blank_runs(&mut lines);
 
+    // Resolve wrapping before choosing a window. Paragraph's scroll offset and
+    // internal row counter are u16, so passing a global history offset can
+    // truncate the read position or overflow even after clamping to u16::MAX.
+    // Keep ratatui's word/grapheme wrapping before handing it only visible rows.
+    let (lines, approval_context_row) = transcript_physical_rows(
+        lines,
+        usize::from(area.width).max(1),
+        approval_context_start,
+    );
     let visible_height = transcript_visible_height(area);
-    let total_rows = transcript_visual_rows(&lines, wrap_width);
+    let total_rows = lines.len();
     let max_scroll = total_rows.saturating_sub(visible_height);
     // Feed the true maximum back so `scroll_transcript_up/down` clamp to it
     // (see `transcript_scroll_max`; same discipline as the peek overlay's
@@ -1027,15 +1036,18 @@ pub(super) fn transcript_render_model(
     };
     let mut scroll_top = max_scroll.saturating_sub(scroll_from_bottom);
     if scroll_from_bottom == 0
-        && let Some(context_start) = approval_context_start
+        && let Some(context_row) = approval_context_row
     {
-        let context_row = transcript_visual_rows(&lines[..context_start], wrap_width);
         let context_tail_rows = total_rows.saturating_sub(context_row);
         if context_tail_rows <= visible_height {
             scroll_top = scroll_top.min(context_row);
         }
     }
-    let scroll_top = u16::try_from(scroll_top).unwrap_or(u16::MAX);
+    let mut lines = lines
+        .into_iter()
+        .skip(scroll_top)
+        .take(visible_height)
+        .collect::<Vec<_>>();
 
     // In the pager the transcript blends with the terminal's DEFAULT
     // background, exactly like the inline live tail: pinned-mode wheel
@@ -1060,16 +1072,156 @@ pub(super) fn transcript_render_model(
             Style::default().fg(palette.text).bg(palette.surface_alt)
         };
 
-    let paragraph = Paragraph::new(Text::from(lines))
-        .block(
-            Block::default()
-                .style(block_style)
-                .border_style(palette.border()),
-        )
-        .scroll((scroll_top, 0))
-        .wrap(Wrap { trim: false });
+    let paragraph = Paragraph::new(Text::from(lines)).block(
+        Block::default()
+            .style(block_style)
+            .border_style(palette.border()),
+    );
 
     TranscriptRenderModel { paragraph, metrics }
+}
+
+/// Produce physical rows once so scrolling metrics and the rendered window
+/// agree. Most message bodies already carry their hanging-indent wrapping;
+/// move those rows without cloning, wrapping only the remaining long rows.
+pub(super) fn transcript_physical_rows(
+    lines: Vec<Line<'static>>,
+    wrap_width: usize,
+    context_start: Option<usize>,
+) -> (Vec<Line<'static>>, Option<usize>) {
+    let mut rows = Vec::with_capacity(lines.len());
+    let mut context_row = None;
+    for (index, line) in lines.into_iter().enumerate() {
+        if Some(index) == context_start {
+            context_row = Some(rows.len());
+        }
+        let whitespace_only = line.spans.iter().all(|span| {
+            span.content
+                .chars()
+                .all(|ch| ch.is_whitespace() || ch == '\u{200b}')
+        });
+        if line.width() <= wrap_width && !whitespace_only {
+            rows.push(line);
+        } else {
+            rows.extend(wrap_transcript_row(&line, wrap_width));
+        }
+    }
+    (rows, context_row)
+}
+
+/// Materialize the `Wrap { trim: false }` rows without Paragraph's u16 row
+/// counter. This follows ratatui 0.29's WordWrapper packing rules, including
+/// whitespace at a wrap boundary and indivisible styled graphemes. Keep the
+/// rendering-oracle regression in sync when upgrading ratatui.
+/// Upstream attribution and MIT notice: `licenses/ratatui-word-wrapper-MIT.txt`.
+fn wrap_transcript_row(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
+    use ratatui::text::StyledGrapheme;
+    use std::collections::VecDeque;
+
+    let mut rows = Vec::new();
+    let mut pending_line = Vec::new();
+    let mut pending_word = Vec::new();
+    let mut whitespace: VecDeque<StyledGrapheme<'_>> = VecDeque::new();
+    let mut line_width = 0usize;
+    let mut word_width = 0usize;
+    let mut whitespace_width = 0usize;
+    let mut non_whitespace_previous = false;
+    let width = width.max(1);
+
+    for grapheme in line.styled_graphemes(Style::default()) {
+        let symbol_width = grapheme.symbol.width();
+        if symbol_width > width {
+            continue;
+        }
+        // Ratatui treats ZWSP as a break and NBSP as part of a word.
+        let is_whitespace = grapheme.symbol == "\u{200b}"
+            || (grapheme.symbol != "\u{00a0}" && grapheme.symbol.chars().all(char::is_whitespace));
+        if (non_whitespace_previous && is_whitespace)
+            || (pending_line.is_empty() && word_width + whitespace_width + symbol_width > width)
+        {
+            pending_line.extend(whitespace.drain(..));
+            line_width += whitespace_width;
+            pending_line.append(&mut pending_word);
+            line_width += word_width;
+            whitespace_width = 0;
+            word_width = 0;
+        }
+
+        // Include the incoming grapheme: checking only the accumulated width
+        // can admit a two-cell glyph one column beyond the physical row.
+        let original_wrap = line_width >= width
+            || (symbol_width > 0 && line_width + whitespace_width + word_width >= width);
+        let incoming_overflow =
+            symbol_width > 0 && line_width + whitespace_width + word_width + symbol_width > width;
+        if original_wrap || incoming_overflow {
+            let mut remaining_width = width.saturating_sub(line_width);
+            rows.push(owned_transcript_row(
+                std::mem::take(&mut pending_line),
+                line,
+            ));
+            line_width = 0;
+            while let Some(grapheme) = whitespace.front() {
+                let symbol_width = grapheme.symbol.width();
+                if symbol_width > remaining_width {
+                    break;
+                }
+                whitespace_width -= symbol_width;
+                remaining_width -= symbol_width;
+                whitespace.pop_front();
+            }
+            // The upstream rule skips incoming whitespace only when the line
+            // was already full. A wide whitespace grapheme that merely cannot
+            // fit the final column must be retained on the following line.
+            if original_wrap && is_whitespace && whitespace.is_empty() {
+                continue;
+            }
+        }
+
+        if is_whitespace {
+            whitespace_width += symbol_width;
+            whitespace.push_back(grapheme);
+        } else {
+            word_width += symbol_width;
+            pending_word.push(grapheme);
+        }
+        non_whitespace_previous = !is_whitespace;
+    }
+
+    if pending_line.is_empty() && pending_word.is_empty() && !whitespace.is_empty() {
+        rows.push(owned_transcript_row(Vec::new(), line));
+    }
+    pending_line.extend(whitespace);
+    pending_line.append(&mut pending_word);
+    if !pending_line.is_empty() {
+        rows.push(owned_transcript_row(pending_line, line));
+    } else if rows.is_empty() {
+        rows.push(owned_transcript_row(Vec::new(), line));
+    }
+    rows
+}
+
+fn owned_transcript_row(
+    graphemes: Vec<ratatui::text::StyledGrapheme<'_>>,
+    source: &Line<'static>,
+) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut last_ascii = false;
+    for grapheme in graphemes {
+        let ascii = grapheme.symbol.is_ascii();
+        if let Some(last) = spans.last_mut()
+            && last.style == grapheme.style
+            && last_ascii
+            && ascii
+        {
+            last.content.to_mut().push_str(grapheme.symbol);
+        } else {
+            spans.push(Span::styled(grapheme.symbol.to_string(), grapheme.style));
+            last_ascii = ascii;
+        }
+    }
+    let mut row = Line::from(spans).style(source.style);
+    row.alignment = source.alignment;
+    row
 }
 
 /// Visible content rows of the transcript surfaces. Both callers — the inline
