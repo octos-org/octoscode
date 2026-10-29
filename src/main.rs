@@ -48,6 +48,7 @@ fn install_terminal_restoring_panic_hook() {
 
         let mut stdout = std::io::stdout();
         let _ = execute!(stdout, DisableMouseCapture);
+        event_loop::release_keyboard_enhancement(&mut stdout);
         let _ = execute!(stdout, LeaveAlternateScreen);
         let _ = disable_raw_mode();
         let _ = execute!(stdout, DisableBracketedPaste, DisableFocusChange, Show);
