@@ -216,31 +216,31 @@ impl<'a> OlpMcpServer<'a> {
         let answer_path = self.answers_dir.join(format!("{ask_id}.json"));
         let deadline = Instant::now() + Duration::from_secs_f64(self.timeout_secs);
         while Instant::now() < deadline {
-            if let Ok(text) = std::fs::read_to_string(&answer_path) {
-                if let Ok(answer) = serde_json::from_str::<Value>(&text) {
-                    let reply = answer
-                        .get("answer")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    self.audit(
-                        "answer",
-                        &format!("id={ask_id} answered ({} chars)", reply.chars().count()),
-                    );
-                    // Archive the consumed pair (S3): questions/ holds only
-                    // unanswered asks; the audit trail keeps full history.
-                    let archive = self.consumed_dir.join(format!("{ts}-{ask_id}.json"));
-                    let _ = std::fs::write(
-                        &archive,
-                        serde_json::to_string_pretty(&json!({
-                            "question": payload, "answer": answer,
-                        }))
-                        .unwrap_or_default(),
-                    );
-                    let _ = std::fs::remove_file(&question_path);
-                    let _ = std::fs::remove_file(&answer_path);
-                    return reply;
-                }
+            if let Ok(text) = std::fs::read_to_string(&answer_path)
+                && let Ok(answer) = serde_json::from_str::<Value>(&text)
+            {
+                let reply = answer
+                    .get("answer")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                self.audit(
+                    "answer",
+                    &format!("id={ask_id} answered ({} chars)", reply.chars().count()),
+                );
+                // Archive the consumed pair (S3): questions/ holds only
+                // unanswered asks; the audit trail keeps full history.
+                let archive = self.consumed_dir.join(format!("{ts}-{ask_id}.json"));
+                let _ = std::fs::write(
+                    &archive,
+                    serde_json::to_string_pretty(&json!({
+                        "question": payload, "answer": answer,
+                    }))
+                    .unwrap_or_default(),
+                );
+                let _ = std::fs::remove_file(&question_path);
+                let _ = std::fs::remove_file(&answer_path);
+                return reply;
             }
             std::thread::sleep(Duration::from_secs_f64(self.poll_interval));
         }

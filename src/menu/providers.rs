@@ -326,10 +326,10 @@ fn help_menu(ctx: &MenuContext<'_>) -> MenuSpec {
 fn available_language_choices() -> Vec<crate::cli::Lang> {
     let mut langs = Vec::new();
     for locale in rust_i18n::available_locales!() {
-        if let Some(lang) = crate::cli::Lang::from_env_value(locale) {
-            if !langs.contains(&lang) {
-                langs.push(lang);
-            }
+        if let Some(lang) = crate::cli::Lang::from_env_value(locale)
+            && !langs.contains(&lang)
+        {
+            langs.push(lang);
         }
     }
     if langs.is_empty() {
@@ -7428,17 +7428,17 @@ fn status_mcp_value(status: &crate::model::SessionRuntimeStatus) -> Option<Strin
         return Some(status.mcp_servers.join(", "));
     }
 
-    if let Some(stamp) = status.runtime_policy_stamp.as_ref() {
-        if !stamp.mcp_servers.is_empty() {
-            return Some(
-                stamp
-                    .mcp_servers
-                    .iter()
-                    .map(RuntimePolicyMcpServer::label)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            );
-        }
+    if let Some(stamp) = status.runtime_policy_stamp.as_ref()
+        && !stamp.mcp_servers.is_empty()
+    {
+        return Some(
+            stamp
+                .mcp_servers
+                .iter()
+                .map(RuntimePolicyMcpServer::label)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
     }
 
     status.mcp_summary.as_ref().map(|summary| {

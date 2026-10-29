@@ -5751,14 +5751,13 @@ impl Store {
         // "done" screen leads with a relaunch hint). Advance to the first
         // selectable row so the cursor never starts parked on a dead row.
         let len = active_menu_item_len(self.state.active_menu.as_ref());
-        if len > 0 && !active_menu_index_selectable(self.state.active_menu.as_ref(), 0) {
-            if let Some(first) =
+        if len > 0
+            && !active_menu_index_selectable(self.state.active_menu.as_ref(), 0)
+            && let Some(first) =
                 (0..len).find(|&i| active_menu_index_selectable(self.state.active_menu.as_ref(), i))
-            {
-                if let Some(frame) = self.state.menu_stack.active_mut() {
-                    frame.selected_index = first;
-                }
-            }
+            && let Some(frame) = self.state.menu_stack.active_mut()
+        {
+            frame.selected_index = first;
         }
         if let Some(frame) = self.state.menu_stack.active() {
             self.state.status = t!("status.menu_label", id = frame.id.to_string()).into_owned();
@@ -6338,10 +6337,10 @@ impl Store {
                 // session: stamp it on the request itself so the transport's
                 // request-id correlation always carries attribution (the
                 // store drops unattributed results rather than guessing).
-                if let AppUiCommand::ProfileLlmSelect(params) = command.as_mut() {
-                    if params.session_id.is_none() {
-                        params.session_id = self.active_session().map(|session| session.id.clone());
-                    }
+                if let AppUiCommand::ProfileLlmSelect(params) = command.as_mut()
+                    && params.session_id.is_none()
+                {
+                    params.session_id = self.active_session().map(|session| session.id.clone());
                 }
                 // Launch-prompt rows send `session/open` directly from the
                 // menu. Remember their target so a `profile_unconfigured`
@@ -8116,18 +8115,18 @@ impl Store {
                             crate::model::APPUI_METHOD_TURN_STEER,
                         ));
                 if is_steer_error {
-                    if let Some(pending) = self.state.pending_turn_steers.pop_front() {
-                        if error.code != "invalid_result" {
-                            self.state.withdraw_steered_user_prompt(
-                                &pending.session_id,
-                                &pending.turn_id,
-                                &pending.prompt,
-                            );
-                            self.state
-                                .stage_prompt_back(&pending.session_id, pending.prompt);
-                            self.state.status = t!("status.message_staged").into_owned();
-                            return None;
-                        }
+                    if let Some(pending) = self.state.pending_turn_steers.pop_front()
+                        && error.code != "invalid_result"
+                    {
+                        self.state.withdraw_steered_user_prompt(
+                            &pending.session_id,
+                            &pending.turn_id,
+                            &pending.prompt,
+                        );
+                        self.state
+                            .stage_prompt_back(&pending.session_id, pending.prompt);
+                        self.state.status = t!("status.message_staged").into_owned();
+                        return None;
                     }
                     self.state.status = t!(
                         "status.error_code_message",
@@ -9767,18 +9766,18 @@ impl Store {
                             crate::model::APPUI_METHOD_TURN_STEER,
                         ));
                 if is_steer_error {
-                    if let Some(pending) = self.state.pending_turn_steers.pop_front() {
-                        if error.code != "invalid_result" {
-                            self.state.withdraw_steered_user_prompt(
-                                &pending.session_id,
-                                &pending.turn_id,
-                                &pending.prompt,
-                            );
-                            self.state
-                                .stage_prompt_back(&pending.session_id, pending.prompt);
-                            self.state.status = t!("status.message_staged").into_owned();
-                            return None;
-                        }
+                    if let Some(pending) = self.state.pending_turn_steers.pop_front()
+                        && error.code != "invalid_result"
+                    {
+                        self.state.withdraw_steered_user_prompt(
+                            &pending.session_id,
+                            &pending.turn_id,
+                            &pending.prompt,
+                        );
+                        self.state
+                            .stage_prompt_back(&pending.session_id, pending.prompt);
+                        self.state.status = t!("status.message_staged").into_owned();
+                        return None;
                     }
                     self.state.status = t!(
                         "status.error_code_message",
@@ -11773,15 +11772,14 @@ impl Store {
         if let Some(capabilities) = event.result.capabilities.clone() {
             self.state.set_capabilities(capabilities);
         }
-        if let Some(profile_id) = event.result.profile_id.as_deref() {
-            if let Some(session) = self
+        if let Some(profile_id) = event.result.profile_id.as_deref()
+            && let Some(session) = self
                 .state
                 .sessions
                 .iter_mut()
                 .find(|session| session.id == event.result.session_id)
-            {
-                session.profile_id = Some(profile_id.to_owned());
-            }
+        {
+            session.profile_id = Some(profile_id.to_owned());
         }
         // M22-D: snapshot the stamp BEFORE consuming the result so
         // we can compare it against the staged permission profile.
@@ -12006,36 +12004,36 @@ impl Store {
                 .find_session(&event.session_id)
                 .and_then(|session| session.live_reply.as_ref())
                 .map(|live_reply| live_reply.turn_id.clone());
-            if let (Some(turn_id), Some(current_turn)) = (event.turn_id.clone(), current_turn) {
-                if turn_id == current_turn {
-                    // The word normally arrives in `label` (the pinned
-                    // server's rotator shape); accept `message` as fallback
-                    // so a message-only status_word is stored rather than
-                    // silently dropped (codex on #512: with the status-line
-                    // gate, a message-only word had NO surface at all).
-                    match event
-                        .metadata
-                        .label
-                        .as_deref()
-                        .or(event.metadata.message.as_deref())
-                        .map(str::trim)
-                        .filter(|word| !word.is_empty())
-                    {
-                        Some(word) => {
-                            self.state.session_status_word.insert(
-                                event.session_id.clone(),
-                                (
-                                    turn_id,
-                                    word.to_owned(),
-                                    // Fresh word ⇒ the harness line replays
-                                    // the decrypt entrance from now.
-                                    std::time::Instant::now(),
-                                ),
-                            );
-                        }
-                        None => {
-                            self.state.session_status_word.remove(&event.session_id);
-                        }
+            if let (Some(turn_id), Some(current_turn)) = (event.turn_id.clone(), current_turn)
+                && turn_id == current_turn
+            {
+                // The word normally arrives in `label` (the pinned
+                // server's rotator shape); accept `message` as fallback
+                // so a message-only status_word is stored rather than
+                // silently dropped (codex on #512: with the status-line
+                // gate, a message-only word had NO surface at all).
+                match event
+                    .metadata
+                    .label
+                    .as_deref()
+                    .or(event.metadata.message.as_deref())
+                    .map(str::trim)
+                    .filter(|word| !word.is_empty())
+                {
+                    Some(word) => {
+                        self.state.session_status_word.insert(
+                            event.session_id.clone(),
+                            (
+                                turn_id,
+                                word.to_owned(),
+                                // Fresh word ⇒ the harness line replays
+                                // the decrypt entrance from now.
+                                std::time::Instant::now(),
+                            ),
+                        );
+                    }
+                    None => {
+                        self.state.session_status_word.remove(&event.session_id);
                     }
                 }
             }
@@ -12306,20 +12304,20 @@ impl Store {
                 // is only emitted when `permission/profile/set` is
                 // advertised, and the runtime policy stamp returned
                 // afterward is the source of truth.
-                if let Some(update) = self.state.onboarding.staged_permission_profile.clone() {
-                    if self.state.capabilities.as_ref().is_some_and(|caps| {
+                if let Some(update) = self.state.onboarding.staged_permission_profile.clone()
+                    && self.state.capabilities.as_ref().is_some_and(|caps| {
                         caps.supports_method(
                             crate::menu::registry::APPUI_METHOD_PERMISSION_PROFILE_SET,
                         )
-                    }) {
-                        return Some(AppUiCommand::SetPermissionProfile(
-                            octos_core::ui_protocol::PermissionProfileSetParams {
-                                session_id,
-                                update,
-                                runtime_mode: None,
-                            },
-                        ));
-                    }
+                    })
+                {
+                    return Some(AppUiCommand::SetPermissionProfile(
+                        octos_core::ui_protocol::PermissionProfileSetParams {
+                            session_id,
+                            update,
+                            runtime_mode: None,
+                        },
+                    ));
                 }
                 None
             }
@@ -14423,10 +14421,10 @@ impl Store {
         let Some(session) = self.find_session_mut(session_id) else {
             return;
         };
-        if let Some(task) = session.tasks.iter_mut().find(|task| task.id == task_id) {
-            if matches!(task_state_label(task.state), "pending" | "running") {
-                task.state = terminal_state;
-            }
+        if let Some(task) = session.tasks.iter_mut().find(|task| task.id == task_id)
+            && matches!(task_state_label(task.state), "pending" | "running")
+        {
+            task.state = terminal_state;
         }
     }
 
@@ -16431,10 +16429,10 @@ fn resolve_launch_workspace_cwd(
     allow_process_cwd_fallback: bool,
     process_cwd: impl FnOnce() -> Option<String>,
 ) -> Option<String> {
-    if let Some(explicit) = explicit {
-        if !explicit.trim().is_empty() {
-            return Some(explicit);
-        }
+    if let Some(explicit) = explicit
+        && !explicit.trim().is_empty()
+    {
+        return Some(explicit);
     }
     if !allow_process_cwd_fallback {
         return None;
@@ -32710,10 +32708,10 @@ workspace_root: None,
 
         let mut saw_status_read = false;
         while let Some(command) = store.state.dequeue_autonomy_hydration() {
-            if let AppUiCommand::ReadSessionStatus(params) = command {
-                if params.session_id == session_id {
-                    saw_status_read = true;
-                }
+            if let AppUiCommand::ReadSessionStatus(params) = command
+                && params.session_id == session_id
+            {
+                saw_status_read = true;
             }
         }
         assert!(
@@ -32775,10 +32773,10 @@ workspace_root: None,
 
         let mut saw_status_read = false;
         while let Some(command) = store.state.dequeue_autonomy_hydration() {
-            if let AppUiCommand::ReadSessionStatus(params) = command {
-                if params.session_id == session_id {
-                    saw_status_read = true;
-                }
+            if let AppUiCommand::ReadSessionStatus(params) = command
+                && params.session_id == session_id
+            {
+                saw_status_read = true;
             }
         }
         assert!(

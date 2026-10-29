@@ -155,16 +155,16 @@ fn self_test_ask_outer_roundtrip() {
         while Instant::now() < deadline {
             if let Ok(entries) = std::fs::read_dir(&questions) {
                 for entry in entries.flatten() {
-                    if let Ok(text) = std::fs::read_to_string(entry.path()) {
-                        if let Ok(payload) = serde_json::from_str::<Value>(&text) {
-                            let id = payload["id"].as_str().unwrap().to_string();
-                            std::fs::write(
-                                answers.join(format!("{id}.json")),
-                                json!({"answer": "外环答:走候选 b"}).to_string(),
-                            )
-                            .unwrap();
-                            return;
-                        }
+                    if let Ok(text) = std::fs::read_to_string(entry.path())
+                        && let Ok(payload) = serde_json::from_str::<Value>(&text)
+                    {
+                        let id = payload["id"].as_str().unwrap().to_string();
+                        std::fs::write(
+                            answers.join(format!("{id}.json")),
+                            json!({"answer": "外环答:走候选 b"}).to_string(),
+                        )
+                        .unwrap();
+                        return;
                     }
                 }
             }

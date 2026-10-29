@@ -226,12 +226,10 @@ impl Report {
                 out.push_str(" — ");
                 out.push_str(&check.detail);
             }
-            if verbose {
-                if let Some(value) = &check.value {
-                    out.push_str(" (");
-                    out.push_str(value);
-                    out.push(')');
-                }
+            if verbose && let Some(value) = &check.value {
+                out.push_str(" (");
+                out.push_str(value);
+                out.push(')');
             }
             out.push('\n');
             if let Some(fix) = &check.fix {

@@ -74,6 +74,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all-targets
 
+  msrv:
+    name: minimum Rust (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: msrv-1.88.0
+      # Compile platform-specific paths on the declared minimum; stable jobs
+      # above continue to execute the full test suite.
+      - run: cargo check --locked --all-targets
+
   clippy:
     name: clippy
     runs-on: ubuntu-22.04
@@ -95,7 +114,7 @@ jobs:
   ci-required:
     name: CI required
     if: always()
-    needs: [fmt, test, test-windows, clippy]
+    needs: [fmt, test, test-windows, msrv, clippy]
     runs-on: ubuntu-latest
     steps:
       - name: Fail if any required job failed or was cancelled

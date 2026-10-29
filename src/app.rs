@@ -2245,17 +2245,17 @@ fn tool_invocation_text(item: &ActivityItem) -> Option<String> {
     // (untruncated — callers like `shell_action_label` match on the full text,
     // and the row builder applies the display-width budget) instead of the JSON
     // envelope.
-    if is_shell_like_tool(&item.title) {
-        if let Some(command) = shell_command_from_args(arguments) {
-            return Some(command);
-        }
+    if is_shell_like_tool(&item.title)
+        && let Some(command) = shell_command_from_args(arguments)
+    {
+        return Some(command);
     }
     // Other tools with an object payload: show a compact `key=value` of the
     // first meaningful string/number field rather than the whole JSON blob.
-    if let Some(map) = arguments.as_object() {
-        if let Some(rendered) = first_meaningful_arg(map) {
-            return Some(single_line_invocation(&rendered));
-        }
+    if let Some(map) = arguments.as_object()
+        && let Some(rendered) = first_meaningful_arg(map)
+    {
+        return Some(single_line_invocation(&rendered));
     }
     // Last resort: bounded raw JSON (never an unbounded dump).
     serde_json::to_string(arguments)
@@ -2298,15 +2298,15 @@ fn humanize_args_echo(echo: &str, title: &str) -> String {
             serde_json::from_str::<serde_json::Value>(trimmed)
         {
             let value = serde_json::Value::Object(map);
-            if is_shell_like_tool(title) {
-                if let Some(command) = shell_command_from_args(&value) {
-                    return command;
-                }
+            if is_shell_like_tool(title)
+                && let Some(command) = shell_command_from_args(&value)
+            {
+                return command;
             }
-            if let Some(map) = value.as_object() {
-                if let Some(rendered) = first_meaningful_arg(map) {
-                    return single_line_invocation(&rendered);
-                }
+            if let Some(map) = value.as_object()
+                && let Some(rendered) = first_meaningful_arg(map)
+            {
+                return single_line_invocation(&rendered);
             }
         } else if is_shell_like_tool(title) {
             // Truncated echo (strict parse fails): scan for the command key
@@ -4574,10 +4574,10 @@ pub(crate) fn peer_dock_counts(app: &AppState) -> (usize, usize, usize, usize) {
         if app.session_blocked_reason(session_id).is_some() {
             blocked += 1;
         }
-        if let Some(n) = app.unread_turns.get(*session_id).copied() {
-            if n > 0 {
-                unread += 1;
-            }
+        if let Some(n) = app.unread_turns.get(*session_id).copied()
+            && n > 0
+        {
+            unread += 1;
         }
     }
     (total, live, blocked, unread)
@@ -5912,18 +5912,18 @@ fn status_bar_work_text(app: &AppState) -> String {
     // master agent stopped working even it said it would continue"). Shown only
     // while the master's OWN turn is settled — that idle window IS the one that
     // looks broken; mid-turn the spinner already says it is alive.
-    if app.active_turn().is_none() {
-        if let Some(fleet) = focused_master_fleet_wait(app) {
-            parts.push(
-                t!(
-                    "app.statusbar.awaiting_fleet",
-                    outstanding = fleet.outstanding_count(),
-                    total = fleet.total,
-                    peers = fleet.outstanding_label()
-                )
-                .into_owned(),
-            );
-        }
+    if app.active_turn().is_none()
+        && let Some(fleet) = focused_master_fleet_wait(app)
+    {
+        parts.push(
+            t!(
+                "app.statusbar.awaiting_fleet",
+                outstanding = fleet.outstanding_count(),
+                total = fleet.total,
+                peers = fleet.outstanding_label()
+            )
+            .into_owned(),
+        );
     }
     if active_session_has_pending_decision(app) {
         // Turn parked on YOUR decision; the approval/question card may have

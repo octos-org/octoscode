@@ -222,10 +222,10 @@ pub fn check(project: &Path) -> DutyState {
         Ok(path) => path,
         Err(_) => return DutyState::Error,
     };
-    if let Some(parent) = path.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
-            return DutyState::Error;
-        }
+    if let Some(parent) = path.parent()
+        && std::fs::create_dir_all(parent).is_err()
+    {
+        return DutyState::Error;
     }
     let file = match open_lock_file(&path, 0o600) {
         Ok(file) => file,

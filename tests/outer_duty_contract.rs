@@ -398,11 +398,11 @@ fn duty_grandchild_lingering_yields_vacant() {
     let wrapper = cmd.spawn().unwrap();
     let mut gpid = 0u32;
     for _ in 0..600 {
-        if let Ok(text) = std::fs::read_to_string(&ginfo) {
-            if let Ok(p) = text.trim().parse::<u32>() {
-                gpid = p;
-                break;
-            }
+        if let Ok(text) = std::fs::read_to_string(&ginfo)
+            && let Ok(p) = text.trim().parse::<u32>()
+        {
+            gpid = p;
+            break;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -487,11 +487,11 @@ fn duty_corrupt_metadata_keeps_ownership() {
     let sidecar = env.lock_path().with_extension("meta");
     let mut settled = false;
     for _ in 0..600 {
-        if let Ok(text) = std::fs::read_to_string(&sidecar) {
-            if text.contains("holder") || text.contains("signature") {
-                settled = true;
-                break;
-            }
+        if let Ok(text) = std::fs::read_to_string(&sidecar)
+            && (text.contains("holder") || text.contains("signature"))
+        {
+            settled = true;
+            break;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
