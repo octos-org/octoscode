@@ -1,3 +1,11 @@
+//! Transport drivers and protocol request handling.
+//!
+//! WebSocket receive queues have both event-count and payload-byte budgets.
+//! When either budget is full, the WebSocket task deliberately waits for the
+//! UI to consume or drop queued events instead of failing the connection.
+//! This backpressure wait has no independent timeout; explicit driver
+//! disconnect aborts the task, including a pending budget acquisition.
+
 use std::collections::{HashMap, VecDeque};
 
 use chrono::Utc;
@@ -32,17 +40,19 @@ use octos_core::ui_protocol::{
 use octos_core::{Message, SessionKey, TaskId};
 use serde_json::Value;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::{
     io::{AsyncWriteExt, BufReader},
     process::Command,
     runtime::Runtime,
-    sync::mpsc,
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc},
 };
 use tokio_tungstenite::{
-    connect_async,
+    connect_async_with_config,
     tungstenite::{
         Message as WsMessage, client::IntoClientRequest, handshake::client::Request as WsRequest,
+        protocol::WebSocketConfig,
     },
 };
 
@@ -82,6 +92,7 @@ use crate::{
 // replay/lifecycle frames) at turn completion. Keep the transport reader well
 // ahead of rendering so stdio stdout does not back up into the backend writer.
 const PROTOCOL_TRANSPORT_QUEUE_CAPACITY: usize = 4096;
+const WEBSOCKET_RECEIVE_QUEUE_BYTES: usize = 8 * MAX_TEXT_FRAME_BYTES;
 const MAX_PENDING_REQUESTS: usize = 256;
 const APPUI_METHOD_CLIENT_HELLO: &str = "client_hello";
 /// A scoped open is a correctness barrier, not an unbounded wait. On timeout
@@ -654,13 +665,52 @@ enum TransportEvent {
     },
 }
 
+struct QueuedWebSocketEvent {
+    event: TransportEvent,
+    _bytes: OwnedSemaphorePermit,
+}
+
+struct WebSocketEventSender {
+    tx: mpsc::Sender<QueuedWebSocketEvent>,
+    bytes: Arc<Semaphore>,
+}
+
+impl WebSocketEventSender {
+    async fn send(&self, event: TransportEvent) -> std::result::Result<(), ()> {
+        let length = match &event {
+            TransportEvent::Frame(TransportFrame::Text(text)) => text.len(),
+            TransportEvent::Frame(TransportFrame::Binary(bytes) | TransportFrame::Ping(bytes)) => {
+                bytes.len()
+            }
+            TransportEvent::Disconnected(message) => message.len(),
+            TransportEvent::Error { code, message, .. } => code.len() + message.len(),
+            TransportEvent::Frame(TransportFrame::Pong | TransportFrame::Close) => 0,
+        }
+        .max(1);
+        if length > WEBSOCKET_RECEIVE_QUEUE_BYTES {
+            return Err(());
+        }
+        let permit = Arc::clone(&self.bytes)
+            .acquire_many_owned(length as u32)
+            .await
+            .map_err(|_| ())?;
+        self.tx
+            .send(QueuedWebSocketEvent {
+                event,
+                _bytes: permit,
+            })
+            .await
+            .map_err(|_| ())
+    }
+}
+
 struct WebSocketTransportDriver {
     shared: Option<crate::shared_instance::Launch>,
     endpoint: String,
     auth_token: Option<String>,
     profile_id: Option<String>,
     command_tx: Option<mpsc::Sender<TransportCommand>>,
-    event_rx: Option<mpsc::Receiver<TransportEvent>>,
+    event_rx: Option<mpsc::Receiver<QueuedWebSocketEvent>>,
     task: Option<tokio::task::JoinHandle<()>>,
     connected: bool,
 }
@@ -933,12 +983,16 @@ impl WebSocketTransportDriver {
         // otherwise freeze the interface for the OS TCP timeout.
         let (stream, _) = runtime
             .block_on(async {
-                tokio::time::timeout(WS_CONNECT_TIMEOUT, connect_async(request))
-                    .await
-                    .map_err(|_| {
-                        eyre!("connect timed out after {}s", WS_CONNECT_TIMEOUT.as_secs())
-                    })?
-                    .map_err(eyre::Report::from)
+                let config = WebSocketConfig::default()
+                    .max_message_size(Some(MAX_TEXT_FRAME_BYTES))
+                    .max_frame_size(Some(MAX_TEXT_FRAME_BYTES));
+                tokio::time::timeout(
+                    WS_CONNECT_TIMEOUT,
+                    connect_async_with_config(request, Some(config), false),
+                )
+                .await
+                .map_err(|_| eyre!("connect timed out after {}s", WS_CONNECT_TIMEOUT.as_secs()))?
+                .map_err(eyre::Report::from)
             })
             .wrap_err_with(|| {
                 format!("failed to connect UI protocol endpoint {}", self.endpoint)
@@ -946,6 +1000,13 @@ impl WebSocketTransportDriver {
         let (mut sink, mut stream) = stream.split();
         let (command_tx, mut command_rx) = mpsc::channel(PROTOCOL_TRANSPORT_QUEUE_CAPACITY);
         let (event_tx, event_rx) = mpsc::channel(PROTOCOL_TRANSPORT_QUEUE_CAPACITY);
+
+        // A count limit alone permits gigabytes of queued payload. Permits
+        // stay with each event until the UI consumes it, providing byte backpressure.
+        let event_tx = WebSocketEventSender {
+            tx: event_tx,
+            bytes: Arc::new(Semaphore::new(WEBSOCKET_RECEIVE_QUEUE_BYTES)),
+        };
 
         let task = runtime.spawn(async move {
             loop {
@@ -1023,8 +1084,13 @@ impl WebSocketTransportDriver {
                             }
                             Ok(WsMessage::Frame(_)) => {}
                             Err(err) => {
+                                let code = if matches!(err, tokio_tungstenite::tungstenite::Error::Capacity(_)) {
+                                    "frame_too_large"
+                                } else {
+                                    "transport_read"
+                                };
                                 let _ = event_tx.send(TransportEvent::Error {
-                                    code: "transport_read".into(),
+                                    code: code.into(),
                                     message: format!("failed to read UI protocol WebSocket message: {err}"),
                                     disconnect: true,
                                 }).await;
@@ -1076,7 +1142,7 @@ impl WebSocketTransportDriver {
         };
 
         match event_rx.try_recv() {
-            Ok(event) => {
+            Ok(QueuedWebSocketEvent { event, .. }) => {
                 if matches!(
                     event,
                     TransportEvent::Disconnected(_)
@@ -2258,6 +2324,10 @@ impl ProtocolAppUiBackend {
     }
 
     fn decode_rpc_text(&mut self, text: &str) -> Result<Option<ClientEvent>> {
+        // Check before response_request_id allocates a full JSON value.
+        if text.len() > MAX_TEXT_FRAME_BYTES {
+            return self.protocol.decode_rpc_text(text);
+        }
         let response_request = response_request_id(text).and_then(|request_id| {
             self.protocol
                 .pending_requests
@@ -6935,6 +7005,136 @@ mod tests {
         thread,
         time::{Duration, Instant},
     };
+
+    fn receive_websocket_fixture(messages: Vec<WsMessage>) -> Vec<TransportEvent> {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind websocket fixture");
+        listener.set_nonblocking(true).expect("nonblocking");
+        let address = listener.local_addr().expect("address");
+        let runtime = Runtime::new().expect("runtime");
+        let server = runtime.spawn(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).expect("listener");
+            let (socket, _) = listener.accept().await.expect("accept");
+            let mut socket = tokio_tungstenite::accept_async(socket)
+                .await
+                .expect("handshake");
+            for message in messages {
+                // A rejected frame may close the connection before a later fragment.
+                if socket.send(message).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let mut driver = WebSocketTransportDriver::new(format!("ws://{address}/ui"), None, None);
+        driver.connect(&runtime).expect("connect");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut events = Vec::new();
+        while Instant::now() < deadline {
+            if let Some(event) = driver.poll_event().expect("poll") {
+                let terminal = matches!(
+                    event,
+                    TransportEvent::Disconnected(_)
+                        | TransportEvent::Error {
+                            disconnect: true,
+                            ..
+                        }
+                );
+                events.push(event);
+                if terminal {
+                    break;
+                }
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        driver.disconnect();
+        runtime.block_on(server).expect("fixture exits");
+        events
+    }
+
+    #[test]
+    fn websocket_receive_rejects_oversized_text_before_queueing() {
+        let events = receive_websocket_fixture(vec![WsMessage::Text(
+            "x".repeat(MAX_TEXT_FRAME_BYTES + 1).into(),
+        )]);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, TransportEvent::Frame(TransportFrame::Text(_))))
+        );
+        assert!(events.iter().any(|event| matches!(event, TransportEvent::Error { code, disconnect: true, .. } if code == "frame_too_large")));
+    }
+
+    #[test]
+    fn websocket_receive_bounds_fragmented_binary_messages() {
+        use tokio_tungstenite::tungstenite::protocol::frame::{
+            Frame,
+            coding::{Data, OpCode},
+        };
+        let half = MAX_TEXT_FRAME_BYTES / 2 + 1;
+        let events = receive_websocket_fixture(vec![
+            WsMessage::Frame(Frame::message(
+                vec![b'x'; half],
+                OpCode::Data(Data::Binary),
+                false,
+            )),
+            WsMessage::Frame(Frame::message(
+                vec![b'x'; half],
+                OpCode::Data(Data::Continue),
+                true,
+            )),
+        ]);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, TransportEvent::Frame(TransportFrame::Binary(_))))
+        );
+        assert!(events.iter().any(|event| matches!(event, TransportEvent::Error { code, disconnect: true, .. } if code == "frame_too_large")));
+    }
+
+    #[test]
+    fn websocket_receive_allows_message_at_protocol_limit() {
+        let events = receive_websocket_fixture(vec![WsMessage::Text(
+            "x".repeat(MAX_TEXT_FRAME_BYTES).into(),
+        )]);
+        assert!(events.iter().any(|event| matches!(event, TransportEvent::Frame(TransportFrame::Text(text)) if text.len() == MAX_TEXT_FRAME_BYTES)));
+    }
+
+    #[test]
+    fn websocket_receive_queue_releases_byte_budget_only_when_consumed() {
+        Runtime::new().unwrap().block_on(async {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+            let bytes = Arc::new(Semaphore::new(MAX_TEXT_FRAME_BYTES));
+            let sender = WebSocketEventSender {
+                tx,
+                bytes: Arc::clone(&bytes),
+            };
+            sender
+                .send(TransportEvent::Frame(TransportFrame::Text(
+                    "a".repeat(MAX_TEXT_FRAME_BYTES),
+                )))
+                .await
+                .unwrap();
+            assert_eq!(bytes.available_permits(), 0);
+            let second = sender.send(TransportEvent::Frame(TransportFrame::Binary(
+                vec![b'b'; MAX_TEXT_FRAME_BYTES],
+            )));
+            tokio::pin!(second);
+            assert!(matches!(
+                futures::poll!(second.as_mut()),
+                std::task::Poll::Pending
+            ));
+            let first = rx.try_recv().unwrap();
+            assert_eq!(
+                bytes.available_permits(),
+                0,
+                "dequeue does not release an event still owned by its caller"
+            );
+            drop(first);
+            second.await.unwrap();
+            assert_eq!(bytes.available_permits(), 0);
+            drop(rx.try_recv().unwrap());
+            assert_eq!(bytes.available_permits(), MAX_TEXT_FRAME_BYTES);
+        });
+    }
 
     #[test]
     fn stdio_target_label_redacts_inline_secret_env_assignments() {
