@@ -3,6 +3,7 @@ use eyre::{Result, WrapErr, eyre};
 use serde::Deserialize;
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -633,8 +634,62 @@ pub fn merge_into_config(
     let mut serialized =
         serde_json::to_string_pretty(&root).wrap_err("failed to serialize TUI config")?;
     serialized.push('\n');
-    fs::write(path, serialized)
-        .wrap_err_with(|| format!("failed to write TUI config {}", path.display()))
+    write_config_atomically(path, serialized.as_bytes())
+}
+
+/// Publish a fully-written private sibling instead of truncating the active
+/// config. `persist` replaces existing files on Windows as well as Unix; an
+/// error leaves the destination intact and cleans up the temporary file.
+fn write_config_atomically(path: &Path, contents: &[u8]) -> Result<()> {
+    let destination = match fs::symlink_metadata(path) {
+        // Keep user-managed dotfile symlinks: replace their resolved target,
+        // not the symlink itself. A dangling symlink is an error, not a reason
+        // to silently discard the user's link.
+        Ok(metadata) if metadata.file_type().is_symlink() => fs::canonicalize(path)
+            .wrap_err_with(|| t!("config_privacy.resolve_failed", path = path.display()))?,
+        Ok(_) => path.to_path_buf(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
+        Err(error) => {
+            return Err(error)
+                .wrap_err_with(|| t!("config_privacy.inspect_failed", path = path.display()));
+        }
+    };
+    // Atomic replacement is controlled by the directory permission on Unix.
+    // Respect a deliberately read-only existing file rather than bypassing it.
+    if fs::metadata(&destination).is_ok_and(|metadata| metadata.permissions().readonly()) {
+        return Err(eyre!(
+            "{}",
+            t!("config_privacy.read_only", path = path.display())
+        ));
+    }
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".octoscode-config-")
+        .tempfile_in(parent)
+        .wrap_err_with(|| t!("config_privacy.create_failed", path = parent.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(fs::Permissions::from_mode(0o600))
+            .wrap_err_with(|| t!("config_privacy.restrict_failed"))?;
+    }
+    temporary
+        .write_all(contents)
+        .wrap_err_with(|| t!("config_privacy.write_failed"))?;
+    temporary
+        .as_file()
+        .sync_all()
+        .wrap_err_with(|| t!("config_privacy.sync_failed"))?;
+    temporary
+        .persist(&destination)
+        .map_err(|error| error.error)
+        .wrap_err_with(|| t!("config_privacy.replace_failed", path = path.display()))?;
+    Ok(())
 }
 
 /// The clap `Command` for the top-level TUI args — exposed so `octoscode config`

@@ -2012,3 +2012,17 @@ question_header:
   sending: "Sending"
   expand: " F2 · Full question "
   close: " ↑↓/PgUp/PgDn scroll · Esc/F2 close "
+
+config_privacy:
+  redacted: "[REDACTED]"
+  show_help: "Print the saved config with authentication tokens redacted (the default)"
+  show_secrets_help: "Print authentication tokens verbatim (default: redact them)"
+  resolve_failed: "failed to resolve TUI config %{path}"
+  inspect_failed: "failed to inspect TUI config %{path}"
+  read_only: "TUI config %{path} is read-only"
+  create_failed: "failed to create config temporary file in %{path}"
+  restrict_failed: "failed to restrict config temporary file permissions"
+  write_failed: "failed to write config temporary file"
+  sync_failed: "failed to sync config temporary file"
+  replace_failed: "failed to replace TUI config %{path}"
+  display_parse_failed: "failed to parse config %{path} for display"

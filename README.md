@@ -629,6 +629,10 @@ settings loaded by `octos serve`, and the TUI config rejects them.
 `--config FILE` points at a different one. CLI flags win on conflict. Print the
 path with `octoscode config path`.
 
+`octoscode config` (or `config show`) masks saved authentication tokens by
+default. Use `octoscode config show --show-secrets` only when you explicitly
+need their original values; keep that output out of shared diagnostics.
+
 ```json
 {
   "mode": "protocol",
@@ -649,6 +653,10 @@ path with `octoscode config path`.
 back into this file (merging — it never clobbers transport keys like
 `stdio_command`); without `--config` it falls back to
 `~/.config/octoscode/config.json`.
+
+Saving uses a private temporary file and atomic replacement, preserving the
+previous config if publication fails. On Unix, the saved file is owner-only
+(`0600`), including when replacing an older file with broader permissions.
 
 To attach to a running server instead, swap the transport key (the file is
 strict JSON — unknown keys are rejected, and there are no comments):

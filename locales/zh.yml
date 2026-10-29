@@ -1959,3 +1959,17 @@ question_header:
   sending: "发送中"
   expand: " F2 · 完整问题 "
   close: " ↑↓/PgUp/PgDn 滚动 · Esc/F2 关闭 "
+
+config_privacy:
+  redacted: "[已隐藏]"
+  show_help: "显示已保存配置，默认隐藏认证令牌"
+  show_secrets_help: "显示认证令牌原文（默认隐藏）"
+  resolve_failed: "无法解析 TUI 配置路径 %{path}"
+  inspect_failed: "无法检查 TUI 配置 %{path}"
+  read_only: "TUI 配置 %{path} 为只读"
+  create_failed: "无法在 %{path} 创建配置临时文件"
+  restrict_failed: "无法限制配置临时文件权限"
+  write_failed: "无法写入配置临时文件"
+  sync_failed: "无法同步配置临时文件"
+  replace_failed: "无法替换 TUI 配置 %{path}"
+  display_parse_failed: "无法解析要显示的配置 %{path}"
