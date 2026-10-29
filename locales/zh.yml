@@ -1953,6 +1953,9 @@ workspace_team:
   hint: "↑/↓ 选择 · Enter 发消息或指定协调者 · Esc 关闭"
   list_first: "请先运行 /agents，再选择协调者。"
 
+backend_install:
+  checksum_required: "无法获取 Octos 安装包校验值，已停止安装。请重试或手动安装后端。"
+
 question_header:
   latest: "你的问题"
   queued: "已排队"

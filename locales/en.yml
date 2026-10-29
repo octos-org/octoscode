@@ -2006,6 +2006,9 @@ workspace_team:
   hint: "↑/↓ select · Enter message or assign coordinator · Esc close"
   list_first: "Run /agents first, then select a coordinator."
 
+backend_install:
+  checksum_required: "Failed to fetch the Octos bundle checksum; refusing to install. Retry or install the backend manually."
+
 question_header:
   latest: "You"
   queued: "Queued"
