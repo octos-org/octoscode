@@ -1,5 +1,14 @@
 use std::time::Instant;
 
+// A new AppState (including snapshot replacement) must never reuse a prior
+// state's cache generation merely because it has the same session and length.
+static NEXT_COMMITTED_HISTORY_REVISION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+fn next_committed_history_revision() -> u64 {
+    NEXT_COMMITTED_HISTORY_REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 use octos_core::app_ui::{APP_UI_API_V1, AppUiLiveReply, AppUiSession, AppUiSnapshot, AppUiTask};
 use octos_core::ui_protocol::{
     ApprovalDecision, ApprovalId, ApprovalRenderHints, ApprovalRequestedEvent,
@@ -4695,6 +4704,9 @@ pub struct AppState {
     /// also drives the `*` current marker in the `/theme` menu.
     pub theme: crate::cli::ThemeName,
     pub sessions: Vec<SessionView>,
+    /// Maintained by production committed-message mutators, not by raw Vec access.
+    /// Only the internal event-loop cache opts into this contract.
+    committed_history_revision: u64,
     /// Latest whole-job orchestration status per session (`session/orchestration`).
     /// Drives the composer top-border job indicator; absent/`active:false` hides it.
     pub orchestration: std::collections::HashMap<SessionKey, SessionOrchestrationEvent>,
@@ -7118,6 +7130,14 @@ impl AppState {
         Self::new_with_panes(sessions, selected_session, status, target, readonly, panes)
     }
 
+    pub(crate) fn committed_history_revision(&self) -> u64 {
+        self.committed_history_revision
+    }
+
+    pub(crate) fn mark_committed_history_changed(&mut self) {
+        self.committed_history_revision = next_committed_history_revision();
+    }
+
     fn new_with_panes(
         sessions: Vec<SessionView>,
         selected_session: usize,
@@ -7138,6 +7158,7 @@ impl AppState {
         Self {
             theme: crate::cli::ThemeName::default(),
             sessions,
+            committed_history_revision: next_committed_history_revision(),
             orchestration: std::collections::HashMap::new(),
             session_usage: std::collections::HashMap::new(),
             session_context_window: std::collections::HashMap::new(),
@@ -8263,6 +8284,7 @@ impl AppState {
                 .cloned()
                 .unwrap_or_else(|| Message::user(optimistic.content.clone()));
             session.messages.insert(insert_at, message);
+            self.committed_history_revision = next_committed_history_revision();
             inserted_indices.push(insert_at);
             for ((owner_session, _), owner) in &mut self.background_completion_rows {
                 if owner_session == &session.id && owner.index >= insert_at {
@@ -8462,6 +8484,7 @@ impl AppState {
             })
         {
             session.messages.remove(row);
+            self.committed_history_revision = next_committed_history_revision();
             self.background_completion_row_removed(session_id, row);
         }
     }
@@ -8570,6 +8593,7 @@ impl AppState {
             })
         {
             session.messages.remove(row);
+            self.committed_history_revision = next_committed_history_revision();
             self.background_completion_row_removed(session_id, row);
         }
     }
@@ -8686,6 +8710,7 @@ impl AppState {
         let mut message = Message::user(text).with_thread_id(octos_core::ThreadId::new(thread_id));
         message.media = media;
         self.sessions[session_index].messages.push(message);
+        self.mark_committed_history_changed();
     }
 
     pub fn record_turn_prompt_anchor_from_latest_user(

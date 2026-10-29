@@ -303,7 +303,7 @@ pub fn run(cli: Cli) -> Result<()> {
         store.state.onboarding.profiles_data_dir = Some(data_dir.to_string_lossy().into_owned());
     }
     let mut input_state = TerminalInputState::default();
-    let mut scrollback = ScrollbackTracker::new();
+    let mut scrollback = ScrollbackTracker::with_committed_revision_cache();
     // Force a draw on the first iteration.
     let mut dirty = true;
     // Whether the LAST drawn frame reserved a slash/command menu row block. Used
