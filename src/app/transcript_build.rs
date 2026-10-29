@@ -3807,40 +3807,6 @@ pub(super) fn push_inline_diff_preview(
         }
 
         if !preview.files.is_empty() {
-            // Footer hint: hunk navigation/staging, plus the view-mode toggle
-            // — or, when the transcript is too narrow to split, why the toggle
-            // is disabled.
-            //
-            // The hint advertises the Alt binds, NOT the plain `[`/`]`/`c`/`v`
-            // keys. The plain keys are gated on `focus != Composer` (#485,
-            // because a bare letter cannot be both text and a command), and
-            // the composer is the usual focus while a preview is open — so a
-            // hint naming them would be wrong exactly when it is read. The Alt
-            // family works from any focus. This function has no access to
-            // focus, so a focus-aware hint would mean plumbing it through both
-            // call sites for a string; advertising the universally-correct
-            // binds is the simpler honest answer.
-            let mut hint = t!("app.diff.select_stage_hint").into_owned();
-            hint.push_str(" | ");
-            if side_by_side_available {
-                hint.push_str(&if diff.side_by_side {
-                    t!("app.diff.toggle_unified_hint")
-                } else {
-                    t!("app.diff.toggle_side_by_side_hint")
-                });
-            } else {
-                hint.push_str(&t!(
-                    "app.diff.side_by_side_too_narrow",
-                    min = crate::model::DIFF_SIDE_BY_SIDE_MIN_WIDTH
-                ));
-            }
-            lines.push(Line::from(vec![
-                Span::styled("    ", palette.muted()),
-                Span::styled(hint, palette.selected()),
-            ]));
-        }
-
-        if !preview.files.is_empty() {
             let file_idx = diff
                 .selected_file
                 .min(preview.files.len().saturating_sub(1));

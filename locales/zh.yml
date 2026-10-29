@@ -174,13 +174,11 @@ app:
       operation: "操作"
       preview: "预览"
   diff:
+    workspace: "工作区未提交改动"
+    turn: "会话改动预览"
     title: "差异预览"
     inline_patch: "内联补丁"
     loading: "正在加载差异预览……"
-    select_stage_hint: "Alt+H/Ctrl+N 下一个代码块 | Alt+C/Ctrl+X 暂存所选差异上下文"
-    toggle_side_by_side_hint: "Alt+V/Ctrl+V 并排视图"
-    toggle_unified_hint: "Alt+V/Ctrl+V 统一视图"
-    side_by_side_too_narrow: "并排视图需要至少 %{min} 列"
     more_files_hidden: "还有 %{count} 个文件已隐藏"
     line_unavailable: "此更改无可用的行级差异"
     more_lines_hidden: "还有 %{count} 行差异已隐藏（Ctrl+O 展开）"
@@ -295,7 +293,8 @@ app:
     ctrl_o_expand: "Ctrl+O 展开"
     task_output_modal: "o 查看更多 | PgUp/PgDn | Esc 关闭"
     scroll_modal: "PgUp/PgDn | Esc 关闭"
-    diff_preview_modal: "j/k 滚动 | PgUp/PgDn | [/] 代码块 | v 视图 | c 暂存 | Esc 收起"
+    diff_files: "↑↓ 选择 · Enter 打开 · Tab 切换范围 · r 刷新 · Esc 关闭"
+    diff_preview_modal: "↑↓ 滚动 · c 引用到提问 · Tab 切换范围 · Esc 返回"
   plan:
     live: "实时"
   workspace:
@@ -624,6 +623,8 @@ command:
     desc: 配置档案专属的 LLM 供应商和路由
   ps:
     desc: 显示后台任务和进程状态
+  diff:
+    desc: "浏览改动文件（/diff [turn|workspace]）"
   review:
     desc: 启动后端代码审查工作流
   skills:
@@ -1771,6 +1772,7 @@ status:
   task_control_unavailable: "此服务器不支持任务控制；取消已禁用"
   requested_cancel: "已请求取消：%{title}"
   no_session_for_diff: "没有用于差异预览的活动会话"
+  workspace_diff_unavailable: "此服务器不支持工作区改动，请更新 Octos。"
   no_diff_preview_id: "所选任务没有可用的差异预览 id"
   requested_diff_preview: "已请求差异预览"
   approval_pane_hidden: "审批面板已隐藏；在再次显示审批前禁用自动打开"
@@ -1789,7 +1791,6 @@ status:
   diff_view_too_narrow: "终端宽度不足，无法并排显示差异（需要至少 %{min} 列）"
   diff_overlay_expanded: "差异预览已全屏展开（Esc 收起）"
   diff_overlay_collapsed: "差异预览已收起为内联显示"
-  staged_diff_context: "已为下一回合暂存所选差异代码块上下文：%{path}"
   added_diff_context: "已将所选差异代码块上下文添加到输入框：%{path}"
   accepted: "已接受"
   rejected: "已拒绝"
