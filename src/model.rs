@@ -921,6 +921,7 @@ pub enum AppUiCommand {
     ProfileSkillsRemove(ProfileSkillsRemoveParams),
     // M15-E backend-owned autonomy surface (UPCR-2026-021).
     ListAgents(AgentListParams),
+    WorkspaceTeam(crate::workspace_team::Command),
     ReadAgentStatus(AgentStatusReadParams),
     ReadAgentOutput(AgentOutputReadParams),
     ListAgentArtifacts(AgentArtifactListParams),
@@ -1024,6 +1025,7 @@ impl AppUiCommand {
             Self::ProfileSkillsInstall(_) => APPUI_METHOD_PROFILE_SKILLS_INSTALL,
             Self::ProfileSkillsRemove(_) => APPUI_METHOD_PROFILE_SKILLS_REMOVE,
             Self::ListAgents(_) => APPUI_METHOD_AGENT_LIST,
+            Self::WorkspaceTeam(command) => command.method(),
             Self::ReadAgentStatus(_) => APPUI_METHOD_AGENT_STATUS_READ,
             Self::ReadAgentOutput(_) => APPUI_METHOD_AGENT_OUTPUT_READ,
             Self::ListAgentArtifacts(_) => APPUI_METHOD_AGENT_ARTIFACT_LIST,
@@ -1198,10 +1200,12 @@ pub struct ModelSelectResult {
     pub selected: ModelStatus,
     #[serde(default)]
     pub applied: bool,
-    /// The selection was persisted, but the currently running profile is
-    /// startup-pinned and cannot use it until the backend restarts.
     #[serde(default)]
     pub restart_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_disposition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_policy_stamp: Option<RuntimePolicyStamp>,
 }
@@ -4683,6 +4687,8 @@ impl ScrollToBottomHit {
 
 #[derive(Debug, Clone)]
 pub struct AppState {
+    pub workspace_teams: std::collections::HashMap<SessionKey, crate::workspace_team::Snapshot>,
+    pub workspace_launch_topic: String,
     /// Active TUI palette, chosen at launch (`--theme`/config) and switchable
     /// at runtime via `/theme`. The event loop derives the per-frame `Palette`
     /// from this field, so a `/theme` change repaints on the next frame; it
@@ -4865,25 +4871,17 @@ pub struct AppState {
     /// key is read, so it is stale by at most one frame — the same discipline as
     /// [`AppState::agent_view_scroll_max`]).
     pub goal_objective_folded_effective: std::cell::Cell<bool>,
-    /// `--scroll-mode pinned`: capture the mouse in the chat flow so wheel-up
-    /// auto-enters the pager (composer stays pinned) and wheel-down at the
-    /// pager bottom drops back to the inline tail. False = `native` (default):
-    /// the wheel belongs to the terminal and native selection/copy stay intact.
-    pub pinned_scroll: bool,
+    /// Chat presentation, seeded from launch settings by the event loop.
+    pub scroll_mode: crate::cli::ScrollMode,
+    /// Read-only expansion of the fixed question; separate from chat scrolling.
+    pub question_detail: QuestionDetailState,
     /// Vim modal editing for the composer (opt-in via `--vim-mode`/config
     /// `vim-mode`/`/vimmode`). When false the composer behaves exactly as a
     /// plain text field (equivalent to always-Insert); `composer_mode` is only
     /// consulted when this is true.
     pub vim_mode: bool,
-    /// octos#1807 steering as an OPT-IN: when true, a prompt typed while a
-    /// turn is running is injected into the LIVE turn via `turn/steer`. The
-    /// default is false — mid-turn prompts stage FIFO in `pending_messages`
-    /// and each drains as its OWN turn at turn-end, so every prompt is
-    /// processed to completion in the order it was typed. Steering makes the
-    /// model treat the newest instruction as superseding the work in
-    /// progress (the steer lands as a bare `role: user` message mid-loop),
-    /// which reads as "interrupt and pivot" — the right tool for a course
-    /// correction, the wrong default for "also do this next".
+    /// Enter steers an active turn by default. Tab queues a separate turn;
+    /// `/steer off` restores FIFO submission for every prompt.
     pub steer_mid_turn: bool,
     /// Current composer editing mode under Vim. Defaults to `Insert` so typing
     /// works immediately when Vim is enabled; `Esc` switches to `Normal`.
@@ -6018,6 +6016,15 @@ impl UserQuestionPickerState {
             .collect();
         UserQuestionRespondParams::new(self.session_id.clone(), self.question_id.clone(), answers)
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QuestionDetailState {
+    pub active: bool,
+    pub title: String,
+    pub content: String,
+    pub scroll: usize,
+    pub max_scroll: std::cell::Cell<usize>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -7156,9 +7163,12 @@ impl AppState {
             peer_dock_collapsed: false,
             goal_objective_fold: GoalObjectiveFold::default(),
             goal_objective_folded_effective: std::cell::Cell::new(false),
-            pinned_scroll: false,
+            // Keep the transport/model constructor presentation-neutral. The
+            // event loop applies the resolved CLI/config mode before drawing.
+            scroll_mode: crate::cli::ScrollMode::Native,
+            question_detail: QuestionDetailState::default(),
             vim_mode: false,
-            steer_mid_turn: false,
+            steer_mid_turn: true,
             composer_mode: ComposerMode::Insert,
             composer_vim_pending: None,
             ctrl_c_quit_armed: false,
@@ -7246,6 +7256,8 @@ impl AppState {
             active_menu: None,
             capabilities: None,
             onboarding: OnboardingWizardState::default(),
+            workspace_teams: std::collections::HashMap::new(),
+            workspace_launch_topic: format!("coding-{}", crate::workspace_team::occurrence()),
             permission_profiles: Vec::new(),
             session_runtime_statuses: Vec::new(),
             profile_llm_catalog: None,
@@ -9246,6 +9258,7 @@ impl AppState {
         self.stash_pending_messages_for_selected_session();
         self.composer_history.reset_navigation(); // end history browse on switch
         self.selected_session = index;
+        self.question_detail = QuestionDetailState::default();
         self.selected_task = 0;
         // The new session has its own (or no) sub-agents; a carried-over agent
         // selection would point at the wrong session's agent.
@@ -12076,6 +12089,7 @@ mod tests {
         use octos_core::ui_protocol::SessionOpenParams;
         let open = |id: &str| {
             AppUiCommand::OpenSession(SessionOpenParams {
+                client_commands: None,
                 session_id: SessionKey(id.into()),
                 topic: None,
                 profile_id: None,
@@ -12087,6 +12101,7 @@ mod tests {
         let mut state = AppState::new(Vec::new(), 0, "ready".into(), None, false);
         for _ in 0..16 {
             state.enqueue_autonomy_hydration(AppUiCommand::ListSessions(SessionListParams {
+                profile_id: None,
                 cwd: None,
             }));
         }
@@ -12127,12 +12142,14 @@ mod tests {
         let mut state = AppState::new(Vec::new(), 0, "ready".into(), None, false);
         for _ in 0..15 {
             state.enqueue_autonomy_hydration(AppUiCommand::ListSessions(SessionListParams {
+                profile_id: None,
                 cwd: None,
             }));
         }
         state
             .pending_autonomy_hydration
             .push_front(AppUiCommand::OpenSession(SessionOpenParams {
+                client_commands: None,
                 session_id: session_id.clone(),
                 topic: None,
                 profile_id: None,
@@ -12147,6 +12164,7 @@ mod tests {
         );
 
         state.enqueue_autonomy_hydration(AppUiCommand::SubmitPrompt(TurnStartParams {
+            origin: None,
             tool_context: None,
             session_id: session_id.clone(),
             turn_id: TurnId::new(),
@@ -12191,6 +12209,7 @@ mod tests {
         let mut state = AppState::new(Vec::new(), 0, "ready".into(), None, false);
         for index in 0..16 {
             state.enqueue_autonomy_hydration(AppUiCommand::OpenSession(SessionOpenParams {
+                client_commands: None,
                 session_id: SessionKey(format!("local:{index}")),
                 topic: None,
                 profile_id: None,
@@ -12240,6 +12259,7 @@ mod tests {
             }));
         }
         state.enqueue_local_session_open_front(AppUiCommand::OpenSession(SessionOpenParams {
+            client_commands: None,
             session_id: SessionKey("local:active".into()),
             topic: None,
             profile_id: None,
@@ -13193,7 +13213,10 @@ mod tests {
         // historical empty object `{}`, byte-identical to what old clients
         // sent, so an OLD server (no per-project session storage) still
         // deserializes it unchanged (`cwd: None` -> legacy global listing).
-        let params = SessionListParams { cwd: None };
+        let params = SessionListParams {
+            profile_id: None,
+            cwd: None,
+        };
         let wire = serde_json::to_value(&params).expect("SessionListParams serializes");
         assert_eq!(wire, serde_json::json!({}));
     }
@@ -13205,6 +13228,7 @@ mod tests {
         // `session.workspace_cwd.v1` feature) honors to scope the listing to
         // the project rooted at that path.
         let params = SessionListParams {
+            profile_id: None,
             cwd: Some("/tmp/project".into()),
         };
         let wire = serde_json::to_value(&params).expect("SessionListParams serializes");

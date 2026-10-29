@@ -207,6 +207,11 @@ pub struct AppUiLaunch {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppUiEndpoint {
+    SharedLocal {
+        command: String,
+        cwd: std::path::PathBuf,
+        profile_id: Option<String>,
+    },
     WebSocket {
         url: String,
         auth_token: Option<String>,
@@ -247,7 +252,7 @@ impl AppUiEndpoint {
     pub fn label(&self) -> &str {
         match self {
             Self::WebSocket { url, .. } => url,
-            Self::Stdio { command } => command,
+            Self::Stdio { command } | Self::SharedLocal { command, .. } => command,
         }
     }
 }
@@ -296,6 +301,20 @@ fn launch_from_cli(cli: &Cli) -> AppUiLaunch {
 
 fn endpoint_from_cli(cli: &Cli, auth_token: Option<String>) -> Option<AppUiEndpoint> {
     if let Some(command) = &cli.stdio_command {
+        if crate::profiles::command_tokens(command)
+            .iter()
+            .any(|w| w == "--shared")
+        {
+            return Some(AppUiEndpoint::SharedLocal {
+                command: command.clone(),
+                cwd: cli
+                    .cwd
+                    .clone()
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_default(),
+                profile_id: cli.profile_id.clone(),
+            });
+        }
         return Some(AppUiEndpoint::stdio(command.clone()));
     }
 
@@ -636,6 +655,7 @@ enum TransportEvent {
 }
 
 struct WebSocketTransportDriver {
+    shared: Option<crate::shared_instance::Launch>,
     endpoint: String,
     auth_token: Option<String>,
     profile_id: Option<String>,
@@ -788,6 +808,19 @@ impl ProtocolExchange {
 impl ProtocolTransportDriver {
     fn from_endpoint(endpoint: &AppUiEndpoint) -> Result<Self> {
         match endpoint {
+            AppUiEndpoint::SharedLocal {
+                command,
+                cwd,
+                profile_id,
+            } => {
+                let mut driver =
+                    WebSocketTransportDriver::new(command.clone(), None, profile_id.clone());
+                driver.shared = Some(crate::shared_instance::Launch {
+                    command: command.clone(),
+                    cwd: cwd.clone(),
+                });
+                Ok(Self::WebSocket(driver))
+            }
             AppUiEndpoint::WebSocket {
                 url,
                 auth_token,
@@ -859,6 +892,7 @@ impl ProtocolTransportDriver {
 impl WebSocketTransportDriver {
     fn new(endpoint: String, auth_token: Option<String>, profile_id: Option<String>) -> Self {
         Self {
+            shared: None,
             endpoint,
             auth_token,
             profile_id,
@@ -884,6 +918,11 @@ impl WebSocketTransportDriver {
 
         self.disconnect();
 
+        if let Some(shared) = &self.shared {
+            let instance = runtime.block_on(crate::shared_instance::discover(shared))?;
+            self.endpoint = instance.endpoint;
+            self.auth_token = Some(instance.auth_token);
+        }
         let request = websocket_request(
             &self.endpoint,
             self.auth_token.as_deref(),
@@ -1997,6 +2036,7 @@ impl ProtocolAppUiBackend {
                 .cloned()
                 .or_else(|| self.launch.cwd.clone());
             AppUiCommand::OpenSession(SessionOpenParams {
+                client_commands: None,
                 session_id,
                 topic: None,
                 profile_id: self.launch.profile_id.clone(),
@@ -2066,6 +2106,7 @@ impl ProtocolAppUiBackend {
             return None;
         }
         Some(AppUiCommand::OpenSession(SessionOpenParams {
+            client_commands: None,
             session_id: params.session_id.clone(),
             topic: None,
             profile_id: self.launch.profile_id.clone(),
@@ -2518,6 +2559,7 @@ impl ProtocolAppUiBackend {
                 // hydration depends on these, and `--readonly` users
                 // still want to see backend agent/goal/loop state.
                 | AppUiCommand::ListAgents(_)
+                | AppUiCommand::WorkspaceTeam(crate::workspace_team::Command::List { .. })
                 | AppUiCommand::ReadAgentStatus(_)
                 | AppUiCommand::ReadAgentOutput(_)
                 | AppUiCommand::ListAgentArtifacts(_)
@@ -2737,6 +2779,7 @@ impl ProtocolAppUiBackend {
             // "unexpectedly blocked read-style" readonly_policy bug.
             | AppUiCommand::SessionRollback(_)
             | AppUiCommand::StartReview(_)
+            | AppUiCommand::WorkspaceTeam(_)
             | AppUiCommand::SelectModel(_)
             | AppUiCommand::CancelTask(_)
             | AppUiCommand::RestartTaskFromNode(_)
@@ -2803,6 +2846,7 @@ impl AppUiBackend for ProtocolAppUiBackend {
         if let Some(session_id) = self.launch.session_id.clone() {
             self.send(AppUiCommand::OpenSession(
                 octos_core::ui_protocol::SessionOpenParams {
+                    client_commands: None,
                     session_id,
                     topic: None,
                     profile_id: self.launch.profile_id.clone(),
@@ -3500,6 +3544,7 @@ fn rpc_request_from_command(
         AppUiCommand::ProfileSkillsInstall(params) => serde_json::to_value(params),
         AppUiCommand::ProfileSkillsRemove(params) => serde_json::to_value(params),
         AppUiCommand::ListAgents(params) => serde_json::to_value(params),
+        AppUiCommand::WorkspaceTeam(params) => serde_json::to_value(params),
         AppUiCommand::ReadAgentStatus(params) => serde_json::to_value(params),
         AppUiCommand::ReadAgentOutput(params) => serde_json::to_value(params),
         AppUiCommand::ListAgentArtifacts(params) => serde_json::to_value(params),
@@ -3612,6 +3657,16 @@ fn rpc_value_to_app_event(
         };
 
         let params = frame.get("params").cloned().unwrap_or(Value::Null);
+        if method == "peer/team/updated" {
+            return Ok(Some(match serde_json::from_value(params) {
+                Ok(team) => ClientEvent::WorkspaceTeamUpdated(team),
+                Err(error) => app_error(
+                    "invalid_params",
+                    format!("invalid workspace team update: {error}"),
+                )
+                .into(),
+            }));
+        }
         if method == "server/heartbeat" {
             return Ok(None);
         }
@@ -4371,6 +4426,26 @@ fn success_response_to_app_event(
         // M15-E autonomy results. We decode and forward as
         // ClientEvent::Autonomy so the store can update the per-session
         // mirror.
+        crate::workspace_team::LIST | crate::workspace_team::LEADER => {
+            match serde_json::from_value::<crate::workspace_team::Snapshot>(result) {
+                Ok(team) => Ok(Some(ClientEvent::WorkspaceTeam(team))),
+                Err(error) => Ok(Some(
+                    app_error("invalid_result", format!("invalid workspace team: {error}")).into(),
+                )),
+            }
+        }
+        crate::workspace_team::MESSAGE => {
+            match serde_json::from_value::<crate::workspace_team::MessageResult>(result) {
+                Ok(receipt) => Ok(Some(ClientEvent::WorkspaceMessage(receipt))),
+                Err(error) => Ok(Some(
+                    app_error(
+                        "invalid_result",
+                        format!("invalid peer message receipt: {error}"),
+                    )
+                    .into(),
+                )),
+            }
+        }
         crate::model::APPUI_METHOD_AGENT_LIST => {
             match serde_json::from_value::<crate::model::AgentListResult>(result) {
                 Ok(result) => Ok(Some(autonomy_event(AutonomyResult::AgentList(result)))),
@@ -4582,12 +4657,18 @@ fn model_select_event(
     result: ModelSelectResult,
     initiating_session: Option<SessionKey>,
 ) -> ClientEvent {
-    let prefix = if result.restart_required && result.applied {
+    let prefix = if result.restart_required {
         "Model saved; restart required"
-    } else if result.applied {
-        "Model selected"
     } else {
-        "Model unchanged"
+        match result.runtime_disposition.as_deref() {
+            Some("reloaded") => "Model saved. Your next message uses",
+            Some("restart_required") => "Model saved; restart required",
+            Some("deferred") => "Model saved; runtime activation pending",
+            Some("persisted_but_not_live") => "Model saved, but not live",
+            Some("unchanged") => "Model unchanged",
+            _ if result.applied => "Model saved; runtime activation unconfirmed",
+            _ => "Model unchanged",
+        }
     };
     ClientEvent::ModelSelect(ModelSelectClientEvent {
         message: format!(
@@ -5531,6 +5612,7 @@ impl MockAppUiBackend {
                     .into(),
         }));
         self.enqueue_protocol(UiNotification::TurnCompleted(TurnCompletedEvent {
+            token_usage: None,
             session_id: session_id.clone(),
             topic: None,
             turn_id,
@@ -5716,6 +5798,8 @@ impl AppUiBackend for MockAppUiBackend {
                         selected,
                         applied: true,
                         restart_required: false,
+                        runtime_disposition: Some("reloaded".into()),
+                        runtime_error: None,
                         runtime_policy_stamp: None,
                     },
                     Some(params.session_id),
@@ -5749,6 +5833,8 @@ impl AppUiBackend for MockAppUiBackend {
                         selected,
                         applied: true,
                         restart_required: false,
+                        runtime_disposition: Some("reloaded".into()),
+                        runtime_error: None,
                         runtime_policy_stamp: None,
                     },
                     Some(initiating),
@@ -6115,6 +6201,8 @@ impl AppUiBackend for MockAppUiBackend {
             AppUiCommand::ListSessions(_) => {
                 self.queue
                     .push_back(ClientEvent::SessionList(SessionListResult {
+                        profile_id: None,
+                        workspace_root: None,
                         sessions: serde_json::json!([
                             {
                                 "id": "local:mock#alpha",
@@ -6157,6 +6245,9 @@ impl AppUiBackend for MockAppUiBackend {
                             context_state: None,
                             replayed_tool_envelopes: None,
                             messages: Some(vec![HydratedMessage {
+                                tool_call_id: None,
+                                tool_calls: Vec::new(),
+                                tool_name: None,
                                 seq: 1,
                                 role: "user".into(),
                                 content: "first mock prompt".into(),
@@ -6564,6 +6655,14 @@ fn mock_approval_tool_name(kind: &str) -> &'static str {
     }
 }
 
+/// Workspace root shown in mock approval details: the current directory,
+/// so no fixed machine path is compiled into the binary.
+fn mock_workspace_root() -> String {
+    std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| ".".into())
+}
+
 fn mock_approval_title(kind: &str) -> &'static str {
     match kind {
         approval_kinds::DIFF => "Mock diff approval boundary",
@@ -6597,6 +6696,7 @@ fn mock_approval_risk(kind: &str) -> &'static str {
 fn mock_approval_details(kind: &str) -> ApprovalTypedDetails {
     match kind {
         approval_kinds::DIFF => ApprovalTypedDetails {
+            host_tool: None,
             kind: approval_kinds::DIFF.into(),
             command: None,
             sandbox: None,
@@ -6613,6 +6713,7 @@ fn mock_approval_details(kind: &str) -> ApprovalTypedDetails {
             sandbox_escalation: None,
         },
         approval_kinds::FILESYSTEM => ApprovalTypedDetails {
+            host_tool: None,
             kind: approval_kinds::FILESYSTEM.into(),
             command: None,
             sandbox: None,
@@ -6621,12 +6722,13 @@ fn mock_approval_details(kind: &str) -> ApprovalTypedDetails {
                 operation: "write".into(),
                 paths: vec!["/tmp/octos-mock-approval.txt".into()],
                 outside_workspace: true,
-                writable_roots: vec!["/Users/yuechen/home/octos".into()],
+                writable_roots: vec![mock_workspace_root()],
             }),
             network: None,
             sandbox_escalation: None,
         },
         approval_kinds::NETWORK => ApprovalTypedDetails {
+            host_tool: None,
             kind: approval_kinds::NETWORK.into(),
             command: None,
             sandbox: None,
@@ -6641,6 +6743,7 @@ fn mock_approval_details(kind: &str) -> ApprovalTypedDetails {
             sandbox_escalation: None,
         },
         approval_kinds::SANDBOX_ESCALATION => ApprovalTypedDetails {
+            host_tool: None,
             kind: approval_kinds::SANDBOX_ESCALATION.into(),
             command: None,
             sandbox: None,
@@ -6680,7 +6783,7 @@ fn mock_approval_details(kind: &str) -> ApprovalTypedDetails {
                 mode: Some("workspace-write".into()),
                 filesystem_access: Some("workspace-write".into()),
                 network_access: Some(false),
-                writable_roots: vec!["/Users/yuechen/home/octos".into()],
+                writable_roots: vec![mock_workspace_root()],
             }),
         ),
     }
@@ -6724,6 +6827,87 @@ fn mock_diff_preview(session_id: SessionKey, preview_id: PreviewId) -> DiffPrevi
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn workspace_default_launch_is_shared_and_explicit_transports_are_preserved() {
+        let local = Cli::try_parse_from(["octoscode"]).unwrap();
+        assert!(matches!(
+            endpoint_from_cli(&local, None),
+            Some(AppUiEndpoint::SharedLocal { .. })
+        ));
+        let stdio =
+            Cli::try_parse_from(["octoscode", "--stdio-command", "octos serve --stdio --solo"])
+                .unwrap();
+        assert!(matches!(
+            endpoint_from_cli(&stdio, None),
+            Some(AppUiEndpoint::Stdio { .. })
+        ));
+        let remote = Cli::try_parse_from([
+            "octoscode",
+            "--endpoint",
+            "ws://example.test/api/ui-protocol/ws",
+        ])
+        .unwrap();
+        assert!(matches!(
+            endpoint_from_cli(&remote, None),
+            Some(AppUiEndpoint::WebSocket { .. })
+        ));
+    }
+
+    /// POSIX shlex rejects a quoted path ending in a backslash (`\"` reads as
+    /// an escaped quote), which would silently misroute a `--shared` command
+    /// carrying a Windows backslash path to plain stdio.
+    #[cfg(windows)]
+    #[test]
+    fn shared_gate_tolerates_windows_backslash_paths() {
+        let cli = Cli::try_parse_from([
+            "octoscode",
+            "--stdio-command",
+            "octos serve --shared --solo --data-dir \"C:\\dir\\\"",
+        ])
+        .unwrap();
+        assert!(matches!(
+            endpoint_from_cli(&cli, None),
+            Some(AppUiEndpoint::SharedLocal { .. })
+        ));
+    }
+
+    #[test]
+    fn model_select_messages_report_runtime_disposition() {
+        for (disposition, expected) in [
+            ("reloaded", "next message"),
+            ("restart_required", "restart required"),
+            ("deferred", "pending"),
+            ("persisted_but_not_live", "not live"),
+            ("legacy", "unconfirmed"),
+            ("unchanged", "unchanged"),
+        ] {
+            let mut raw = serde_json::json!({
+                "session_id":"local:a", "selected":{"model":"new", "provider":"openai", "selected":true}, "applied":true
+            });
+            if disposition != "legacy" {
+                raw["runtime_disposition"] = disposition.into();
+            }
+            let ClientEvent::ModelSelect(event) =
+                model_select_event(serde_json::from_value(raw).unwrap(), None)
+            else {
+                panic!("model event")
+            };
+            assert!(
+                event.message.contains(expected),
+                "{disposition}: {}",
+                event.message
+            );
+        }
+        let result = serde_json::from_value(serde_json::json!({
+            "session_id":"local:a", "selected":{"model":"new", "provider":"openai", "selected":true},
+            "applied":true, "restart_required":true
+        })).unwrap();
+        let ClientEvent::ModelSelect(event) = model_select_event(result, None) else {
+            panic!("model event")
+        };
+        assert!(event.message.contains("restart required"));
+    }
+
     use super::*;
     use crate::model::{
         AgentArtifactReadParams, ConfigCapabilitiesListParams, McpConfigDeleteParams,
@@ -7429,6 +7613,7 @@ mod tests {
         let request = rpc_request_from_command(
             "tui-7".into(),
             AppUiCommand::SubmitPrompt(TurnStartParams {
+                origin: None,
                 // Ordinary chat turn: context-scoped tools stay unadvertised.
                 tool_context: None,
                 session_id: SessionKey("local:test".into()),
@@ -7459,6 +7644,7 @@ mod tests {
         let request = rpc_request_from_command(
             "tui-9".into(),
             AppUiCommand::SubmitPrompt(TurnStartParams {
+                origin: None,
                 // Ordinary chat turn: context-scoped tools stay unadvertised.
                 tool_context: None,
                 session_id: SessionKey("local:test".into()),
@@ -9420,6 +9606,7 @@ mod tests {
         let read_style_commands = [
             AppUiCommand::ListConfigCapabilities(ConfigCapabilitiesListParams {}),
             AppUiCommand::OpenSession(SessionOpenParams {
+                client_commands: None,
                 session_id: session_id.clone(),
                 topic: None,
                 sandbox: None,
@@ -9456,7 +9643,10 @@ mod tests {
                 after: None,
                 include: Vec::new(),
             }),
-            AppUiCommand::ListSessions(octos_core::ui_protocol::SessionListParams { cwd: None }),
+            AppUiCommand::ListSessions(octos_core::ui_protocol::SessionListParams {
+                profile_id: None,
+                cwd: None,
+            }),
             AppUiCommand::GetThreadGraph(ThreadGraphGetParams {
                 session_id: session_id.clone(),
                 at: None,
@@ -9497,6 +9687,7 @@ mod tests {
 
         let mutating_commands = [
             AppUiCommand::SubmitPrompt(TurnStartParams {
+                origin: None,
                 // Ordinary chat turn: context-scoped tools stay unadvertised.
                 tool_context: None,
                 session_id: session_id.clone(),
@@ -10595,6 +10786,7 @@ mod tests {
     #[test]
     fn launch_from_cli_uses_stdio_endpoint_when_requested() {
         let cli = Cli {
+            implicit_local_transport: false,
             config: None,
             mode: crate::cli::Mode::Protocol,
             base_url: None,
@@ -10958,6 +11150,7 @@ mod tests {
             .expect("session opened event");
         let request = exchange
             .build_tracked_request(AppUiCommand::OpenSession(SessionOpenParams {
+                client_commands: None,
                 session_id: session_id.clone(),
                 topic: None,
                 sandbox: None,
@@ -11442,6 +11635,7 @@ mod tests {
         // This seam tests a hydrate writer failure in an ALREADY opened
         // scope; unknown-scope hydration has a separate session/open gate.
         backend.remember_confirmed_session_scope(SessionOpenParams {
+            client_commands: None,
             session_id: SessionKey("local:hydrate-send".into()),
             topic: None,
             profile_id: None,
@@ -11632,9 +11826,16 @@ mod tests {
         // Drain until the reconnect happens: the dead writer makes the next
         // send/poll fail, the disconnect is reported, and the backend
         // reconnects (server accepts connection 2 and captures 3 requests).
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // Both outcomes are required before leaving the loop: the reconnect's
+        // capabilities frame reaching the test server does NOT imply the
+        // disconnect status was already popped from the backend's event queue
+        // — which side wins is scheduler-dependent, and the Windows CI runner
+        // under full-suite load routinely delivers the frame first. Generous
+        // deadline for the same reason; isolated runs finish in <1s.
+        let deadline = Instant::now() + Duration::from_secs(30);
         let mut saw_disconnect = false;
-        while Instant::now() < deadline {
+        let mut saw_reconnect = false;
+        while Instant::now() < deadline && !(saw_disconnect && saw_reconnect) {
             match backend.next_event() {
                 Ok(Some(ClientEvent::App(event))) => {
                     if let AppUiEvent::Status(status) = *event {
@@ -11651,16 +11852,29 @@ mod tests {
                     session_id: SessionKey("local:test".into()),
                 },
             ));
-            if let Ok(frame) = server.received.recv_timeout(Duration::from_millis(50)) {
-                // First reconnect request must be the capabilities refresh.
-                assert_eq!(
-                    frame["method"],
-                    crate::model::APPUI_METHOD_CONFIG_CAPABILITIES_LIST
-                );
-                break;
+            // Only the FIRST reconnect frame is consumed here; the replayed
+            // launch/resolve and the session reopen stay queued for the
+            // recv_json assertions below.
+            if !saw_reconnect {
+                if let Ok(frame) = server.received.recv_timeout(Duration::from_millis(50)) {
+                    // First reconnect request must be the capabilities refresh.
+                    assert_eq!(
+                        frame["method"],
+                        crate::model::APPUI_METHOD_CONFIG_CAPABILITIES_LIST
+                    );
+                    saw_reconnect = true;
+                }
+            } else {
+                // Keep iterations paced while waiting for the disconnect
+                // status; recv_timeout no longer provides the 50ms pause.
+                thread::sleep(Duration::from_millis(50));
             }
         }
-        assert!(saw_disconnect, "the dead connection was reported");
+        assert!(
+            saw_disconnect && saw_reconnect,
+            "the dead connection was reported and the reconnect happened \
+             (saw_disconnect={saw_disconnect}, saw_reconnect={saw_reconnect})"
+        );
 
         // The REPLAYED launch/resolve lands BEFORE the session reopen.
         let replayed = server.recv_json();
@@ -11754,6 +11968,7 @@ mod tests {
 
         let request = backend
             .build_tracked_request(AppUiCommand::SubmitPrompt(TurnStartParams {
+                origin: None,
                 // Ordinary chat turn: context-scoped tools stay unadvertised.
                 tool_context: None,
                 session_id: SessionKey("local:test".into()),
@@ -11861,6 +12076,7 @@ mod tests {
         let session_id = SessionKey("local:test".into());
         let request = backend
             .build_tracked_request(AppUiCommand::OpenSession(SessionOpenParams {
+                client_commands: None,
                 session_id: session_id.clone(),
                 topic: None,
                 sandbox: None,
@@ -12484,6 +12700,7 @@ mod tests {
         });
         let request = backend
             .build_tracked_request(AppUiCommand::OpenSession(SessionOpenParams {
+                client_commands: None,
                 session_id: SessionKey("local:test".into()),
                 topic: None,
                 sandbox: None,
@@ -12522,6 +12739,7 @@ mod tests {
     #[test]
     fn launch_from_cli_defaults_cwd_to_process_current_dir() {
         let cli = Cli {
+            implicit_local_transport: false,
             config: None,
             mode: crate::cli::Mode::Protocol,
             base_url: Some("wss://example.test/ui-protocol".into()),
@@ -12565,6 +12783,7 @@ mod tests {
         });
         let request = backend
             .build_tracked_request(AppUiCommand::OpenSession(SessionOpenParams {
+                client_commands: None,
                 session_id: SessionKey("local:test".into()),
                 topic: None,
                 sandbox: None,
@@ -12594,7 +12813,10 @@ mod tests {
         });
         let request = backend
             .build_tracked_request(AppUiCommand::ListSessions(
-                octos_core::ui_protocol::SessionListParams { cwd: None },
+                octos_core::ui_protocol::SessionListParams {
+                    profile_id: None,
+                    cwd: None,
+                },
             ))
             .expect("request builds");
 
@@ -12617,7 +12839,10 @@ mod tests {
         });
         let request = backend
             .build_tracked_request(AppUiCommand::ListSessions(
-                octos_core::ui_protocol::SessionListParams { cwd: None },
+                octos_core::ui_protocol::SessionListParams {
+                    profile_id: None,
+                    cwd: None,
+                },
             ))
             .expect("request builds");
 
@@ -12647,6 +12872,7 @@ mod tests {
         );
         let open = |session_id: &str, cwd: Option<&str>| {
             AppUiCommand::OpenSession(SessionOpenParams {
+                client_commands: None,
                 session_id: SessionKey(session_id.into()),
                 topic: None,
                 profile_id: Some("dev".into()),
@@ -12750,6 +12976,7 @@ mod tests {
 
         let request = backend
             .build_tracked_request(AppUiCommand::OpenSession(SessionOpenParams {
+                client_commands: None,
                 session_id: session_id.clone(),
                 topic: None,
                 sandbox: None,
@@ -12975,6 +13202,7 @@ mod tests {
 
         // 2. An explicit open carries its OWN cwd, not the launch one.
         backend.record_reopen_target(&AppUiCommand::OpenSession(SessionOpenParams {
+            client_commands: None,
             session_id: SessionKey("local:other".into()),
             topic: None,
             profile_id: Some("research".into()),
@@ -13077,6 +13305,7 @@ done
         backend.refresh_capabilities_on_reconnect = true;
         backend
             .send(AppUiCommand::SubmitPrompt(TurnStartParams {
+                origin: None,
                 tool_context: None,
                 session_id: session_id.clone(),
                 turn_id: TurnId::new(),
@@ -13249,6 +13478,7 @@ wait
         ] {
             backend
                 .send(AppUiCommand::OpenSession(SessionOpenParams {
+                    client_commands: None,
                     session_id: SessionKey(session.into()),
                     topic: None,
                     profile_id: Some(
@@ -13302,6 +13532,7 @@ wait
         for session in ["local:master", "local:peer"] {
             backend
                 .send(AppUiCommand::SubmitPrompt(TurnStartParams {
+                    origin: None,
                     tool_context: None,
                     session_id: SessionKey(session.into()),
                     turn_id: TurnId::new(),
@@ -13513,6 +13744,7 @@ wait
         backend.disconnected_status_reported = true;
         let prompt = |session: &str| {
             AppUiCommand::SubmitPrompt(TurnStartParams {
+                origin: None,
                 tool_context: None,
                 session_id: SessionKey(session.into()),
                 turn_id: TurnId::new(),
@@ -13553,6 +13785,7 @@ wait
         );
         backend
             .send(AppUiCommand::OpenSession(SessionOpenParams {
+                client_commands: None,
                 session_id: SessionKey("local:peer".into()),
                 topic: None,
                 profile_id: Some("dev".into()),
@@ -13591,6 +13824,7 @@ wait
         let session_id = SessionKey("local:barrier".into());
         let request = backend
             .build_tracked_request(AppUiCommand::OpenSession(SessionOpenParams {
+                client_commands: None,
                 session_id: session_id.clone(),
                 topic: None,
                 profile_id: Some("dev".into()),
@@ -13609,7 +13843,10 @@ wait
         });
         backend
             .deferred_until_reconnect_open
-            .push_back(AppUiCommand::ListSessions(SessionListParams { cwd: None }));
+            .push_back(AppUiCommand::ListSessions(SessionListParams {
+                profile_id: None,
+                cwd: None,
+            }));
         (backend, request_id)
     }
 
@@ -13619,6 +13856,7 @@ wait
     fn arm_session_open_barrier(backend: &mut ProtocolAppUiBackend, session_id: &str) -> String {
         let session_id = SessionKey(session_id.into());
         let command = AppUiCommand::OpenSession(SessionOpenParams {
+            client_commands: None,
             session_id: session_id.clone(),
             topic: None,
             profile_id: Some("dev".into()),
@@ -13836,6 +14074,7 @@ done
         backend.refresh_capabilities_on_reconnect = true;
         backend
             .send(AppUiCommand::SubmitPrompt(TurnStartParams {
+                origin: None,
                 tool_context: None,
                 session_id: session_id.clone(),
                 turn_id: TurnId::new(),
@@ -13954,6 +14193,7 @@ done
         backend.refresh_capabilities_on_reconnect = true;
         backend
             .send(AppUiCommand::SubmitPrompt(TurnStartParams {
+                origin: None,
                 tool_context: None,
                 session_id: session_id.clone(),
                 turn_id: TurnId::new(),
@@ -14091,7 +14331,10 @@ done
         backend.disconnected_status_reported = true;
         backend.refresh_capabilities_on_reconnect = true;
         backend
-            .send(AppUiCommand::ListSessions(SessionListParams { cwd: None }))
+            .send(AppUiCommand::ListSessions(SessionListParams {
+                profile_id: None,
+                cwd: None,
+            }))
             .expect("child launch + deferred list");
 
         let mut seen = Vec::new();
@@ -14110,6 +14353,7 @@ done
 
         let prompt = || {
             AppUiCommand::SubmitPrompt(TurnStartParams {
+                origin: None,
                 tool_context: None,
                 session_id: SessionKey("local:rejected".into()),
                 turn_id: TurnId::new(),
@@ -14127,6 +14371,7 @@ done
         // with a follow-up command queued behind the barrier.
         backend
             .send(AppUiCommand::OpenSession(SessionOpenParams {
+                client_commands: None,
                 session_id: SessionKey("local:rejected".into()),
                 topic: None,
                 profile_id: Some("dev".into()),
@@ -14140,7 +14385,10 @@ done
             "every open arms the scoped barrier"
         );
         backend
-            .send(AppUiCommand::ListSessions(SessionListParams { cwd: None }))
+            .send(AppUiCommand::ListSessions(SessionListParams {
+                profile_id: None,
+                cwd: None,
+            }))
             .expect("list defers behind the barrier");
         backend.send(prompt()).expect("submit defers");
         assert_eq!(backend.deferred_until_reconnect_open.len(), 2);
@@ -14234,6 +14482,7 @@ done
         );
         backend
             .send(AppUiCommand::OpenSession(SessionOpenParams {
+                client_commands: None,
                 session_id: launch_session.clone(),
                 topic: None,
                 profile_id: Some("dev".into()),
@@ -14320,6 +14569,7 @@ done
         let mut exchange = ProtocolExchange::default();
         let open = exchange
             .build_tracked_request(AppUiCommand::OpenSession(SessionOpenParams {
+                client_commands: None,
                 session_id: SessionKey("local:context".into()),
                 topic: None,
                 profile_id: None,
@@ -14438,6 +14688,7 @@ done
         // An explicitly recorded reopen target (e.g. after /resume) also gets
         // its cwd corrected to the confirmed root.
         backend.record_reopen_target(&AppUiCommand::OpenSession(SessionOpenParams {
+            client_commands: None,
             session_id: session_id.clone(),
             topic: None,
             profile_id: Some("coding".into()),
@@ -14509,6 +14760,7 @@ done
         // records the reopen target via `record_reopen_target` before any
         // network I/O; drive that helper directly so the test never dials out.
         backend.record_reopen_target(&AppUiCommand::OpenSession(SessionOpenParams {
+            client_commands: None,
             session_id: resumed_session.clone(),
             topic: None,
             profile_id: Some("research".into()),
@@ -14670,6 +14922,7 @@ done
 
         backend
             .send(AppUiCommand::SubmitPrompt(TurnStartParams {
+                origin: None,
                 // Ordinary chat turn: context-scoped tools stay unadvertised.
                 tool_context: None,
                 session_id: session_id.clone(),
@@ -14734,6 +14987,7 @@ done
 
         backend
             .send(AppUiCommand::SubmitPrompt(TurnStartParams {
+                origin: None,
                 // Ordinary chat turn: context-scoped tools stay unadvertised.
                 tool_context: None,
                 session_id: session,
@@ -14769,6 +15023,7 @@ done
         let turn_id = TurnId::new();
         backend
             .send(AppUiCommand::SubmitPrompt(TurnStartParams {
+                origin: None,
                 // Ordinary chat turn: context-scoped tools stay unadvertised.
                 tool_context: None,
                 session_id: session_id.clone(),
@@ -14923,6 +15178,7 @@ done
 
         backend
             .send(AppUiCommand::SubmitPrompt(TurnStartParams {
+                origin: None,
                 // Ordinary chat turn: context-scoped tools stay unadvertised.
                 tool_context: None,
                 session_id,

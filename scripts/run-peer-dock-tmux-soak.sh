@@ -12,8 +12,8 @@
 # workspace + data dir under /tmp, tears down on exit.
 set -euo pipefail
 
-OCTOS_BIN="${OCTOS_BIN:-/Users/yuechen/home/octos-one/octos/target/debug/octos}"
-OCTOSCODE_BIN="${OCTOSCODE_BIN:-/Users/yuechen/home/octoscode-wt-bashcard/target/debug/octoscode}"
+OCTOS_BIN="${OCTOS_BIN:-$HOME/home/octos-one/octos/target/debug/octos}"
+OCTOSCODE_BIN="${OCTOSCODE_BIN:-$(cd "$(dirname "$0")/.." && pwd)/target/debug/octoscode}"
 
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 ROOT="/tmp/octos-peer-soak-$RUN_ID"

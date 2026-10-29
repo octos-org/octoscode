@@ -125,7 +125,15 @@ pub fn ensure_octos_backend(cli: &mut Cli) -> Result<()> {
         return Ok(());
     };
 
-    match resolve_backend(&program)? {
+    let resolved = resolve_backend(&program)?;
+    let candidate = match &resolved {
+        Resolved::OnPath => Path::new(&program),
+        Resolved::AtPath(path) => path.as_path(),
+    };
+    select_implicit_local_transport(cli, candidate);
+    let command = cli.stdio_command.clone().expect("local launch command");
+
+    match resolved {
         // Already on PATH — the bare `octos serve` command works as-is.
         Resolved::OnPath => Ok(()),
         // Usable only in the install dir — rewrite the command to launch it
@@ -160,6 +168,42 @@ pub fn ensure_octos_backend(cli: &mut Cli) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Older auto-provisioned releases must keep launching until the shared-server
+/// backend is published. Probe only implicit launches; explicit transports are
+/// user choices and must never silently become private stdio.
+fn select_implicit_local_transport(cli: &mut Cli, candidate: &Path) {
+    if !cli.implicit_local_transport || supports_shared_server(candidate) {
+        return;
+    }
+    cli.stdio_command = Some("octos serve --stdio --solo".to_owned());
+    eprintln!(
+        "octoscode: this backend does not advertise shared workspace sessions; \
+         using private stdio. Update Octos to enable multiple sessions in one folder."
+    );
+}
+
+fn supports_shared_server(candidate: &Path) -> bool {
+    let is_bare = !candidate.to_string_lossy().contains(['/', '\\']);
+    let output = if cfg!(windows) && is_bare {
+        let Some(shim) = where_first(candidate) else {
+            return false;
+        };
+        Command::new("cmd")
+            .arg("/C")
+            .arg(shim)
+            .args(["serve", "--help"])
+            .output()
+    } else {
+        Command::new(candidate).args(["serve", "--help"]).output()
+    };
+    output.is_ok_and(|output| {
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .any(|word| word == "--shared")
+    })
 }
 
 /// A usable octos, either already on `PATH` or at an explicit path we must
@@ -637,7 +681,7 @@ fn have(program: &str) -> bool {
 /// v2.0.3-rc.1 while this stayed on v2.0.2, so a fresh install auto-provisioned
 /// a server whose protocol predated the client's. [`REQUIRED_OCTOS_CORE_REV`]
 /// and the test beside it now make the pair checkable instead of a comment.
-pub(crate) const REQUIRED_OCTOS_RELEASE: &str = "v2.0.3-rc.12";
+pub(crate) const REQUIRED_OCTOS_RELEASE: &str = "v2.0.3";
 
 /// The `octos-core` rev that [`REQUIRED_OCTOS_RELEASE`] resolves to — i.e. the
 /// commit the release tag points at, and the rev Cargo.toml must pin.
@@ -651,7 +695,7 @@ pub(crate) const REQUIRED_OCTOS_RELEASE: &str = "v2.0.3-rc.12";
 /// Test-only: its whole job is to be compared against Cargo.toml, so it would
 /// be dead weight in a real build.
 #[cfg(test)]
-pub(crate) const REQUIRED_OCTOS_CORE_REV: &str = "f4a31d9a0ef2228e919c3d516b78a9d82ad6f470";
+pub(crate) const REQUIRED_OCTOS_CORE_REV: &str = "fca32c45845abefdf6729ddff081c5083553289a";
 /// Env var overriding the octos release tag to install (fork / pinned build).
 const OCTOS_RELEASE_ENV: &str = "OCTOSCODE_OCTOS_RELEASE";
 /// The octos server-bundle asset name for THIS build's target platform, or
@@ -925,6 +969,58 @@ fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn implicit_launch_probes_shared_support_and_preserves_explicit_transport() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.json");
+        std::fs::write(&config, "{}").unwrap();
+        let server = dir.path().join("octos");
+        let implicit =
+            || Cli::try_parse_from(["octoscode", "--config", config.to_str().unwrap()]).unwrap();
+        for (advertised, expected) in [
+            ("--stdio", "octos serve --stdio --solo"),
+            ("--shared-preview", "octos serve --stdio --solo"),
+            ("--shared", crate::cli::DEFAULT_STDIO_COMMAND),
+        ] {
+            std::fs::write(&server, format!(
+                "#!/bin/sh\n[ \"$1 $2\" = \"serve --help\" ] || exit 4\nprintf '%s\\n' '  {advertised}  Serve transport'\n"
+            )).unwrap();
+            std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let mut cli = implicit();
+            assert!(cli.implicit_local_transport);
+            select_implicit_local_transport(&mut cli, &server);
+            assert_eq!(cli.stdio_command.as_deref(), Some(expected));
+        }
+        let mut explicit = Cli::try_parse_from([
+            "octoscode",
+            "--config",
+            config.to_str().unwrap(),
+            "--stdio-command",
+            crate::cli::DEFAULT_STDIO_COMMAND,
+        ])
+        .unwrap();
+        assert!(!explicit.implicit_local_transport);
+        select_implicit_local_transport(&mut explicit, &dir.path().join("must-not-be-probed"));
+        assert_eq!(
+            explicit.stdio_command.as_deref(),
+            Some(crate::cli::DEFAULT_STDIO_COMMAND)
+        );
+        std::fs::write(
+            &config,
+            r#"{"stdio-command":"octos serve --shared --solo"}"#,
+        )
+        .unwrap();
+        let mut configured = implicit();
+        assert!(!configured.implicit_local_transport);
+        select_implicit_local_transport(&mut configured, &dir.path().join("must-not-be-probed"));
+        assert_eq!(
+            configured.stdio_command.as_deref(),
+            Some(crate::cli::DEFAULT_STDIO_COMMAND)
+        );
+    }
 
     #[test]
     fn bundle_urls_point_at_the_pinned_release() {

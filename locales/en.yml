@@ -265,7 +265,7 @@ app:
     re_entering: "Re-entering"
     working: "Working"
   composer_hint:
-    queued_messages: "Queued messages (%{count}) after active turn | Esc interrupt/send | Ctrl+U clear"
+    queued_messages: "Queued messages (%{count}) after active turn | Ctrl+X send now | Ctrl+U clear"
     large_paste: "Large paste collapsed | Enter sends full text | Ctrl+U clear"
     multiline_tail_lines: "Multiline input | showing tail, %{count} earlier line(s) hidden | Enter sends full text | Ctrl+U clear"
     multiline_tail_line: "Multiline input | showing tail of long line | Enter sends full text | Ctrl+U clear"
@@ -603,10 +603,11 @@ saveconfig:
   failed: "Could not save config: %{error}"
   no_path: "No config path available to save to."
 scrollmode:
+  set_sticky: "Scroll mode: sticky — latest question fixed at the top, composer at the bottom. F2 expands the question."
   current: "(current: %{mode})"
   set_pinned: "Scroll mode: pinned — the wheel scrolls the transcript, composer stays at the bottom (Shift+drag to select)."
   set_native: "Scroll mode: native — the wheel belongs to the terminal again (Ctrl+T opens the pager)."
-  unknown: "Unknown scroll mode '%{value}'. Available: native, pinned."
+  unknown: "Unknown scroll mode '%{value}'. Available: sticky, native, pinned."
 vimmode:
   enabled: "Vim mode: on — Esc for Normal, i to insert (Insert mode now)."
   disabled: "Vim mode: off — the composer is a plain text field again."
@@ -720,7 +721,7 @@ status:
   # --- Runtime status/activity messages (store.rs) ---
   list_more: ", +%{count} more"
   no_session_send_prompt: "No coding session open. Run /onboard open-session before sending a prompt."
-  message_staged: "Message staged; it will submit after the active turn. Press Esc to interrupt/send."
+  message_staged: "Message staged; it will submit after the active turn. Press Ctrl+X to interrupt/send."
   steered_into_turn: "Steered into the running turn."
   steer_restaged_after_turn_end: "The turn ended before your steered message was taken up — it was re-queued and is sending as a new turn."
   steer_returned_by_server: "Server returned %{count} steered message(s) it never took up (%{reason}) — re-queued."
@@ -1122,7 +1123,7 @@ command:
   add_model:
     desc: Add or change the profile's AI model (family, model, and provider route).
   agents:
-    desc: Inspect or interrupt backend-owned subagents.
+    desc: See workspace agents, choose a coordinator, send messages, or inspect subagents.
   aliases_label: 'Aliases:'
   btw:
     desc: Ask a quick aside question while the current turn keeps working.
@@ -1193,11 +1194,11 @@ command:
   saveconfig:
     desc: "Save the active appearance, language, scroll-mode, vim-mode and steer-mode to the config file."
   scrollmode:
-    desc: 'Switch wheel-scroll behavior: /scrollmode [native|pinned] (bare toggles).'
+    desc: 'Switch wheel-scroll behavior: /scrollmode [sticky|native|pinned] (bare toggles).'
   vimmode:
     desc: "Toggle Vim modal editing in the composer (Normal/Insert)."
   steer:
-    desc: "Switch what Enter means mid-turn: /steer [on|off] — on injects into the running turn, off (default) queues FIFO."
+    desc: "Switch what Enter means mid-turn: /steer [on|off] — on (default) steers the running turn; Tab or off queues FIFO."
   thinking:
     desc: 'Set reasoning effort for thinking models: /thinking low|medium|high|max|default.'
   threads:
@@ -1990,3 +1991,24 @@ menu:
     title: Tool Settings
     unavailable_title: Tool settings unavailable
   unavailable: Menu unavailable
+
+workspace_team:
+  title: "Workspace agents"
+  you: " · you"
+  coordinator: "coordinator"
+  member: "member"
+  running: "running"
+  idle: "idle"
+  connected: "connected"
+  detached: "detached"
+  make_coordinator: "Make %{agent} coordinator"
+  refresh: "Refresh agents"
+  hint: "↑/↓ select · Enter message or assign coordinator · Esc close"
+  list_first: "Run /agents first, then select a coordinator."
+
+question_header:
+  latest: "You"
+  queued: "Queued"
+  sending: "Sending"
+  expand: " F2 · Full question "
+  close: " ↑↓/PgUp/PgDn scroll · Esc/F2 close "

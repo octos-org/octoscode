@@ -248,6 +248,7 @@ it by hand.
 
 | AppUI command | Wire method |
 |---|---|
+| `WorkspaceTeam` | `peer/team/list`, `peer/team/leader/set`, `peer/team/message` |
 | `PeerGather` | `peer/gather` |
 | `PeerPrepare` | `peer/prepare` |
 
@@ -387,6 +388,7 @@ This list is kept complete by `tests/docs_drift.rs`.
 | `ContextCompactionCompleted` | `context/compaction_completed` |
 | `ContextCompactionStarted` | `context/compaction_started` |
 | `ContextNormalizationReported` | `context/normalization_reported` |
+| `ContextStateReported` | `context/state_reported` (ignored; `context.state.v1` is not negotiated) |
 
 ### `message/`
 
@@ -472,6 +474,7 @@ This list is kept complete by `tests/docs_drift.rs`.
 | Notification | Wire method |
 |---|---|
 | `PeerStaged` | `peer/staged` |
+| `WorkspaceTeamUpdated` | `peer/team/updated` |
 
 ## Client Layers
 
@@ -509,6 +512,8 @@ added without a row here.
 
 | File | Lines | Responsibility |
 |---|---:|---|
+| `src/shared_instance.rs` | 280 | Authenticated shared local WebSocket server discovery, startup locking and detached launch. |
+| `src/workspace_team.rs` | 160 | Workspace peer team wire types and the `/agents` member/coordinator picker. |
 | `src/backend_ensure.rs` | 1140 | Auto-provision the `octos` server backend so a fresh octoscode install |
 | `src/profiles.rs` | 544 | Phase 3 startup profile discovery. |
 | `src/transport.rs` | 10721 | `AppUiBackend`, the mock and protocol backends, WebSocket/stdio framing, auth, reconnect status and in-memory cursors. |
@@ -521,6 +526,7 @@ added without a row here.
 | `src/app/activity_nav.rs` | 558 | `activity_nav` — extracted from `app.rs` (#365 step 2). Items keep their |
 | `src/app/markdown_highlight.rs` | 516 | Style-only markdown highlighting for the composer draft. |
 | `src/app/render.rs` | 2172 | `render` — extracted from `app.rs` (#365 step 2). Items keep their |
+| `src/app/pinned_question.rs` | 165 | Latest submitted question header and read-only expansion for sticky scrolling. |
 | `src/app/tests.rs` | 12480 | Test module for [`crate::app`] (#365): moved out of `app.rs`, which was |
 | `src/app/transcript_build.rs` | 3615 | `transcript_build` — extracted from `app.rs` (#365 step 2). Items keep their |
 | `src/highlight.rs` | 172 | Fenced-code-block syntax highlighting for the transcript renderer |

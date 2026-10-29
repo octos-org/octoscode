@@ -253,7 +253,7 @@ app:
     re_entering: "重新进入"
     working: "运行中"
   composer_hint:
-    queued_messages: "已排队 %{count} 条消息（当前任务结束后发送）| Esc 中断/发送 | Ctrl+U 清空"
+    queued_messages: "已排队 %{count} 条消息（当前任务结束后发送）| Ctrl+X 立即发送 | Ctrl+U 清空"
     large_paste: "大段粘贴已折叠 | Enter 发送全文 | Ctrl+U 清空"
     multiline_tail_lines: "多行输入 | 显示末尾，已隐藏 %{count} 行 | Enter 发送全文 | Ctrl+U 清空"
     multiline_tail_line: "多行输入 | 显示超长行末尾 | Enter 发送全文 | Ctrl+U 清空"
@@ -570,7 +570,7 @@ command:
   add_model:
     desc: 为档案添加或更改 AI 模型（模型系列、模型和供应商路由）。
   agents:
-    desc: 查看或中断后端智能体
+    desc: 查看工作目录中的智能体、指定协调者、发送消息或查看子智能体
   aliases_label: 别名：
   btw:
     desc: 在当前回合继续运行时快速旁路提问。
@@ -641,11 +641,11 @@ command:
   saveconfig:
     desc: "把当前主题/语言/滚动模式/Vim 模式/转向模式保存到配置文件。"
   scrollmode:
-    desc: "切换滚轮滚动模式：/scrollmode [native|pinned]（不带参数为切换）。"
+    desc: "切换滚轮滚动模式：/scrollmode [sticky|native|pinned]（不带参数为切换）。"
   vimmode:
     desc: "切换输入框的 Vim 模态编辑（Normal/Insert）。"
   steer:
-    desc: "切换运行中按 Enter 的含义：/steer [on|off] —— on 注入当前轮次，off（默认）按顺序排队。"
+    desc: "切换运行中按 Enter 的含义：/steer [on|off] —— on（默认）引导当前轮次；Tab 或 off 按顺序排队。"
   thinking:
     desc: 设置思考模型的思考强度：/thinking low|medium|high|max|default
   threads:
@@ -1529,7 +1529,7 @@ status:
   # --- 运行时状态/活动消息 (store.rs) ---
   list_more: "，+%{count} 项更多"
   no_session_send_prompt: "没有打开的编码会话。发送提示前请运行 /onboard open-session。"
-  message_staged: "消息已暂存；将在当前回合结束后提交。按 Esc 可中断/发送。"
+  message_staged: "消息已暂存；将在当前回合结束后提交。按 Ctrl+X 可中断并立即发送。"
   steered_into_turn: "已插入正在运行的回合。"
   steer_restaged_after_turn_end: "回合在你插入的消息被采纳前就结束了——已重新入队，作为新回合发送。"
   steer_returned_by_server: "服务端返还了 %{count} 条未被采纳的插入消息（%{reason}）——已重新入队。"
@@ -1917,10 +1917,11 @@ saveconfig:
   failed: "保存配置失败：%{error}"
   no_path: "没有可用的配置路径可保存。"
 scrollmode:
+  set_sticky: "滚动模式：sticky —— 最新问题固定在顶部，输入框固定在底部。F2 查看完整问题。"
   current: "（当前：%{mode}）"
   set_pinned: "滚动模式：pinned —— 滚轮滚动会话内容，输入框钉在底部（选择文本用 Shift+拖选）。"
   set_native: "滚动模式：native —— 滚轮归还终端（Ctrl+T 进入回看）。"
-  unknown: "未知滚动模式 '%{value}'。可用：native、pinned。"
+  unknown: "未知滚动模式 '%{value}'。可用：sticky、native、pinned。"
 vimmode:
   enabled: "Vim 模式：开 —— Esc 进 Normal，i 进 Insert（当前 Insert）。"
   disabled: "Vim 模式：关 —— 输入框恢复为普通文本框。"
@@ -1937,3 +1938,24 @@ thinking:
   usage: 推理强度：%{current}。用法：/thinking <low|medium|high|max|default>。
   display_on: 本会话已在对话记录中显示推理内容。
   display_off: 已隐藏推理内容（仅保留动画与检查器）。
+
+workspace_team:
+  title: "工作目录中的智能体"
+  you: " · 当前会话"
+  coordinator: "协调者"
+  member: "成员"
+  running: "运行中"
+  idle: "空闲"
+  connected: "已连接"
+  detached: "已断开界面"
+  make_coordinator: "设 %{agent} 为协调者"
+  refresh: "刷新智能体列表"
+  hint: "↑/↓ 选择 · Enter 发消息或指定协调者 · Esc 关闭"
+  list_first: "请先运行 /agents，再选择协调者。"
+
+question_header:
+  latest: "你的问题"
+  queued: "已排队"
+  sending: "发送中"
+  expand: " F2 · 完整问题 "
+  close: " ↑↓/PgUp/PgDn 滚动 · Esc/F2 关闭 "

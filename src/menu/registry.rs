@@ -1649,8 +1649,8 @@ mod slash_vs_path_tests {
     #[test]
     fn paths_are_not_slash_commands() {
         for input in [
-            "/Users/yuechen/Downloads/desktop-vs-mobile-open.md",
-            "/Users/yuechen/Downloads/notes.md is broken, fix it",
+            "/Users/me/Downloads/desktop-vs-mobile-open.md",
+            "/Users/me/Downloads/notes.md is broken, fix it",
             "/tmp/x/y.txt",
             "/home/me/repo",
             "/var/log/system.log  what does this say?",
@@ -1701,7 +1701,7 @@ mod slash_vs_path_tests {
     fn registry_resolves_a_path_as_not_a_command() {
         let registry = CommandRegistry::with_core_commands();
         assert_eq!(
-            registry.resolve("/Users/yuechen/Downloads/desktop-vs-mobile-open.md"),
+            registry.resolve("/Users/me/Downloads/desktop-vs-mobile-open.md"),
             CommandResolution::NotCommand
         );
     }

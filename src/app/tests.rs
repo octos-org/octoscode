@@ -5680,7 +5680,7 @@ mod tests {
     fn agent_task_bash_row_extracts_command_from_truncated_detail_echo() {
         let item = ActivityItem::new(ActivityKind::Tool, "bash", "complete")
             .with_detail(
-                r#"{"cmd":"grep -n '<img' /Users/yuechen/dev/2026-world-cup/client/src/pages/HomePage.tsx /Users/yuechen/dev/2026-world-cup/client/s"#,
+                r#"{"cmd":"grep -n '<img' /Users/me/dev/2026-world-cup/client/src/pages/HomePage.tsx /Users/me/dev/2026-world-cup/client/s"#,
             )
             .with_tool_call("call_01_ABCDEFGHIJKLMNOP")
             .with_success(true)

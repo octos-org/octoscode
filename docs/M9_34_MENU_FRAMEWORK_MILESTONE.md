@@ -18,14 +18,14 @@ composer, renderer, event loop, or AppUI transport.
 
 Codex reference source inspected locally:
 
-- `/Users/yuechen/home/codex/codex-rs/tui/src/slash_command.rs`
-- `/Users/yuechen/home/codex/codex-rs/tui/src/bottom_pane/command_popup.rs`
-- `/Users/yuechen/home/codex/codex-rs/tui/src/bottom_pane/list_selection_view.rs`
-- `/Users/yuechen/home/codex/codex-rs/tui/src/bottom_pane/multi_select_picker.rs`
-- `/Users/yuechen/home/codex/codex-rs/tui/src/theme_picker.rs`
-- `/Users/yuechen/home/codex/codex-rs/tui/src/bottom_pane/status_line_setup.rs`
-- `/Users/yuechen/home/codex/codex-rs/tui/src/bottom_pane/title_setup.rs`
-- `/Users/yuechen/home/codex/codex-rs/tui/src/keymap_setup/picker.rs`
+- `codex-rs/tui/src/slash_command.rs`
+- `codex-rs/tui/src/bottom_pane/command_popup.rs`
+- `codex-rs/tui/src/bottom_pane/list_selection_view.rs`
+- `codex-rs/tui/src/bottom_pane/multi_select_picker.rs`
+- `codex-rs/tui/src/theme_picker.rs`
+- `codex-rs/tui/src/bottom_pane/status_line_setup.rs`
+- `codex-rs/tui/src/bottom_pane/title_setup.rs`
+- `codex-rs/tui/src/keymap_setup/picker.rs`
 
 Codex is Apache-2.0. Octos is Apache-2.0. We may borrow architecture and
 implementation ideas, but the Octos implementation should be native to the

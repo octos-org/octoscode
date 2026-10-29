@@ -1,19 +1,19 @@
 class Octoscode < Formula
   desc "Terminal UI client for the Octos UI Protocol"
   homepage "https://github.com/octos-org/octoscode"
-  version "0.3.0"
+  version "0.3.1"
   if OS.mac? && Hardware::CPU.arm?
-    url "https://github.com/octos-org/octoscode/releases/download/v0.3.0/octoscode-aarch64-apple-darwin.tar.xz"
-    sha256 "c8c6321018d6576e5db6e41f9decdf45c5cca92788c3558124aaa175039b1ae0"
+    url "https://github.com/octos-org/octoscode/releases/download/v0.3.1/octoscode-aarch64-apple-darwin.tar.xz"
+    sha256 "81155cf67dac609c1ad57379b9ee9b445faa736a7f7b7d056333f31eee0e3518"
   end
   if OS.linux?
     if Hardware::CPU.arm?
-      url "https://github.com/octos-org/octoscode/releases/download/v0.3.0/octoscode-aarch64-unknown-linux-gnu.tar.xz"
-      sha256 "c411e5649c42ab349f1e1fb3b75c551078b12dcf23d7e97e61ae82515d374f9d"
+      url "https://github.com/octos-org/octoscode/releases/download/v0.3.1/octoscode-aarch64-unknown-linux-gnu.tar.xz"
+      sha256 "63a140b1a7e0ba441f34c348e684bfc6ba0c4ed93bf27796f712962fc78c7fc3"
     end
     if Hardware::CPU.intel?
-      url "https://github.com/octos-org/octoscode/releases/download/v0.3.0/octoscode-x86_64-unknown-linux-gnu.tar.xz"
-      sha256 "8f20bce688063769baa523ff3a7b23d748aa8e908530e6e6378607eb34e7bb01"
+      url "https://github.com/octos-org/octoscode/releases/download/v0.3.1/octoscode-x86_64-unknown-linux-gnu.tar.xz"
+      sha256 "5c8cb1fd208e991ab7299fd348a53ab2471f621d2418c4d58b964dd19ef3848e"
     end
   end
   license "Apache-2.0"

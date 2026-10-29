@@ -464,6 +464,14 @@ impl Store {
     }
 
     pub fn compose_command(&mut self) -> Option<AppUiCommand> {
+        self.compose_with_delivery(false)
+    }
+
+    pub fn queue_composer_command(&mut self) -> Option<AppUiCommand> {
+        self.compose_with_delivery(true)
+    }
+
+    fn compose_with_delivery(&mut self, queue_only: bool) -> Option<AppUiCommand> {
         let prompt = self.state.composer.trim().to_string();
         // `looks_like_slash_command`, not `starts_with('/')`: a prompt that
         // merely BEGINS with a path (`/Users/me/Downloads/notes.md is broken,
@@ -532,6 +540,11 @@ impl Store {
             // A settled `/btw` aside is ephemeral — the next prompt dismisses
             // it (an answering one stays; its result may still land).
             self.state.clear_settled_btw_aside(&session_id);
+        }
+        if queue_only && self.turn_in_progress() {
+            self.state.pending_messages.push(prompt);
+            self.state.status = t!("status.message_staged").into_owned();
+            return None;
         }
         self.queue_or_start_prompt_turn(prompt, t!("status.queued_turn_start").into_owned())
     }
@@ -743,15 +756,9 @@ impl Store {
     /// prompt is stashed FIFO in `pending_turn_steers` so an attributed
     /// steer failure can re-stage it (the text must never be lost).
     fn try_steer_live_turn(&mut self, prompt: &str) -> Option<AppUiCommand> {
-        // Steering is OPT-IN (`steer_mid_turn` config / --steer-mid-turn).
-        // The default answers "what does Enter mean while the agent works?"
-        // with FIFO: stage the prompt and run it as its OWN turn after the
-        // current one finishes, in the order typed. A steer is delivered as
-        // a bare user message into the RUNNING loop, and the model treats
-        // the newest instruction as superseding the work in progress — an
-        // effective interrupt-and-pivot. Right tool for a course
-        // correction; wrong default for "also do this next".
-        if !self.state.steer_mid_turn {
+        // Enter steers by default; Tab explicitly queues. Unsupported servers
+        // retain FIFO behavior, and a saved /steer off preference is respected.
+        if !self.state.steer_mid_turn || !Self::image_media_from_prompt(prompt).is_empty() {
             return None;
         }
         if self.state.readonly {
@@ -1377,6 +1384,7 @@ impl Store {
                     },
                 );
                 let open = AppUiCommand::OpenSession(octos_core::ui_protocol::SessionOpenParams {
+                    client_commands: None,
                     session_id,
                     topic: None,
                     profile_id: Some(entry.profile_id.clone()),
@@ -1423,6 +1431,7 @@ impl Store {
         .into_owned();
         Some(AppUiCommand::OpenSession(
             octos_core::ui_protocol::SessionOpenParams {
+                client_commands: None,
                 session_id,
                 topic: None,
                 profile_id: Some(result.profile_id),
@@ -1487,6 +1496,7 @@ impl Store {
         self.state.status = t!("status.peer_staged_by_agent", slug = display_name).into_owned();
         Some(AppUiCommand::OpenSession(
             octos_core::ui_protocol::SessionOpenParams {
+                client_commands: None,
                 session_id,
                 topic: None,
                 profile_id: Some(event.profile_id),
@@ -1711,6 +1721,7 @@ impl Store {
         let slug = self.peer_slug_for_key(&session_id);
         self.state.status = t!("status.peer_started", slug = slug).into_owned();
         Some(AppUiCommand::SubmitPrompt(TurnStartParams {
+            origin: None,
             // Ordinary chat turn: context-scoped tools stay unadvertised.
             tool_context: None,
             session_id,
@@ -2149,7 +2160,61 @@ impl Store {
         use crate::autonomy::AgentsCommand;
         let session_id = self.active_autonomy_session_id()?;
         match cmd {
+            AgentsCommand::Leader(agent_id) => {
+                if !self.require_mutating_appui_method(crate::workspace_team::LEADER) {
+                    return None;
+                }
+                let Some(team) = self.state.workspace_teams.get(&session_id) else {
+                    self.state.status = t!("workspace_team.list_first").into_owned();
+                    return None;
+                };
+                Some(AppUiCommand::WorkspaceTeam(
+                    crate::workspace_team::Command::Leader {
+                        session_id,
+                        agent_id,
+                        expected_revision: team.revision,
+                    },
+                ))
+            }
+            AgentsCommand::Message { agent_id, text } => {
+                if !self.require_mutating_appui_method(crate::workspace_team::MESSAGE) {
+                    return None;
+                }
+                Some(AppUiCommand::WorkspaceTeam(
+                    crate::workspace_team::Command::Message {
+                        session_id,
+                        agent_id: Some(agent_id),
+                        message: text,
+                        broadcast: false,
+                        occurrence_id: crate::workspace_team::occurrence(),
+                    },
+                ))
+            }
+            AgentsCommand::Broadcast(text) => {
+                if !self.require_mutating_appui_method(crate::workspace_team::MESSAGE) {
+                    return None;
+                }
+                Some(AppUiCommand::WorkspaceTeam(
+                    crate::workspace_team::Command::Message {
+                        session_id,
+                        agent_id: None,
+                        message: text,
+                        broadcast: true,
+                        occurrence_id: crate::workspace_team::occurrence(),
+                    },
+                ))
+            }
             AgentsCommand::List => {
+                if self
+                    .state
+                    .capabilities
+                    .as_ref()
+                    .is_some_and(|caps| caps.supports_method(crate::workspace_team::LIST))
+                {
+                    return Some(AppUiCommand::WorkspaceTeam(
+                        crate::workspace_team::Command::List { session_id },
+                    ));
+                }
                 if !self.require_appui_method(crate::model::APPUI_METHOD_AGENT_LIST) {
                     return None;
                 }
@@ -2877,7 +2942,10 @@ impl Store {
                     // `ProtocolAppUiBackend::fill_session_list_cwd`) so a
                     // server with per-project session storage scopes the
                     // listing to this project.
-                    Some(AppUiCommand::ListSessions(SessionListParams { cwd: None }))
+                    Some(AppUiCommand::ListSessions(SessionListParams {
+                        profile_id: None,
+                        cwd: None,
+                    }))
                 } else if !self.state.resume_list_loaded {
                     // `/resume <query>` before the list ever loaded: the local
                     // resolve below would ALWAYS fail (`resume_sessions` is only
@@ -2895,7 +2963,10 @@ impl Store {
                     // `ProtocolAppUiBackend::fill_session_list_cwd`) so a
                     // server with per-project session storage scopes the
                     // listing to this project.
-                    Some(AppUiCommand::ListSessions(SessionListParams { cwd: None }))
+                    Some(AppUiCommand::ListSessions(SessionListParams {
+                        profile_id: None,
+                        cwd: None,
+                    }))
                 } else {
                     // `/resume <query>` shortcut: resolve to a session id
                     // (exact / prefix / substring) and switch directly, reusing
@@ -3040,10 +3111,16 @@ impl Store {
         // kind/message, not the request's profile id.
         self.state.onboarding.profile_id = Some(id.to_owned());
         let cwd = self.current_switch_cwd();
-        let session_id = octos_core::SessionKey::with_profile_topic(id, "local", "tui", "coding");
+        let session_id = octos_core::SessionKey::with_profile_topic(
+            id,
+            "local",
+            "tui",
+            self.workspace_launch_topic(),
+        );
         self.state.status = t!("status.switching_profile", profile = id.to_string()).into_owned();
         Some(AppUiCommand::OpenSession(
             octos_core::ui_protocol::SessionOpenParams {
+                client_commands: None,
                 session_id,
                 topic: None,
                 profile_id: Some(id.to_owned()),
@@ -3475,11 +3552,7 @@ impl Store {
             self.state.status = t!("saveconfig.no_path").into_owned();
             return;
         };
-        let scroll_mode = if self.state.pinned_scroll {
-            crate::cli::ScrollMode::Pinned
-        } else {
-            crate::cli::ScrollMode::Native
-        };
+        let scroll_mode = self.state.scroll_mode;
         let lang =
             crate::cli::Lang::from_env_value(&rust_i18n::locale()).unwrap_or(crate::cli::Lang::En);
         match crate::cli::save_ui_settings(
@@ -3554,25 +3627,30 @@ impl Store {
     }
 
     /// `/scrollmode` — runtime switch of the wheel-scroll model. Bare command
-    /// toggles; `native`/`pinned` set explicitly. Mouse capture follows on the
-    /// next frame (the draw loop re-syncs capture from `wants_mouse_capture`).
+    /// toggles sticky/native; all three modes can be set explicitly. Mouse
+    /// capture follows on the next frame (re-synced by `wants_mouse_capture`).
     fn dispatch_set_scrollmode(&mut self, inline_args: &str) {
         let arg = inline_args.trim().to_ascii_lowercase();
-        let pinned = match arg.as_str() {
-            "" => !self.state.pinned_scroll,
-            "pinned" | "pin" => true,
-            "native" | "default" => false,
+        use crate::cli::ScrollMode;
+        let mode = match arg.as_str() {
+            "" if self.state.scroll_mode == ScrollMode::Native => ScrollMode::Sticky,
+            "" | "native" => ScrollMode::Native,
+            "pinned" | "pin" => ScrollMode::Pinned,
+            "sticky" => ScrollMode::Sticky,
+            "default" => ScrollMode::default(),
             other => {
                 self.state.status =
                     t!("scrollmode.unknown", value = other.to_string()).into_owned();
                 return;
             }
         };
-        self.state.pinned_scroll = pinned;
-        self.state.status = if pinned {
-            t!("scrollmode.set_pinned").into_owned()
-        } else {
-            t!("scrollmode.set_native").into_owned()
+        self.state.scroll_mode = mode;
+        self.state.exit_transcript_pager();
+        self.state.question_detail = Default::default();
+        self.state.status = match mode {
+            ScrollMode::Pinned => t!("scrollmode.set_pinned").into_owned(),
+            ScrollMode::Native => t!("scrollmode.set_native").into_owned(),
+            ScrollMode::Sticky => t!("scrollmode.set_sticky").into_owned(),
         };
     }
 
@@ -5230,10 +5308,12 @@ impl Store {
         {
             self.state.workspace.root = canonical.clone();
         }
+        let topic = self.workspace_launch_topic();
         let session_id =
-            octos_core::SessionKey::with_profile_topic(&profile_id, "local", "tui", "coding");
+            octos_core::SessionKey::with_profile_topic(&profile_id, "local", "tui", topic);
         self.state.status = t!("status.opening_coding_session", profile = profile_id).into_owned();
         Some(AppUiCommand::OpenSession(SessionOpenParams {
+            client_commands: None,
             session_id,
             topic: None,
             profile_id: Some(profile_id),
@@ -6323,10 +6403,22 @@ impl Store {
             theme_name: Some(self.state.theme.as_str()),
             selected_path: &path,
         };
-        let result = filter_menu_result_for_search(
-            core_menu_registry().build(&frame.id, &ctx),
-            &frame.search_query,
-        );
+        let build = if frame.id.as_str() == crate::workspace_team::MENU {
+            self.state
+                .active_session()
+                .and_then(|session| self.state.workspace_teams.get(&session.id))
+                .map(|team| crate::workspace_team::menu(team, self.state.readonly))
+                .unwrap_or_else(|| {
+                    MenuBuildResult::Unavailable(crate::menu::MenuStatusSpec::new(
+                        crate::workspace_team::MENU,
+                        "Workspace agents",
+                        "Run /agents to refresh this session's team.",
+                    ))
+                })
+        } else {
+            core_menu_registry().build(&frame.id, &ctx)
+        };
+        let result = filter_menu_result_for_search(build, &frame.search_query);
         let len = active_menu_item_len(Some(&result));
         if len > 0
             && let Some(frame) = self.state.menu_stack.active_mut()
@@ -6456,6 +6548,7 @@ impl Store {
             mcp_config_catalog: self.state.mcp_config_catalog.as_ref(),
             tool_config_catalog: self.state.tool_config_catalog.as_ref(),
             onboarding: Some(&self.state.onboarding),
+            workspace_launch_topic: Some(self.workspace_launch_topic()),
             selected_session_id: selected_session.map(|session| &session.id),
             selected_session_title: selected_session.map(|session| session.title.as_str()),
             selected_task_title: selected_task.map(|task| task.title.as_str()),
@@ -6471,7 +6564,7 @@ impl Store {
                     )
                 })
                 .count(),
-            pinned_scroll: self.state.pinned_scroll,
+            scroll_mode: self.state.scroll_mode,
             resume_sessions: &self.state.resume_sessions,
             resume_list_loaded: self.state.resume_list_loaded,
             rewind_turns: &self.state.rewind_turns,
@@ -6917,6 +7010,7 @@ impl Store {
             self.state.status = t!("status.images_attached", count = media.len()).into_owned();
         }
         Some(AppUiCommand::SubmitPrompt(TurnStartParams {
+            origin: None,
             // Ordinary chat turn: context-scoped tools stay unadvertised.
             tool_context: None,
             session_id,
@@ -6974,7 +7068,27 @@ impl Store {
             return None;
         }
 
-        let command = self.interrupt_command();
+        self.send_pending_now_command()
+    }
+
+    pub fn send_pending_now_command(&mut self) -> Option<AppUiCommand> {
+        let (session_id, turn_id) = self.state.active_turn()?;
+        if self.state.turn_locally_interrupted(session_id, turn_id)
+            || self
+                .state
+                .pending_turn_steers
+                .iter()
+                .any(|s| &s.session_id == session_id)
+            || !(self.state.has_pending_messages()
+                || self
+                    .state
+                    .retained_steers
+                    .iter()
+                    .any(|s| &s.session_id == session_id && &s.turn_id == turn_id))
+        {
+            return None;
+        }
+        let command = self.interrupt_with_restore(false);
         if command.is_some() {
             self.state.status = t!("status.interrupt_staged_submit").into_owned();
         }
@@ -6982,6 +7096,10 @@ impl Store {
     }
 
     pub fn interrupt_command(&mut self) -> Option<AppUiCommand> {
+        self.interrupt_with_restore(true)
+    }
+
+    fn interrupt_with_restore(&mut self, restore_prompt: bool) -> Option<AppUiCommand> {
         let Some((session_id, turn_id)) = self
             .state
             .active_turn()
@@ -6998,6 +7116,12 @@ impl Store {
             return None;
         };
 
+        if !restore_prompt {
+            self.state
+                .pending_interrupt_restores
+                .retain(|pending| pending.session_id != session_id || pending.turn_id != turn_id);
+        }
+
         // A user Esc/Ctrl+C is a "stop and let me edit/resend" gesture, so the
         // interrupted turn's prompt comes back to the composer — but only once
         // the turn actually SETTLES (its terminal arrives), not here at
@@ -7012,7 +7136,8 @@ impl Store {
         // typed (the apply site re-checks). This is the single user-initiated
         // interrupt chokepoint (both Esc and Ctrl+C route here), so the stash
         // is always user-driven; genuine turn errors never arm it.
-        if self.state.composer.is_empty()
+        if restore_prompt
+            && self.state.composer.is_empty()
             && let Some(prompt) = self.state.submitted_prompt_for_turn(&session_id, &turn_id)
             && !prompt.trim().is_empty()
         {
@@ -7386,6 +7511,14 @@ impl Store {
         }
     }
 
+    /// A decision taking keyboard focus must also enter the visible pane.
+    fn reveal_pending_decision(&mut self) {
+        self.state.diff_preview.expanded = false;
+        if self.state.scroll_mode == crate::cli::ScrollMode::Sticky {
+            self.state.scroll_transcript_to_latest();
+        }
+    }
+
     pub fn show_pending_approval(&mut self) -> bool {
         let title = {
             let Some(approval) = self.state.approval.as_mut() else {
@@ -7401,7 +7534,7 @@ impl Store {
         // overlays, yet takes key priority over all of them — an expanded
         // diff overlay left up would cover the very dialog now receiving
         // approve/deny keys. Collapse it (keep the preview open inline).
-        self.state.diff_preview.expanded = false;
+        self.reveal_pending_decision();
         self.state.approval_auto_open = true;
         self.state.focus = FocusPane::Composer;
         self.state.status = t!("status.approval_shown", title = title).into_owned();
@@ -7591,7 +7724,7 @@ impl Store {
         // Same as `show_pending_approval`: the picker takes key priority over
         // the expanded diff overlay but renders beneath it — collapse the
         // overlay so the user answers a dialog they can actually see.
-        self.state.diff_preview.expanded = false;
+        self.reveal_pending_decision();
         self.state.user_question_auto_open = true;
         self.state.focus = FocusPane::Composer;
         self.state.status = t!("status.question_shown", title = title).into_owned();
@@ -8676,6 +8809,45 @@ impl Store {
                 self.refresh_active_menu_if_open();
                 self.tool_config_list_command()
             }
+            ClientEvent::WorkspaceTeamUpdated(team) => {
+                self.state
+                    .workspace_teams
+                    .insert(team.session_id.clone(), team);
+                self.refresh_active_menu_if_open();
+                None
+            }
+            ClientEvent::WorkspaceTeam(team) => {
+                let active = self
+                    .state
+                    .active_session()
+                    .is_some_and(|s| s.id == team.session_id);
+                self.state
+                    .workspace_teams
+                    .insert(team.session_id.clone(), team);
+                if active {
+                    self.open_menu(MenuId::from(crate::workspace_team::MENU));
+                }
+                None
+            }
+            ClientEvent::WorkspaceMessage(result) => {
+                self.state.status = result
+                    .receipts
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            "{}: {}{}",
+                            r.agent_id,
+                            r.status,
+                            r.error
+                                .as_ref()
+                                .map(|e| format!(" ({e})"))
+                                .unwrap_or_default()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                None
+            }
             ClientEvent::Autonomy(event) => self.apply_autonomy_result(event),
             ClientEvent::LocalShellResult(event) => {
                 self.apply_local_shell_result(event);
@@ -9269,7 +9441,7 @@ impl Store {
                 // scroll mode (otherwise a launch `--scroll-mode`/`/scrollmode`
                 // reverts to native).
                 let config_path = self.state.config_path.clone();
-                let pinned_scroll = self.state.pinned_scroll;
+                let scroll_mode = self.state.scroll_mode;
                 // Local-only Vim editing settings the server never echoes: the
                 // launch/runtime vim toggle and the current Normal/Insert mode
                 // (otherwise a reconnect drops you out of Vim mid-edit).
@@ -9391,7 +9563,7 @@ impl Store {
                 state.session_reasoning_display = session_reasoning_display;
                 state.theme = theme;
                 state.config_path = config_path;
-                state.pinned_scroll = pinned_scroll;
+                state.scroll_mode = scroll_mode;
                 state.vim_mode = vim_mode;
                 state.composer_mode = composer_mode;
                 state.resume_sessions = resume_sessions;
@@ -10159,11 +10331,27 @@ impl Store {
         }
     }
 
+    /// Every fresh launch route shares the same per-client conversation identity.
+    /// Explicit history/resume targets bypass this choice.
+    fn workspace_launch_topic(&self) -> &str {
+        if self
+            .state
+            .capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.supports_method(crate::workspace_team::LIST))
+        {
+            self.state.workspace_launch_topic.as_str()
+        } else {
+            "coding"
+        }
+    }
+
     /// Build the `session/open` command for a launch-resolved profile, attaching
     /// the workspace cwd so the session lands in this folder's per-project store.
     fn open_resolved_launch_session(&mut self, profile_id: String) -> Option<AppUiCommand> {
+        let topic = self.workspace_launch_topic();
         let session_id =
-            octos_core::SessionKey::with_profile_topic(&profile_id, "local", "tui", "coding");
+            octos_core::SessionKey::with_profile_topic(&profile_id, "local", "tui", topic);
         // Preserve the target across a rejected `session/open`; AppUiError does
         // not carry request params, and profile-unconfigured recovery needs the
         // id to open model setup for the correct profile.
@@ -10175,6 +10363,7 @@ impl Store {
         .into_owned();
         Some(AppUiCommand::OpenSession(
             octos_core::ui_protocol::SessionOpenParams {
+                client_commands: None,
                 session_id,
                 topic: None,
                 profile_id: Some(profile_id),
@@ -10216,11 +10405,10 @@ impl Store {
             .iter_mut()
             .find(|status| status.session_id == session_id)
         {
-            // A startup-pinned profile accepted the persisted selection but
-            // did not rebuild its live provider chain. Keep the footer on the
-            // effective model until reconnect instead of claiming the saved
-            // model is already serving this session.
-            if !result.restart_required {
+            // Persistence alone does not mean the runtime changed. Older
+            // servers may save the default but keep serving the boot model.
+            if !result.restart_required && result.runtime_disposition.as_deref() == Some("reloaded")
+            {
                 status.model = Some(result.selected.clone());
                 if let Some(stamp) = result.runtime_policy_stamp.clone() {
                     status.runtime_policy_stamp = Some(stamp);
@@ -10228,6 +10416,7 @@ impl Store {
             }
         }
         if !result.restart_required
+            && result.runtime_disposition.as_deref() != Some("restart_required")
             && let Some(catalog) = self
                 .state
                 .session_model_catalogs
@@ -10236,10 +10425,13 @@ impl Store {
         {
             for model in &mut catalog.models {
                 model.selected = model.model == result.selected.model
-                    && model.provider == result.selected.provider;
+                    && model.provider == result.selected.provider
+                    && model.route == result.selected.route;
             }
             if !catalog.models.iter().any(|model| {
-                model.model == result.selected.model && model.provider == result.selected.provider
+                model.model == result.selected.model
+                    && model.provider == result.selected.provider
+                    && model.route == result.selected.route
             }) {
                 catalog.models.push(result.selected);
             }
@@ -10598,6 +10790,50 @@ impl Store {
                             }
                         }
                     }
+                    // #651: a mid-turn backend recycle fails the latched turn
+                    // with a locally synthesized failure card (a replayed
+                    // `orphaned_by_restart` terminal, or the relaunch
+                    // reconcile's own `backend_relaunched` one), but the
+                    // server records that terminal as a ledger EVENT, not a
+                    // transcript row — this projection has no trace of it and
+                    // the wholesale replace above just wiped the card.
+                    // Restore it alongside the optimistic user rows — without
+                    // it an unattended pane shows a clean transcript with no
+                    // record of the lost turn. The match below also carries
+                    // switch-finalized partial text committed under the same
+                    // turn thread; keeping it is deliberate. Bounded by the
+                    // `errored_turns` per-session FIFO cap, like every other
+                    // consumer of that set.
+                    let lost_errored_turn_rows = previous_messages
+                        .iter()
+                        .filter(|message| {
+                            message.role == MessageRole::Assistant
+                                && message.thread_id.as_deref().is_some_and(|thread| {
+                                    self.state
+                                        .is_turn_errored_by_wire_ids(&session_id.0, thread)
+                                })
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if !lost_errored_turn_rows.is_empty() {
+                        let hydrated = self
+                            .find_session_mut(&session_id)
+                            .expect("hydrated session exists");
+                        for card in lost_errored_turn_rows {
+                            // Suppress only an identical row: a projected row
+                            // may legitimately share the turn's thread (a
+                            // partial assistant row committed before the child
+                            // died) — that is not the failure card, and the
+                            // card must still be restored next to it.
+                            if !hydrated.messages.iter().any(|message| {
+                                message.role == MessageRole::Assistant
+                                    && message.thread_id == card.thread_id
+                                    && message.content == card.content
+                            }) {
+                                hydrated.messages.push(card);
+                            }
+                        }
+                    }
                     let rendered_history_changed = !hydrated_history_preserves_rendered_prefix(
                         &previous_messages,
                         &self
@@ -10856,6 +11092,7 @@ impl Store {
             self.state.startup_prompt_dispatched = true;
             let turn_id = TurnId::new();
             let prompt_command = AppUiCommand::SubmitPrompt(TurnStartParams {
+                origin: None,
                 tool_context: None,
                 session_id: session_id.clone(),
                 turn_id,
@@ -11102,7 +11339,7 @@ impl Store {
             // A visible approval takes key priority over the expanded diff
             // overlay but renders beneath it — collapse the overlay so the
             // dialog receiving approve/deny keys is on screen.
-            self.state.diff_preview.expanded = false;
+            self.reveal_pending_decision();
         }
         self.state.approval = Some(approval);
         self.state.focus = FocusPane::Composer;
@@ -11163,7 +11400,7 @@ impl Store {
             // A visible question owns the keyboard before the expanded diff
             // overlay, but renders below it. Collapse the overlay so hydrate
             // cannot leave the user answering an invisible dialog.
-            self.state.diff_preview.expanded = false;
+            self.reveal_pending_decision();
         }
         self.state.user_question = Some(picker);
         self.state.focus = FocusPane::Composer;
@@ -12376,7 +12613,7 @@ impl Store {
                     // A visible approval takes key priority over the expanded
                     // diff overlay but renders beneath it — collapse the
                     // overlay so approve/deny keys act on a visible dialog.
-                    self.state.diff_preview.expanded = false;
+                    self.reveal_pending_decision();
                 }
                 let diff_preview_id = approval.diff_preview_id();
                 let diff_preview_turn_id = approval.turn_id.clone();
@@ -12972,6 +13209,9 @@ impl Store {
             // octos-core is ahead of this crate and added `VoiceExit`; handling
             // it here keeps the match exhaustive so the workspace compiles.)
             UiNotification::VoiceExit(_) => None,
+            // The TUI does not negotiate context.state.v1. Accept unsolicited
+            // progress snapshots without treating them as compaction events.
+            UiNotification::ContextStateReported(_) => None,
             // task-consume-turn-steer-dropped: the server hands back `turn/steer`
             // inputs it accepted but never drained. Only a matching retained
             // steer earns a re-stage — whoever consumes it first (this arm or
@@ -13799,6 +14039,7 @@ impl Store {
                 let command = match outcome {
                     TurnTerminalOutcome::Completed => {
                         let (tokens_in, tokens_out) = token_usage
+                            .as_ref()
                             .map(|usage| {
                                 (
                                     u32::try_from(usage.input_tokens).ok(),
@@ -13807,6 +14048,7 @@ impl Store {
                             })
                             .unwrap_or((None, None));
                         self.commit_live_reply(TurnCompletedEvent {
+                            token_usage,
                             session_id: session_id.clone(),
                             topic,
                             turn_id: turn_id.clone(),
@@ -14120,7 +14362,7 @@ impl Store {
         // The picker takes key priority over the expanded diff overlay but
         // renders beneath it — collapse the overlay so the question is
         // answered on a visible dialog.
-        self.state.diff_preview.expanded = false;
+        self.reveal_pending_decision();
         self.state.user_question_auto_open = true;
         self.state.user_question = Some(picker);
         // Salience (spec task-approval-ux-salience): a live decision arrival
@@ -14921,6 +15163,7 @@ impl Store {
             runtime.and_then(|status| status.workspace_root.clone().or_else(|| status.cwd.clone()));
         self.state
             .enqueue_local_session_open_front(AppUiCommand::OpenSession(SessionOpenParams {
+                client_commands: None,
                 session_id,
                 topic: None,
                 profile_id,
@@ -17576,6 +17819,7 @@ mod tests {
         // Stale TurnCompleted for a DIFFERENT (older) turn while turn B is live.
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id: TurnId::new(),
@@ -17599,6 +17843,7 @@ mod tests {
         // The REAL terminal for the live turn DOES stamp it done.
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id: live_turn,
@@ -19114,23 +19359,15 @@ mod tests {
         params.turn_id
     }
 
-    /// The DEFAULT for a prompt typed while the agent is working: stage FIFO
-    /// and run it as its OWN turn after the current one finishes — even when
-    /// the server advertises `turn/steer`. A steer is delivered as a bare
-    /// user message into the RUNNING loop, where the model treats the newest
-    /// instruction as superseding the work in progress — an effective
-    /// interrupt-and-pivot. That redirection is opt-in (`steer_mid_turn`);
-    /// plain Enter means "next, in order", and every prompt gets processed.
+    /// A saved /steer off preference still uses FIFO even on a capable server.
     #[test]
-    fn mid_turn_prompts_stage_fifo_by_default_even_when_steer_capable() {
+    fn mid_turn_prompts_stage_fifo_when_steering_disabled() {
         let mut store = store_with_empty_session();
+        assert!(store.state.steer_mid_turn);
+        store.state.steer_mid_turn = false;
         store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods([
             crate::model::APPUI_METHOD_TURN_STEER,
         ]));
-        assert!(
-            !store.state.steer_mid_turn,
-            "precondition: steering is opt-in, off by default"
-        );
         let session_id = store.state.sessions[0].id.clone();
         let first_turn = start_live_turn(&mut store, "review the design");
 
@@ -19150,7 +19387,7 @@ mod tests {
         );
         assert!(
             store.state.pending_turn_steers.is_empty(),
-            "nothing may enter the steer stash by default"
+            "nothing may enter the steer stash when disabled"
         );
         assert_eq!(
             store.state.pending_messages,
@@ -19166,6 +19403,7 @@ mod tests {
         let drained = store
             .apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
                 TurnCompletedEvent {
+                    token_usage: None,
                     session_id: session_id.clone(),
                     topic: None,
                     turn_id: first_turn,
@@ -19647,6 +19885,9 @@ mod tests {
 
     fn hydrated_user_row(seq: u64, content: &str, thread_id: &str) -> HydratedMessage {
         HydratedMessage {
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+            tool_name: None,
             seq,
             role: "user".into(),
             content: content.into(),
@@ -20294,6 +20535,7 @@ mod tests {
         // the race `steered:false` covers.
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id: live_turn,
@@ -21216,6 +21458,8 @@ now analyzing the bus module"
         let mut store = store_with_empty_session();
 
         store.apply_client_event(ClientEvent::SessionList(SessionListResult {
+profile_id: None,
+workspace_root: None,
             sessions: serde_json::json!([
                 { "id": "s:old", "message_count": 1, "updated_at": "2026-06-01T00:00:00Z" },
                 { "id": "s:new", "message_count": 9, "title": "Newest", "updated_at": "2026-07-01T00:00:00Z" },
@@ -21813,6 +22057,7 @@ now analyzing the bus module"
         // A's terminal fires while B is active: nothing may submit into B.
         let command = store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: SessionKey("local:a".into()),
                 topic: None,
                 turn_id,
@@ -21900,6 +22145,7 @@ now analyzing the bus module"
         )));
         let command = store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: a.clone(),
                 topic: None,
                 turn_id,
@@ -22289,6 +22535,7 @@ now analyzing the bus module"
         // new turn's TurnStarted.
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: a.clone(),
                 topic: None,
                 turn_id: old_turn.clone(),
@@ -22328,6 +22575,7 @@ now analyzing the bus module"
         // The gate's OWN terminal still releases it (FIFO preserved).
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: a.clone(),
                 topic: None,
                 turn_id: new_turn,
@@ -23306,6 +23554,9 @@ now analyzing the bus module"
                 context: None,
                 context_state: None,
                 messages: Some(vec![HydratedMessage {
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                    tool_name: None,
                     seq: 1,
                     role: "user".into(),
                     content: "first question".into(),
@@ -23369,6 +23620,9 @@ now analyzing the bus module"
                 context: None,
                 context_state: None,
                 messages: Some(vec![HydratedMessage {
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                    tool_name: None,
                     seq: 1,
                     role: "user".into(),
                     content: "first question".into(),
@@ -23440,6 +23694,9 @@ now analyzing the bus module"
                 context: None,
                 context_state: None,
                 messages: Some(vec![HydratedMessage {
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                    tool_name: None,
                     seq: 1,
                     role: "user".into(),
                     content: "first question".into(),
@@ -23490,6 +23747,8 @@ now analyzing the bus module"
 
         // Server returns zero prior sessions.
         store.apply_client_event(ClientEvent::SessionList(SessionListResult {
+            profile_id: None,
+            workspace_root: None,
             sessions: serde_json::json!([]),
         }));
 
@@ -23666,7 +23925,7 @@ now analyzing the bus module"
         // launch config path and the wheel scroll mode are the same class of
         // local-only setting and must survive the replay too.
         store.state.config_path = Some(std::path::PathBuf::from("/tmp/launch-config.json"));
-        store.state.pinned_scroll = true;
+        store.state.scroll_mode = crate::cli::ScrollMode::Pinned;
         let sessions = store.state.sessions.clone();
         store.apply_event(AppUiEvent::Snapshot(AppUiSnapshot {
             sessions,
@@ -23686,7 +23945,7 @@ now analyzing the bus module"
             "launch config path must survive snapshot replay so /saveconfig keeps targeting it"
         );
         assert!(
-            store.state.pinned_scroll,
+            store.state.scroll_mode == crate::cli::ScrollMode::Pinned,
             "wheel scroll mode must survive snapshot replay"
         );
     }
@@ -23915,6 +24174,7 @@ now analyzing the bus module"
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: a.clone(),
                 topic: None,
                 turn_id: turn,
@@ -23990,6 +24250,7 @@ now analyzing the bus module"
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: a,
                 topic: None,
                 turn_id: turn,
@@ -24137,6 +24398,7 @@ now analyzing the bus module"
         )));
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: a,
                 topic: None,
                 turn_id: turn,
@@ -24237,6 +24499,7 @@ now analyzing the bus module"
         // …then the turn settles before the event loop reaches the draw.
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id,
@@ -24426,6 +24689,7 @@ now analyzing the bus module"
 
     fn turn_completed_event(session_id: &SessionKey, turn_id: &TurnId) -> AppUiEvent {
         AppUiEvent::Protocol(UiNotification::TurnCompleted(TurnCompletedEvent {
+            token_usage: None,
             session_id: session_id.clone(),
             topic: None,
             turn_id: turn_id.clone(),
@@ -24443,6 +24707,163 @@ now analyzing the bus module"
             .iter()
             .filter(|message| message.content.contains(&*note))
             .count()
+    }
+
+    /// #651: a mid-turn backend recycle fails the latched turn with a locally
+    /// synthesized `backend_relaunched` failure card, but the post-reconnect
+    /// `session/hydrate` then replaces the transcript with the server
+    /// projection — and the server has no trace of the lost turn (its
+    /// in-flight rows were never committed). The card must be restored
+    /// alongside the optimistic user rows, or an unattended pane shows a
+    /// clean transcript with no record of the lost turn.
+    #[test]
+    fn relaunch_failure_card_survives_the_reconnect_hydrate() {
+        let mut store = store_with_two_sessions("local:a", "local:b");
+        let session_id = SessionKey("local:a".into());
+        let dead_turn = TurnId::new();
+        store.state.sessions[0].live_reply = Some(LiveReply {
+            turn_id: dead_turn.clone(),
+            text: "partial answer from the dead child".into(),
+        });
+
+        store.apply_client_event(ClientEvent::BackendRelaunched);
+        assert_eq!(
+            relaunch_failure_cards(&store, 0),
+            1,
+            "the relaunch reconcile pushes the failure card"
+        );
+
+        // The replacement child's hydrate serves committed history only: the
+        // lost turn has neither messages nor a turns entry.
+        let hydrate: SessionHydrateResult = serde_json::from_value(serde_json::json!({
+            "session_id": session_id.0,
+            "cursor": {"stream": "session", "seq": 1},
+            "messages": [],
+            "turns": [],
+        }))
+        .expect("hydrate result decodes");
+        store.apply_client_event(ClientEvent::SessionHydrate(hydrate));
+
+        assert_eq!(
+            relaunch_failure_cards(&store, 0),
+            1,
+            "the failure card must survive the reconnect hydrate"
+        );
+    }
+
+    /// The real v2.0.3 reconnect path from the #651 soak: the replacement
+    /// child's ledger recovery synthesizes a durable
+    /// `turn_error(orphaned_by_restart)` — so the hydrate `turns` list DOES
+    /// know the terminal — but that terminal is a ledger event, not a
+    /// transcript row, so the `messages` projection still has no trace of the
+    /// lost turn. The replayed terminal's failure card must survive the
+    /// hydrate regardless of the `turns` entry.
+    #[test]
+    fn relaunch_failure_card_survives_a_server_known_terminal_without_a_projected_row() {
+        let mut store = store_with_two_sessions("local:a", "local:b");
+        let session_id = SessionKey("local:a".into());
+        let dead_turn = TurnId::new();
+        store.state.sessions[0].live_reply = Some(LiveReply {
+            turn_id: dead_turn.clone(),
+            text: "partial answer from the dead child".into(),
+        });
+
+        store.apply_client_event(ClientEvent::BackendRelaunched);
+        assert_eq!(relaunch_failure_cards(&store, 0), 1);
+
+        let hydrate: SessionHydrateResult = serde_json::from_value(serde_json::json!({
+            "session_id": session_id.0,
+            "cursor": {"stream": "session", "seq": 1},
+            "messages": [],
+            "turns": [{"turn_id": dead_turn.0.to_string(), "state": "errored"}],
+        }))
+        .expect("hydrate result decodes");
+        store.apply_client_event(ClientEvent::SessionHydrate(hydrate));
+
+        assert_eq!(
+            relaunch_failure_cards(&store, 0),
+            1,
+            "a ledger-only terminal projects no transcript row — the card must survive"
+        );
+    }
+
+    /// The restore must be idempotent: every later re-hydrate of the same
+    /// session (post-dispatch reconnect, /resume) re-appends the card exactly
+    /// once rather than stacking duplicates.
+    #[test]
+    fn relaunch_failure_card_restore_is_idempotent_across_rehydrates() {
+        let mut store = store_with_two_sessions("local:a", "local:b");
+        let session_id = SessionKey("local:a".into());
+        let dead_turn = TurnId::new();
+        store.state.sessions[0].live_reply = Some(LiveReply {
+            turn_id: dead_turn.clone(),
+            text: "partial answer from the dead child".into(),
+        });
+
+        store.apply_client_event(ClientEvent::BackendRelaunched);
+        assert_eq!(relaunch_failure_cards(&store, 0), 1);
+
+        for _ in 0..3 {
+            let hydrate: SessionHydrateResult = serde_json::from_value(serde_json::json!({
+                "session_id": session_id.0,
+                "cursor": {"stream": "session", "seq": 1},
+                "messages": [],
+                "turns": [],
+            }))
+            .expect("hydrate result decodes");
+            store.apply_client_event(ClientEvent::SessionHydrate(hydrate));
+        }
+
+        assert_eq!(
+            relaunch_failure_cards(&store, 0),
+            1,
+            "three re-hydrates must leave exactly one restored card"
+        );
+    }
+
+    /// A child that died mid-stream may still have committed a partial
+    /// assistant row for the lost turn, and hydrated rows can carry the turn
+    /// id as their thread. That partial row is not the failure card: the
+    /// restore must keep the card AND leave the projected partial untouched.
+    #[test]
+    fn relaunch_failure_card_is_restored_alongside_a_projected_partial_row() {
+        let mut store = store_with_two_sessions("local:a", "local:b");
+        let session_id = SessionKey("local:a".into());
+        let dead_turn = TurnId::new();
+        store.state.sessions[0].live_reply = Some(LiveReply {
+            turn_id: dead_turn.clone(),
+            text: "partial answer from the dead child".into(),
+        });
+
+        store.apply_client_event(ClientEvent::BackendRelaunched);
+        assert_eq!(relaunch_failure_cards(&store, 0), 1);
+
+        let hydrate: SessionHydrateResult = serde_json::from_value(serde_json::json!({
+            "session_id": session_id.0,
+            "cursor": {"stream": "session", "seq": 1},
+            "messages": [
+                {"seq": 0, "role": "assistant", "content": "partial answer from the dead child",
+                 "thread_id": dead_turn.0.to_string(), "persisted_at": chrono::Utc::now()},
+            ],
+            "turns": [{"turn_id": dead_turn.0.to_string(), "state": "errored"}],
+        }))
+        .expect("hydrate result decodes");
+        store.apply_client_event(ClientEvent::SessionHydrate(hydrate));
+
+        let messages = &store.state.sessions[0].messages;
+        assert_eq!(
+            relaunch_failure_cards(&store, 0),
+            1,
+            "a projected partial row must not suppress the failure card"
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.content == "partial answer from the dead child")
+                .count(),
+            1,
+            "the projected partial row must not be duplicated"
+        );
     }
 
     /// P1-3: the replacement stdio child can resume a durable continuation
@@ -24612,6 +25033,120 @@ now analyzing the bus module"
             !store.state.is_turn_errored(&a, &stopped),
             "an interrupt commits the streamed text itself and is not an error"
         );
+    }
+
+    #[test]
+    fn workspace_launches_are_distinct_but_bootstrap_retry_keeps_identity() {
+        let mut a = protocol_store_with_methods(&[crate::workspace_team::LIST]);
+        let mut b = protocol_store_with_methods(&[crate::workspace_team::LIST]);
+        let Some(AppUiCommand::OpenSession(first)) = a.open_resolved_launch_session("dev".into())
+        else {
+            panic!("open")
+        };
+        let Some(AppUiCommand::OpenSession(retry)) = a.open_resolved_launch_session("dev".into())
+        else {
+            panic!("open")
+        };
+        let Some(AppUiCommand::OpenSession(second)) = b.open_resolved_launch_session("dev".into())
+        else {
+            panic!("open")
+        };
+        assert_eq!(first.session_id, retry.session_id);
+        assert_ne!(first.session_id, second.session_id);
+        let mut legacy = protocol_store_with_methods(&[]);
+        let Some(AppUiCommand::OpenSession(old)) =
+            legacy.open_resolved_launch_session("dev".into())
+        else {
+            panic!("open")
+        };
+        assert_eq!(old.session_id.topic(), Some("coding"));
+    }
+
+    #[test]
+    fn workspace_activation_menus_and_profile_switch_keep_clients_distinct() {
+        use crate::model::{LaunchDecisionKind, LaunchPromptState};
+        fn activate(store: &mut Store, decision: LaunchDecisionKind) -> SessionKey {
+            store.state.workspace.root = "/tmp/shared-new-folder".into();
+            store.state.onboarding.launch_prompt = Some(LaunchPromptState {
+                decision,
+                resolved_profile: "dev".into(),
+                existing_profiles: vec!["other".into()],
+                cwd: "/tmp/shared-new-folder".into(),
+            });
+            store.open_menu(MenuId::from(crate::menu::registry::MENU_LAUNCH_PROMPT));
+            let Some(AppUiCommand::OpenSession(params)) = store.accept_active_menu_item() else {
+                panic!("activation must open the menu's workspace");
+            };
+            assert_eq!(params.cwd.as_deref(), Some("/tmp/shared-new-folder"));
+            params.session_id
+        }
+        let mut a = protocol_store_with_methods(&[crate::workspace_team::LIST]);
+        let mut b = protocol_store_with_methods(&[crate::workspace_team::LIST]);
+        let first = activate(&mut a, LaunchDecisionKind::Activate);
+        let second = activate(&mut b, LaunchDecisionKind::Activate);
+        assert_ne!(
+            first, second,
+            "concurrent first-use confirmations need separate chats"
+        );
+        assert_eq!(first, activate(&mut a, LaunchDecisionKind::CrossProfile));
+        let Some(AppUiCommand::OpenSession(switched)) = a.dispatch_switch_to_profile("dev") else {
+            panic!("profile switch must open a session");
+        };
+        assert_eq!(
+            first, switched.session_id,
+            "switch back stays in this client's chat"
+        );
+        let mut legacy = protocol_store_with_methods(&[]);
+        assert_eq!(
+            activate(&mut legacy, LaunchDecisionKind::Activate).topic(),
+            Some("coding")
+        );
+    }
+
+    #[test]
+    fn workspace_agent_controls_require_capability_revision_and_mutable_client() {
+        use crate::autonomy::AgentsCommand;
+        use crate::workspace_team::{Command, LEADER, LIST, MESSAGE, Snapshot};
+        let mut store = protocol_store_with_methods(&[LIST, LEADER, MESSAGE]);
+        assert!(matches!(
+            store.dispatch_agents_command(AgentsCommand::List),
+            Some(AppUiCommand::WorkspaceTeam(Command::List { .. }))
+        ));
+        assert!(
+            store
+                .dispatch_agents_command(AgentsCommand::Leader("workspace-2".into()))
+                .is_none()
+        );
+        let session = store.state.active_session().unwrap().id.clone();
+        store.state.workspace_teams.insert(
+            session.clone(),
+            Snapshot {
+                session_id: session,
+                workspace: "/repo".into(),
+                revision: 7,
+                leader: "workspace-1".into(),
+                members: vec![],
+            },
+        );
+        assert!(matches!(
+            store.dispatch_agents_command(AgentsCommand::Leader("workspace-2".into())),
+            Some(AppUiCommand::WorkspaceTeam(Command::Leader {
+                expected_revision: 7,
+                ..
+            }))
+        ));
+        store.state.readonly = true;
+        assert!(
+            store
+                .dispatch_agents_command(AgentsCommand::Broadcast("hi".into()))
+                .is_none()
+        );
+        assert!(
+            store
+                .dispatch_agents_command(AgentsCommand::Leader("workspace-2".into()))
+                .is_none()
+        );
+        assert!(store.dispatch_agents_command(AgentsCommand::List).is_some());
     }
 
     fn protocol_store_with_methods(methods: &[&str]) -> Store {
@@ -31370,6 +31905,7 @@ now analyzing the bus module"
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id: turn_id.clone(),
@@ -31387,6 +31923,68 @@ now analyzing the bus module"
         );
         assert!(store.state.sessions[0].live_reply.is_none());
         assert_eq!(store.state.run_state.label(), "done");
+    }
+
+    #[test]
+    fn model_select_keeps_saved_and_runtime_models_distinct() {
+        for disposition in [
+            "restart_required",
+            "deferred",
+            "persisted_but_not_live",
+            "legacy",
+            "reloaded",
+        ] {
+            let mut store = store_with_two_sessions("local:a", "local:b");
+            let session = SessionKey("local:a".into());
+            let status: crate::model::SessionStatusReadResult = serde_json::from_value(serde_json::json!({
+                "session_id": "local:a", "model": {"model":"old", "provider":"openai", "selected":true}
+            })).unwrap();
+            store.state.session_runtime_statuses.push(status.into());
+            store
+                .state
+                .set_model_catalog(crate::model::SessionModelCatalog {
+                    session_id: session.clone(),
+                    models: vec![],
+                });
+            let mut raw = serde_json::json!({
+                "session_id":"local:a", "selected":{"model":"new", "provider":"openai", "selected":true},
+                "applied":true,
+                "runtime_policy_stamp":{"model": if disposition == "reloaded" {"new"} else {"old"}, "provider":"openai"}
+            });
+            if disposition != "legacy" {
+                raw["runtime_disposition"] = disposition.into();
+            }
+            store.apply_client_event(ClientEvent::ModelSelect(
+                crate::client_event::ModelSelectClientEvent {
+                    result: serde_json::from_value(raw).unwrap(),
+                    message: "saved".into(),
+                    initiating_session: Some(session.clone()),
+                },
+            ));
+            let expected = if disposition == "reloaded" {
+                "new"
+            } else {
+                "old"
+            };
+            assert_eq!(
+                store.state.session_runtime_statuses[0]
+                    .model
+                    .as_ref()
+                    .unwrap()
+                    .model,
+                expected,
+                "{disposition}"
+            );
+            let models = &store.state.model_catalog_for(&session).unwrap().models;
+            if disposition == "restart_required" {
+                assert!(
+                    models.is_empty(),
+                    "pending restart waits for catalog readback"
+                );
+            } else {
+                assert_eq!(models[0].model, "new");
+            }
+        }
     }
 
     /// A select result carries its initiating session (correlated by request
@@ -31446,6 +32044,8 @@ now analyzing the bus module"
                     },
                     applied: true,
                     restart_required: false,
+                    runtime_disposition: Some("reloaded".into()),
+                    runtime_error: None,
                     runtime_policy_stamp: None,
                 },
                 message: "Model selected".into(),
@@ -31545,6 +32145,8 @@ now analyzing the bus module"
                     },
                     applied: true,
                     restart_required: true,
+                    runtime_disposition: None,
+                    runtime_error: None,
                     runtime_policy_stamp: Some(RuntimePolicyStamp {
                         model: Some("deepseek-chat".into()),
                         provider: Some("deepseek".into()),
@@ -31660,6 +32262,8 @@ now analyzing the bus module"
                     },
                     applied: true,
                     restart_required: false,
+                    runtime_disposition: Some("reloaded".into()),
+                    runtime_error: None,
                     runtime_policy_stamp: None,
                 },
                 message: "Model selected".into(),
@@ -32062,6 +32666,7 @@ now analyzing the bus module"
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id: turn_id.clone(),
@@ -32368,6 +32973,7 @@ now analyzing the bus module"
         assert_eq!(store.state.selected_session, 0);
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: background_id.clone(),
                 topic: None,
                 turn_id: turn_id.clone(),
@@ -32441,6 +33047,7 @@ now analyzing the bus module"
         // Original user turn completes first and clears live_reply.
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id: original_turn,
@@ -32472,6 +33079,7 @@ now analyzing the bus module"
         }
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id: continuation,
@@ -32534,6 +33142,7 @@ now analyzing the bus module"
         )));
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id: turn_id.clone(),
@@ -32574,6 +33183,7 @@ now analyzing the bus module"
         )));
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id: turn_id.clone(),
@@ -32805,6 +33415,7 @@ now analyzing the bus module"
         let mut store = store_with_live_reply(turn_id.clone(), "the answer");
         let session_id = store.state.sessions[0].id.clone();
         let completed = TurnCompletedEvent {
+            token_usage: None,
             session_id: session_id.clone(),
             topic: None,
             turn_id: turn_id.clone(),
@@ -32847,6 +33458,7 @@ now analyzing the bus module"
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id: turn_id.clone(),
@@ -32895,6 +33507,7 @@ now analyzing the bus module"
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id: original_turn,
@@ -32919,6 +33532,7 @@ now analyzing the bus module"
         }
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id: continuation,
@@ -32962,6 +33576,7 @@ now analyzing the bus module"
         )));
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id: continuation,
@@ -32998,6 +33613,7 @@ now analyzing the bus module"
             )));
             store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
                 TurnCompletedEvent {
+                    token_usage: None,
                     session_id: session_id.clone(),
                     topic: None,
                     turn_id: turn.clone(),
@@ -33049,6 +33665,7 @@ now analyzing the bus module"
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id: turn_id.clone(),
@@ -33100,6 +33717,7 @@ now analyzing the bus module"
         );
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id: turn_a.clone(),
@@ -33129,6 +33747,7 @@ now analyzing the bus module"
         );
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id: turn_b.clone(),
@@ -33182,6 +33801,7 @@ now analyzing the bus module"
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id: turn_id.clone(),
@@ -33274,6 +33894,7 @@ now analyzing the bus module"
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id,
@@ -33304,6 +33925,7 @@ now analyzing the bus module"
                 ));
             store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
                 TurnCompletedEvent {
+                    token_usage: None,
                     session_id,
                     topic: None,
                     turn_id: turn,
@@ -33355,6 +33977,7 @@ now analyzing the bus module"
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id,
@@ -33384,6 +34007,7 @@ now analyzing the bus module"
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id,
@@ -33419,6 +34043,7 @@ now analyzing the bus module"
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: peer.clone(),
                 topic: None,
                 turn_id,
@@ -33449,6 +34074,7 @@ now analyzing the bus module"
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id,
@@ -33480,6 +34106,7 @@ now analyzing the bus module"
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id,
@@ -33540,6 +34167,7 @@ now analyzing the bus module"
         )));
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id,
@@ -33577,6 +34205,7 @@ now analyzing the bus module"
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id,
@@ -33605,6 +34234,7 @@ now analyzing the bus module"
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id: TurnId::new(),
@@ -33698,6 +34328,7 @@ now analyzing the bus module"
         // B completes — live_reply is now None.
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id: turn_b.clone(),
@@ -33723,6 +34354,7 @@ now analyzing the bus module"
         // LATE TurnCompleted{A} arrives after B already committed.
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id: turn_a.clone(),
@@ -33787,6 +34419,7 @@ now analyzing the bus module"
         // Turn B completes — live_reply is now None.
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id: turn_b.clone(),
@@ -33818,6 +34451,7 @@ now analyzing the bus module"
         // LATE TurnCompleted{A} arrives after B has completed (live_reply None).
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id: turn_a.clone(),
@@ -33872,6 +34506,7 @@ now analyzing the bus module"
         )));
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id: turn_a.clone(),
@@ -33910,6 +34545,7 @@ now analyzing the bus module"
         // B completes normally; with the fix nothing latched → back to idle.
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id: turn_b.clone(),
@@ -33966,6 +34602,7 @@ now analyzing the bus module"
         // B completes — live_reply is now None.
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id: turn_b.clone(),
@@ -34190,6 +34827,7 @@ now analyzing the bus module"
         let logs_before = store.state.turn_activity_logs.len();
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id: turn_a.clone(),
@@ -34288,6 +34926,7 @@ now analyzing the bus module"
         // B completes — live_reply is now None.
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id: turn_b.clone(),
@@ -34366,6 +35005,7 @@ now analyzing the bus module"
         )));
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id: turn_a,
@@ -34439,6 +35079,7 @@ now analyzing the bus module"
             }
             LegacyPayload::TurnCompleted { token_usage } => {
                 UiNotification::TurnCompleted(TurnCompletedEvent {
+                    token_usage: None,
                     session_id,
                     topic: None,
                     turn_id,
@@ -35022,6 +35663,7 @@ now analyzing the bus module"
         let command = store
             .apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
                 TurnCompletedEvent {
+                    token_usage: None,
                     session_id: session_id.clone(),
                     topic: None,
                     turn_id,
@@ -35059,6 +35701,7 @@ now analyzing the bus module"
         let command = store
             .apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
                 TurnCompletedEvent {
+                    token_usage: None,
                     session_id,
                     topic: None,
                     turn_id,
@@ -35145,6 +35788,7 @@ now analyzing the bus module"
         let command = store
             .apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
                 TurnCompletedEvent {
+                    token_usage: None,
                     session_id: session_id.clone(),
                     topic: None,
                     turn_id,
@@ -35713,6 +36357,7 @@ now analyzing the bus module"
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id,
@@ -35858,6 +36503,7 @@ now analyzing the bus module"
         );
         event.approval_kind = Some(approval_kinds::DIFF.into());
         event.typed_details = Some(ApprovalTypedDetails {
+            host_tool: None,
             kind: approval_kinds::DIFF.into(),
             command: None,
             sandbox: None,
@@ -35933,6 +36579,7 @@ now analyzing the bus module"
         )));
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id,
@@ -36868,6 +37515,7 @@ now analyzing the bus module"
         // …and then finishes NORMALLY — the interrupt never landed.
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id: turn_id.clone(),
@@ -36917,6 +37565,7 @@ now analyzing the bus module"
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id,
@@ -37478,6 +38127,7 @@ now analyzing the bus module"
         // Some servers settle an interrupted turn with a normal completion.
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id,
                 topic: None,
                 turn_id,
@@ -38270,6 +38920,20 @@ now analyzing the bus module"
     }
 
     #[test]
+    fn image_prompt_stays_queued_when_mid_turn_steering_is_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("shot.png");
+        std::fs::write(&img, b"image bytes").unwrap();
+        let mut store = steer_capable_store();
+        start_live_turn(&mut store, "work");
+        let prompt = format!("inspect @{}", img.display());
+        store.state.set_composer_text(&prompt);
+        assert!(store.compose_command().is_none());
+        assert_eq!(store.state.pending_messages, vec![prompt]);
+        assert!(store.state.pending_turn_steers.is_empty());
+    }
+
+    #[test]
     fn submitted_prompt_attaches_existing_image_paths_as_media() {
         // Route-1 image support: terminals cannot deliver pasted image BYTES
         // (bracketed paste is text-only), so the path IS the paste surface —
@@ -38952,6 +39616,7 @@ now analyzing the bus module"
         );
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id: TurnId::new(),
@@ -38969,6 +39634,7 @@ now analyzing the bus module"
         // The OWNING turn's terminal clears it.
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id: owner_turn.clone(),
@@ -39612,6 +40278,7 @@ now analyzing the bus module"
         // …so the turn's terminal archives it with the turn.
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id: turn_id.clone(),
@@ -40068,6 +40735,7 @@ now analyzing the bus module"
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id,
@@ -40137,6 +40805,7 @@ now analyzing the bus module"
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id: stale_turn,
@@ -43108,6 +43777,9 @@ now analyzing the bus module"
         // a tool turn went 2 live msgs -> 4 on hydrate before this filter).
         let now = chrono::Utc::now();
         let row = |role: &str, content: &str| HydratedMessage {
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+            tool_name: None,
             seq: 1,
             role: role.into(),
             content: content.into(),
@@ -43160,6 +43832,9 @@ now analyzing the bus module"
             context: None,
             context_state: None,
             messages: Some(vec![HydratedMessage {
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                tool_name: None,
                 seq: 1,
                 role: "user".into(),
                 content: "earlier committed prompt".into(),
@@ -43266,6 +43941,9 @@ now analyzing the bus module"
                     .iter()
                     .enumerate()
                     .map(|(i, (role, content))| HydratedMessage {
+                        tool_call_id: None,
+                        tool_calls: Vec::new(),
+                        tool_name: None,
                         seq: i as u64 + 1,
                         role: (*role).into(),
                         content: (*content).into(),
@@ -45340,6 +46018,9 @@ now analyzing the bus module"
             context: None,
             context_state: None,
             messages: Some(vec![HydratedMessage {
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                tool_name: None,
                 seq: 1,
                 role: "assistant".into(),
                 content: REPORT.into(),
@@ -45414,6 +46095,9 @@ now analyzing the bus module"
             }),
             messages: Some(vec![
                 HydratedMessage {
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                    tool_name: None,
                     seq: 1,
                     role: "user".into(),
                     content: "build this".into(),
@@ -45427,6 +46111,9 @@ now analyzing the bus module"
                     reasoning_content: None,
                 },
                 HydratedMessage {
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                    tool_name: None,
                     seq: 2,
                     role: "assistant".into(),
                     content: "legacy companion".into(),
@@ -45440,6 +46127,9 @@ now analyzing the bus module"
                     reasoning_content: None,
                 },
                 HydratedMessage {
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                    tool_name: None,
                     seq: 3,
                     role: "assistant".into(),
                     content: "legacy ack".into(),
@@ -45603,6 +46293,9 @@ now analyzing the bus module"
             context_state: None,
             messages: Some(vec![
                 HydratedMessage {
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                    tool_name: None,
                     seq: 0,
                     role: "user".into(),
                     content: "which is larger, 9.11 or 9.9?".into(),
@@ -45616,6 +46309,9 @@ now analyzing the bus module"
                     reasoning_content: None,
                 },
                 HydratedMessage {
+                    tool_call_id: None,
+                    tool_calls: Vec::new(),
+                    tool_name: None,
                     seq: 1,
                     role: "assistant".into(),
                     content: "9.9 is larger.".into(),
@@ -46299,6 +46995,7 @@ now analyzing the bus module"
 
     fn completed_terminal(session_id: &SessionKey, turn_id: &TurnId) -> AppUiEvent {
         AppUiEvent::Protocol(UiNotification::TurnCompleted(TurnCompletedEvent {
+            token_usage: None,
             session_id: session_id.clone(),
             topic: None,
             turn_id: turn_id.clone(),
@@ -46929,6 +47626,9 @@ now analyzing the bus module"
             context: None,
             context_state: None,
             messages: Some(vec![HydratedMessage {
+                tool_call_id: None,
+                tool_calls: Vec::new(),
+                tool_name: None,
                 seq: 1,
                 role: "user".into(),
                 content: "earlier committed prompt".into(),
@@ -48296,6 +48996,7 @@ now analyzing the bus module"
         // `finalized_history_lines_range_dedup_live` call in viewport.rs).
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id: turn.clone(),
@@ -48358,6 +49059,7 @@ now analyzing the bus module"
         // The legacy terminal must still commit — not be deduped away.
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: session_id.clone(),
                 topic: None,
                 turn_id: turn.clone(),
@@ -48425,6 +49127,7 @@ now analyzing the bus module"
         // A is focused; B's turn completes in the background.
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: b.clone(),
                 topic: None,
                 turn_id: TurnId::new(),
@@ -48440,6 +49143,7 @@ now analyzing the bus module"
         let a = SessionKey("local:a".into());
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
+                token_usage: None,
                 session_id: a.clone(),
                 topic: None,
                 turn_id: TurnId::new(),

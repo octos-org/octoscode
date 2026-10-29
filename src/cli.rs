@@ -54,7 +54,10 @@ impl ThemeName {
 
 /// How scrolling interacts with the chat composer.
 ///
-/// `Native` (default) keeps the terminal's own scrollback authoritative: the
+/// `Sticky` (default) uses app-managed scrolling with the latest question
+/// above the transcript and the composer below it.
+///
+/// `Native` keeps the terminal's own scrollback authoritative: the
 /// wheel scrolls the terminal, native selection/copy work untouched, and the
 /// composer scrolls away with the screen (the transcript pager via Ctrl+T /
 /// PageUp is the pinned view). `Pinned` opts into app-side mouse capture so
@@ -64,9 +67,11 @@ impl ThemeName {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ScrollMode {
-    #[default]
     Native,
     Pinned,
+    /// Full-screen chat with the latest question fixed above the transcript.
+    #[default]
+    Sticky,
 }
 
 impl ScrollMode {
@@ -76,6 +81,7 @@ impl ScrollMode {
         match self {
             ScrollMode::Native => "native",
             ScrollMode::Pinned => "pinned",
+            ScrollMode::Sticky => "sticky",
         }
     }
 }
@@ -112,10 +118,10 @@ impl Lang {
     }
 }
 
-/// The stdio backend command a bare launch defaults to (and that
-/// `backend_ensure` auto-provisions). Mirrors the documented
-/// `octos serve --stdio --solo`.
-pub const DEFAULT_STDIO_COMMAND: &str = "octos serve --stdio --solo";
+/// The local backend command a bare launch defaults to. The legacy field
+/// name is retained for config compatibility; --shared selects WebSocket
+/// discovery instead of a private stdio child.
+pub const DEFAULT_STDIO_COMMAND: &str = "octos serve --shared --solo";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cli {
@@ -127,6 +133,8 @@ pub struct Cli {
     pub base_url: Option<String>,
     /// UI Protocol v1 stdio child command.
     pub stdio_command: Option<String>,
+    /// True only when no transport was provided by CLI or configuration.
+    pub implicit_local_transport: bool,
     /// Session id to open first.
     pub session: Option<String>,
     /// Profile id to use for the session.
@@ -264,10 +272,9 @@ struct CliArgs {
     #[arg(long, value_enum)]
     pub lang: Option<Lang>,
 
-    /// Wheel-scroll behavior: `native` keeps terminal scrollback + native
-    /// selection (default); `pinned` captures the mouse so the wheel scrolls
-    /// the transcript pager and the composer stays pinned to the bottom
-    /// (native selection then needs Shift+drag).
+    /// Chat layout: `sticky` (default) fixes the latest question and composer;
+    /// `native` keeps terminal scrollback and selection; `pinned` fixes only
+    /// the composer while scrolling. App scrolling uses Shift+drag to select.
     #[arg(long = "scroll-mode", value_enum)]
     pub scroll_mode: Option<ScrollMode>,
 
@@ -277,8 +284,8 @@ struct CliArgs {
     pub vim_mode: bool,
 
     /// Steer a prompt typed mid-turn into the RUNNING turn (octos#1807)
-    /// instead of queueing it. Off by default: queued prompts each run as
-    /// their own turn, in the order typed. Also toggled at runtime with
+    /// instead of queueing it. On by default; Tab queues a separate turn.
+    /// A saved false preference disables steering. Also toggled at runtime with
     /// `/steer` (persist with `/saveconfig`).
     #[arg(long = "steer-mid-turn")]
     pub steer_mid_turn: bool,
@@ -410,18 +417,20 @@ impl Cli {
         // lone `--mode protocol`) gets the default stdio command, which
         // `backend_ensure` provisions. An explicit `--endpoint`/`--stdio-command`
         // is honored as-is; Mock needs no transport.
-        let stdio_command =
-            if mode == Mode::Protocol && stdio_command.is_none() && base_url.is_none() {
-                Some(DEFAULT_STDIO_COMMAND.to_string())
-            } else {
-                stdio_command
-            };
+        let implicit_local_transport =
+            mode == Mode::Protocol && stdio_command.is_none() && base_url.is_none();
+        let stdio_command = if implicit_local_transport {
+            Some(DEFAULT_STDIO_COMMAND.to_string())
+        } else {
+            stdio_command
+        };
 
         Ok(Self {
             config: args.config,
             mode,
             base_url,
             stdio_command,
+            implicit_local_transport,
             session: args.session.or(file_config.session),
             profile_id: args.profile_id.or(file_config.profile_id),
             cwd: args.cwd.or(file_config.cwd),
@@ -451,7 +460,7 @@ impl Cli {
             // "false"), so the CLI flag only force-enables; the config provides
             // the default when the flag is absent.
             vim_mode: args.vim_mode || file_config.vim_mode.unwrap_or(false),
-            steer_mid_turn: args.steer_mid_turn || file_config.steer_mid_turn.unwrap_or(false),
+            steer_mid_turn: args.steer_mid_turn || file_config.steer_mid_turn.unwrap_or(true),
             // Flag + OCTOSCODE_NO_SPLASH env only — no config-file key
             // (CliFileConfig is deny_unknown_fields; spec gates via these two).
             no_splash: args.no_splash,
@@ -837,9 +846,32 @@ mod tests {
     }
 
     #[test]
-    fn should_default_bare_launch_to_stdio_protocol() {
+    fn sticky_scroll_default_respects_saved_and_explicit_preferences() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, "{}").unwrap();
+        let args = ["octoscode", "--config", path.to_str().unwrap()];
+        assert_eq!(
+            Cli::try_parse_from(args).unwrap().scroll_mode,
+            super::ScrollMode::Sticky
+        );
+        std::fs::write(&path, r#"{"scroll-mode":"native"}"#).unwrap();
+        assert_eq!(
+            Cli::try_parse_from(args).unwrap().scroll_mode,
+            super::ScrollMode::Native
+        );
+        assert_eq!(
+            Cli::try_parse_from(args.into_iter().chain(["--scroll-mode", "sticky"]))
+                .unwrap()
+                .scroll_mode,
+            super::ScrollMode::Sticky
+        );
+    }
+
+    #[test]
+    fn should_default_bare_launch_to_shared_protocol() {
         // A bare launch (no mode, no transport, no config) now connects to the
-        // real backend over stdio (auto-provisioned) instead of the mock demo.
+        // shared local backend (auto-provisioned) instead of the mock demo.
         let cli = Cli::try_parse_from(["octoscode"]).expect("cli parses");
 
         assert_eq!(cli.mode, Mode::Protocol);
