@@ -149,6 +149,7 @@ impl CommandSpec {
                 | "agents"
                 | "goal"
                 | "loop"
+                | "monitor"
         )
     }
 }
