@@ -3891,6 +3891,9 @@ pub struct PeerGatherEntry {
 /// mirrors `turn/start`'s items (text only in the TUI flow).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnSteerParams {
+    /// Local identity preserved through rejection and out-of-order RPC replies.
+    #[serde(skip)]
+    pub local_id: Option<TurnId>,
     pub session_id: SessionKey,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_turn_id: Option<TurnId>,
@@ -3913,10 +3916,9 @@ pub struct TurnSteerResult {
 /// An in-flight `turn/steer` (octos#1807): the client-local copy of the
 /// steered text so a steer that positively DIES (server rejection /
 /// cancel-all / send-layer failure) can fall back to STAGING the prompt
-/// without losing what the user typed. FIFO — the `TurnSteered` result and
-/// the method-attributed error frames each consume exactly one entry from
-/// the front (every dead steer produces exactly one attributed error event,
-/// see the transport's send/cancel paths).
+/// without losing what the user typed. Production replies and failures carry
+/// the client-local identity, so concurrent requests never consume another
+/// steer's record. Uncorrelated legacy/mock events retain their FIFO fallback.
 /// task-steer-retained-until-echo: a steer the server ACCEPTED
 /// (`steered:true`) but has not yet CONFIRMED — confirmation is the drain-time
 /// persisted `UserMessage` echo landing (see [`AppState::apply_user_row_echo`]).
@@ -3929,6 +3931,8 @@ pub struct TurnSteerResult {
 /// their turn id with the live turn's original prompt.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RetainedSteer {
+    /// Client dispatch chronology, independent of RPC reply arrival order.
+    pub dispatch_order: u64,
     pub session_id: SessionKey,
     pub turn_id: TurnId,
     pub prompt: String,
@@ -3942,6 +3946,9 @@ pub struct RetainedSteer {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingTurnSteer {
+    /// Client dispatch chronology, independent of transport request id format.
+    pub dispatch_order: u64,
+    pub local_id: Option<TurnId>,
     pub session_id: SessionKey,
     /// The EXPECTED (live) turn id the steer named — also the id the
     /// optimistic transcript row was recorded under, so the error fallback
@@ -3949,6 +3956,57 @@ pub struct PendingTurnSteer {
     /// re-key it onto the real new turn.
     pub turn_id: TurnId,
     pub prompt: String,
+}
+
+/// Positional identity for locally staged prompts, including duplicate text.
+/// A raw public Vec edit discards these identities on the next queue mutation.
+#[derive(Debug, Clone)]
+pub(crate) struct StagedPromptOrder {
+    prompt: String,
+    dispatch_order: Option<u64>,
+    force_front: bool,
+}
+
+/// Local correlation for user input whose state must survive dispatch failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputRequest {
+    Steer(TurnId),
+    Approval {
+        session_id: SessionKey,
+        approval_id: ApprovalId,
+    },
+    Question {
+        session_id: SessionKey,
+        question_id: QuestionId,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingDecisionResponse {
+    Approval(Box<ApprovalModalState>),
+    Question(UserQuestionPickerState),
+}
+
+impl PendingDecisionResponse {
+    pub fn request(&self) -> InputRequest {
+        match self {
+            Self::Approval(value) => InputRequest::Approval {
+                session_id: value.session_id.clone(),
+                approval_id: value.approval_id.clone(),
+            },
+            Self::Question(value) => InputRequest::Question {
+                session_id: value.session_id.clone(),
+                question_id: value.question_id.clone(),
+            },
+        }
+    }
+
+    pub fn matches_turn(&self, session_id: &SessionKey, turn_id: &TurnId) -> bool {
+        match self {
+            Self::Approval(value) => &value.session_id == session_id && &value.turn_id == turn_id,
+            Self::Question(value) => &value.session_id == session_id && &value.turn_id == turn_id,
+        }
+    }
 }
 
 /// An in-flight `/peer` dispatch (#395): the client-local halves of the flow
@@ -4969,6 +5027,8 @@ pub struct AppState {
     /// Stashed/loaded by [`Self::switch_selected_session`]. Local-only client
     /// state the server never echoes — preserved across snapshot replays.
     pub pending_messages_by_session: std::collections::HashMap<SessionKey, Vec<String>>,
+    pub(crate) next_input_order: u64,
+    pub(crate) staged_prompt_orders: std::collections::HashMap<SessionKey, Vec<StagedPromptOrder>>,
     /// Sessions with a staged-queue submit ENQUEUED whose turn has not yet
     /// been observed (no `turn/started` or terminal), stamped with WHEN the
     /// submit was enqueued. Gates `submit_next_pending_if_idle`: inside the
@@ -5139,10 +5199,11 @@ pub struct AppState {
     /// that positively dies (attributed error frame) is re-staged from this
     /// stash so the typed text is never lost, and a `steered:false` result
     /// re-keys its optimistic row onto the server's real new turn. Consumed
-    /// front-first by [`crate::client_event::ClientEvent::TurnSteered`] and
-    /// the attributed error fallback (exactly one of which arrives per
-    /// steer). Bounded by the transport's pending-request cap.
+    /// by local input identity on production replies/errors. The legacy/mock
+    /// event fallback remains FIFO. Bounded by the transport's pending cap.
     pub pending_turn_steers: std::collections::VecDeque<PendingTurnSteer>,
+    /// Kept until the matching RPC or server decision settles; never resent automatically.
+    pub pending_decision_responses: Vec<PendingDecisionResponse>,
     /// task-steer-retained-until-echo: accepted-but-unconfirmed steers, in
     /// dispatch order. See [`RetainedSteer`].
     pub retained_steers: Vec<RetainedSteer>,
@@ -7195,6 +7256,8 @@ impl AppState {
             composer_history: crate::history::ComposerHistory::default(),
             pending_messages: Vec::new(),
             pending_messages_by_session: std::collections::HashMap::new(),
+            next_input_order: 1,
+            staged_prompt_orders: std::collections::HashMap::new(),
             staged_submit_in_flight: std::collections::HashMap::new(),
             optimistic_user_messages: Vec::new(),
             turn_prompt_anchors: Vec::new(),
@@ -7223,6 +7286,7 @@ impl AppState {
             startup_prompt_dispatched: false,
             unread_turns: std::collections::HashMap::new(),
             pending_turn_steers: std::collections::VecDeque::new(),
+            pending_decision_responses: Vec::new(),
             retained_steers: Vec::new(),
             pending_peer_prepare: None,
             pending_peer_kickoffs: std::collections::HashMap::new(),
@@ -8497,36 +8561,135 @@ impl AppState {
     /// #246). The active session's queue lives in `pending_messages`; other
     /// sessions' queues are stashed per-session.
     pub fn restage_staged_prompt_front(&mut self, session_id: &SessionKey, prompt: String) {
+        let (messages, orders) = self.staged_queue_mut(session_id);
+        orders.insert(
+            0,
+            StagedPromptOrder {
+                prompt: prompt.clone(),
+                dispatch_order: None,
+                force_front: true,
+            },
+        );
+        messages.insert(0, prompt);
+    }
+
+    pub(crate) fn allocate_input_order(&mut self) -> u64 {
+        let order = self.next_input_order;
+        self.next_input_order = self
+            .next_input_order
+            .checked_add(1)
+            .expect("local input order exhausted");
+        order
+    }
+
+    /// Return the queue and its positional ordering identities. Public raw Vec
+    /// edits are supported: any mismatch discards metadata rather than using
+    /// a stale index or assigning another prompt's identity by text matching.
+    fn staged_queue_mut(
+        &mut self,
+        session_id: &SessionKey,
+    ) -> (&mut Vec<String>, &mut Vec<StagedPromptOrder>) {
         let is_active = self
             .active_session()
             .is_some_and(|session| &session.id == session_id);
-        if is_active {
-            self.pending_messages.insert(0, prompt);
+        let messages = if is_active {
+            &mut self.pending_messages
         } else {
             self.pending_messages_by_session
                 .entry(session_id.clone())
                 .or_default()
-                .insert(0, prompt);
+        };
+        let orders = self
+            .staged_prompt_orders
+            .entry(session_id.clone())
+            .or_default();
+        if orders.len() != messages.len()
+            || orders
+                .iter()
+                .zip(messages.iter())
+                .any(|(order, prompt)| &order.prompt != prompt)
+        {
+            *orders = messages
+                .iter()
+                .map(|prompt| StagedPromptOrder {
+                    prompt: prompt.clone(),
+                    dispatch_order: None,
+                    force_front: false,
+                })
+                .collect();
+        }
+        (messages, orders)
+    }
+
+    /// Ordinary staging is chronological; every entry receives a local order
+    /// before a later RPC response can insert a recovered steer ahead of it.
+    pub fn stage_prompt_back(&mut self, session_id: &SessionKey, prompt: String) {
+        let dispatch_order = self.allocate_input_order();
+        let (messages, orders) = self.staged_queue_mut(session_id);
+        orders.push(StagedPromptOrder {
+            prompt: prompt.clone(),
+            dispatch_order: Some(dispatch_order),
+            force_front: false,
+        });
+        messages.push(prompt);
+    }
+
+    pub(crate) fn stage_active_prompt_back(&mut self, prompt: String) {
+        if let Some(session_id) = self.active_session().map(|session| session.id.clone()) {
+            self.stage_prompt_back(&session_id, prompt);
         }
     }
 
-    /// Stage a prompt at the BACK of its session's queue — the `turn/steer`
-    /// error fallback (octos#1807). Unlike the dead staged-DRAIN re-stage
-    /// (front — the drain had already dequeued it), a failed steer's text was
-    /// typed AFTER anything already staged, so appending preserves the
-    /// chronological order the user produced it in.
-    pub fn stage_prompt_back(&mut self, session_id: &SessionKey, prompt: String) {
-        let is_active = self
-            .active_session()
-            .is_some_and(|session| &session.id == session_id);
-        if is_active {
-            self.pending_messages.push(prompt);
+    /// Restore by dispatch identity, never RPC arrival order or prompt text.
+    /// Unknown/raw entries retain the old back-on-error/front-on-terminal
+    /// fallback. An explicit front retry always keeps its priority.
+    pub(crate) fn restage_steer_in_dispatch_order(
+        &mut self,
+        session_id: &SessionKey,
+        prompt: String,
+        dispatch_order: u64,
+        before_untracked: bool,
+    ) {
+        let (messages, orders) = self.staged_queue_mut(session_id);
+        let index = orders
+            .iter()
+            .position(|order| {
+                !order.force_front
+                    && match order.dispatch_order {
+                        Some(existing) => existing > dispatch_order,
+                        None => before_untracked,
+                    }
+            })
+            .unwrap_or(messages.len());
+        orders.insert(
+            index,
+            StagedPromptOrder {
+                prompt: prompt.clone(),
+                dispatch_order: Some(dispatch_order),
+                force_front: false,
+            },
+        );
+        messages.insert(index, prompt);
+    }
+
+    pub(crate) fn clear_active_staged_prompts(&mut self) {
+        if let Some(session_id) = self.active_session().map(|session| session.id.clone()) {
+            let (messages, orders) = self.staged_queue_mut(&session_id);
+            messages.clear();
+            orders.clear();
         } else {
-            self.pending_messages_by_session
-                .entry(session_id.clone())
-                .or_default()
-                .push(prompt);
+            self.pending_messages.clear();
         }
+    }
+
+    pub(crate) fn take_active_staged_prompt(&mut self) -> Option<String> {
+        let session_id = self.active_session()?.id.clone();
+        let (messages, orders) = self.staged_queue_mut(&session_id);
+        if messages.is_empty() {
+            return None;
+        }
+        orders.remove(0);
+        Some(messages.remove(0))
     }
 
     /// Withdraw the optimistic row a DEAD `turn/steer` recorded (octos#1807):
@@ -11571,6 +11734,49 @@ mod tests {
 
     fn catalog(json: serde_json::Value) -> ProfileLlmCatalogResult {
         serde_json::from_value(json).expect("catalog fixture deserializes")
+    }
+
+    #[test]
+    fn input_response_staged_order_metadata_recovers_from_raw_vec_edits_and_front_priority() {
+        let session = SessionView {
+            id: SessionKey("raw-queue".into()),
+            title: "raw".into(),
+            profile_id: None,
+            messages: vec![],
+            tasks: vec![],
+            live_reply: None,
+        };
+        let mut state = AppState::new(vec![session], 0, "ready".into(), None, false);
+        let session_id = state.sessions[0].id.clone();
+        let earlier = state.allocate_input_order();
+        state.stage_prompt_back(&session_id, "original".into());
+        state.pending_messages[0] = "raw rewrite".into();
+        state.restage_steer_in_dispatch_order(&session_id, "recovered".into(), earlier, false);
+        assert_eq!(
+            state.pending_messages,
+            ["raw rewrite", "recovered"],
+            "raw rewrite discards stale ordering identity"
+        );
+        state.pending_messages.clear();
+        state.restage_staged_prompt_front(&session_id, "explicit front".into());
+        state.restage_steer_in_dispatch_order(
+            &session_id,
+            "terminal restore".into(),
+            earlier,
+            true,
+        );
+        assert_eq!(
+            state.pending_messages,
+            ["explicit front", "terminal restore"]
+        );
+        assert_eq!(
+            state.take_active_staged_prompt().as_deref(),
+            Some("explicit front")
+        );
+        state.clear_active_staged_prompts();
+        state.stage_prompt_back(&session_id, "fresh".into());
+        state.restage_steer_in_dispatch_order(&session_id, "earlier".into(), earlier, false);
+        assert_eq!(state.pending_messages, ["earlier", "fresh"]);
     }
 
     /// The wire contract types key-env as `string | null` optional: for a

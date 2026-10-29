@@ -259,8 +259,12 @@ impl AppUiEndpoint {
 
 /// Preserve locally-known hydrate attribution even when no RPC was admitted
 /// (size gates and commands waiting behind a scoped-open barrier).
-fn command_error_event(command: &AppUiCommand, code: &str, message: String) -> ClientEvent {
-    if let AppUiCommand::HydrateSession(params) = command {
+pub(crate) fn command_error_event(
+    command: &AppUiCommand,
+    code: &str,
+    message: String,
+) -> ClientEvent {
+    let event = if let AppUiCommand::HydrateSession(params) = command {
         ClientEvent::HydrateError(crate::client_event::HydrateErrorClientEvent {
             session_id: params.session_id.clone(),
             code: code.to_owned(),
@@ -268,6 +272,36 @@ fn command_error_event(command: &AppUiCommand, code: &str, message: String) -> C
         })
     } else {
         app_error(code, message).into()
+    };
+    correlate_input_event(input_request(command), Some(event)).expect("error event exists")
+}
+
+fn input_request(command: &AppUiCommand) -> Option<crate::model::InputRequest> {
+    use crate::model::InputRequest;
+    match command {
+        AppUiCommand::TurnSteer(params) => params.local_id.clone().map(InputRequest::Steer),
+        AppUiCommand::RespondApproval(params) => Some(InputRequest::Approval {
+            session_id: params.session_id.clone(),
+            approval_id: params.approval_id.clone(),
+        }),
+        AppUiCommand::RespondUserQuestion(params) => Some(InputRequest::Question {
+            session_id: params.session_id.clone(),
+            question_id: params.question_id.clone(),
+        }),
+        _ => None,
+    }
+}
+
+fn correlate_input_event(
+    request: Option<crate::model::InputRequest>,
+    event: Option<ClientEvent>,
+) -> Option<ClientEvent> {
+    match request {
+        Some(request) => Some(ClientEvent::InputResponse {
+            request,
+            event: event.map(Box::new),
+        }),
+        None => event,
     }
 }
 
@@ -561,6 +595,7 @@ impl ReconnectBackoff {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingRequest {
+    input_request: Option<crate::model::InputRequest>,
     method: String,
     /// For `profile/llm/select`: the session that initiated the request, so
     /// the response updates exactly that session's caches — correlation by
@@ -588,6 +623,7 @@ struct ProtocolExchange {
 }
 
 struct CancelledRequest {
+    input_request: Option<crate::model::InputRequest>,
     method: String,
     event: AppUiEvent,
     /// #22b-r1: hydrate session attribution carried from the pending entry —
@@ -601,6 +637,12 @@ impl CancelledRequest {
     }
 
     fn into_client_event(self) -> ClientEvent {
+        if let Some(request) = self.input_request {
+            return ClientEvent::InputResponse {
+                request,
+                event: Some(Box::new(self.event.into())),
+            };
+        }
         if let Some(session_id) = self.hydrate_session
             && let AppUiEvent::Error(error) = self.event
         {
@@ -693,12 +735,14 @@ impl ProtocolExchange {
             AppUiCommand::HydrateSession(params) => Some(params.session_id.clone()),
             _ => None,
         };
+        let input_request = input_request(&command);
         let request_id = self.next_request_id();
         let request = rpc_request_from_command(request_id.clone(), command)?;
 
         self.pending_requests.insert(
             request_id,
             PendingRequest {
+                input_request,
                 method,
                 select_session,
                 hydrate_session,
@@ -716,6 +760,7 @@ impl ProtocolExchange {
         self.pending_requests.insert(
             request_id.clone(),
             PendingRequest {
+                input_request: None,
                 method: APPUI_METHOD_CLIENT_HELLO.to_owned(),
                 select_session: None,
                 hydrate_session: None,
@@ -796,6 +841,7 @@ impl ProtocolExchange {
                     format!("{method} request {id} cancelled: {reason}"),
                 );
                 CancelledRequest {
+                    input_request: request.input_request,
                     method,
                     event,
                     hydrate_session: request.hydrate_session,
@@ -2402,7 +2448,7 @@ impl ProtocolAppUiBackend {
             "{} was not sent because session/open was rejected; open the intended session successfully before retrying",
             command.method()
         );
-        if matches!(command, AppUiCommand::HydrateSession(_)) {
+        if matches!(command, AppUiCommand::HydrateSession(_)) || input_request(&command).is_some() {
             self.queue.push_back(command_error_event(
                 &command,
                 "session_open_rejected",
@@ -2733,6 +2779,14 @@ impl ProtocolAppUiBackend {
     #[allow(unreachable_patterns)]
     fn enqueue_readonly_blocked_response(&mut self, command: AppUiCommand) {
         let method = command.method().to_string();
+        if input_request(&command).is_some() {
+            self.queue.push_back(command_error_event(
+                &command,
+                "readonly",
+                format!("Read-only mode blocks {method}; no network request was sent."),
+            ));
+            return;
+        }
         match command {
             AppUiCommand::SubmitPrompt(params) => {
                 self.queue.push_back(
@@ -2907,19 +2961,7 @@ impl AppUiBackend for ProtocolAppUiBackend {
             // #22b-r1: a hydrate refusal is attributable LOCALLY from the
             // in-hand command — emit the attributed event so the store
             // releases only that session's marker.
-            let event: ClientEvent = if let AppUiCommand::HydrateSession(params) = &command {
-                ClientEvent::HydrateError(crate::client_event::HydrateErrorClientEvent {
-                    session_id: params.session_id.clone(),
-                    code: "too_many_pending_requests".into(),
-                    message,
-                })
-            } else {
-                AppUiEvent::Error(AppUiError {
-                    code: "too_many_pending_requests".into(),
-                    message,
-                })
-                .into()
-            };
+            let event = command_error_event(&command, "too_many_pending_requests", message);
             self.queue.push_back(event);
             return Ok(());
         }
@@ -3014,11 +3056,11 @@ impl AppUiBackend for ProtocolAppUiBackend {
         if text.len() > MAX_TEXT_FRAME_BYTES {
             // #22b-r1: recover the hydrate session attribution before dropping
             // the pending entry.
-            let hydrate_session = self
-                .protocol
-                .pending_requests
-                .remove(&request_id)
-                .and_then(|pending| pending.hydrate_session);
+            let pending = self.protocol.pending_requests.remove(&request_id);
+            let input_request = pending
+                .as_ref()
+                .and_then(|pending| pending.input_request.clone());
+            let hydrate_session = pending.and_then(|pending| pending.hydrate_session);
             let message = frame_too_large_message(method.as_str(), &request_id, text.len());
             let event: ClientEvent = match hydrate_session {
                 Some(session_id) => {
@@ -3034,7 +3076,9 @@ impl AppUiBackend for ProtocolAppUiBackend {
                 })
                 .into(),
             };
-            self.queue.push_back(event);
+            self.queue.push_back(
+                correlate_input_event(input_request, Some(event)).expect("error event exists"),
+            );
             return Ok(());
         }
 
@@ -3053,11 +3097,11 @@ impl AppUiBackend for ProtocolAppUiBackend {
             // cancel_pending_requests does not emit a duplicate "cancelled"
             // event for this request on top of the transport_send error below.
             // #22b-r1: recover the hydrate session attribution (see above).
-            let hydrate_session = self
-                .protocol
-                .pending_requests
-                .remove(&request_id)
-                .and_then(|pending| pending.hydrate_session);
+            let pending = self.protocol.pending_requests.remove(&request_id);
+            let input_request = pending
+                .as_ref()
+                .and_then(|pending| pending.input_request.clone());
+            let hydrate_session = pending.and_then(|pending| pending.hydrate_session);
             self.mark_disconnected(format!(
                 "UI protocol disconnected; reconnect will retry on next send/read: {err:#}"
             ));
@@ -3076,7 +3120,9 @@ impl AppUiBackend for ProtocolAppUiBackend {
                 })
                 .into(),
             };
-            self.queue.push_back(event);
+            self.queue.push_back(
+                correlate_input_event(input_request, Some(event)).expect("error event exists"),
+            );
         }
 
         Ok(())
@@ -3708,11 +3754,17 @@ fn rpc_value_to_app_event(
             ));
         }
 
-        return if has_error {
+        let request = response_id(frame)
+            .ok()
+            .flatten()
+            .and_then(|id| pending_requests.get(&id))
+            .and_then(|pending| pending.input_request.clone());
+        let event = if has_error {
             Ok(Some(error_response_to_app_event(frame, pending_requests)))
         } else {
             success_response_to_app_event(frame, pending_requests)
-        };
+        }?;
+        return Ok(correlate_input_event(request, event));
     }
 
     Ok(Some(
@@ -7065,10 +7117,13 @@ mod tests {
     }
 
     fn unwrap_app_event(event: ClientEvent) -> AppUiEvent {
-        let ClientEvent::App(event) = event else {
-            panic!("expected app event");
-        };
-        *event
+        match event {
+            ClientEvent::App(event) => *event,
+            ClientEvent::InputResponse {
+                event: Some(event), ..
+            } => unwrap_app_event(*event),
+            _ => panic!("expected app event"),
+        }
     }
 
     #[test]
@@ -8802,6 +8857,7 @@ mod tests {
         pending.insert(
             "skills-list".into(),
             PendingRequest {
+                input_request: None,
                 select_session: None,
                 method: crate::model::APPUI_METHOD_PROFILE_SKILLS_LIST.into(),
                 hydrate_session: None,
@@ -8871,6 +8927,7 @@ mod tests {
         pending.insert(
             "peer-1".into(),
             PendingRequest {
+                input_request: None,
                 method: crate::model::APPUI_METHOD_PEER_PREPARE.into(),
                 select_session: None,
                 hydrate_session: None,
@@ -8938,6 +8995,7 @@ mod tests {
         pending.insert(
             "peer-2".into(),
             PendingRequest {
+                input_request: None,
                 method: crate::model::APPUI_METHOD_PEER_PREPARE.into(),
                 select_session: None,
                 hydrate_session: None,
@@ -8994,6 +9052,7 @@ mod tests {
         let request = rpc_request_from_command(
             "steer-1".into(),
             AppUiCommand::TurnSteer(crate::model::TurnSteerParams {
+                local_id: None,
                 session_id: SessionKey("coding:local:tui#coding".into()),
                 expected_turn_id: Some(expected_turn.clone()),
                 input: vec![octos_core::ui_protocol::InputItem::Text {
@@ -9013,6 +9072,7 @@ mod tests {
         let absent = rpc_request_from_command(
             "steer-2".into(),
             AppUiCommand::TurnSteer(crate::model::TurnSteerParams {
+                local_id: None,
                 session_id: SessionKey("coding:local:tui#coding".into()),
                 expected_turn_id: None,
                 input: vec![octos_core::ui_protocol::InputItem::Text {
@@ -9031,6 +9091,7 @@ mod tests {
         pending.insert(
             "steer-1".into(),
             PendingRequest {
+                input_request: None,
                 method: crate::model::APPUI_METHOD_TURN_STEER.into(),
                 select_session: None,
                 hydrate_session: None,
@@ -9057,6 +9118,7 @@ mod tests {
         pending.insert(
             "steer-3".into(),
             PendingRequest {
+                input_request: None,
                 method: crate::model::APPUI_METHOD_TURN_STEER.into(),
                 select_session: None,
                 hydrate_session: None,
@@ -9348,6 +9410,7 @@ mod tests {
         pending.insert(
             "gather-1".into(),
             PendingRequest {
+                input_request: None,
                 method: crate::model::APPUI_METHOD_PEER_GATHER.into(),
                 select_session: None,
                 hydrate_session: None,
@@ -9455,6 +9518,7 @@ mod tests {
         pending.insert(
             "status-1".into(),
             PendingRequest {
+                input_request: None,
                 method: crate::model::APPUI_METHOD_SESSION_STATUS_READ.into(),
                 select_session: None,
                 hydrate_session: None,
@@ -9769,6 +9833,7 @@ mod tests {
             // octos#1807: `turn/steer` injects input into a running turn —
             // the same mutation class as `turn/start`, blocked in read-only.
             AppUiCommand::TurnSteer(crate::model::TurnSteerParams {
+                local_id: None,
                 session_id: SessionKey("local:test".into()),
                 expected_turn_id: Some(TurnId::new()),
                 input: vec![octos_core::ui_protocol::InputItem::Text {
@@ -11095,6 +11160,7 @@ mod tests {
         assert_eq!(
             exchange.pending_requests.get(&request.id),
             Some(&PendingRequest {
+                input_request: None,
                 select_session: None,
                 method: methods::APPROVAL_SCOPES_LIST.into(),
                 hydrate_session: None,
@@ -11518,6 +11584,7 @@ mod tests {
             backend.protocol.pending_requests.insert(
                 format!("existing-{index}"),
                 PendingRequest {
+                    input_request: None,
                     select_session: None,
                     method: methods::APPROVAL_SCOPES_LIST.into(),
                     hydrate_session: None,
@@ -11682,6 +11749,7 @@ mod tests {
         pending_requests.insert(
             "tui-9".to_string(),
             PendingRequest {
+                input_request: None,
                 method: crate::model::APPUI_METHOD_SESSION_HYDRATE.into(),
                 select_session: None,
                 hydrate_session: Some(SessionKey("local:hydrate-b".into())),
@@ -11709,6 +11777,7 @@ mod tests {
         pending_requests.insert(
             "tui-9".to_string(),
             PendingRequest {
+                input_request: None,
                 method: crate::model::APPUI_METHOD_SESSION_HYDRATE.into(),
                 select_session: None,
                 hydrate_session: None,
@@ -11905,6 +11974,7 @@ mod tests {
             backend.protocol.pending_requests.insert(
                 format!("existing-{index}"),
                 PendingRequest {
+                    input_request: None,
                     select_session: None,
                     method: methods::APPROVAL_SCOPES_LIST.into(),
                     hydrate_session: None,
@@ -11987,6 +12057,7 @@ mod tests {
         assert_eq!(
             backend.protocol.pending_requests.get(&request.id),
             Some(&PendingRequest {
+                input_request: None,
                 select_session: None,
                 method: methods::TURN_START.into(),
                 hydrate_session: None,
@@ -15200,5 +15271,622 @@ done
             notification,
             AppUiEvent::Protocol(UiNotification::Warning(_))
         ));
+    }
+
+    fn input_lifecycle_store() -> crate::store::Store {
+        let turn_id = TurnId::new();
+        let mut state = crate::model::AppState::new(
+            vec![crate::model::SessionView {
+                id: SessionKey("local:input-response".into()),
+                title: "input response".into(),
+                profile_id: Some("coding".into()),
+                messages: vec![],
+                tasks: vec![],
+                live_reply: Some(crate::model::LiveReply {
+                    turn_id,
+                    text: "working".into(),
+                }),
+            }],
+            0,
+            "ready".into(),
+            None,
+            false,
+        );
+        state.capabilities = Some(crate::menu::CapabilitySet::from_methods_and_features(
+            [crate::model::APPUI_METHOD_TURN_STEER],
+            ["event.turn_steer_dropped.v1"],
+        ));
+        state.steer_mid_turn = true;
+        crate::store::Store { state }
+    }
+
+    fn input_lifecycle_steer(store: &mut crate::store::Store, text: &str) -> AppUiCommand {
+        store.state.set_composer_text(text);
+        let command = store.compose_command().expect("compose steer");
+        assert!(matches!(command, AppUiCommand::TurnSteer(_)));
+        command
+    }
+
+    #[test]
+    fn input_response_local_rejection_does_not_consume_another_steer() {
+        for same_text in [false, true] {
+            let mut store = input_lifecycle_store();
+            let a = input_lifecycle_steer(&mut store, "first input");
+            let b_text = if same_text {
+                "first input"
+            } else {
+                "second input"
+            };
+            let b = input_lifecycle_steer(&mut store, b_text);
+            let a_local = store.state.pending_turn_steers[0].local_id.clone();
+            let b_local = store.state.pending_turn_steers[1].local_id.clone();
+            assert_ne!(a_local, b_local);
+            let turn = store.state.active_turn().unwrap().1.clone();
+            let mut backend = ProtocolAppUiBackend::new(AppUiLaunch::default());
+            let request = backend.protocol.build_tracked_request(a).unwrap();
+            assert!(
+                request.params.get("local_id").is_none(),
+                "local identity must not change OUP"
+            );
+            for n in 1..MAX_PENDING_REQUESTS {
+                backend.protocol.pending_requests.insert(
+                    format!("filled-{n}"),
+                    PendingRequest {
+                        input_request: None,
+                        method: "session/status/read".into(),
+                        select_session: None,
+                        hydrate_session: None,
+                    },
+                );
+            }
+            backend.send(b).unwrap(); // Rejected locally, before any network access.
+            let rejected = backend
+                .queue
+                .pop_front()
+                .expect("attributed local rejection");
+            store.apply_client_event(rejected);
+            assert_eq!(store.state.pending_turn_steers.len(), 1);
+            assert_eq!(store.state.pending_turn_steers[0].local_id, a_local);
+            assert_eq!(store.state.pending_messages, [b_text]);
+            let reply = json!({"jsonrpc":"2.0", "id":request.id, "result":{"turn_id":turn, "steered":true}});
+            store.apply_client_event(
+                backend
+                    .decode_rpc_text(&reply.to_string())
+                    .unwrap()
+                    .unwrap(),
+            );
+            assert!(store.state.pending_turn_steers.is_empty());
+            assert_eq!(store.state.retained_steers.len(), 1);
+            assert_eq!(store.state.retained_steers[0].prompt, "first input");
+            assert_eq!(store.state.pending_messages, [b_text]);
+        }
+    }
+
+    #[test]
+    fn input_response_reordered_steers_stay_in_their_sessions() {
+        let mut store = input_lifecycle_store();
+        let a_session = store.state.sessions[0].id.clone();
+        let a = input_lifecycle_steer(&mut store, "session A input");
+        let mut second = store.state.sessions[0].clone();
+        second.id = SessionKey("local:input-response-B".into());
+        second.messages.clear();
+        second.live_reply.as_mut().unwrap().turn_id = TurnId::new();
+        store.state.sessions.push(second);
+        store.state.selected_session = 1;
+        let b = input_lifecycle_steer(&mut store, "session B input");
+        let b_session = store.state.sessions[1].id.clone();
+        let b_turn = store.state.active_turn().unwrap().1.clone();
+        let mut exchange = ProtocolExchange::default();
+        let a = exchange.build_tracked_request(a).unwrap();
+        let b = exchange.build_tracked_request(b).unwrap();
+        let b_reply =
+            json!({"jsonrpc":"2.0", "id":b.id, "result":{"turn_id":b_turn,"steered":true}});
+        store.apply_client_event(
+            exchange
+                .decode_rpc_text(&b_reply.to_string())
+                .unwrap()
+                .unwrap(),
+        );
+        assert_eq!(store.state.retained_steers[0].session_id, b_session);
+        assert_eq!(store.state.pending_turn_steers[0].session_id, a_session);
+        let a_error =
+            json!({"jsonrpc":"2.0", "id":a.id, "error":{"code":-32602,"message":"rejected A"}});
+        store.apply_client_event(
+            exchange
+                .decode_rpc_text(&a_error.to_string())
+                .unwrap()
+                .unwrap(),
+        );
+        assert!(store.state.pending_messages.is_empty());
+        assert_eq!(
+            store
+                .state
+                .pending_messages_by_session
+                .get(&a_session)
+                .unwrap(),
+            &["session A input"]
+        );
+        assert_eq!(store.state.retained_steers[0].prompt, "session B input");
+        assert!(store.state.pending_turn_steers.is_empty());
+    }
+
+    fn input_lifecycle_approval(
+        store: &mut crate::store::Store,
+    ) -> octos_core::ui_protocol::ApprovalId {
+        let (session, turn) = store
+            .state
+            .active_turn()
+            .map(|(s, t)| (s.clone(), t.clone()))
+            .unwrap();
+        let id = octos_core::ui_protocol::ApprovalId::new();
+        store.apply_event(AppUiEvent::Protocol(UiNotification::ApprovalRequested(
+            octos_core::ui_protocol::ApprovalRequestedEvent::generic(
+                session,
+                id.clone(),
+                turn,
+                "shell",
+                "Approval",
+                "Allow operation?",
+            ),
+        )));
+        id
+    }
+
+    #[test]
+    fn input_response_failed_approval_restores_the_original_card_and_can_retry() {
+        let mut store = input_lifecycle_store();
+        let id = input_lifecycle_approval(&mut store);
+        let command = store
+            .respond_approval_command(crate::model::ApprovalModalAction::ApproveRequest)
+            .unwrap();
+        assert!(store.state.approval.is_none());
+        assert!(
+            store
+                .respond_approval_command(crate::model::ApprovalModalAction::ApproveRequest)
+                .is_none()
+        );
+        let mut backend = ProtocolAppUiBackend::new(AppUiLaunch {
+            readonly: true,
+            ..AppUiLaunch::default()
+        });
+        store.state.scroll_mode = crate::cli::ScrollMode::Sticky;
+        store.state.transcript_scroll = 50;
+        store.state.diff_preview.expanded = true;
+        backend.send(command).unwrap();
+        store.apply_client_event(backend.queue.pop_front().unwrap());
+        let restored = store.state.approval.as_ref().unwrap();
+        assert_eq!(restored.approval_id, id);
+        assert!(restored.visible);
+        assert_eq!(store.state.run_state.label(), "blocked");
+        assert_eq!(store.state.transcript_scroll, 0);
+        assert!(!store.state.diff_preview.expanded);
+        assert!(store.state.pending_decision_responses.is_empty());
+        let retry = store
+            .respond_approval_command(crate::model::ApprovalModalAction::DenyRequest)
+            .unwrap();
+        let mut exchange = ProtocolExchange::default();
+        let request = exchange.build_tracked_request(retry).unwrap();
+        let reply = json!({"jsonrpc":"2.0","id":request.id,"result":{}});
+        store.apply_client_event(
+            exchange
+                .decode_rpc_text(&reply.to_string())
+                .unwrap()
+                .unwrap(),
+        );
+        assert!(store.state.approval.is_none());
+        assert!(store.state.pending_decision_responses.is_empty());
+    }
+
+    #[test]
+    fn input_response_failed_question_preserves_answers() {
+        let mut store = input_lifecycle_store();
+        let (session, turn) = store
+            .state
+            .active_turn()
+            .map(|(s, t)| (s.clone(), t.clone()))
+            .unwrap();
+        let question = octos_core::ui_protocol::UserQuestion {
+            header: "Choice".into(),
+            question: "Pick one".into(),
+            multi_select: false,
+            allow_free_text: true,
+            options: vec![octos_core::ui_protocol::UserQuestionOption {
+                label: "Option A".into(),
+                description: "".into(),
+            }],
+        };
+        store.apply_event(AppUiEvent::Protocol(UiNotification::UserQuestionRequested(
+            octos_core::ui_protocol::UserQuestionRequestedEvent::new(
+                session,
+                octos_core::ui_protocol::QuestionId::new(),
+                turn,
+                "Question",
+                "Pick",
+                vec![question],
+            ),
+        )));
+        store.user_question_toggle();
+        let original = store.state.user_question.clone().unwrap();
+        let command = store.respond_user_question_command().unwrap();
+        let mut exchange = ProtocolExchange::default();
+        let request = exchange.build_tracked_request(command).unwrap();
+        let error = json!({"jsonrpc":"2.0","id":request.id,"error":{"code":-32602,"message":"answer rejected"}});
+        store.apply_client_event(
+            exchange
+                .decode_rpc_text(&error.to_string())
+                .unwrap()
+                .unwrap(),
+        );
+        assert_eq!(store.state.user_question.as_ref(), Some(&original));
+        let retry = store.respond_user_question_command().unwrap();
+        let request = exchange.build_tracked_request(retry).unwrap();
+        let reply = json!({"jsonrpc":"2.0","id":request.id,"result":{}});
+        store.apply_client_event(
+            exchange
+                .decode_rpc_text(&reply.to_string())
+                .unwrap()
+                .unwrap(),
+        );
+        assert!(
+            store.state.pending_decision_responses.is_empty(),
+            "even a previously ignored question ack settles its backup"
+        );
+    }
+
+    #[test]
+    fn input_response_late_approval_error_does_not_resurrect_a_decided_card() {
+        let mut store = input_lifecycle_store();
+        let approval_id = input_lifecycle_approval(&mut store);
+        let command = store
+            .respond_approval_command(crate::model::ApprovalModalAction::ApproveRequest)
+            .unwrap();
+        let (session_id, turn_id) = store
+            .state
+            .active_turn()
+            .map(|(s, t)| (s.clone(), t.clone()))
+            .unwrap();
+        store.apply_event(AppUiEvent::Protocol(UiNotification::ApprovalDecided(
+            octos_core::ui_protocol::ApprovalDecidedEvent::manual(
+                session_id,
+                approval_id,
+                turn_id,
+                octos_core::ui_protocol::ApprovalDecision::Approve,
+                "operator",
+            ),
+        )));
+        store.apply_client_event(command_error_event(
+            &command,
+            "transport_send",
+            "late failure".into(),
+        ));
+        assert!(store.state.approval.is_none());
+        assert!(store.state.pending_decision_responses.is_empty());
+    }
+
+    #[test]
+    fn input_response_peer_approval_failure_stays_in_background() {
+        let mut store = input_lifecycle_store();
+        let peer = SessionKey("local:background-peer".into());
+        let mut second = store.state.sessions[0].clone();
+        second.id = peer.clone();
+        store.state.sessions.push(second);
+        let approval = octos_core::ui_protocol::ApprovalRequestedEvent::generic(
+            peer.clone(),
+            octos_core::ui_protocol::ApprovalId::new(),
+            TurnId::new(),
+            "shell",
+            "Peer approval",
+            "Allow?",
+        );
+        let approval_id = approval.approval_id.clone();
+        store.apply_event(AppUiEvent::Protocol(UiNotification::ApprovalRequested(
+            approval,
+        )));
+        let command = store
+            .respond_peer_approval_command(&peer, crate::model::ApprovalModalAction::ApproveRequest)
+            .unwrap();
+        store.apply_client_event(command_error_event(
+            &command,
+            "too_many_pending_requests",
+            "pending limit".into(),
+        ));
+        assert!(store.state.approval.is_none());
+        assert_eq!(
+            store
+                .state
+                .pending_session_approvals
+                .get(&peer)
+                .unwrap()
+                .approval_id,
+            approval_id
+        );
+        assert!(store.state.pending_decision_responses.is_empty());
+    }
+
+    #[test]
+    fn input_response_disconnect_cancels_only_the_matching_inputs() {
+        let mut store = input_lifecycle_store();
+        let a = input_lifecycle_steer(&mut store, "first");
+        let b = input_lifecycle_steer(&mut store, "second");
+        let mut exchange = ProtocolExchange::default();
+        exchange.build_tracked_request(a).unwrap();
+        exchange.build_tracked_request(b).unwrap();
+        for cancelled in exchange.cancel_pending_requests("connection closed") {
+            store.apply_client_event(cancelled.into_client_event());
+        }
+        assert!(store.state.pending_turn_steers.is_empty());
+        assert_eq!(store.state.pending_messages, ["first", "second"]);
+    }
+
+    fn input_response_reject(
+        store: &mut crate::store::Store,
+        exchange: &mut ProtocolExchange,
+        id: &str,
+    ) {
+        let reply = json!({"jsonrpc":"2.0", "id":id, "error":{"code":-32602,"message":"rejected"}});
+        store.apply_client_event(
+            exchange
+                .decode_rpc_text(&reply.to_string())
+                .unwrap()
+                .unwrap(),
+        );
+    }
+
+    #[test]
+    fn input_response_cancel_9_10_restores_local_dispatch_order() {
+        let mut store = input_lifecycle_store();
+        let a = input_lifecycle_steer(&mut store, "first");
+        let b = input_lifecycle_steer(&mut store, "second");
+        let mut exchange = ProtocolExchange {
+            next_request_id: 8,
+            ..ProtocolExchange::default()
+        };
+        assert_eq!(exchange.build_tracked_request(a).unwrap().id, "tui-9");
+        assert_eq!(exchange.build_tracked_request(b).unwrap().id, "tui-10");
+        for cancelled in exchange.cancel_pending_requests("connection closed") {
+            store.apply_client_event(cancelled.into_client_event());
+        }
+        assert!(store.state.pending_turn_steers.is_empty());
+        assert_eq!(store.state.pending_messages, ["first", "second"]);
+    }
+
+    #[test]
+    fn input_response_reverse_rejections_preserve_duplicate_dispatch_order() {
+        let mut store = input_lifecycle_store();
+        let commands =
+            ["repeat", "middle", "repeat"].map(|text| input_lifecycle_steer(&mut store, text));
+        let session_id = store.state.sessions[0].id.clone();
+        store
+            .state
+            .stage_prompt_back(&session_id, "later queued".into());
+        let mut exchange = ProtocolExchange::default();
+        let requests = commands.map(|command| exchange.build_tracked_request(command).unwrap());
+        for request in requests.iter().rev() {
+            input_response_reject(&mut store, &mut exchange, &request.id);
+        }
+        assert!(store.state.pending_turn_steers.is_empty());
+        assert_eq!(
+            store.state.pending_messages,
+            ["repeat", "middle", "repeat", "later queued"]
+        );
+        assert!(
+            store.state.sessions[0].messages.is_empty(),
+            "only the exact failed optimistic rows are withdrawn"
+        );
+    }
+
+    #[test]
+    fn input_response_reverse_acceptance_then_legacy_terminal_preserves_dispatch_order() {
+        let mut store = input_lifecycle_store();
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods([
+            crate::model::APPUI_METHOD_TURN_STEER,
+        ]));
+        let session_id = store.state.sessions[0].id.clone();
+        let turn_id = store.state.active_turn().unwrap().1.clone();
+        let a = input_lifecycle_steer(&mut store, "first");
+        let b = input_lifecycle_steer(&mut store, "second");
+        let mut exchange = ProtocolExchange::default();
+        let a = exchange.build_tracked_request(a).unwrap();
+        let b = exchange.build_tracked_request(b).unwrap();
+        for request in [&b, &a] {
+            let reply = json!({"jsonrpc":"2.0", "id":request.id, "result":{"turn_id":turn_id,"steered":true}});
+            store.apply_client_event(
+                exchange
+                    .decode_rpc_text(&reply.to_string())
+                    .unwrap()
+                    .unwrap(),
+            );
+        }
+        assert_eq!(
+            store
+                .state
+                .retained_steers
+                .iter()
+                .map(|steer| steer.prompt.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+        store
+            .state
+            .stage_prompt_back(&session_id, "later queued".into());
+        let command = store
+            .apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
+                octos_core::ui_protocol::TurnCompletedEvent {
+                    token_usage: None,
+                    session_id,
+                    topic: None,
+                    turn_id,
+                    cursor: None,
+                    tokens_in: None,
+                    tokens_out: None,
+                    session_result: None,
+                },
+            )))
+            .expect("first recovered steer drains");
+        let AppUiCommand::SubmitPrompt(params) = command else {
+            panic!("expected recovered prompt")
+        };
+        assert!(matches!(&params.input[0], InputItem::Text { text } if text == "first"));
+        assert_eq!(store.state.pending_messages, ["second", "later queued"]);
+        assert!(store.state.retained_steers.is_empty());
+    }
+
+    #[test]
+    fn input_response_snapshot_preserves_background_queue_order_and_session_owner() {
+        let mut store = input_lifecycle_store();
+        let session_a = store.state.sessions[0].id.clone();
+        let a = input_lifecycle_steer(&mut store, "first A");
+        let b = input_lifecycle_steer(&mut store, "second A");
+        let mut exchange = ProtocolExchange::default();
+        let a = exchange.build_tracked_request(a).unwrap();
+        let b = exchange.build_tracked_request(b).unwrap();
+        input_response_reject(&mut store, &mut exchange, &b.id);
+        let mut sessions = store.state.sessions.clone();
+        let mut second = sessions[0].clone();
+        second.id = SessionKey("local:second-session".into());
+        second.messages.clear();
+        sessions.push(second);
+        store.apply_event(AppUiEvent::Snapshot(octos_core::app_ui::AppUiSnapshot {
+            sessions,
+            selected_session: 1,
+            status: "replay".into(),
+            target: None,
+            readonly: false,
+        }));
+        assert!(
+            store.state.pending_messages.is_empty(),
+            "A's recovered input must not migrate to the selected B session"
+        );
+        let session_b = store.state.sessions[1].id.clone();
+        store.state.stage_prompt_back(&session_b, "B queue".into());
+        input_response_reject(&mut store, &mut exchange, &a.id);
+        store.state.stage_prompt_back(&session_a, "later A".into());
+        assert_eq!(store.state.pending_messages, ["B queue"]);
+        assert_eq!(
+            store
+                .state
+                .pending_messages_by_session
+                .get(&session_a)
+                .unwrap(),
+            &["first A", "second A", "later A"]
+        );
+        store.state.switch_selected_session(0);
+        assert_eq!(
+            store.state.pending_messages,
+            ["first A", "second A", "later A"]
+        );
+        assert_eq!(
+            store
+                .state
+                .pending_messages_by_session
+                .get(&session_b)
+                .unwrap(),
+            &["B queue"]
+        );
+    }
+
+    #[test]
+    fn input_response_terminal_waits_for_earlier_steer_before_draining_recovery() {
+        let mut store = input_lifecycle_store();
+        let session_id = store.state.sessions[0].id.clone();
+        let turn_id = store.state.active_turn().unwrap().1.clone();
+        let a = input_lifecycle_steer(&mut store, "first");
+        let b = input_lifecycle_steer(&mut store, "second");
+        let mut exchange = ProtocolExchange::default();
+        let a = exchange.build_tracked_request(a).unwrap();
+        let b = exchange.build_tracked_request(b).unwrap();
+        input_response_reject(&mut store, &mut exchange, &b.id);
+        assert_eq!(
+            store.state.pending_messages,
+            ["second"],
+            "a refused input is visible immediately"
+        );
+        let terminal = store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
+            octos_core::ui_protocol::TurnCompletedEvent {
+                token_usage: None,
+                session_id,
+                topic: None,
+                turn_id,
+                cursor: None,
+                tokens_in: None,
+                tokens_out: None,
+                session_result: None,
+            },
+        )));
+        assert!(
+            terminal.is_none(),
+            "do not send second while first can still recover ahead of it"
+        );
+        assert!(!store.drain_staged_backstop());
+        input_response_reject(&mut store, &mut exchange, &a.id);
+        assert_eq!(store.state.pending_messages, ["first", "second"]);
+        assert!(
+            store.drain_staged_backstop(),
+            "the final reply releases the automatic drain"
+        );
+        let command = store
+            .state
+            .pending_autonomy_hydration
+            .pop_front()
+            .expect("backstop command");
+        let AppUiCommand::SubmitPrompt(params) = command else {
+            panic!("expected prompt")
+        };
+        assert!(matches!(&params.input[0], InputItem::Text { text } if text == "first"));
+        assert_eq!(store.state.pending_messages, ["second"]);
+    }
+
+    #[test]
+    fn input_response_terminal_late_acceptance_releases_pending_drain_gate() {
+        let mut store = input_lifecycle_store();
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods([
+            crate::model::APPUI_METHOD_TURN_STEER,
+        ]));
+        let session_id = store.state.sessions[0].id.clone();
+        let turn_id = store.state.active_turn().unwrap().1.clone();
+        let a = input_lifecycle_steer(&mut store, "first");
+        let b = input_lifecycle_steer(&mut store, "second");
+        let mut exchange = ProtocolExchange::default();
+        let a = exchange.build_tracked_request(a).unwrap();
+        let b = exchange.build_tracked_request(b).unwrap();
+        input_response_reject(&mut store, &mut exchange, &b.id);
+        assert!(
+            store
+                .apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
+                    octos_core::ui_protocol::TurnCompletedEvent {
+                        token_usage: None,
+                        session_id,
+                        topic: None,
+                        turn_id: turn_id.clone(),
+                        cursor: None,
+                        tokens_in: None,
+                        tokens_out: None,
+                        session_result: None,
+                    }
+                )))
+                .is_none()
+        );
+        let reply =
+            json!({"jsonrpc":"2.0", "id":a.id, "result":{"turn_id":turn_id,"steered":true}});
+        store.apply_client_event(
+            exchange
+                .decode_rpc_text(&reply.to_string())
+                .unwrap()
+                .unwrap(),
+        );
+        assert!(store.state.pending_turn_steers.is_empty());
+        assert!(
+            store.drain_staged_backstop(),
+            "a late successful reply releases the new gate too"
+        );
+        let command = store
+            .state
+            .pending_autonomy_hydration
+            .pop_front()
+            .expect("backstop command");
+        let AppUiCommand::SubmitPrompt(params) = command else {
+            panic!("expected prompt")
+        };
+        assert!(matches!(&params.input[0], InputItem::Text { text } if text == "second"));
     }
 }
