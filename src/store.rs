@@ -7100,6 +7100,7 @@ impl Store {
     }
 
     fn interrupt_with_restore(&mut self, restore_prompt: bool) -> Option<AppUiCommand> {
+        let had_pending_messages = self.state.has_pending_messages();
         let Some((session_id, turn_id)) = self
             .state
             .active_turn()
@@ -7190,7 +7191,20 @@ impl Store {
         ) {
             self.state.set_run_state_idle();
         }
-        self.state.status = t!("status.interrupt_requested_active_turn").into_owned();
+        // Esc/Ctrl+C owns the next-turn slot as soon as the optimistic idle is
+        // installed. Enqueue the staged submit behind the interrupt RPC instead
+        // of waiting for a terminal that may never arrive. Ctrl+X uses
+        // `interrupt_with_restore(false)` and keeps its wait-for-terminal
+        // contract. The staged gate prevents the old terminal from draining a
+        // second prompt while this fresh submit is still in flight.
+        if restore_prompt && let Some(command) = self.submit_next_pending_after_interrupt() {
+            self.state.enqueue_autonomy_hydration(command);
+        }
+        self.state.status = if restore_prompt && had_pending_messages {
+            t!("status.interrupt_staged_submit").into_owned()
+        } else {
+            t!("status.interrupt_requested_active_turn").into_owned()
+        };
         Some(AppUiCommand::InterruptTurn(TurnInterruptParams {
             session_id,
             turn_id,
@@ -14930,6 +14944,14 @@ impl Store {
         // resurrecting it into `live_reply` (the wedge fix).
         self.state
             .mark_turn_completed(&event.session_id, &event.turn_id);
+        // Esc may already have released a staged successor before this real
+        // terminal arrived. If that successor's turn-switch settled the old
+        // partial answer, an interrupt acknowledgement must not settle it a
+        // second time with a spurious failure card. Genuine errors still take
+        // the existing late-error path below.
+        if event.code == "interrupted" && was_finalized_by_switch {
+            return self.drain_after_terminal(steer_restaged);
+        }
         self.state
             .clear_live_reply_segment_boundaries(&event.session_id, &event.turn_id);
         // Streamed reasoning for this turn leaves the accumulator on the error
@@ -15268,8 +15290,31 @@ impl Store {
     /// terminal firing here can never submit another session's staged prompt
     /// into this one.
     fn submit_next_pending_if_idle(&mut self) -> Option<AppUiCommand> {
-        // A streaming turn (live_reply present) always blocks the drain.
-        if self.state.active_turn().is_some() {
+        self.submit_next_pending_if_idle_inner(false)
+    }
+
+    /// Esc/Ctrl+C explicitly hands the next-turn slot to staged input while the
+    /// interrupted turn's terminal is still outstanding. Other drain callers
+    /// retain the ordinary live-turn guard until that handoff has created a
+    /// staged-submit gate (the tick backstop may then recover a dead submit).
+    fn submit_next_pending_after_interrupt(&mut self) -> Option<AppUiCommand> {
+        self.submit_next_pending_if_idle_inner(true)
+    }
+
+    fn submit_next_pending_if_idle_inner(
+        &mut self,
+        after_user_interrupt: bool,
+    ) -> Option<AppUiCommand> {
+        // A streaming turn (live_reply present) blocks the drain unless the
+        // user interrupt path has explicitly superseded it. Once that handoff
+        // has armed a staged gate, the tick backstop may also recover its dead
+        // submit; Ctrl+X has no such gate and still waits for the terminal.
+        let interrupted_turn_can_drain = self.state.active_live_turn_interrupted()
+            && (after_user_interrupt
+                || self.state.active_session().is_some_and(|session| {
+                    self.state.staged_submit_in_flight.contains_key(&session.id)
+                }));
+        if self.state.active_turn().is_some() && !interrupted_turn_can_drain {
             return None;
         }
         let session_id = self
@@ -35537,6 +35582,226 @@ workspace_root: None,
         assert_eq!(params.session_id, session_id);
         assert_eq!(params.turn_id, turn_id);
         assert_eq!(store.state.status, "Interrupt requested for active turn");
+    }
+
+    #[test]
+    fn esc_interrupt_drains_staged_message_without_waiting_for_terminal() {
+        let turn_id = TurnId::new();
+        let mut store = store_with_live_reply(turn_id, "streaming");
+        store.state.pending_messages = vec!["queued next".into()];
+
+        let command = store.interrupt_command().expect("active turn interrupts");
+        assert!(matches!(command, AppUiCommand::InterruptTurn(_)));
+        assert_eq!(store.state.run_state, SessionRunState::Idle);
+
+        // No terminal arrives: Esc itself must enqueue the fresh submit behind
+        // the interrupt instead of leaving it latched in the staged queue.
+        let submit = store
+            .state
+            .pending_autonomy_hydration
+            .iter()
+            .find_map(|command| match command {
+                AppUiCommand::SubmitPrompt(params) => Some(params),
+                _ => None,
+            })
+            .expect("queued prompt submits after Esc");
+        assert_eq!(
+            submit.input,
+            vec![InputItem::Text {
+                text: "queued next".into()
+            }]
+        );
+        assert!(store.state.pending_messages.is_empty());
+    }
+
+    #[test]
+    fn esc_staged_submit_recovery_runs_before_the_old_terminal() {
+        use octos_core::app_ui::AppUiError;
+
+        let old_turn = TurnId::new();
+        let mut store = store_with_live_reply(old_turn, "streaming");
+        let session_id = store.state.sessions[0].id.clone();
+        store.state.pending_messages = vec!["queued next".into()];
+        store.interrupt_command().expect("active turn interrupts");
+        let submit = store
+            .state
+            .pending_autonomy_hydration
+            .pop_front()
+            .expect("Esc releases the staged prompt");
+        assert!(matches!(submit, AppUiCommand::SubmitPrompt(_)));
+
+        store.apply_event(AppUiEvent::Error(AppUiError {
+            code: "send_failed".into(),
+            message: "failed to send command".into(),
+        }));
+        assert_eq!(store.state.pending_messages, vec!["queued next"]);
+        let gate = store
+            .state
+            .staged_submit_in_flight
+            .get_mut(&session_id)
+            .expect("send failure leaves a retry gate");
+        gate.submitted_at = std::time::Instant::now()
+            .checked_sub(STAGED_SUBMIT_GATE_TTL + std::time::Duration::from_secs(1))
+            .expect("instant in the past");
+
+        assert!(
+            store.drain_staged_backstop(),
+            "the old interrupted live_reply must not block Esc's retry"
+        );
+        assert!(store.state.pending_messages.is_empty());
+        assert_eq!(
+            store.state.sessions[0]
+                .messages
+                .iter()
+                .filter(|message| message.content == "queued next")
+                .count(),
+            1,
+            "retry withdraws the dead optimistic echo before resubmitting"
+        );
+    }
+
+    #[test]
+    fn late_interrupt_terminal_before_fresh_turn_started_preserves_staged_gate() {
+        let old_turn = TurnId::new();
+        let mut store = store_with_live_reply(old_turn.clone(), "partial answer");
+        let session_id = store.state.sessions[0].id.clone();
+        store.state.pending_messages = vec!["fresh turn".into(), "still queued".into()];
+        store.interrupt_command().expect("active turn interrupts");
+        let AppUiCommand::SubmitPrompt(submit) = store
+            .state
+            .pending_autonomy_hydration
+            .pop_front()
+            .expect("Esc releases the first staged prompt")
+        else {
+            panic!("expected staged prompt submission");
+        };
+        let fresh_turn = submit.turn_id;
+
+        for _ in 0..2 {
+            let command = store.apply_event(AppUiEvent::Protocol(UiNotification::TurnError(
+                TurnErrorEvent {
+                    token_usage: None,
+                    partial_result: None,
+                    session_id: session_id.clone(),
+                    topic: None,
+                    turn_id: old_turn.clone(),
+                    code: "interrupted".into(),
+                    message: "turn interrupted by client".into(),
+                },
+            )));
+            assert!(
+                command.is_none(),
+                "an old terminal must not drain behind the fresh submit's gate"
+            );
+        }
+
+        assert_eq!(store.state.pending_messages, vec!["still queued"]);
+        assert!(
+            store
+                .state
+                .staged_submit_in_flight
+                .get(&session_id)
+                .and_then(|gate| gate.in_flight.as_ref())
+                .is_some_and(|in_flight| in_flight.turn_id == fresh_turn),
+            "the old terminal and its replay leave the fresh submit gated"
+        );
+        assert_eq!(
+            store.state.sessions[0]
+                .messages
+                .iter()
+                .filter(|message| message.content == "partial answer")
+                .count(),
+            1,
+            "the interrupted answer settles exactly once"
+        );
+    }
+
+    #[test]
+    fn late_interrupt_terminal_after_fresh_turn_started_does_not_double_settle_or_drain() {
+        let old_turn = TurnId::new();
+        let mut store = store_with_live_reply(old_turn.clone(), "partial answer");
+        let session_id = store.state.sessions[0].id.clone();
+        store.state.pending_messages = vec!["fresh turn".into(), "still queued".into()];
+        store.interrupt_command().expect("active turn interrupts");
+
+        let AppUiCommand::SubmitPrompt(submit) = store
+            .state
+            .pending_autonomy_hydration
+            .pop_front()
+            .expect("Esc releases the first staged prompt")
+        else {
+            panic!("expected staged prompt submission");
+        };
+        let fresh_turn = submit.turn_id.clone();
+        store.apply_event(AppUiEvent::Protocol(UiNotification::TurnStarted(
+            TurnStartedEvent {
+                session_id: session_id.clone(),
+                turn_id: fresh_turn.clone(),
+                timestamp: chrono::Utc::now(),
+                topic: None,
+            },
+        )));
+        let messages_before: Vec<String> = store.state.sessions[0]
+            .messages
+            .iter()
+            .map(|message| message.content.clone())
+            .collect();
+
+        // The interrupted turn's real terminal can arrive after its successor
+        // has already started. The turn-switch settled its partial answer, so
+        // this terminal must reconcile only the old turn — not commit another
+        // card, disturb the successor, or drain the next queued prompt.
+        let command = store.apply_event(AppUiEvent::Protocol(UiNotification::TurnError(
+            TurnErrorEvent {
+                token_usage: None,
+                partial_result: None,
+                session_id: session_id.clone(),
+                topic: None,
+                turn_id: old_turn.clone(),
+                code: "interrupted".into(),
+                message: "turn interrupted by client".into(),
+            },
+        )));
+        assert!(command.is_none());
+        assert_eq!(
+            store.state.sessions[0]
+                .messages
+                .iter()
+                .map(|message| message.content.clone())
+                .collect::<Vec<_>>(),
+            messages_before
+        );
+        assert_eq!(
+            store.state.sessions[0]
+                .live_reply
+                .as_ref()
+                .map(|live| live.turn_id.clone()),
+            Some(fresh_turn)
+        );
+        assert_eq!(store.state.pending_messages, vec!["still queued"]);
+
+        // A replayed terminal is likewise inert.
+        let command = store.apply_event(AppUiEvent::Protocol(UiNotification::TurnError(
+            TurnErrorEvent {
+                token_usage: None,
+                partial_result: None,
+                session_id,
+                topic: None,
+                turn_id: old_turn,
+                code: "interrupted".into(),
+                message: "turn interrupted by client".into(),
+            },
+        )));
+        assert!(command.is_none());
+        assert_eq!(
+            store.state.sessions[0]
+                .messages
+                .iter()
+                .map(|message| message.content.clone())
+                .collect::<Vec<_>>(),
+            messages_before
+        );
+        assert_eq!(store.state.pending_messages, vec!["still queued"]);
     }
 
     #[test]
