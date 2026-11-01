@@ -2438,10 +2438,11 @@ impl Store {
                 return None;
             }
             self.state.status = t!("status.listing_loops").into_owned();
-            // Only a USER-dispatched list may pop the loops menu when its
-            // result lands — hydration fires the same RPC silently.
-            self.state.pending_loop_list_menu = true;
             let session_id = self.active_session().map(|session| session.id.clone());
+            // Only a USER-dispatched list may pop the loops menu when its
+            // matching result lands in the same active session — hydration
+            // fires the same RPC silently, including for other sessions.
+            self.state.pending_loop_list_menu = session_id.clone();
             // Without a session there is no session profile to read, and the
             // server would fall back to the `main` profile — filtering out
             // every loop under the user's actual profile. Fall back to the
@@ -2830,6 +2831,25 @@ impl Store {
                         self.dispatch_loop_command(crate::autonomy::LoopCommand::Resume(loop_id))
                     }
                     _ => None,
+                }
+            }
+            LocalAction::RequestDeleteLoop(request) => {
+                if self.require_mutating_appui_method(crate::model::APPUI_METHOD_LOOP_DELETE) {
+                    self.state.pending_loop_delete = Some(request);
+                    self.open_menu(MenuId::from(
+                        crate::menu::registry::MENU_LOOP_DELETE_CONFIRM,
+                    ));
+                }
+                None
+            }
+            LocalAction::ConfirmDeleteLoop(request) => {
+                if !self.require_mutating_appui_method(crate::model::APPUI_METHOD_LOOP_DELETE) {
+                    None
+                } else {
+                    self.state.pending_loop_delete = None;
+                    self.state.status =
+                        t!("status.deleting_loop", id = request.loop_id).into_owned();
+                    Some(AppUiCommand::DeleteLoop(request))
                 }
             }
             LocalAction::RunSlashCommand(draft) => {
@@ -6578,6 +6598,7 @@ impl Store {
             agents: self.state.active_session_agents(),
             loops: self.state.active_session_loops(),
             loop_actions_target: self.state.loop_actions_target.as_deref(),
+            pending_loop_delete: self.state.pending_loop_delete.as_ref(),
             now_ms: i64::try_from(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -9120,31 +9141,41 @@ impl Store {
                             .sum()
                     }
                 };
-                // Upstream main opens the loops menu here so each loop's
-                // actions (pause/resume/delete/fire) are directly reachable.
-                // Keep that for SCOPED queries — the menu reads the ACTIVE
-                // session's mirror, which is exactly what a scoped query
-                // refreshed. A GLOBAL (no-session) query has no active
-                // session to read, so the menu would come up unavailable
-                // and stomp the status; the transcript block below is the
-                // global surface. Status is set AFTER opening: `open_menu`
-                // overwrites `state.status` with the menu label.
-                // Consume the flag unconditionally: a global result must not
-                // leave it armed for a later hydration result to trip over.
-                let user_requested = std::mem::take(&mut self.state.pending_loop_list_menu);
+                // Only the response to an explicit request for THIS session
+                // may open the menu, and only while that session is still
+                // active. An unrelated hydration response must not consume the
+                // pending request; a matching but now-stale response consumes
+                // it without changing focus or status.
+                let user_requested = match (
+                    result.session_id.as_ref(),
+                    self.state.pending_loop_list_menu.as_ref(),
+                ) {
+                    (Some(result_session), Some(requested_session)) => {
+                        result_session == requested_session
+                    }
+                    _ => false,
+                };
+                if user_requested {
+                    self.state.pending_loop_list_menu = None;
+                }
+                let open_loop_menu = user_requested
+                    && self
+                        .active_session()
+                        .is_some_and(|session| result.session_id.as_ref() == Some(&session.id));
                 // Menu-first (user feedback 2026-08-08): the menu is LIVE
                 // (rebuilt from the mirror on every refresh) while a transcript
                 // report is a frozen snapshot — showing both lets them drift
                 // apart after any mutation. A scoped user query gets ONLY the
-                // menu (its Unavailable card covers the empty case); the
-                // transcript report below is reserved for GLOBAL (no-session)
-                // queries, which the menu cannot serve — it reads the active
-                // session's mirror. Hydration (user_requested=false) stays
-                // silent either way.
-                if scoped && user_requested {
+                // menu; the transcript report below is reserved for GLOBAL
+                // (no-session) queries. Hydration and stale responses update
+                // only the mirror and leave the existing UI untouched.
+                if open_loop_menu {
                     self.open_menu(MenuId::from(crate::menu::registry::MENU_LOOPS));
+                    // `open_menu` overwrites status with the menu label, so the
+                    // explicit query's acknowledgment must be set afterwards.
+                    self.state.status =
+                        t!("status.loop_list_refreshed", count = count).into_owned();
                 }
-                self.state.status = t!("status.loop_list_refreshed", count = count).into_owned();
                 // A loop list is a local transcript REPORT, not runtime/tool
                 // activity. Report rendering bypasses agent-task grouping,
                 // settled collapse, and Tool preview limits so every id remains
@@ -9152,6 +9183,7 @@ impl Store {
                 if scoped {
                     return None;
                 }
+                self.state.status = t!("status.loop_list_refreshed", count = count).into_owned();
                 let title = t!("status.loop_list_title").into_owned();
                 // A list is a snapshot of CURRENT state, not a log: drop any
                 // earlier loop-list report (scoped or global) so exactly one —
@@ -30746,7 +30778,7 @@ workspace_root: None,
         // showing both drifts apart after any mutation (user report
         // 2026-08-08: menu said paused while the report still said active).
         let mut store = store_with_empty_session();
-        store.state.pending_loop_list_menu = true;
+        store.state.pending_loop_list_menu = Some(SessionKey("local:test".into()));
         apply_loop_list(
             &mut store,
             vec![list_loop_record("loop-aaa", "写书", "active")],
@@ -30766,7 +30798,7 @@ workspace_root: None,
         // An empty list still answers with a REAL menu (creation hint as a
         // read-only row), not an Unavailable card (user request 2026-08-08).
         let mut store = store_with_empty_session();
-        store.state.pending_loop_list_menu = true;
+        store.state.pending_loop_list_menu = Some(SessionKey("local:test".into()));
         apply_loop_list(&mut store, vec![]);
         match store.state.active_menu.as_ref() {
             Some(crate::menu::MenuBuildResult::Ready(spec)) => {
@@ -30791,7 +30823,7 @@ workspace_root: None,
             ],
             [crate::model::APPUI_FEATURE_CODING_AUTONOMY_V1],
         ));
-        store.state.pending_loop_list_menu = true;
+        store.state.pending_loop_list_menu = Some(SessionKey("local:test".into()));
         apply_loop_list(
             &mut store,
             vec![list_loop_record("loop-aaa", "写书", "active")],
@@ -30818,7 +30850,7 @@ workspace_root: None,
             ],
             [crate::model::APPUI_FEATURE_CODING_AUTONOMY_V1],
         ));
-        store.state.pending_loop_list_menu = true;
+        store.state.pending_loop_list_menu = Some(SessionKey("local:test".into()));
         apply_loop_list(
             &mut store,
             vec![list_loop_record("loop-aaa", "写书", "paused")],
@@ -30837,7 +30869,7 @@ workspace_root: None,
         // The empty loops menu's hint row declares no right_action — Right
         // must dispatch nothing and leave the menu open.
         let mut store = store_with_empty_session();
-        store.state.pending_loop_list_menu = true;
+        store.state.pending_loop_list_menu = Some(SessionKey("local:test".into()));
         apply_loop_list(&mut store, vec![]);
 
         assert!(store.trigger_menu_right_action().is_none());
@@ -30849,7 +30881,7 @@ workspace_root: None,
         // Spec task-loops-menu-rows: a loops-list row activation records the
         // target and pushes the per-loop action submenu onto the stack.
         let mut store = store_with_empty_session();
-        store.state.pending_loop_list_menu = true;
+        store.state.pending_loop_list_menu = Some(SessionKey("local:test".into()));
         apply_loop_list(
             &mut store,
             vec![list_loop_record("loop-aaa", "写书", "active")],
@@ -30880,6 +30912,129 @@ workspace_root: None,
     }
 
     #[test]
+    fn loop_delete_requires_yes_and_preserves_captured_session_and_loop() {
+        let mut store = store_with_two_sessions("local:test", "local:other");
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods_and_features(
+            [crate::model::APPUI_METHOD_LOOP_DELETE],
+            [crate::model::APPUI_FEATURE_CODING_AUTONOMY_V1],
+        ));
+        apply_loop_list(
+            &mut store,
+            vec![list_loop_record("loop-aaa", "写书", "active")],
+        );
+        store.open_menu(MenuId::from(crate::menu::registry::MENU_LOOPS));
+        store.dispatch_menu_action(crate::menu::MenuAction::Local(
+            crate::menu::LocalAction::OpenLoopActions("loop-aaa".into()),
+        ));
+
+        let delete_action = match store.state.active_menu.as_ref() {
+            Some(crate::menu::MenuBuildResult::Ready(spec)) => {
+                let row = spec
+                    .items
+                    .iter()
+                    .find(|item| item.id == "loop_actions.delete")
+                    .expect("delete row");
+                assert!(row.state.destructive, "delete row is destructive");
+                row.action.clone()
+            }
+            other => panic!("expected Ready action submenu, got {other:?}"),
+        };
+        assert!(
+            store.dispatch_menu_action(delete_action).is_none(),
+            "selecting delete must not emit DeleteLoop before confirmation"
+        );
+
+        let no_action = match store.state.active_menu.as_ref() {
+            Some(crate::menu::MenuBuildResult::Ready(spec)) => {
+                assert_eq!(
+                    spec.id.as_str(),
+                    crate::menu::registry::MENU_LOOP_DELETE_CONFIRM
+                );
+                assert_eq!(spec.items.len(), 2, "confirmation is exactly Yes/No");
+                let yes = &spec.items[0];
+                assert!(yes.state.destructive, "Yes row is destructive");
+                spec.items[1].action.clone()
+            }
+            other => panic!("expected Ready delete confirmation, got {other:?}"),
+        };
+        assert!(
+            store.dispatch_menu_action(no_action).is_none(),
+            "No must not emit DeleteLoop"
+        );
+
+        let delete_action = match store.state.active_menu.as_ref() {
+            Some(crate::menu::MenuBuildResult::Ready(spec)) => spec
+                .items
+                .iter()
+                .find(|item| item.id == "loop_actions.delete")
+                .expect("delete row after No")
+                .action
+                .clone(),
+            other => panic!("expected action submenu after No, got {other:?}"),
+        };
+        assert!(store.dispatch_menu_action(delete_action).is_none());
+        let yes_action = match store.state.active_menu.as_ref() {
+            Some(crate::menu::MenuBuildResult::Ready(spec)) => spec.items[0].action.clone(),
+            other => panic!("expected open delete confirmation, got {other:?}"),
+        };
+        store.state.switch_selected_session(1);
+
+        match store.dispatch_menu_action(yes_action) {
+            Some(AppUiCommand::DeleteLoop(params)) => {
+                assert_eq!(params.session_id, SessionKey("local:test".into()));
+                assert_eq!(params.loop_id, "loop-aaa");
+            }
+            other => panic!("expected DeleteLoop only after Yes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scoped_loop_list_hydration_updates_mirror_silently() {
+        let mut store = store_with_empty_session();
+        store.state.status = "user status".into();
+        store.state.focus = FocusPane::Composer;
+
+        apply_loop_list(
+            &mut store,
+            vec![list_loop_record("loop-aaa", "写书", "active")],
+        );
+
+        assert_eq!(store.state.active_session_loops().len(), 1);
+        assert_eq!(store.state.active_session_loops()[0].loop_id, "loop-aaa");
+        assert!(store.state.active_menu.is_none());
+        assert_eq!(store.state.focus, FocusPane::Composer);
+        assert_eq!(store.state.status, "user status");
+    }
+
+    #[test]
+    fn stale_prior_session_loop_list_does_not_open_menu() {
+        let mut store = store_with_two_sessions("local:test", "local:other");
+        store.state.pending_loop_list_menu = Some(SessionKey("local:test".into()));
+        store.state.switch_selected_session(1);
+        store.state.status = "current session status".into();
+        let prior_session = SessionKey("local:test".into());
+        let mut record = list_loop_record("loop-prior", "旧会话", "active");
+        record.session_id = prior_session.clone();
+
+        apply_loop_list_for_scope(&mut store, Some(prior_session.clone()), vec![record]);
+
+        assert_eq!(
+            store
+                .state
+                .session_autonomy
+                .iter()
+                .find(|entry| entry.session_id == prior_session)
+                .expect("prior session mirror")
+                .loops
+                .len(),
+            1
+        );
+        assert!(store.state.active_menu.is_none());
+        assert_eq!(store.state.focus, FocusPane::Composer);
+        assert_eq!(store.state.status, "current session status");
+    }
+
+    #[test]
     fn user_loop_list_opens_menu_but_hydration_does_not() {
         // Session-open hydration fires loop/list silently; found live
         // 2026-08-08: the unconditional open popped the menu on session open,
@@ -30887,7 +31042,7 @@ workspace_root: None,
         // pause-toggled a loop the user never selected.
         let mut store = store_with_empty_session();
 
-        // Hydration result: flag unset — no menu.
+        // Hydration result: no explicit request pending — no menu.
         apply_loop_list(
             &mut store,
             vec![list_loop_record("loop-aaa", "写书", "active")],
@@ -30897,8 +31052,8 @@ workspace_root: None,
             "hydration must never pop the loops menu"
         );
 
-        // User-dispatched: flag armed — menu opens.
-        store.state.pending_loop_list_menu = true;
+        // User-dispatched: matching session request pending — menu opens.
+        store.state.pending_loop_list_menu = Some(SessionKey("local:test".into()));
         apply_loop_list(
             &mut store,
             vec![list_loop_record("loop-aaa", "写书", "active")],
@@ -30908,8 +31063,8 @@ workspace_root: None,
             "an explicit /loop list opens the menu"
         );
         assert!(
-            !store.state.pending_loop_list_menu,
-            "the flag is consumed by the result"
+            store.state.pending_loop_list_menu.is_none(),
+            "the request is consumed by the matching result"
         );
     }
 
@@ -47480,6 +47635,7 @@ workspace_root: None,
         use octos_core::ui_protocol::UiLoopRecord;
         let mut store = protocol_store_with_autonomy();
         let session_id = SessionKey("local:test".into());
+        store.state.status = "before hydration".into();
         store.apply_client_event(ClientEvent::Autonomy(AutonomyClientEvent {
             result: AutonomyResult::LoopList(crate::model::LoopListResult {
                 session_id: Some(session_id.clone()),
@@ -47505,7 +47661,7 @@ workspace_root: None,
             .session_autonomy_for(&session_id)
             .expect("mirror");
         assert_eq!(mirror.loops.len(), 1);
-        assert!(store.state.status.contains("1 loop"));
+        assert_eq!(store.state.status, "before hydration");
     }
 
     #[test]
