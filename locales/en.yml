@@ -1342,6 +1342,13 @@ menu:
       fire-now: "⚡ fire-now — trigger one run immediately"
       pause: "⏸ pause — stop scheduling until resumed"
       resume: "▶ resume — re-arm the schedule"
+  loop_delete:
+    no_target: No loop deletion is pending.
+    title: "Delete loop %{id}?"
+    subtitle: This permanently removes the loop and cannot be undone.
+    yes: Yes, delete loop
+    yes_desc: Permanently delete the captured loop now.
+    no: No, keep loop
   loops:
     row_hint: "Enter actions · → pause/resume"
     subtitle: "%{count} loops · %{active} active · %{paused} paused"

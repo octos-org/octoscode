@@ -37,8 +37,8 @@ estimate: 0.25d
   状态快照"而非日志,堆积多份旧快照只会误导;这也与"最近的 Report 可见"
   的措辞一致。
 - 空列表也要有明确输出(不能只有状态栏一句),提示 `/loop <提示词>` 如何创建。
-- 状态栏原有的 "Loop list refreshed: N loop(s)" 保留(它是操作确认),
-  本任务只补转录输出。
+- 状态栏原有的 "Loop list refreshed: N loop(s)" 保留为显式查询的操作确认;
+  hydration 与已过期的前会话响应不得改写状态栏。
 
 ## 边界
 
@@ -65,7 +65,7 @@ estimate: 0.25d
   Report——菜单读的是活跃会话镜像,无会话时它只会以"不可用"抢占状态栏。
   菜单本身的行为不属于本合约,由上游测试钉住。**但菜单的触发时机属于本合约**:
   只有用户显式派发的 `/loop list` 才弹菜单;会话打开时的 hydration 会静默发同一
-  RPC,其结果只刷新镜像与转录,绝不弹菜单(实测 2026-08-08:上游的无条件弹出
+  RPC,其结果只刷新镜像,绝不弹菜单或改写状态栏(实测 2026-08-08:上游的无条件弹出
   导致每次进会话菜单不请自来,随后的键入全被菜单搜索框吞掉、Enter 误触 pause)。
 
 ## 完成条件
@@ -101,6 +101,20 @@ estimate: 0.25d
   那么 不弹出任何菜单
   当 用户派发 /loop list 且结果到达
   那么 loops 菜单弹出
+
+场景: hydration 只更新镜像且保持界面静默
+  测试: scoped_loop_list_hydration_updates_mirror_silently
+  假设 会话已打开且用户正在查看既有状态
+  当 hydration 的 scoped loop/list 结果到达
+  那么 该会话 loop 镜像更新
+  并且 不弹出菜单、不改变焦点、不改写状态栏
+
+场景: 前会话的迟到清单不抢占新会话
+  测试: stale_prior_session_loop_list_does_not_open_menu
+  假设 用户请求会话 A 的清单后已切换到会话 B
+  当 会话 A 的 scoped loop/list 结果迟到
+  那么 会话 A 的镜像仍更新
+  并且 不弹出菜单、不改变焦点、不改写会话 B 的状态栏
 
 场景: 有会话的用户查询只开菜单不推 Report
   测试: scoped_user_loop_list_opens_menu_without_report

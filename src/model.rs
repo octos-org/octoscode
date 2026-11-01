@@ -4918,13 +4918,16 @@ pub struct AppState {
     /// Session whose NEXT turn should be attributed to a loop: set when
     /// `loop/fired` arrives, consumed when that session's next turn starts.
     pub pending_loop_attribution: std::collections::HashSet<SessionKey>,
-    /// True while a USER-dispatched `/loop list` awaits its result. The
-    /// session-open hydration fires the same RPC silently; only an explicit
-    /// user query may pop the loops menu when the result lands.
-    pub pending_loop_list_menu: bool,
+    /// Session whose USER-dispatched `/loop list` awaits its result. The
+    /// session-open hydration fires the same RPC silently; only a matching
+    /// result for the still-active session may pop the loops menu.
+    pub pending_loop_list_menu: Option<SessionKey>,
     /// Loop id the `MENU_LOOP_ACTIONS` submenu is acting on (set when a
     /// loops-list row is activated).
     pub loop_actions_target: Option<String>,
+    /// Session and loop captured by the delete row and staged for Yes/No
+    /// confirmation. Confirming never re-reads the active session.
+    pub pending_loop_delete: Option<LoopIdParams>,
     /// Path of the `--config` file this session launched from, retained so
     /// `/saveconfig` can persist runtime UI settings back. `None` when launched
     /// without `--config` (saving then falls back to the default path).
@@ -7178,8 +7181,9 @@ impl AppState {
             loop_fire_counts: std::collections::HashMap::new(),
             loop_attributed_turns: std::collections::HashSet::new(),
             pending_loop_attribution: std::collections::HashSet::new(),
-            pending_loop_list_menu: false,
+            pending_loop_list_menu: None,
             loop_actions_target: None,
+            pending_loop_delete: None,
             config_path: None,
             activity_navigator: ActivityNavigatorState::default(),
             focus: FocusPane::Composer,
