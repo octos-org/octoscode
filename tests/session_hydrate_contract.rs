@@ -97,6 +97,7 @@ fn session_hydrate_result_replaces_durable_messages() {
         pending_approvals: None,
         pending_questions: None,
         replayed_envelopes: None,
+        file_mutations: None,
     };
 
     store.apply_client_event(ClientEvent::SessionHydrate(result));
