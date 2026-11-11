@@ -9248,6 +9248,7 @@ mod tests {
             baseline,
             vec![
                 UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1,
+                UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1,
                 UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1,
                 UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1,
                 UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1,
