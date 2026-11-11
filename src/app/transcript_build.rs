@@ -2750,6 +2750,21 @@ pub(super) fn push_background_activity_section(
     let expanded = app.expanded_tool_outputs;
     let budget = width.saturating_sub(6).max(20);
     for (origin, rows) in groups {
+        if rows.first().is_some_and(|row| row.is_agent_report()) {
+            let running_turn = session
+                .live_reply
+                .as_ref()
+                .map(|reply| reply.turn_id.0.to_string());
+            push_agent_report_group(
+                lines,
+                palette,
+                &rows,
+                running_turn.as_deref(),
+                expanded,
+                budget,
+            );
+            continue;
+        }
         let dropped: u64 = rows.iter().filter_map(|row| row.dropped_count).sum();
         let mut header = format!("{origin} · {} event(s)", rows.len());
         if dropped > 0 {
@@ -2792,6 +2807,151 @@ pub(super) fn push_background_activity_section(
                 lines.push(Line::from(vec![
                     Span::styled(prefix, Style::default().fg(palette.frame)),
                     Span::styled(wrapped, style),
+                ]));
+            }
+        }
+    }
+}
+
+/// octos UPCR-2026-R3DB2ECCA — one agent's own progress reports.
+///
+/// Unlike an observed monitor or fleet line, a report is something the agent
+/// said to the user, so it is drawn in reading colour under a header naming
+/// who said it, and its kind is spelled out: a blocker or a correction must
+/// not read as one more routine line. Every kind is the agent's own
+/// statement. `Self-check` is a check the agent ran, never a review or an
+/// approval, and nothing here is drawn as a pass.
+///
+/// Collapsed, the group is its header plus the newest report, for as long as
+/// the turn that report came from is still running. Once that turn is over
+/// the reply is the agent's current word, so only the header and its count
+/// stay: a finished turn's "Blocked" must not sit under a later answer as if
+/// it still held. Expanded, every retained report stays in order, so a
+/// correction is seen next to what it corrects instead of replacing it.
+fn push_agent_report_group(
+    lines: &mut Vec<Line<'static>>,
+    palette: Palette,
+    rows: &[&crate::model::BackgroundActivityParams],
+    running_turn: Option<&str>,
+    expanded: bool,
+    budget: usize,
+) {
+    use crate::model::AgentReportKind;
+    let Some(first) = rows.first() else {
+        return;
+    };
+    let peer = first
+        .origin_label
+        .as_deref()
+        .map(str::trim)
+        .filter(|label| !label.is_empty());
+    let mut header = match peer {
+        Some(name) => t!("app.activity.report_header_peer", name = name).to_string(),
+        None => t!("app.activity.report_header_main").to_string(),
+    };
+    let reports = rows.iter().filter(|row| !row.suppressed).count();
+    header.push_str(&format!(" · {reports}"));
+    let dropped: u64 = rows.iter().filter_map(|row| row.dropped_count).sum();
+    if dropped > 0 {
+        header.push_str(&format!(" · {dropped} dropped"));
+    }
+    // A report without a turn id cannot be placed, so it counts as current.
+    let newest_is_current = rows.last().is_some_and(|row| {
+        let turn = row
+            .report
+            .as_ref()
+            .and_then(|report| report.turn_id.as_deref());
+        turn.is_none() || turn == running_turn
+    });
+    let shown = if expanded {
+        rows
+    } else if newest_is_current {
+        &rows[rows.len() - 1..]
+    } else {
+        &[]
+    };
+    if shown.len() < rows.len() {
+        header.push_str(" · ctrl+o to expand");
+    }
+    lines.push(Line::from(vec![
+        Span::styled("◈ ", Style::default().fg(palette.accent)),
+        Span::styled(
+            header,
+            Style::default()
+                .fg(palette.text)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    let frame = Style::default().fg(palette.frame);
+    for row in shown {
+        let text = row.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if row.suppressed {
+            let style = Style::default()
+                .fg(palette.danger)
+                .add_modifier(Modifier::ITALIC);
+            for (idx, wrapped) in wrap_display_width(&text, budget).into_iter().enumerate() {
+                let prefix = if idx == 0 { "  ⎿ " } else { "    " };
+                lines.push(Line::from(vec![
+                    Span::styled(prefix, frame),
+                    Span::styled(wrapped, style),
+                ]));
+            }
+            continue;
+        }
+        let kind = row
+            .report
+            .as_ref()
+            .map_or(AgentReportKind::Milestone, |report| report.kind());
+        let (label, color) = match kind {
+            AgentReportKind::Milestone => {
+                (t!("app.activity.report_kind_milestone"), palette.accent)
+            }
+            AgentReportKind::Blocker => (t!("app.activity.report_kind_blocker"), palette.danger),
+            AgentReportKind::Correction => {
+                (t!("app.activity.report_kind_correction"), palette.highlight)
+            }
+            AgentReportKind::Verification => {
+                (t!("app.activity.report_kind_verification"), palette.success)
+            }
+        };
+        let head = format!("{label}: ");
+        let body = Style::default().fg(palette.text);
+        for (idx, wrapped) in wrap_display_width(&format!("{head}{text}"), budget)
+            .into_iter()
+            .enumerate()
+        {
+            let prefix = Span::styled(if idx == 0 { "  ⎿ " } else { "    " }, frame);
+            let rest = (idx == 0).then(|| wrapped.strip_prefix(&head)).flatten();
+            lines.push(match rest {
+                Some(rest) => Line::from(vec![
+                    prefix,
+                    Span::styled(
+                        head.clone(),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(rest.to_owned(), body),
+                ]),
+                None => Line::from(vec![prefix, Span::styled(wrapped, body)]),
+            });
+        }
+        let details = row.report.iter().flat_map(|report| {
+            [
+                (t!("app.activity.report_next"), report.next_step.as_deref()),
+                (
+                    t!("app.activity.report_evidence"),
+                    report.evidence.as_deref(),
+                ),
+            ]
+        });
+        for (name, value) in details {
+            let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+                continue;
+            };
+            let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
+            for wrapped in wrap_display_width(&format!("{name}: {value}"), budget) {
+                lines.push(Line::from(vec![
+                    Span::styled("    ", frame),
+                    Span::styled(wrapped, Style::default().fg(palette.muted)),
                 ]));
             }
         }
