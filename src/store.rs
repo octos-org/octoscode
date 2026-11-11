@@ -1391,6 +1391,7 @@ impl Store {
                     cwd: Some(entry.cwd.clone()),
                     sandbox: None,
                     after: None,
+                    session_ref: None,
                 });
                 if first_open.is_none() {
                     first_open = Some(open);
@@ -1438,6 +1439,7 @@ impl Store {
                 cwd: Some(result.cwd),
                 sandbox: None,
                 after: None,
+                session_ref: None,
             },
         ))
     }
@@ -1503,6 +1505,7 @@ impl Store {
                 cwd: Some(event.cwd),
                 sandbox: None,
                 after: None,
+                session_ref: None,
             },
         ))
     }
@@ -2965,6 +2968,9 @@ impl Store {
                     Some(AppUiCommand::ListSessions(SessionListParams {
                         profile_id: None,
                         cwd: None,
+                        cursor: None,
+                        limit: None,
+                        workspace_id: None,
                     }))
                 } else if !self.state.resume_list_loaded {
                     // `/resume <query>` before the list ever loaded: the local
@@ -2986,6 +2992,9 @@ impl Store {
                     Some(AppUiCommand::ListSessions(SessionListParams {
                         profile_id: None,
                         cwd: None,
+                        cursor: None,
+                        limit: None,
+                        workspace_id: None,
                     }))
                 } else {
                     // `/resume <query>` shortcut: resolve to a session id
@@ -3147,6 +3156,7 @@ impl Store {
                 cwd,
                 sandbox: None,
                 after: None,
+                session_ref: None,
             },
         ))
     }
@@ -5340,6 +5350,7 @@ impl Store {
             cwd: onboarding_workspace_cwd(&self.state.workspace.root),
             sandbox: None,
             after: None,
+            session_ref: None,
         }))
     }
 
@@ -10402,6 +10413,7 @@ impl Store {
                 cwd: self.launch_workspace_cwd(),
                 sandbox: None,
                 after: None,
+                session_ref: None,
             },
         ))
     }
@@ -11184,6 +11196,7 @@ impl Store {
                 tool_call_id,
                 name,
                 arguments_preview,
+                write_path: _,
             } => {
                 // A live-streamed row (or a prior replay already archived into
                 // the turn log) covers this call — never double-render it.
@@ -12720,6 +12733,11 @@ impl Store {
             UiNotification::ApprovalAutoResolved(event) => self.apply_approval_auto_resolved(event),
             UiNotification::ApprovalDecided(event) => self.apply_approval_decided(event),
             UiNotification::ApprovalCancelled(event) => self.apply_approval_cancelled(event),
+            // octos #1492: a durable `user_question/cancelled` frame. The
+            // picker is already cleared when the turn that asked the question
+            // ends or fails, so until it consumes this event directly, ignore
+            // it gracefully rather than wedge on the unknown variant.
+            UiNotification::UserQuestionCancelled(_) => None,
             UiNotification::ProgressUpdated(event) => self.apply_progress(event),
             UiNotification::ReplayLossy(event) => self.apply_replay_lossy(event),
             UiNotification::TurnSpawnComplete(event) => self.apply_turn_spawn_complete(event),
@@ -13960,6 +13978,7 @@ impl Store {
                 tool_call_id,
                 name,
                 arguments_preview,
+                write_path: _,
             } => {
                 let turn_id = self.resolve_v2_turn_id(&session_id, &wire_turn_id, false);
                 // Terminal tombstone (mirror `UiNotification::ToolStarted`): a
@@ -15202,6 +15221,7 @@ impl Store {
                 cwd,
                 sandbox: None,
                 after: None,
+                session_ref: None,
             }));
         self.enqueue_staged_drain_after_switch();
         true
@@ -16997,6 +17017,8 @@ fn hydrated_row_to_message(row: HydratedMessage) -> Message {
         client_message_id: row.client_message_id,
         thread_id: row.thread_id,
         timestamp: row.persisted_at,
+        participant: None,
+        source: None,
     }
 }
 
@@ -21127,6 +21149,8 @@ the final line of the reply"
                 client_message_id: None,
                 thread_id: None,
                 timestamp: chrono::Utc::now(),
+                participant: None,
+                source: None,
             });
         }
         assert_eq!(
@@ -21497,6 +21521,8 @@ workspace_root: None,
                 { "id": "s:new", "message_count": 9, "title": "Newest", "updated_at": "2026-07-01T00:00:00Z" },
                 { "id": "s:legacy", "message_count": 3 }
             ]),
+            next_cursor: None,
+            scope: None,
         }));
 
         let ids: Vec<&str> = store
@@ -21656,6 +21682,7 @@ workspace_root: None,
             pending_questions: None,
             replayed_envelopes: None,
             replayed_tool_envelopes: None,
+            file_mutations: None,
         }));
 
         let created = store
@@ -23606,6 +23633,7 @@ workspace_root: None,
                 pending_approvals: None,
                 pending_questions: None,
                 replayed_envelopes: None,
+                file_mutations: None,
             },
         }));
 
@@ -23672,6 +23700,7 @@ workspace_root: None,
                 pending_approvals: None,
                 pending_questions: None,
                 replayed_envelopes: None,
+                file_mutations: None,
             },
         }));
 
@@ -23746,6 +23775,7 @@ workspace_root: None,
                 pending_approvals: None,
                 pending_questions: None,
                 replayed_envelopes: None,
+                file_mutations: None,
             },
         }));
 
@@ -23782,6 +23812,8 @@ workspace_root: None,
             profile_id: None,
             workspace_root: None,
             sessions: serde_json::json!([]),
+            next_cursor: None,
+            scope: None,
         }));
 
         assert!(
@@ -35292,6 +35324,7 @@ workspace_root: None,
                 tool_call_id: "tool-1".into(),
                 name: "write_file".into(),
                 arguments_preview: None,
+                write_path: None,
             },
         )));
         store.apply_event(AppUiEvent::Protocol(envelope_v2_notification(
@@ -35557,6 +35590,7 @@ workspace_root: None,
                 tool_call_id: "tool-attachment".into(),
                 name: "write_file".into(),
                 arguments_preview: None,
+                write_path: None,
             },
         )));
         store.apply_event(AppUiEvent::Protocol(envelope_v2_notification(
@@ -38058,6 +38092,7 @@ workspace_root: None,
                 tool_call_id: "late-envelope-call".into(),
                 name: "bash".into(),
                 arguments_preview: Some("cmd: \"./tools/parity/run_suite.sh\"".into()),
+                write_path: None,
             },
         )));
         store.apply_event(AppUiEvent::Protocol(envelope_v2_notification(
@@ -38878,6 +38913,7 @@ workspace_root: None,
             pending_approvals: None,
             pending_questions: None,
             replayed_envelopes: None,
+            file_mutations: None,
         };
         store.apply_client_event(ClientEvent::SessionHydrate(result));
 
@@ -44007,6 +44043,7 @@ workspace_root: None,
             pending_approvals: None,
             pending_questions: None,
             replayed_envelopes: None,
+            file_mutations: None,
         };
         store.apply_client_event(ClientEvent::SessionHydrate(result));
 
@@ -44060,6 +44097,7 @@ workspace_root: None,
             pending_questions: None,
             replayed_envelopes: None,
             replayed_tool_envelopes: None,
+            file_mutations: None,
         }));
 
         assert!(
@@ -44131,6 +44169,7 @@ workspace_root: None,
             pending_approvals: None,
             pending_questions: None,
             replayed_envelopes: None,
+            file_mutations: None,
         };
 
         let active = SessionKey("local:peer-active".into());
@@ -44754,6 +44793,7 @@ workspace_root: None,
                         tool_call_id: "shared-call".into(),
                         name: "read_file".into(),
                         arguments_preview: None,
+                        write_path: None,
                     },
                 )));
             }
@@ -44810,6 +44850,7 @@ workspace_root: None,
                 tool_call_id: "reused".into(),
                 name: "A tool".into(),
                 arguments_preview: None,
+                write_path: None,
             },
         );
         let wrong_end = envelope(
@@ -45566,6 +45607,7 @@ workspace_root: None,
                     tool_call_id: "read".into(),
                     name: "read_file".into(),
                     arguments_preview: None,
+                    write_path: None,
                 },
             );
             if later_segment {
@@ -45786,6 +45828,7 @@ workspace_root: None,
                         tool_call_id: id.clone(),
                         name: "peer_gather".into(),
                         arguments_preview: None,
+                        write_path: None,
                     },
                 );
                 send(
@@ -45974,6 +46017,7 @@ workspace_root: None,
                         tool_call_id: id.clone(),
                         name: "peer_gather".into(),
                         arguments_preview: None,
+                        write_path: None,
                     },
                 );
                 progress(
@@ -46193,6 +46237,7 @@ workspace_root: None,
             pending_approvals: None,
             pending_questions: None,
             replayed_envelopes: None,
+            file_mutations: None,
         }));
 
         assert!(
@@ -46336,6 +46381,7 @@ workspace_root: None,
                     media: vec!["out.md".into()],
                 },
             }]),
+            file_mutations: None,
         };
 
         store.apply_client_event(ClientEvent::SessionHydrate(result));
@@ -46408,6 +46454,7 @@ workspace_root: None,
             pending_approvals: None,
             pending_questions: None,
             replayed_envelopes: None,
+            file_mutations: None,
         };
         store.apply_client_event(ClientEvent::SessionHydrate(result));
 
@@ -46486,6 +46533,7 @@ workspace_root: None,
             pending_questions: None,
             replayed_envelopes: None,
             replayed_tool_envelopes: None,
+            file_mutations: None,
         };
         store.apply_client_event(ClientEvent::SessionHydrate(result));
 
@@ -46798,6 +46846,7 @@ workspace_root: None,
                         tool_call_id: "tc-replay-1".into(),
                         name: "shell".into(),
                         arguments_preview: Some("command: \"cargo test\"".into()),
+                        write_path: None,
                     },
                 ),
                 envelope(
@@ -46819,6 +46868,7 @@ workspace_root: None,
                     },
                 ),
             ]),
+            file_mutations: None,
         };
         store.apply_client_event(ClientEvent::SessionHydrate(result));
 
@@ -46905,6 +46955,7 @@ workspace_root: None,
                         tool_call_id: "tc-idem".into(),
                         name: "read_file".into(),
                         arguments_preview: None,
+                        write_path: None,
                     },
                 ),
                 envelope(
@@ -46919,6 +46970,7 @@ workspace_root: None,
                     },
                 ),
             ]),
+            file_mutations: None,
         };
 
         store.apply_client_event(ClientEvent::SessionHydrate(make_result()));
@@ -46985,6 +47037,7 @@ workspace_root: None,
             pending_approvals: None,
             pending_questions: None,
             replayed_envelopes: None,
+            file_mutations: None,
         };
         store.apply_client_event(ClientEvent::SessionHydrate(result));
 
@@ -47039,6 +47092,7 @@ workspace_root: None,
                 pending_approvals: None,
                 pending_questions: None,
                 replayed_envelopes: None,
+                file_mutations: None,
             };
             store.apply_client_event(ClientEvent::SessionHydrate(result));
 
@@ -47190,6 +47244,7 @@ workspace_root: None,
             pending_approvals: None,
             pending_questions: None,
             replayed_envelopes: None,
+            file_mutations: None,
         }
     }
 
@@ -47601,6 +47656,7 @@ workspace_root: None,
                 pending_approvals: None,
                 pending_questions: None,
                 replayed_envelopes: None,
+                file_mutations: None,
             };
             store.apply_client_event(ClientEvent::SessionHydrate(result));
 
@@ -47802,6 +47858,7 @@ workspace_root: None,
             pending_approvals: None,
             pending_questions: None,
             replayed_envelopes: None,
+            file_mutations: None,
         };
         store.apply_client_event(ClientEvent::SessionHydrate(hydrate));
         let session = store
@@ -48449,6 +48506,7 @@ workspace_root: None,
                 tool_call_id: "tool-1".into(),
                 name: "read_file".into(),
                 arguments_preview: None,
+                write_path: None,
             },
         );
         send(
@@ -48624,6 +48682,7 @@ workspace_root: None,
                     tool_call_id: tool_call_id.clone(),
                     name: tool.into(),
                     arguments_preview: None,
+                    write_path: None,
                 },
             );
             send(
@@ -48748,6 +48807,7 @@ workspace_root: None,
                 tool_call_id: "tool-1".into(),
                 name: "read_file".into(),
                 arguments_preview: None,
+                write_path: None,
             },
         )));
         sync(&mut tracker, &store, &mut emitted);

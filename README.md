@@ -532,7 +532,7 @@ proxy, the server has to be told to trust its address: set
 `OCTOS_APPUI_ALLOWED_ORIGINS=http://<client host>:<port>` on the server, or
 `appui.allowed_origins` in its config. It trusts only its own address otherwise.
 
-> Octos `v2.0.3` can print a one-time pairing link with
+> Octos `v2.1.0-rc.1` can print a one-time pairing link with
 > `octos serve --web-url …`; the browser can open it without copying a token.
 
 Both clients can open the **same session**. Pass `--session <id>` here and pick
