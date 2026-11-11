@@ -49,6 +49,7 @@ fn scrub_session_open_cwd_when_feature_absent() {
         cwd: Some("/tmp/solo-project".into()),
         sandbox: None,
         after: None,
+        session_ref: None,
     };
     let supported: Vec<String> = Vec::new();
     let scrubbed = scrub_session_open_cwd_for_capabilities(params, &supported);
@@ -72,6 +73,7 @@ fn scrub_session_open_cwd_passthrough_when_feature_present() {
         cwd: Some("/tmp/solo-project".into()),
         sandbox: None,
         after: None,
+        session_ref: None,
     };
     let supported = vec!["session.workspace_cwd.v1".to_string()];
     let scrubbed = scrub_session_open_cwd_for_capabilities(params, &supported);

@@ -1616,9 +1616,10 @@ dependencies = [
 
 [[package]]
 name = "octos-core"
-version = "2.0.3"
-source = "git+https://github.com/octos-org/octos?rev=fca32c45845abefdf6729ddff081c5083553289a#fca32c45845abefdf6729ddff081c5083553289a"
+version = "2.1.0-rc.1"
+source = "git+https://github.com/octos-org/octos?rev=4f58167b4830db4c54f6c30e9484d52949ef4495#4f58167b4830db4c54f6c30e9484d52949ef4495"
 dependencies = [
+ "base64",
  "chrono",
  "eyre",
  "serde",
@@ -1630,7 +1631,7 @@ dependencies = [
 
 [[package]]
 name = "octoscode"
-version = "0.3.1"
+version = "0.4.0-rc.1"
 dependencies = [
  "axoupdater",
  "chrono",
