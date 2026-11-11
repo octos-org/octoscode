@@ -1171,7 +1171,7 @@ fn latest_user_message(session: &SessionView) -> Option<&str> {
         .messages
         .iter()
         .rev()
-        .find(|message| message.role.as_str() == "user")
+        .find(|message| crate::model::is_typed_user_message(message))
         .map(|message| message.content.as_str())
         .filter(|content| !content.trim().is_empty())
 }

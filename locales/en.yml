@@ -2005,6 +2005,8 @@ workspace_team:
   refresh: "Refresh agents"
   hint: "↑/↓ select · Enter message or assign coordinator · Esc close"
   list_first: "Run /agents first, then select a coordinator."
+  message_card: "Message from %{agent}"
+  assignment_card: "Assignment from %{agent}"
 
 question_header:
   latest: "You"

@@ -15240,3 +15240,60 @@ fn goal_objective_rows_never_split_a_grapheme() {
         "the family emoji must stay within a single row, got: {chunks:?}"
     );
 }
+
+/// octos UPCR-2026-RF506E103 — a peer message card names its sender and does
+/// not use the user block's accent gutter or reverse-video body, so another
+/// agent's words never look like a prompt the user typed.
+#[test]
+fn peer_message_card_is_attributed_and_never_drawn_as_a_user_prompt() {
+    let palette = Palette::for_theme(crate::cli::ThemeName::Terminal);
+    let card = |assignment| {
+        crate::model::PeerMessageRecord {
+            from_agent: "workspace-1".into(),
+            text: "rebase onto main\nthen rerun the suite".into(),
+            assignment,
+        }
+        .into_card_message(Some("t-peer".into()), chrono::Utc::now())
+        .expect("card")
+    };
+    let render = |message: &octos_core::Message| {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        push_committed_message_block(&mut lines, palette, message, 80);
+        lines
+    };
+    let text = |lines: &[Line<'static>]| {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let lines = render(&card(false));
+    assert_eq!(
+        text(&lines),
+        [
+            "⇢ Message from workspace-1",
+            "│ rebase onto main",
+            "│ then rerun the suite"
+        ]
+    );
+    assert!(
+        lines.iter().flat_map(|line| &line.spans).all(|span| {
+            !span.content.starts_with('▌') && !span.style.add_modifier.contains(Modifier::REVERSED)
+        }),
+        "the card shares no marker with the user block"
+    );
+    assert_eq!(
+        text(&render(&card(true)))[0],
+        "⇢ Assignment from workspace-1"
+    );
+
+    // A typed prompt keeps the user block.
+    let typed = render(&octos_core::Message::user("typed prompt"));
+    assert!(typed[0].spans[0].content.starts_with('▌'));
+}

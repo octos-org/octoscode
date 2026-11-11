@@ -3383,7 +3383,10 @@ impl Store {
         session
             .messages
             .iter()
-            .filter(|message| message.role.as_str() == "user")
+            // A peer message card roots no rollback turn on the server (octos
+            // UPCR-2026-RF506E103), so it is not a rewind target and does not
+            // shift the count of the prompts around it.
+            .filter(|message| crate::model::is_typed_user_message(message))
             .rev()
             .enumerate()
             .map(|(index, message)| {
@@ -8759,6 +8762,14 @@ impl Store {
             // misattributed (octos-tui#461 / #466 / #483).
             ClientEvent::BackgroundActivity(event) => {
                 self.state.push_background_activity(event);
+                None
+            }
+            // octos UPCR-2026-RF506E103: the card belongs to the RECIPIENT
+            // session named by the event, never to whichever one is focused.
+            ClientEvent::PeerTeamMessageReceived(event) => {
+                let session_id =
+                    self.envelope_session_key(event.session_id.clone(), event.topic.as_deref());
+                self.state.apply_peer_message_received(&session_id, event);
                 None
             }
             ClientEvent::PeerClosed(e) => self.apply_peer_closed_event(e),
@@ -16726,7 +16737,11 @@ struct HydratedMessageProjection {
 }
 
 fn hydrated_user_turn_id(result: &SessionHydrateResult, row: &HydratedMessage) -> Option<TurnId> {
-    if row.role != "user" || row.source.is_some() {
+    // A recorded peer message opens its turn the way a typed prompt does, so
+    // the turn's activity anchors to the card on hydrate as it does live.
+    let opens_turn = row.source.is_none()
+        || row.source.as_deref() == Some(crate::model::WORKSPACE_PEER_MESSAGE_SOURCE);
+    if row.role != "user" || !opens_turn {
         return None;
     }
     let thread = row.thread_id.as_deref().filter(|id| !id.is_empty());
@@ -16951,6 +16966,11 @@ fn hydrated_history_preserves_rendered_prefix(existing: &[Message], incoming: &[
 /// output bubble AND the assistant's formatted answer — the "repeat" bug seen on
 /// the mini5 soak: a tool turn went 2 live msgs -> 4 on reconnect).
 fn hydrated_row_is_displayable(row: &HydratedMessage) -> bool {
+    if row.source.as_deref() == Some(crate::model::WORKSPACE_PEER_MESSAGE_SOURCE) {
+        // A recorded peer message is shown as its card or not at all: its
+        // stored content is a prompt, never text this client's user typed.
+        return hydrated_peer_message_card(row).is_some();
+    }
     match row.role.as_str() {
         "tool" => false,
         "assistant" => !row.content.trim().is_empty(),
@@ -16969,7 +16989,23 @@ fn hydrated_row_is_covered_by_envelope(
         .is_some_and(|id| envelope_message_ids.contains(id))
 }
 
+/// The card for a hydrated row the transport marked as a recorded workspace
+/// peer message (`fold_hydrated_peer_messages` in the transport: `source` is
+/// the record source and `content` is the `peer_message` object as JSON).
+/// `None` when the row is not such a record or the object does not decode.
+fn hydrated_peer_message_card(row: &HydratedMessage) -> Option<Message> {
+    if row.source.as_deref() != Some(crate::model::WORKSPACE_PEER_MESSAGE_SOURCE) {
+        return None;
+    }
+    serde_json::from_str::<crate::model::PeerMessageRecord>(&row.content)
+        .ok()?
+        .into_card_message(row.thread_id.clone(), row.persisted_at)
+}
+
 fn hydrated_row_to_message(row: HydratedMessage) -> Message {
+    if let Some(card) = hydrated_peer_message_card(&row) {
+        return card;
+    }
     Message {
         role: hydrated_role(&row.role),
         content: crate::sanitize::strip_terminal_controls(&row.content).into_owned(),
@@ -50079,6 +50115,157 @@ workspace_root: None,
             "a refused entry must not leave a live lane intent behind"
         );
         assert!(!store.active_menu_id_is(crate::menu::registry::MENU_ONBOARD));
+    }
+
+    fn peer_message_received(session: &SessionKey, thread: &str) -> ClientEvent {
+        ClientEvent::PeerTeamMessageReceived(crate::model::PeerTeamMessageReceivedParams {
+            session_id: session.clone(),
+            topic: None,
+            thread_id: thread.into(),
+            message_id: None,
+            seq: Some(2),
+            persisted_at: chrono::Utc::now(),
+            peer_message: crate::model::PeerMessageRecord {
+                from_agent: "workspace-1".into(),
+                text: "rebase onto main".into(),
+                assignment: false,
+            },
+        })
+    }
+
+    /// A hydrate result as an octos server with `peer.team_message_record.v1`
+    /// returns it, passed through the transport fold the real decode applies.
+    fn hydrate_with_recorded_peer_message(session: &SessionKey) -> SessionHydrateResult {
+        let mut result = serde_json::json!({
+            "session_id": session.0,
+            "cursor": {"stream": "session", "seq": 9},
+            "messages": [
+                {"seq": 0, "role": "user", "content": "typed prompt", "thread_id": "t-typed",
+                 "persisted_at": "2026-11-10T11:59:00Z"},
+                {"seq": 1, "role": "assistant", "content": "typed answer", "thread_id": "t-typed",
+                 "persisted_at": "2026-11-10T11:59:30Z"},
+                {"seq": 2, "role": "user",
+                 "content": "[workspace-peer-message] stored prompt\n{\"from_agent\":\"workspace-1\"}",
+                 "thread_id": "t-peer", "persisted_at": "2026-11-10T12:00:00Z",
+                 "peer_message": {"from_agent": "workspace-1", "text": "rebase onto main"}},
+                {"seq": 3, "role": "assistant", "content": "rebased", "thread_id": "t-peer",
+                 "persisted_at": "2026-11-10T12:00:30Z"}
+            ],
+            "turns": [],
+        });
+        crate::transport::fold_hydrated_peer_messages(result.get_mut("messages"));
+        serde_json::from_value(result).expect("hydrate result decodes")
+    }
+
+    /// octos UPCR-2026-RF506E103 — the live notification adds ONE attributed
+    /// card to the recipient session, and its durable replay adds nothing.
+    #[test]
+    fn peer_message_received_adds_one_card_to_the_recipient_session() {
+        let mut store = store_with_two_sessions("local:a", "local:b");
+        let recipient = SessionKey("local:b".into());
+        store.apply_client_event(peer_message_received(&recipient, "t-peer"));
+        store.apply_client_event(peer_message_received(&recipient, "t-peer"));
+
+        assert!(
+            store.state.sessions[0].messages.is_empty(),
+            "the focused session is not the recipient and gets no card"
+        );
+        let rows = &store.state.sessions[1].messages;
+        assert_eq!(rows.len(), 1, "a replayed notification adds no second card");
+        let card = crate::model::peer_message_card(&rows[0]).expect("row is a card");
+        assert_eq!(card.from_agent, "workspace-1");
+        assert_eq!(card.text, "rebase onto main");
+        assert!(!crate::model::is_typed_user_message(&rows[0]));
+    }
+
+    /// The same record arrives again through hydrate. The row must come back
+    /// as the card, in place, with the stored prompt nowhere in the
+    /// transcript, and a card already shown live must not be drawn twice.
+    #[test]
+    fn hydrated_peer_message_row_is_the_card_and_never_the_stored_prompt() {
+        let mut store = store_with_two_sessions("local:a", "local:b");
+        let session = SessionKey("local:a".into());
+        store.state.sessions[0].messages = vec![
+            Message::user("typed prompt").with_thread_id(ThreadId::new("t-typed")),
+            Message::assistant_with_thread("typed answer", ThreadId::new("t-typed")),
+        ];
+        store.apply_client_event(peer_message_received(&session, "t-peer"));
+        let live = store.state.sessions[0].messages.clone();
+        assert_eq!(live.len(), 3);
+
+        let hydrate = hydrate_with_recorded_peer_message(&session);
+        let projected = hydrated_projection_messages(&hydrate, &live).expect("projection");
+        assert!(
+            hydrated_history_preserves_rendered_prefix(&live, &projected),
+            "the live card and the hydrated card are the same rendered row"
+        );
+        store.apply_client_event(ClientEvent::SessionHydrate(hydrate));
+
+        let rows = &store.state.sessions[0].messages;
+        let contents: Vec<&str> = rows.iter().map(|row| row.content.as_str()).collect();
+        assert_eq!(
+            contents,
+            [
+                "typed prompt",
+                "typed answer",
+                "rebase onto main",
+                "rebased"
+            ]
+        );
+        let card = crate::model::peer_message_card(&rows[2]).expect("hydrated row is a card");
+        assert_eq!(card.from_agent, "workspace-1");
+        assert_eq!(rows[2].thread_id.as_deref(), Some("t-peer"));
+
+        // Durable replay after the hydrate: still one card.
+        store.apply_client_event(peer_message_received(&session, "t-peer"));
+        assert_eq!(store.state.sessions[0].messages.len(), 4);
+    }
+
+    /// A marked row whose record cannot be read is hidden. Showing it would
+    /// put another agent's prompt in the transcript as the user's own words.
+    #[test]
+    fn hydrated_peer_message_row_without_a_readable_record_is_hidden() {
+        let session = SessionKey("local:a".into());
+        let mut result = serde_json::json!({
+            "session_id": session.0,
+            "cursor": {"stream": "session", "seq": 3},
+            "messages": [
+                {"seq": 0, "role": "user", "content": "[workspace-peer-message] stored prompt",
+                 "thread_id": "t-peer", "persisted_at": "2026-11-10T12:00:00Z",
+                 "peer_message": {"text": "no sender"}},
+                {"seq": 1, "role": "assistant", "content": "reply", "thread_id": "t-peer",
+                 "persisted_at": "2026-11-10T12:00:30Z"}
+            ],
+            "turns": [],
+        });
+        crate::transport::fold_hydrated_peer_messages(result.get_mut("messages"));
+        let hydrate: SessionHydrateResult = serde_json::from_value(result).expect("decodes");
+        let projected = hydrated_projection_messages(&hydrate, &[]).expect("projection");
+        let contents: Vec<&str> = projected.iter().map(|row| row.content.as_str()).collect();
+        assert_eq!(contents, ["reply"]);
+    }
+
+    /// The server roots no rollback turn on a recorded peer message, so the
+    /// `/rewind` picker must not offer the card or count it.
+    #[test]
+    fn rewind_turns_skip_peer_message_cards() {
+        let mut store = store_with_empty_session();
+        let session = store.state.sessions[0].id.clone();
+        store.state.sessions[0].messages = vec![
+            Message::user("first prompt").with_thread_id(ThreadId::new("t-1")),
+            Message::assistant_with_thread("first answer", ThreadId::new("t-1")),
+        ];
+        store.apply_client_event(peer_message_received(&session, "t-peer"));
+        store.state.sessions[0]
+            .messages
+            .push(Message::user("second prompt").with_thread_id(ThreadId::new("t-2")));
+
+        let rows = store.collect_rewind_turns();
+        let offered: Vec<(&str, u32)> = rows
+            .iter()
+            .map(|row| (row.prefill.as_str(), row.num_turns))
+            .collect();
+        assert_eq!(offered, [("second prompt", 1), ("first prompt", 2)]);
     }
 }
 

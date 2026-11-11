@@ -1952,6 +1952,8 @@ workspace_team:
   refresh: "刷新智能体列表"
   hint: "↑/↓ 选择 · Enter 发消息或指定协调者 · Esc 关闭"
   list_first: "请先运行 /agents，再选择协调者。"
+  message_card: "来自 %{agent} 的消息"
+  assignment_card: "来自 %{agent} 的任务分配"
 
 question_header:
   latest: "你的问题"

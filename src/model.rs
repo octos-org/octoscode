@@ -134,6 +134,13 @@ pub const APPUI_METHOD_PEER_CLOSED: &str = "peer/closed";
 /// vendored octos-core rev predates the variant, mirroring
 /// [`APPUI_METHOD_PEER_STAGED`].
 pub const APPUI_METHOD_BACKGROUND_ACTIVITY: &str = "background/activity";
+/// octos UPCR-2026-RF506E103: durable SERVER→CLIENT notification — another
+/// member of this workspace team sent this session a message and the server
+/// recorded it in this session's history. Sent only when
+/// [`APPUI_FEATURE_PEER_TEAM_MESSAGE_RECORD_V1`] is negotiated. Not a request
+/// method; decoded tui-locally in the transport because the vendored
+/// octos-core rev predates the variant, mirroring [`APPUI_METHOD_PEER_STAGED`].
+pub const APPUI_METHOD_PEER_TEAM_MESSAGE_RECEIVED: &str = "peer/team/message_received";
 /// octos#1807: `turn/steer` — mid-turn prompt injection into the ACTIVE
 /// turn. Params `{session_id, expected_turn_id?, input}`; result
 /// `{turn_id, steered}`. `steered:true` = the text joined the live turn
@@ -280,6 +287,14 @@ pub const APPUI_FEATURE_CODING_LOOP_RUNTIME_V1: &str = "coding.loop_runtime.v1";
 /// receive a notification it cannot render. Tui-local mirror: the vendored
 /// octos-core rev predates the constant.
 pub const APPUI_FEATURE_BACKGROUND_ACTIVITY_V1: &str = "event.background_activity.v1";
+/// octos UPCR-2026-RF506E103: the server records each workspace peer message
+/// in the recipient's history. When negotiated it pushes
+/// `peer/team/message_received` and returns the recorded row, with a
+/// `peer_message` object, from `session/hydrate` and `session/rollback`. When
+/// it is NOT negotiated the server sends neither, so a TUI that cannot draw the
+/// card never receives the row. Tui-local mirror: the vendored octos-core rev
+/// predates the constant.
+pub const APPUI_FEATURE_PEER_TEAM_MESSAGE_RECORD_V1: &str = "peer.team_message_record.v1";
 /// task-consume-turn-steer-dropped: server guarantees that accepted-but-
 /// undrained `turn/steer` inputs are returned as `turn/steer_dropped` BEFORE
 /// the turn's terminal frame. When advertised, a terminal without a preceding
@@ -3834,6 +3849,121 @@ impl BackgroundActivityParams {
             .filter(|label| !label.is_empty())
             .unwrap_or(self.origin_id.as_str())
     }
+}
+
+/// `source` of a transcript row that is a recorded workspace peer message
+/// (octos UPCR-2026-RF506E103). The server stores the row under this value;
+/// the TUI keeps it on the card row it builds.
+pub const WORKSPACE_PEER_MESSAGE_SOURCE: &str = "workspace_peer_message";
+/// Tui-local `source` of a card row whose message the coordinator sent as an
+/// assignment. Never sent to or read from the server: the wire carries the
+/// distinction as `peer_message.assignment`.
+pub const WORKSPACE_PEER_ASSIGNMENT_SOURCE: &str = "workspace_peer_assignment";
+/// Longest sender label a card shows. The server admits a participant label
+/// of at most 64 bytes; this bounds a label from a server that does not.
+const PEER_MESSAGE_SENDER_MAX_CHARS: usize = 64;
+
+/// Who sent a workspace peer message and what it said: the `peer_message`
+/// object of `peer/team/message_received` and of a recorded hydrate row
+/// (octos UPCR-2026-RF506E103). Tui-local wire mirror, the vendored octos-core
+/// rev predates the type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerMessageRecord {
+    pub from_agent: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub assignment: bool,
+}
+
+impl PeerMessageRecord {
+    /// The transcript row for this record: an attributed card, never a prompt
+    /// this client's user typed. Both strings come from another agent, so
+    /// terminal control sequences are stripped and the sender is held to one
+    /// bounded line. `None` when no sender remains, because an unattributed
+    /// card would read as the user's own words.
+    pub fn into_card_message(
+        self,
+        thread_id: Option<String>,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> Option<Message> {
+        let sender = crate::sanitize::strip_terminal_controls(&self.from_agent);
+        let sender: String = sender
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .chars()
+            .take(PEER_MESSAGE_SENDER_MAX_CHARS)
+            .collect();
+        if sender.is_empty() {
+            return None;
+        }
+        let mut message =
+            Message::user(crate::sanitize::strip_terminal_controls(&self.text).into_owned());
+        message.thread_id = thread_id.filter(|thread| !thread.is_empty());
+        message.timestamp = timestamp;
+        message.participant = Some(sender);
+        message.source = Some(
+            if self.assignment {
+                WORKSPACE_PEER_ASSIGNMENT_SOURCE
+            } else {
+                WORKSPACE_PEER_MESSAGE_SOURCE
+            }
+            .to_owned(),
+        );
+        Some(message)
+    }
+}
+
+/// A recorded workspace peer message as the transcript draws it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerMessageCard<'a> {
+    pub from_agent: &'a str,
+    pub text: &'a str,
+    pub assignment: bool,
+}
+
+/// The card a transcript row stands for, when the row is a recorded workspace
+/// peer message built by [`PeerMessageRecord::into_card_message`].
+pub fn peer_message_card(message: &Message) -> Option<PeerMessageCard<'_>> {
+    let assignment = match message.source.as_deref()? {
+        WORKSPACE_PEER_MESSAGE_SOURCE => false,
+        WORKSPACE_PEER_ASSIGNMENT_SOURCE => true,
+        _ => return None,
+    };
+    Some(PeerMessageCard {
+        from_agent: message.participant.as_deref()?,
+        text: &message.content,
+        assignment,
+    })
+}
+
+/// Whether `message` is a prompt a person typed into this conversation. A
+/// peer message card has the `user` role, because it starts a turn and the
+/// turn's activity anchors to it, but another agent wrote it: it is never the
+/// "latest question", never a rewind target and never text to edit again.
+pub fn is_typed_user_message(message: &Message) -> bool {
+    message.role == octos_core::MessageRole::User && peer_message_card(message).is_none()
+}
+
+/// Params of the durable [`APPUI_METHOD_PEER_TEAM_MESSAGE_RECEIVED`]
+/// notification (octos UPCR-2026-RF506E103). `session_id` is the RECIPIENT
+/// session and the routing key. `thread_id` is the thread of the turn the
+/// message starts and equals the recorded hydrate row's, so a card already
+/// shown is not added again on replay. Tui-local wire mirror, decoded in the
+/// transport exactly like [`PeerStagedParams`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerTeamMessageReceivedParams {
+    pub session_id: SessionKey,
+    #[serde(default)]
+    pub topic: Option<String>,
+    pub thread_id: String,
+    #[serde(default)]
+    pub message_id: Option<String>,
+    #[serde(default)]
+    pub seq: Option<u64>,
+    pub persisted_at: chrono::DateTime<chrono::Utc>,
+    pub peer_message: PeerMessageRecord,
 }
 
 /// Per-session cap on retained background-activity rows. The SERVER already
@@ -8607,6 +8737,41 @@ impl AppState {
         }
     }
 
+    /// Show a recorded workspace peer message (octos UPCR-2026-RF506E103) as
+    /// a card in the recipient session. The notification is durable, so it is
+    /// replayed on reconnect and the same row also arrives through hydrate:
+    /// a card whose thread already has its opening row is not added again.
+    /// Returns whether a card was added.
+    pub fn apply_peer_message_received(
+        &mut self,
+        session_id: &SessionKey,
+        event: PeerTeamMessageReceivedParams,
+    ) -> bool {
+        let Some(session) = self
+            .sessions
+            .iter_mut()
+            .find(|session| &session.id == session_id)
+        else {
+            return false;
+        };
+        if event.thread_id.is_empty()
+            || session.messages.iter().any(|message| {
+                message.role == octos_core::MessageRole::User
+                    && message.thread_id.as_deref() == Some(event.thread_id.as_str())
+            })
+        {
+            return false;
+        }
+        let Some(card) = event
+            .peer_message
+            .into_card_message(Some(event.thread_id), event.persisted_at)
+        else {
+            return false;
+        };
+        session.messages.push(card);
+        true
+    }
+
     /// Apply a persisted v2 `UserMessage` envelope row. Dedup is two-layer:
     ///
     /// 1. thread-id identity — a replayed envelope whose row is already
@@ -11568,6 +11733,38 @@ fn preview_id_from_text(text: &str) -> Option<PreviewId> {
 mod tests {
     use super::*;
     use octos_core::Message;
+
+    /// Both strings of a peer message come from another agent. Escape
+    /// sequences must not reach the terminal, and a card with no sender must
+    /// not exist, because it would read as the user's own words.
+    #[test]
+    fn peer_message_card_strips_terminal_controls_and_requires_a_sender() {
+        let record = |from_agent: &str, assignment| PeerMessageRecord {
+            from_agent: from_agent.into(),
+            text: "\u{1b}[2Jwipe\u{1b}]0;title\u{7}".into(),
+            assignment,
+        };
+        let message = record("\u{1b}[31mworkspace-1\nsecond line", true)
+            .into_card_message(Some("t-peer".into()), chrono::Utc::now())
+            .expect("card");
+        let card = peer_message_card(&message).expect("row is a card");
+        assert_eq!(card.from_agent, "workspace-1");
+        assert!(card.assignment);
+        assert!(!card.text.contains('\u{1b}') && !card.text.contains('\u{7}'));
+        assert!(card.text.contains("wipe"));
+        assert!(!is_typed_user_message(&message));
+        assert!(is_typed_user_message(&Message::user("typed")));
+
+        let long = record(&"w".repeat(500), false)
+            .into_card_message(None, chrono::Utc::now())
+            .expect("card");
+        assert_eq!(long.participant.as_deref().map(str::len), Some(64));
+        assert!(
+            record(" \u{1b}[0m ", false)
+                .into_card_message(None, chrono::Utc::now())
+                .is_none()
+        );
+    }
 
     fn catalog(json: serde_json::Value) -> ProfileLlmCatalogResult {
         serde_json::from_value(json).expect("catalog fixture deserializes")
