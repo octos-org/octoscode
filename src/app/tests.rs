@@ -347,6 +347,37 @@ mod tests {
         );
     }
 
+    /// A staged peer's report shown in the session that staged it follows the
+    /// PEER's turn: current while the peer works, even when this session is
+    /// idle, and folded once the peer's turn is over.
+    #[test]
+    fn staged_peer_report_is_current_while_the_peer_turn_runs() {
+        let mut app = two_session_app();
+        app.sessions[1].id = SessionKey("dev:local:a#peer-reviewer".into());
+        let turn = octos_core::ui_protocol::TurnId::new();
+        let mut row = agent_report_row("milestone", "review/a.json ready");
+        row.origin_id = "peer-reviewer".into();
+        row.origin_label = Some("reviewer".into());
+        row.report.as_mut().expect("report").turn_id = Some(turn.0.to_string());
+        app.push_background_activity(row);
+
+        app.sessions[1].live_reply = Some(crate::model::LiveReply {
+            turn_id: turn.clone(),
+            text: String::new(),
+        });
+        let running = background_activity_lines(&app, &app.sessions[0].clone());
+        assert!(running[0].contains("reviewer reports · 1"), "{running:?}");
+        assert!(
+            running[1].contains("Progress: review/a.json ready"),
+            "shown while the peer works: {running:?}"
+        );
+
+        app.sessions[1].live_reply = None;
+        let over = background_activity_lines(&app, &app.sessions[0].clone());
+        assert_eq!(over.len(), 1, "header only: {over:?}");
+        assert!(over[0].contains("ctrl+o to expand"), "{over:?}");
+    }
+
     /// A blocker must not read as one more routine line: the kind is spelled
     /// out, and the agent's next step and evidence pointer are shown under it.
     #[test]

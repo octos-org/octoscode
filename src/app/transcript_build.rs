@@ -2751,7 +2751,21 @@ pub(super) fn push_background_activity_section(
     let budget = width.saturating_sub(6).max(20);
     for (origin, rows) in groups {
         if rows.first().is_some_and(|row| row.is_agent_report()) {
-            let running_turn = session
+            // A staged peer's report shown in the session that staged it
+            // (octos UPCR-2026-R5992A477) carries the peer's turn, so it is
+            // current while that peer's turn runs, not this session's.
+            let reporter = rows
+                .first()
+                .map(|row| row.origin_id.as_str())
+                .filter(|origin| origin.starts_with("peer-") && session.id.topic() != Some(*origin))
+                .and_then(|origin| {
+                    app.sessions.iter().find(|other| {
+                        other.id.topic() == Some(origin)
+                            && other.id.profile_id() == session.id.profile_id()
+                    })
+                })
+                .unwrap_or(session);
+            let running_turn = reporter
                 .live_reply
                 .as_ref()
                 .map(|reply| reply.turn_id.0.to_string());

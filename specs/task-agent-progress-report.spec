@@ -26,14 +26,20 @@ kind spelled out, and never drawn as a verified result or an approval.
   a finished turn's blocker does not sit under a later answer as if it still
   held. Ctrl+O shows every retained report in order.
 - A report never rewrites an earlier one. A correction is a later row.
+- A staged peer's report can also arrive in the session that staged it
+  (octos UPCR-2026-R5992A477). It is headed by the peer's name and carries
+  the peer's turn, so it is current while that peer's turn runs and folds
+  when the peer's turn is over, whatever this session is doing. When the
+  client does not have the peer session open it cannot tell, and the group
+  stays folded.
 - The capability is requested only from servers outside the old-server
   baseline. Without it the server sends no agent rows and offers the model no
   report tool, so nothing changes.
 
 ## Out of scope
 
-- Reports from other sessions, staged peers' reports in the originator's
-  session, pacing and heartbeats. These are server changes that follow.
+- Reports from workspace-team members' sessions, pacing and heartbeats.
+  These are server changes that follow.
 - Localising the existing `event(s)`, `dropped` and `ctrl+o to expand` words
   of the activity section.
 
@@ -58,6 +64,10 @@ Scenario: a correction is shown as a correction
 Scenario: a finished turn's report is not shown as current
   Test: agent_report_folds_to_its_header_when_its_turn_is_over
   The newest report is shown while its turn runs, folds to the header and count when the turn is over, and stays readable when expanded.
+
+Scenario: a staged peer's report follows the peer's turn
+  Test: staged_peer_report_is_current_while_the_peer_turn_runs
+  In the session that staged the peer, the peer's newest report is shown under the peer's name while the peer's turn runs, and folds to the header when that turn is over.
 
 Scenario: a replayed report is drawn once
   Test: replayed_agent_report_is_drawn_once
