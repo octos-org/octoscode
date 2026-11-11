@@ -472,6 +472,34 @@ Rule: review-monitor — Herdr 监控:区块分离与身份防混
     执行输出相同字节是合法形态,不得因 hash 相等误拒;其余冻结门
     (receipt/HEAD/probe/BASE/selector 锚)不放宽
 
+场景: progress 区块只展示本 session 的 agent 自述(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_monitor_progress_reports_exact_session_self_reported
+  假设 runtime 的 ui-protocol 下有目录名恰为 wire master session 字节 hex
+    (带 NUL+~cwd-hash)的 ledger,含 origin_kind=agent 的 background/activity
+    行(main 的 blocker、staged peer 的未知 kind)、monitor 来源行、
+    session_id 属于别的 session 的行、损坏行、后一个 ledger 文件里重放的
+    同 seq 行;另有同 channel 不同 cwd 的 session ledger
+  当 渲染监控
+  那么 progress 区块按 seq 去重只列本 session 的 agent 报告,标明
+    self-reported,显示 kind/next/see,未知 kind 按 milestone 显示,控制字符
+    不落到终端;monitor 来源行、别的 session 的行、别的 cwd 的 ledger 不
+    出现;被跳过的行计数可见;agent 自述不改变 lifecycle/current-turn/
+    last-outcome/deliverables 任一裁决(octos UPCR-2026-R3DB2ECCA /
+    UPCR-2026-R5992A477)
+
+场景: 没有精确 ledger 时 progress 为 unavailable(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_monitor_progress_unavailable_without_exact_ledger
+  假设 本 session 没有 ledger 目录;或目录名只是指向别处的符号链接;或
+    --session 不带 wire cwd 后缀;或 ledger 里只有被观察来源的行
+  当 渲染监控
+  那么 前三种显示 progress unavailable 并说明原因,不猜测同 channel 的
+    ledger、不跟符号链接;最后一种如实显示没有 agent 报告;旧 server 或
+    未协商能力时同样落在这两种显示上,其余区块不受影响
+
 Rule: review-regression — 前轮八反例回归数据集
 
 场景: state 形状校验全入口结构化(critical)
