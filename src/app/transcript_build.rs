@@ -1384,7 +1384,7 @@ pub(super) fn push_committed_message_block(
     width: usize,
 ) {
     if let Some(card) = crate::model::peer_message_card(message) {
-        push_peer_message_card(lines, palette, card);
+        push_peer_message_card(lines, palette, card, width);
         return;
     }
     push_message_block(
@@ -1400,11 +1400,13 @@ pub(super) fn push_committed_message_block(
 /// UPCR-2026-RF506E103): a header naming the sender, then the body behind a
 /// plain gutter. It deliberately shares nothing with the user block (accent
 /// gutter, reverse-video body), so another agent's words never read as a
-/// prompt the user typed.
+/// prompt the user typed. The body is wrapped here, to `width`, so a long
+/// line keeps the gutter on every row instead of spilling out of the card.
 pub(super) fn push_peer_message_card(
     lines: &mut Vec<Line<'static>>,
     palette: Palette,
     card: crate::model::PeerMessageCard<'_>,
+    width: usize,
 ) {
     if !lines.is_empty() && !line_is_blank(lines.last()) {
         lines.push(Line::from(""));
@@ -1428,11 +1430,14 @@ pub(super) fn push_peer_message_card(
         ]));
         return;
     }
+    let budget = width.saturating_sub(2);
     for raw_line in card.text.lines() {
-        lines.push(Line::from(vec![
-            Span::styled("│ ", palette.muted()),
-            Span::styled(raw_line.trim_end().to_string(), palette.text()),
-        ]));
+        for row in wrap_display_width(raw_line.trim_end(), budget) {
+            lines.push(Line::from(vec![
+                Span::styled("│ ", palette.muted()),
+                Span::styled(row, palette.text()),
+            ]));
+        }
     }
 }
 

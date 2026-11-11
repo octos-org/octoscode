@@ -15293,6 +15293,25 @@ fn peer_message_card_is_attributed_and_never_drawn_as_a_user_prompt() {
         "⇢ Assignment from workspace-1"
     );
 
+    // A line wider than the transcript wraps inside the card: every row keeps
+    // the gutter, so the tail of a long message never reads as loose text.
+    let mut narrow: Vec<Line<'static>> = Vec::new();
+    push_committed_message_block(&mut narrow, palette, &card(false), 12);
+    let body = &text(&narrow)[1..];
+    assert!(body.len() > 2, "the body wrapped: {body:?}");
+    assert!(
+        body.iter()
+            .all(|row| row.starts_with("│ ") && row.chars().count() <= 12),
+        "{body:?}"
+    );
+    assert_eq!(
+        body.iter()
+            .map(|row| row.trim_start_matches("│ "))
+            .collect::<Vec<_>>()
+            .join(" "),
+        "rebase onto main then rerun the suite"
+    );
+
     // A typed prompt keeps the user block.
     let typed = render(&octos_core::Message::user("typed prompt"));
     assert!(typed[0].spans[0].content.starts_with('▌'));
