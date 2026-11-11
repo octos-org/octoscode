@@ -431,6 +431,7 @@ This list is kept complete by `tests/docs_drift.rs`.
 
 | Notification | Wire method |
 |---|---|
+| `UserQuestionCancelled` | `user_question/cancelled` (ignored; the picker is already cleared when the asking turn ends) |
 | `UserQuestionRequested` | `user_question/requested` |
 
 ### `plan/`

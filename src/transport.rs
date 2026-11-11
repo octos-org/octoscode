@@ -2043,6 +2043,7 @@ impl ProtocolAppUiBackend {
                 cwd,
                 sandbox: None,
                 after: None,
+                session_ref: None,
             })
         })
     }
@@ -2118,6 +2119,7 @@ impl ProtocolAppUiBackend {
                 .or_else(|| self.launch.cwd.clone()),
             sandbox: None,
             after: None,
+            session_ref: None,
         }))
     }
 
@@ -2853,6 +2855,7 @@ impl AppUiBackend for ProtocolAppUiBackend {
                     cwd: self.launch.cwd.clone(),
                     sandbox: None,
                     after: None,
+                    session_ref: None,
                 },
             ))?;
         }
@@ -6221,6 +6224,8 @@ impl AppUiBackend for MockAppUiBackend {
                                 "message_count": 47
                             }
                         ]),
+                        next_cursor: None,
+                        scope: None,
                     }));
                 Ok(())
             }
@@ -6265,6 +6270,7 @@ impl AppUiBackend for MockAppUiBackend {
                             pending_approvals: None,
                             pending_questions: None,
                             replayed_envelopes: None,
+                            file_mutations: None,
                         },
                     }));
                 Ok(())
@@ -9613,6 +9619,7 @@ mod tests {
                 profile_id: Some("coding".into()),
                 cwd: Some("/repo".into()),
                 after: None,
+                session_ref: None,
             }),
             AppUiCommand::ReadSessionStatus(SessionStatusReadParams {
                 session_id: session_id.clone(),
@@ -9646,6 +9653,9 @@ mod tests {
             AppUiCommand::ListSessions(octos_core::ui_protocol::SessionListParams {
                 profile_id: None,
                 cwd: None,
+                cursor: None,
+                limit: None,
+                workspace_id: None,
             }),
             AppUiCommand::GetThreadGraph(ThreadGraphGetParams {
                 session_id: session_id.clone(),
@@ -11157,6 +11167,7 @@ mod tests {
                 profile_id: Some("coding".into()),
                 cwd: None,
                 after: None,
+                session_ref: None,
             }))
             .expect("request builds");
 
@@ -11642,6 +11653,7 @@ mod tests {
             cwd: None,
             sandbox: None,
             after: None,
+            session_ref: None,
         });
         // Let the writer task observe the close before we send.
         thread::sleep(Duration::from_millis(200));
@@ -12083,6 +12095,7 @@ mod tests {
                 profile_id: Some("coding".into()),
                 cwd: Some("/repo".into()),
                 after: None,
+                session_ref: None,
             }))
             .expect("request builds");
 
@@ -12707,6 +12720,7 @@ mod tests {
                 profile_id: Some("coding".into()),
                 cwd: None,
                 after: None,
+                session_ref: None,
             }))
             .expect("request builds");
         let request_id = request.id.clone();
@@ -12790,6 +12804,7 @@ mod tests {
                 profile_id: Some("coding".into()),
                 cwd: Some("/tmp/project".into()),
                 after: None,
+                session_ref: None,
             }))
             .expect("request builds");
 
@@ -12816,6 +12831,9 @@ mod tests {
                 octos_core::ui_protocol::SessionListParams {
                     profile_id: None,
                     cwd: None,
+                    cursor: None,
+                    limit: None,
+                    workspace_id: None,
                 },
             ))
             .expect("request builds");
@@ -12842,6 +12860,9 @@ mod tests {
                 octos_core::ui_protocol::SessionListParams {
                     profile_id: None,
                     cwd: None,
+                    cursor: None,
+                    limit: None,
+                    workspace_id: None,
                 },
             ))
             .expect("request builds");
@@ -12879,6 +12900,7 @@ mod tests {
                 cwd: cwd.map(str::to_owned),
                 sandbox: None,
                 after: None,
+                session_ref: None,
             })
         };
 
@@ -12983,6 +13005,7 @@ mod tests {
                 profile_id: Some("coding".into()),
                 cwd: None,
                 after: None,
+                session_ref: None,
             }))
             .expect("request builds");
 
@@ -13209,6 +13232,7 @@ mod tests {
             cwd: Some("/tmp/other".into()),
             sandbox: None,
             after: None,
+            session_ref: None,
         }));
         assert_eq!(
             expect_reopen(&backend).cwd.as_deref(),
@@ -13498,6 +13522,7 @@ wait
                         }
                     }),
                     after: None,
+                    session_ref: None,
                 }))
                 .expect("open original scoped session");
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -13792,6 +13817,7 @@ wait
                 cwd: Some("/corrected".into()),
                 sandbox: None,
                 after: None,
+                session_ref: None,
             }))
             .expect("corrective open");
         backend
@@ -13831,6 +13857,7 @@ wait
                 cwd: Some("/workspace".into()),
                 sandbox: None,
                 after: None,
+                session_ref: None,
             }))
             .expect("open request");
         let request_id = request.id;
@@ -13846,6 +13873,9 @@ wait
             .push_back(AppUiCommand::ListSessions(SessionListParams {
                 profile_id: None,
                 cwd: None,
+                cursor: None,
+                limit: None,
+                workspace_id: None,
             }));
         (backend, request_id)
     }
@@ -13863,6 +13893,7 @@ wait
             cwd: Some("/workspace".into()),
             sandbox: None,
             after: None,
+            session_ref: None,
         });
         backend.record_reopen_target(&command);
         let request = backend
@@ -14334,6 +14365,9 @@ done
             .send(AppUiCommand::ListSessions(SessionListParams {
                 profile_id: None,
                 cwd: None,
+                cursor: None,
+                limit: None,
+                workspace_id: None,
             }))
             .expect("child launch + deferred list");
 
@@ -14378,6 +14412,7 @@ done
                 cwd: None,
                 sandbox: None,
                 after: None,
+                session_ref: None,
             }))
             .expect("open sends");
         assert!(
@@ -14388,6 +14423,9 @@ done
             .send(AppUiCommand::ListSessions(SessionListParams {
                 profile_id: None,
                 cwd: None,
+                cursor: None,
+                limit: None,
+                workspace_id: None,
             }))
             .expect("list defers behind the barrier");
         backend.send(prompt()).expect("submit defers");
@@ -14489,6 +14527,7 @@ done
                 cwd: None,
                 sandbox: None,
                 after: None,
+                session_ref: None,
             }))
             .expect("corrective open allowed");
         let mut corrected = prompt();
@@ -14576,6 +14615,7 @@ done
                 cwd: None,
                 sandbox: None,
                 after: None,
+                session_ref: None,
             }))
             .expect("open request");
         let context_state = json!({
@@ -14695,6 +14735,7 @@ done
             cwd: Some("/shell/cwd".into()),
             sandbox: None,
             after: None,
+            session_ref: None,
         }));
         let reopen = backend
             .reopen_session_open_command()
@@ -14770,6 +14811,7 @@ done
                 stream: resumed_session.0.clone(),
                 seq: 7,
             }),
+            session_ref: None,
         }));
 
         let reopen = backend

@@ -12096,6 +12096,7 @@ mod tests {
                 cwd: None,
                 sandbox: None,
                 after: None,
+                session_ref: None,
             })
         };
         let mut state = AppState::new(Vec::new(), 0, "ready".into(), None, false);
@@ -12103,6 +12104,9 @@ mod tests {
             state.enqueue_autonomy_hydration(AppUiCommand::ListSessions(SessionListParams {
                 profile_id: None,
                 cwd: None,
+                cursor: None,
+                limit: None,
+                workspace_id: None,
             }));
         }
         state.enqueue_local_session_open_front(open("local:b"));
@@ -12144,6 +12148,9 @@ mod tests {
             state.enqueue_autonomy_hydration(AppUiCommand::ListSessions(SessionListParams {
                 profile_id: None,
                 cwd: None,
+                cursor: None,
+                limit: None,
+                workspace_id: None,
             }));
         }
         state
@@ -12156,6 +12163,7 @@ mod tests {
                 cwd: None,
                 sandbox: None,
                 after: None,
+                session_ref: None,
             }));
         assert_eq!(
             state.pending_autonomy_hydration.len(),
@@ -12216,6 +12224,7 @@ mod tests {
                 cwd: None,
                 sandbox: None,
                 after: None,
+                session_ref: None,
             }));
         }
         let dropped_session = SessionKey("local:dropped".into());
@@ -12266,6 +12275,7 @@ mod tests {
             cwd: None,
             sandbox: None,
             after: None,
+            session_ref: None,
         }));
         assert_eq!(state.pending_autonomy_hydration.len(), 16);
         assert!(
@@ -13216,6 +13226,9 @@ mod tests {
         let params = SessionListParams {
             profile_id: None,
             cwd: None,
+            cursor: None,
+            limit: None,
+            workspace_id: None,
         };
         let wire = serde_json::to_value(&params).expect("SessionListParams serializes");
         assert_eq!(wire, serde_json::json!({}));
@@ -13230,6 +13243,9 @@ mod tests {
         let params = SessionListParams {
             profile_id: None,
             cwd: Some("/tmp/project".into()),
+            cursor: None,
+            limit: None,
+            workspace_id: None,
         };
         let wire = serde_json::to_value(&params).expect("SessionListParams serializes");
         assert_eq!(wire, serde_json::json!({ "cwd": "/tmp/project" }));

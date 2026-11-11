@@ -5498,6 +5498,7 @@ done
                 cwd: Some("/tmp/workspace".into()),
                 sandbox: None,
                 after: None,
+                session_ref: None,
             }),
         );
         store.state.composer = "prompt typed during the daemon restart".into();
