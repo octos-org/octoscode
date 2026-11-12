@@ -100,14 +100,16 @@ octoscode outer-duty hold --project <项目> --signature <署名> \
   --duties <职责> -- <你的 agent 启动命令>
 ```
 
-锁**即** authority:wrapper 是唯一持锁 fd 者,你的 agent 经
-`PR_SET_PDEATHSIG` 与之死亡耦合——wrapper 亡 ⇒ agent 必亡 ⇒ 锁 `VACANT`。
+锁**即** authority:你的 agent 与 wrapper 死亡耦合——wrapper 亡 ⇒ agent
+必亡 ⇒ 锁 `VACANT`。Linux 上 wrapper 是唯一持锁 fd 者,内核经
+`PR_SET_PDEATHSIG` 杀掉 agent;macOS 上 wrapper 与 agent 之间有一个持锁的
+守护进程,先杀掉 agent 进程组再放锁。
 `outer-duty check --project <p>` 仅观察(stdout 恰一态
 `VACANT|HELD|ERROR`)。非 holder **只可署名批注**。活锁接管只归 operator,
 无 agent 自助强夺。metadata sidecar 与一切 TTL 仅诊断,绝不参与裁定。
 
-**Linux-only**(flock + PDEATHSIG + /proc;其他平台显式 unsupported 退出 2;
-NFS 不适用)。macOS 上锁不可用——多外环退回值班簿纪律层 + operator 裁决。
+**Linux 与 macOS**(单机 flock;其他平台显式 unsupported 退出 2;
+NFS 不适用)。
 选定署名如 `外环(claude)` / `外环(codex)`,所有黑板写入必须署名。
 
 ### 3.1 发现现场
@@ -257,7 +259,7 @@ octoscode --stdio-command 'octos serve --stdio --solo --danger-full-access'
 |---|---|
 | Linux | 全功率,含 `outer-duty` 内核锁与 bwrap 沙箱档 |
 | WSL2 | 等同 Linux |
-| macOS | 可用,两缺口:无 `outer-duty` 锁(Linux-only)、bwrap 档不成立 |
+| macOS | 可用,含 `outer-duty` 锁;一缺口:bwrap 档不成立 |
 | Windows 原生 | 不推荐——请用 WSL2 |
 
 ## 7. 深入阅读

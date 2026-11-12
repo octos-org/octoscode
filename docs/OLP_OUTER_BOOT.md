@@ -75,12 +75,14 @@ octos goal status --goal <id> / octos peer list           # 结构面(项目目�
 
 上岗即以 `octoscode outer-duty hold --project <项目> --signature <署名>
 --duties <职责> -- <agent 启动命令>` 包裹启动:锁即 authority,**守护式
-死亡耦合**——wrapper 是唯一锁 fd 持有者,agent 经 PR_SET_PDEATHSIG
-(SIGKILL) 与 wrapper 同死(wrapper 亡⇒agent 必亡⇒锁 VACANT);
+死亡耦合**——wrapper 亡⇒agent 必亡⇒锁 VACANT(Linux:wrapper 是唯一
+锁 fd 持有者,agent 经 PR_SET_PDEATHSIG(SIGKILL) 与 wrapper 同死;
+macOS:wrapper 与 agent 之间的守护进程持锁并在 wrapper 亡时杀掉 agent
+进程组后才放锁);
 `outer-duty check --project <项目>` 仅观察(stdout 恰一态
 VACANT|HELD|ERROR);非 holder 只读批注;活锁接管只归 operator(终止
 旧 holder 后再 acquire),无 agent 自助强夺;metadata sidecar 与 TTL 仅
-诊断绝不参与裁定。Linux-only(flock+PDEATHSIG;非 Linux unsupported;Windows LockFileEx 另立条目),
+诊断绝不参与裁定。Linux 与 macOS(单机 flock;其他平台 unsupported;Windows LockFileEx 另立条目),
 NFS 不适用。本切片 fencing 为文档层纪律;硬 gate(写入面校验 lease)
 为后续条目。
 
