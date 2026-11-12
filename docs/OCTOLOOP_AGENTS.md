@@ -143,27 +143,35 @@ project of your start cwd.
 
 ### 3.2 Dispatch — append, never rewrite
 
-Take the current maximum number, then use +1:
-
-```bash
-grep -oE '^### [0-9]+' <board> | tail -1
-```
-
 Write through the atomic helper (flock-mutexed; body from stdin). It is at
 `scripts/olp-board-append.sh` inside the octoscode repo, and `olp-init.sh`
-installs a copy at `~/.octos/outer/board-append.sh` for every other project:
+installs a copy at `~/.octos/outer/board-append.sh` for every other project.
+**The helper allocates the number under the lock**: write `{N}` in the
+heading; the helper fills in the board's highest number + 1 and prints it on
+stdout, so concurrent writers never collide:
 
 ```bash
 ~/.octos/outer/board-append.sh <board> <<'EOF'
-### <n>. <title> (<date>, <signature>)
-...
+### {N}. <title> (<date>, <signature>)
+... body (use {N} to refer to the entry's own number, e.g. branch task/{N}) ...
 EOF
 ```
 
-If neither is present, an equivalent atomic append is
-`flock "<board>.lock" -c 'cat >> "<board>"' <<'EOF' … EOF` — note that
-`flock(1)` is util-linux and absent on stock macOS, where you must serialise
-board writes by convention instead.
+For writes that may be resent (network retry, offline-queue replay) add
+`--key <natural-key>`: when the key is already on the board nothing is
+appended and the original number is returned. Keys may only contain
+`[A-Za-z0-9._:/@+=-]`.
+
+The old style with a hand-written number (`### 12. …`) is still accepted, but
+nothing locks between reading the maximum and writing, so concurrent writers
+collide — do not use it for new entries. Update an older installed helper
+(one that does not know `{N}`) with
+`cp scripts/olp-board-append.sh ~/.octos/outer/board-append.sh`.
+
+The helper needs `flock(1)`: util-linux on Linux; `brew install flock` on
+macOS (a non-interactive ssh PATH has no Homebrew directories, so the helper
+also looks in `/opt/homebrew/bin` and `/usr/local/bin`). Without it the
+helper exits 2 and writes nothing.
 
 An entry must be **self-contained**: background, exact files and line numbers,
 direction of the fix, acceptance criteria, branch name (based on main), budget
