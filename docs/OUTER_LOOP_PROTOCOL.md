@@ -13,8 +13,13 @@
 >
 > v1 → v2 变更(2026-08-30 生效,#38-r1):新增 R7 主审权 OS 独占锁
 > (outer-duty hold/check;锁即 authority、check 仅观察、活锁接管归
-> operator、metadata/TTL 仅诊断;Linux-only 单机 flock+PDEATHSIG,Windows
-> LockFileEx 另立条目,NFS 不适用)。AGENTS.md 引用同步 v2。
+> operator、metadata/TTL 仅诊断;单机 flock,Linux 经 PDEATHSIG、macOS 经
+> 守护进程实现死亡耦合,Windows LockFileEx 另立条目,NFS 不适用)。
+> AGENTS.md 引用同步 v2。
+>
+> v2 平台范围修订(2026-11-12):R7 的平台范围由仅 Linux 扩为 Linux 与 macOS。
+> 锁的语义(锁即 authority、check 仅观察、活锁接管归 operator)不变,
+> 仅新增 macOS 的死亡耦合实现,故不升版本。
 
 ## 角色
 
@@ -92,14 +97,21 @@
 - **R7 — 主审权 OS 独占锁(outer-duty,olp/v2 起)**:多外环的主审权
   以 per-project 会话寿命 OS 锁为准——上岗外环必须经
   `octoscode outer-duty hold --project P --signature S --duties D -- <agent>`
-  启动(**守护式死亡耦合**:wrapper 是唯一锁 fd 持有者,CLOEXEC 保持
-  置位;agent 经 setpgid+PR_SET_PDEATHSIG(SIGKILL) 与 wrapper 同死——
-  wrapper 亡则 agent 必亡、锁即 VACANT,绝无 agent 活而锁 VACANT 的
-  split brain;孙辈进程不持有 fd,agent 退出而孙辈长驻亦为 VACANT);
+  启动(**守护式死亡耦合**:wrapper 亡则 agent 必亡,绝无 agent 活而锁
+  VACANT 的 split brain;agent 自身永不持有锁 fd,CLOEXEC 保持置位;
+  孙辈进程不持有 fd,agent 退出而孙辈长驻亦为 VACANT。Linux:wrapper
+  是唯一锁 fd 持有者,agent 经 setpgid+PR_SET_PDEATHSIG(SIGKILL) 由内核
+  与 wrapper 同死,锁即 VACANT。macOS:无 PDEATHSIG,wrapper 与 agent
+  之间多一个守护进程 `wrapper → guardian → agent`,guardian 继承锁 fd
+  并监视 wrapper——wrapper 亡则 SIGKILL agent 整个进程组,确认组内无
+  存活进程后才退出放锁(等待上限 30 秒);guardian 异常死亡则 wrapper
+  杀掉 agent 进程组并以失败退出,其间锁仍由 wrapper 持有);
   `check` 仅观察、绝不夺取;活锁接管只归 operator(终止旧 holder 后
-  再 acquire),无 agent 自助强夺。metadata sidecar 与一切 TTL 仅诊断、绝不参与裁定。范围:**Linux-only**(单机 flock+PDEATHSIG+/proc;非
-  Linux 平台命令显式 unsupported 退出 2;Windows LockFileEx 另立条目),
-  NFS 不适用;本切片 fencing 为文档层纪律,硬 gate(board-append/push
+  再 acquire),无 agent 自助强夺。metadata sidecar 与一切 TTL 仅诊断、绝不参与裁定。范围:**Linux 与 macOS**(单机 flock;其他
+  平台命令显式 unsupported 退出 2;Windows LockFileEx 另立条目),
+  NFS 不适用。macOS 边界:可承受 wrapper 或 guardian 任一被杀,二者在
+  同一瞬间均被 SIGKILL 时 agent 成为孤儿(Linux 由内核保证,无此边界);
+  wrapper 亡时 macOS 杀整个进程组(含孙辈),严于 Linux;本切片 fencing 为文档层纪律,硬 gate(board-append/push
   校验 lease)为后续条目。
 - **R6 — 版本协商**:本文件头部 `protocol: olp/vN`;`AGENTS.md` 引用同版本。
   信道语义变更必须升版本。
