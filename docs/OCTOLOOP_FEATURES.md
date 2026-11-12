@@ -47,6 +47,9 @@
   伪 verified 行,非 KPI)、监视器 `--harvest` 常驻采集、FLAW 直出契约骨架
   `olp-evo-spec-skeleton.sh`、索引 `olp-evo-index.sh`;octos 侧新增
   `fallback_switch`/`malformed_exhausted` 事件(PR #2257)。
+  多机部署:采集与 retro 只在 hub 上运行——配置了 hub 主机名
+  (`OLP_HUB_HOST`,或 `~/.octos/outer/hub-host` 文件)后,其他机器上
+  的非 dry-run 调用在任何写入前以退出码 3 拒绝;未配置时为单机,行为不变。
 
 ## 通信与信道
 

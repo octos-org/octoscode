@@ -12,6 +12,23 @@ REPO_ROOT="${1:?usage: olp-evo-retro.sh <repo-root> [--dry-run]}"
 DRY_RUN=0
 [ "${2:-}" = "--dry-run" ] && DRY_RUN=1
 
+# Hub guard BEFORE any write: on a multi-machine deployment only the hub
+# runs the retro (the FLAW counter and retro.json are per-machine state).
+# Unconfigured = single machine = no-op; a dry run writes nothing and
+# stays available everywhere. Exit 3 off-hub.
+if [ "$DRY_RUN" -eq 0 ]; then
+    if [ -f "$(dirname "$0")/olp-hub-guard.sh" ]; then
+        . "$(dirname "$0")/olp-hub-guard.sh"
+        olp_hub_guard olp-evo-retro || exit 3
+    elif [ -n "${OLP_HUB_HOST:-}" ] \
+        || [ -f "${OLP_HUB_HOST_FILE:-$HOME/.octos/outer/hub-host}" ]; then
+        # A lone copy of this script without the guard library: a hub is
+        # configured but cannot be checked, so refuse rather than guess.
+        echo "error: olp-evo-retro: hub 已配置,但找不到 olp-hub-guard.sh,未写入任何内容。" >&2
+        exit 3
+    fi
+fi
+
 if [ ! -d "$REPO_ROOT" ]; then
     echo "error: repo-root not found: $REPO_ROOT" >&2
     exit 1
