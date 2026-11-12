@@ -27,6 +27,8 @@ owner 在其独立树完成，不属于本模块。
   - `LedgerAlert: Serialize + Debug`：`kind`（`tool_failed`|`turn_error`）、`seq`、
     `session`、`turn`、`tool_name: Option<String>`、`tool_call_id: Option<String>`、
     `error_code: Option<LedgerErrorCode>`（固定枚举，非自由文本）。
+- 平台：仅 Unix（Linux/macOS）编译——文件身份核对用 dev/ino（`std::os::unix`）；
+  `src/cmd/mod.rs` 以 `#[cfg(unix)]` 声明本模块，Windows 构建不含它。
 - 作用域：严格同时匹配 `event.session_id == session && event.turn_id == turn`；foreign
   session/turn 与**合法无 turn_id** 的通知一律忽略（不是坏 JSON）。首次 poll 允许扫描
   既有记录，但积压未消费完期间 `initial_scan=true`（历史读入不是新进展）；消费完后的
@@ -55,7 +57,7 @@ owner 在其独立树完成，不属于本模块。
 
 ### Allowed Changes
 - src/cmd/olp_runtime_watch_ledger.rs
-- src/cmd/mod.rs（仅一行 `pub mod olp_runtime_watch_ledger;`）
+- src/cmd/mod.rs（仅 `#[cfg(unix)] pub mod olp_runtime_watch_ledger;` 声明及其注释）
 - specs/task-olp-runtime-watch-ledger.spec.md
 
 ### Forbidden

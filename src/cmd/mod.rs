@@ -13,6 +13,9 @@ pub mod doctor;
 pub mod github;
 pub mod install_method;
 pub mod olp_mcp;
+// File identity uses dev/ino (`std::os::unix`); the OctoLoop runtime guard is
+// Unix-only, so the module is not built elsewhere.
+#[cfg(unix)]
 pub mod olp_runtime_watch_ledger;
 #[cfg(target_os = "linux")]
 pub mod outer_duty;
