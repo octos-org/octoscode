@@ -114,16 +114,17 @@ octoscode outer-duty hold --project <project> --signature <sig> \
   --duties <duties> -- <your agent start command>
 ```
 
-The lock **is** the authority: the wrapper is the only holder of the lock fd, and
-your agent is death-coupled to it via `PR_SET_PDEATHSIG` — wrapper dies ⇒ agent
-dies ⇒ lock `VACANT`. `outer-duty check --project <p>` only observes (exactly one
+The lock **is** the authority, and your agent is death-coupled to the wrapper —
+wrapper dies ⇒ agent dies ⇒ lock `VACANT`. On Linux the wrapper is the only
+holder of the lock fd and the kernel kills the agent via `PR_SET_PDEATHSIG`; on
+macOS a small guardian process between wrapper and agent holds the lock and kills
+the agent's process group before releasing it. `outer-duty check --project <p>` only observes (exactly one
 of `VACANT|HELD|ERROR` on stdout). A non-holder may add **signed annotations
 only**. Taking over a live lock belongs to the operator alone; there is no agent
 self-seizure. Metadata sidecars and TTLs are diagnostics and never adjudicate.
 
-**Linux-only** (flock + PDEATHSIG + /proc; exits 2 as unsupported elsewhere; not
-valid on NFS). On macOS the lock is unavailable — multi-outer coordination falls
-back to the duty roster as discipline plus operator arbitration. Pick a signature
+**Linux and macOS** (single-machine flock; exits 2 as unsupported elsewhere; not
+valid on NFS). Pick a signature
 like `外环(claude)` / `外环(codex)` and sign every board write.
 
 ### 3.1 Discover the scene
@@ -299,7 +300,7 @@ editing config without a new session is paper insurance).
 |---|---|
 | Linux | full power, including the `outer-duty` kernel lock and bwrap tiers |
 | WSL2 | equivalent to Linux |
-| macOS | usable, two gaps: no `outer-duty` lock (Linux-only), and bwrap tiers do not apply |
+| macOS | usable, including the `outer-duty` lock; one gap: bwrap tiers do not apply |
 | Windows native | not recommended — use WSL2 |
 
 ## 7. Going deeper

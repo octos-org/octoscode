@@ -1,7 +1,7 @@
 //! Contract tests for `octoscode outer-duty` (#38 / #38-r1) — the
 //! per-project session-lifetime OS-exclusive duty lock. Real subprocess
 //! (CARGO_BIN_EXE), temp HOME + project (locks never touch real state).
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -282,7 +282,7 @@ fn duty_two_contenders_exactly_one_wins() {
 }
 
 /// 契约 2a(#38-r3/r4:真实 child 观测): wrapper SIGKILL → the REAL agent
-/// (sidecar-recorded PID + /proc starttime, reuse-proof) must DIE, then
+/// (sidecar-recorded PID + kernel starttime, reuse-proof) must DIE, then
 /// the lock goes VACANT — not the lock state alone.
 #[test]
 fn duty_wrapper_death_kills_agent_and_releases() {
@@ -323,6 +323,113 @@ fn duty_wrapper_death_kills_agent_and_releases() {
     assert!(vacant, "wrapper death must release the authority");
 }
 
+/// macOS 契约 2c(guardian 被杀): the guardian — the fork between wrapper
+/// and agent that stands in for PR_SET_PDEATHSIG — is SIGKILLed. The
+/// wrapper must notice, kill the REAL agent, exit non-zero, and only then
+/// does the lock go VACANT (supervision loss never leaves a live agent).
+#[cfg(target_os = "macos")]
+#[test]
+fn duty_guardian_death_kills_agent_and_fails_wrapper() {
+    let env = TempHome::new("guardian-killed");
+    let project = env.project();
+    let mut wrapper = spawn_holder(
+        env.home().as_path(),
+        project.as_path(),
+        env.sentinel().as_path(),
+    );
+    wait_started(&env);
+    let (pid, start) = read_sidecar_child(&env);
+    assert!(proc_alive_with_start(pid, start), "agent alive before kill");
+    let guardian = guardian_of(wrapper.id());
+    assert_ne!(guardian, pid, "the guardian is not the agent itself");
+    assert!(signal_pid("-KILL", guardian), "SIGKILL the guardian");
+    let mut status = None;
+    for _ in 0..600 {
+        if let Some(found) = wrapper.try_wait().unwrap() {
+            status = Some(found);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let status = status.expect("wrapper must exit after its guardian is killed");
+    assert!(
+        !status.success(),
+        "losing the guardian is a failure, never a clean exit"
+    );
+    // The wrapper held the lock until the agent group was gone: by the
+    // time it has exited, the agent is already dead.
+    assert!(
+        !proc_alive_with_start(pid, start),
+        "real agent (pid {pid}) must be dead once the wrapper has exited"
+    );
+    assert_eq!(
+        check_state(env.home().as_path(), project.as_path()),
+        "VACANT"
+    );
+    let wrapper_err =
+        std::fs::read_to_string(env.sentinel().with_extension("wrapper-err")).unwrap_or_default();
+    assert!(
+        wrapper_err.contains("guardian died abnormally"),
+        "the wrapper names the cause: {wrapper_err}"
+    );
+}
+
+/// macOS 契约 2d(无 split-brain 窗口): after the wrapper is SIGKILLed the
+/// lock may only be observed VACANT once the REAL agent is dead — the
+/// guardian keeps the fd until the agent's process group is gone. Polled
+/// without sleeping, over several rounds.
+#[cfg(target_os = "macos")]
+#[test]
+fn duty_vacant_is_never_observed_while_agent_alive() {
+    for round in 0..5 {
+        let env = TempHome::new("no-window");
+        let project = env.project();
+        let mut wrapper = spawn_holder(
+            env.home().as_path(),
+            project.as_path(),
+            env.sentinel().as_path(),
+        );
+        wait_started(&env);
+        let (pid, start) = read_sidecar_child(&env);
+        assert!(proc_alive_with_start(pid, start), "agent alive before kill");
+        wrapper.kill().unwrap();
+        let _ = wrapper.wait();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut vacant = false;
+        while std::time::Instant::now() < deadline {
+            if check_state(env.home().as_path(), project.as_path()) == "VACANT" {
+                vacant = true;
+                assert!(
+                    !proc_alive_with_start(pid, start),
+                    "round {round}: lock VACANT while the real agent (pid {pid}) is alive"
+                );
+                break;
+            }
+        }
+        assert!(vacant, "round {round}: wrapper death must release the lock");
+    }
+}
+
+/// The wrapper's only direct child on macOS is the guardian.
+#[cfg(target_os = "macos")]
+fn guardian_of(wrapper: u32) -> u32 {
+    for _ in 0..200 {
+        let out = Command::new("/usr/bin/pgrep")
+            .args(["-P", &wrapper.to_string()])
+            .output()
+            .expect("pgrep");
+        let pids: Vec<u32> = String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .filter_map(|p| p.parse().ok())
+            .collect();
+        if let [only] = pids[..] {
+            return only;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("wrapper {wrapper} has no single guardian child");
+}
+
 /// child_pid/child_starttime from the diagnostic sidecar JSON.
 fn read_sidecar_child(env: &TempHome) -> (u32, u64) {
     for _ in 0..600 {
@@ -349,6 +456,7 @@ fn read_sidecar_child(env: &TempHome) -> (u32, u64) {
 }
 
 /// /proc/<pid>/stat field 22 must equal the recorded starttime (reuse-proof).
+#[cfg(target_os = "linux")]
 fn proc_alive_with_start(pid: u32, starttime: u64) -> bool {
     let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
         return false;
@@ -362,6 +470,37 @@ fn proc_alive_with_start(pid: u32, starttime: u64) -> bool {
         .and_then(|f| f.parse().ok())
         .unwrap_or(0);
     start != 0 && start == starttime
+}
+
+/// macOS: the kernel-reported start time (`proc_pidinfo`) must equal the
+/// recorded starttime (reuse-proof). An exited/reaped pid reads 0.
+#[cfg(target_os = "macos")]
+fn proc_alive_with_start(pid: u32, starttime: u64) -> bool {
+    let start = octoscode::outer_duty::process_starttime(pid);
+    start != 0 && start == starttime
+}
+
+/// The pid exists as a process right now (any state).
+#[cfg(target_os = "linux")]
+fn pid_exists(pid: u32) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+#[cfg(target_os = "macos")]
+fn pid_exists(pid: u32) -> bool {
+    signal_pid("-0", pid)
+}
+
+/// `/bin/kill <signal> <pid>`; true when the signal was delivered.
+#[cfg(target_os = "macos")]
+fn signal_pid(signal: &str, pid: u32) -> bool {
+    Command::new("/bin/kill")
+        .args([signal, &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 /// 契约 2b(#38-r3/r4:grandchild 活性观测): the agent exits while a
@@ -423,10 +562,7 @@ fn duty_grandchild_lingering_yields_vacant() {
         heartbeat_fresh(&ginfo),
         "grandchild (pid {gpid}) provably alive at VACANT"
     );
-    assert!(
-        std::path::Path::new(&format!("/proc/{gpid}")).exists(),
-        "grandchild proc exists"
-    );
+    assert!(pid_exists(gpid), "grandchild proc exists");
     let _ = std::fs::remove_file(&gctl);
     let _ = wrapper;
 }
