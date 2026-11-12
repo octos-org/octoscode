@@ -182,6 +182,23 @@ translate**:
 > 外环(<sig>)·R2 记档(#N):<claim vs. re-verified fact>
 ```
 
+Three more line-initial formulas are read by the inbox
+(`scripts/olp-inbox.py`). They attach to an entry by `#N`, so they count
+wherever they are written on the board; **copy them verbatim** too:
+
+```
+> 外环(<sig>)·采认(#N):<verification evidence>            (accepted)
+> 外环(<sig>)·打回(#N):<reason; the rework goes in a new entry>   (returned)
+> 外环(<sig>)·搁置(#N) 至 YYYY-MM-DD:<what it waits for>   (snoozed until)
+```
+
+`olp-inbox.py <board>` derives from these lines and the ACK lines who each
+card is waiting on: **inbox** (the inner loop ACKed or a unit pushed; the
+outer loop must decide), **working** (waiting for the inner loop's ACK),
+**snoozed** (hidden until the date), **settled** (accepted, returned, voided
+or archived). Nothing is stored on the board; a card with no 采认 line stays
+in the inbox, so write one when verification passes.
+
 ### 3.3 Wake and steer the inner loop
 
 ```bash
