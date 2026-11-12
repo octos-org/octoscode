@@ -5,7 +5,8 @@
 # record drafts. Judgement stays with the locked outer reviewer.
 #
 # Usage: olp-evo-retro.sh <repo-root> [--dry-run]
-# Exit codes: 70 injected fault; 0 ok (incl. no new cards); 1 errors.
+# Exit codes: 70 injected fault; 0 ok (incl. no new cards); 1 errors;
+# 2 required tools unusable (preflight, before any write).
 set -euo pipefail
 
 REPO_ROOT="${1:?usage: olp-evo-retro.sh <repo-root> [--dry-run]}"
@@ -15,6 +16,15 @@ DRY_RUN=0
 if [ ! -d "$REPO_ROOT" ]; then
     echo "error: repo-root not found: $REPO_ROOT" >&2
     exit 1
+fi
+
+# Capability preflight before ANY write (state dir, lock, brief). A
+# dry-run takes no lock, so it does not require flock.
+. "$(dirname "${BASH_SOURCE[0]}")/olp-preflight.sh"
+if [ "$DRY_RUN" -eq 1 ]; then
+    olp_preflight olp-evo-retro realpath sha256sum python3 || exit 2
+else
+    olp_preflight olp-evo-retro realpath sha256sum python3 flock || exit 2
 fi
 
 REAL_REPO=$(realpath "$REPO_ROOT")
