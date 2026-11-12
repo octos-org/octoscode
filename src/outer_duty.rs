@@ -1,26 +1,39 @@
 //! `octoscode outer-duty` (OUTER_LOOP_REVIEW #38 / #38-r1): the kernel lock
 //! behind multi-outer primary-reviewer authority — a per-project,
-//! session-lifetime OS-exclusive lock. Linux-only by adjudication
-//! (#38-r3/r4): single-machine `flock` + PR_SET_PDEATHSIG + /proc
-//! semantics; NFS out of scope; non-Linux builds route the subcommand to
-//! an explicit unsupported error (see `src/cmd/mod.rs`); Windows
-//! LockFileEx support is a separate follow-up entry. The module does not
-//! compile on non-Linux targets by design (honest shrink, per the
-//! countersign).
+//! session-lifetime OS-exclusive lock. Linux and macOS (single-machine
+//! `flock`; NFS out of scope); other platforms route the subcommand to an
+//! explicit unsupported error (see `src/cmd/mod.rs`); Windows LockFileEx
+//! support is a separate follow-up entry. The module does not compile on
+//! unsupported targets by design (honest shrink, per the countersign).
 //!
-//! Lifecycle binding (#38-r2 adjudicated: GUARDIAN death coupling): the
-//! wrapper is the sole fd holder (CLOEXEC stays set — the lock never leaks
-//! to descendants); the child gets setpgid + PR_SET_PDEATHSIG(SIGKILL), so
-//! wrapper death kills the agent and releases the authority immediately —
-//! no split brain, no lingering authority. Grandchildren hold no fd: an
-//! agent that exits while leaving a grandchild running yields VACANT. Both
-//! invariants are contract-pinned with real processes.
+//! Lifecycle binding (#38-r2 adjudicated: GUARDIAN death coupling) — the
+//! invariant on every supported platform is "wrapper dead ⇒ agent dead,
+//! and the lock is never VACANT while the agent is alive":
+//!
+//! - Linux: the wrapper is the sole fd holder (CLOEXEC stays set — the
+//!   lock never leaks to descendants); the child gets setpgid +
+//!   PR_SET_PDEATHSIG(SIGKILL), so the kernel kills the agent the moment
+//!   the wrapper dies and the authority is released immediately.
+//! - macOS: there is no PDEATHSIG. The wrapper forks a tiny GUARDIAN
+//!   (reaper) process which inherits the lock fd and is the agent's
+//!   parent: `wrapper → guardian → agent`. The guardian watches the
+//!   wrapper (kqueue EVFILT_PROC + a getppid poll); when the wrapper dies
+//!   it SIGKILLs the agent's process group and exits only after the group
+//!   is gone, so the lock stays HELD until the agent is provably dead.
+//!   The wrapper in turn watches the guardian: a guardian that dies
+//!   abnormally makes the wrapper kill the agent group and fail. The agent
+//!   itself never holds the fd (CLOEXEC). Boundary: this survives the
+//!   death of either supervisor, not a simultaneous SIGKILL of both.
+//!
+//! Grandchildren hold no fd: an agent that exits while leaving a
+//! grandchild running yields VACANT. These invariants are contract-pinned
+//! with real processes on both platforms.
 //!
 //! Lock naming is a STABLE protocol: SHA-256 over the domain-prefixed
 //! canonical project path (DefaultHasher is not stable across Rust versions
 //! — protocol-documented limitation). HOME missing ⇒ fail-closed error.
 
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -117,14 +130,12 @@ fn open_lock_file(path: &Path, mode: u32) -> std::io::Result<std::fs::File> {
 /// #38-r8: the seam is PRIVATE — `tighten_with` takes the chmod operation
 /// as a parameter (production passes the real chmod; unit tests under
 /// cfg(test) pass a failing closure). No global/public hook remains.
-#[cfg(target_os = "linux")]
 fn tighten(path: &Path, mode: u32) -> Result<()> {
     tighten_with(path, mode, real_tighten)
 }
 
 /// The parameterized boundary: apply `op` unless a `cfg(test)` injection
 /// replaces it (test-only thread-local, invisible in production builds).
-#[cfg(target_os = "linux")]
 fn tighten_with(path: &Path, mode: u32, op: fn(&Path, u32) -> Result<()>) -> Result<()> {
     #[cfg(test)]
     {
@@ -151,7 +162,6 @@ fn set_tighten_test_override(f: Option<TightenOp>) {
 }
 
 /// The production chmod.
-#[cfg(target_os = "linux")]
 fn real_tighten(path: &Path, mode: u32) -> Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
@@ -330,6 +340,48 @@ pub fn held_diagnostics(lock: &Path) -> String {
     }
 }
 
+/// The duty-wrapped agent as the wrapper sees it. `id()` is the REAL
+/// agent pid on every platform (what the diagnostic sidecar records);
+/// `wait()` blocks until the agent is gone and yields its exit status.
+pub struct HolderChild {
+    #[cfg(target_os = "linux")]
+    child: std::process::Child,
+    #[cfg(target_os = "macos")]
+    guardian: libc::pid_t,
+    #[cfg(target_os = "macos")]
+    agent: libc::pid_t,
+}
+
+impl HolderChild {
+    /// The real agent pid.
+    pub fn id(&self) -> u32 {
+        #[cfg(target_os = "linux")]
+        {
+            self.child.id()
+        }
+        #[cfg(target_os = "macos")]
+        {
+            self.agent as u32
+        }
+    }
+
+    /// Wait for the agent. Linux: the direct child. macOS: the guardian,
+    /// which relays the agent's exit code (128+signal for a signal death);
+    /// a guardian that itself dies by a signal is a supervision failure —
+    /// the agent group is killed and an error is returned (the wrapper
+    /// still holds the lock while that happens).
+    pub fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        #[cfg(target_os = "linux")]
+        {
+            self.child.wait()
+        }
+        #[cfg(target_os = "macos")]
+        {
+            macos::wait_guardian(self.guardian, self.agent)
+        }
+    }
+}
+
 /// Spawn the duty-wrapped child with GUARDIAN death coupling (#38-r2
 /// adjudicated design): the wrapper is the ONLY fd holder (CLOEXEC stays
 /// set — the lock never leaks to descendants); the child runs in its own
@@ -339,10 +391,11 @@ pub fn held_diagnostics(lock: &Path) -> String {
 /// exits (normally or not), the wrapper exits and the lock releases.
 ///
 /// PDEATHSIG semantics boundary: the signal is delivered when the child's
-/// *parent thread* dies; it is Linux-specific (hence the linux-gnu target
-/// confinement) and does NOT chain to grandchildren — a grandchild that
-/// outlives its parent holds no fd and no authority (pinned by contract).
-pub fn spawn_holder_child(command: &[String]) -> Result<std::process::Child> {
+/// *parent thread* dies; it is Linux-specific and does NOT chain to
+/// grandchildren — a grandchild that outlives its parent holds no fd and
+/// no authority (pinned by contract).
+#[cfg(target_os = "linux")]
+pub fn spawn_holder_child(command: &[String]) -> Result<HolderChild> {
     use std::os::unix::process::CommandExt as _;
     let mut cmd = std::process::Command::new(&command[0]);
     cmd.args(&command[1..]);
@@ -374,8 +427,21 @@ pub fn spawn_holder_child(command: &[String]) -> Result<std::process::Child> {
             Ok(())
         });
     }
-    cmd.spawn()
-        .wrap_err_with(|| format!("failed to spawn duty child: {}", command[0]))
+    let child = cmd
+        .spawn()
+        .wrap_err_with(|| format!("failed to spawn duty child: {}", command[0]))?;
+    Ok(HolderChild { child })
+}
+
+/// macOS spawn: `wrapper → guardian → agent` (see the module docs). The
+/// guardian is a fork WITHOUT exec, so it inherits the lock fd (same open
+/// file description ⇒ same flock) and keeps the authority HELD until the
+/// agent's process group is gone. Must be called before any thread is
+/// started (the `outer-duty` subcommand dispatches first thing in `main`).
+#[cfg(target_os = "macos")]
+pub fn spawn_holder_child(command: &[String]) -> Result<HolderChild> {
+    let (guardian, agent) = macos::spawn_guarded(command)?;
+    Ok(HolderChild { guardian, agent })
 }
 
 /// /proc/<pid>/stat field 22 (starttime in clock ticks since boot) — a
@@ -392,6 +458,292 @@ fn process_starttime(pid: u32) -> u64 {
         .nth(19)
         .and_then(|f| f.parse().ok())
         .unwrap_or(0)
+}
+
+/// Process start time in microseconds since the Unix epoch
+/// (`proc_pidinfo(PROC_PIDTBSDINFO)`) — the macOS PID-reuse-proof locator
+/// for operators; 0 when unreadable.
+#[cfg(target_os = "macos")]
+pub fn process_starttime(pid: u32) -> u64 {
+    #[allow(unsafe_code)]
+    unsafe {
+        let mut info: libc::proc_bsdinfo = std::mem::zeroed();
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let read = libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        );
+        if read != size {
+            return 0;
+        }
+        info.pbi_start_tvsec
+            .saturating_mul(1_000_000)
+            .saturating_add(info.pbi_start_tvusec)
+    }
+}
+
+/// macOS guardian (reaper) implementation. Everything that runs after
+/// `fork()` uses raw libc calls only — no allocation, no std I/O.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod macos {
+    use eyre::{Result, WrapErr, eyre};
+    use std::ffi::CString;
+
+    /// How often the guardian re-checks its parent when no kqueue event
+    /// arrives (belt and braces next to EVFILT_PROC).
+    const POLL_MS: libc::c_long = 100;
+    /// Upper bound on waiting for a SIGKILLed agent group to disappear
+    /// before the lock is released anyway (never a permanent stuck lock).
+    const GROUP_GONE_CAP_MS: u32 = 30_000;
+    /// Signals the guardian ignores so a terminal ^C / hangup aimed at the
+    /// wrapper cannot take both supervisors down at once.
+    const GUARDED_SIGNALS: [libc::c_int; 4] =
+        [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT];
+
+    /// Fork the guardian (which forks + execs the agent). Returns
+    /// `(guardian_pid, agent_pid)`.
+    pub(super) fn spawn_guarded(command: &[String]) -> Result<(libc::pid_t, libc::pid_t)> {
+        // Everything the post-fork code needs is prepared up front.
+        let args: Vec<CString> = command
+            .iter()
+            .map(|arg| CString::new(arg.as_bytes()))
+            .collect::<std::result::Result<_, _>>()
+            .wrap_err("outer-duty: child command contains a NUL byte")?;
+        let mut argv: Vec<*const libc::c_char> = args.iter().map(|arg| arg.as_ptr()).collect();
+        argv.push(std::ptr::null());
+
+        let mut fds = [0 as libc::c_int; 2];
+        unsafe {
+            if libc::pipe(fds.as_mut_ptr()) == -1 {
+                return Err(std::io::Error::last_os_error())
+                    .wrap_err("outer-duty: failed to create the guardian pipe");
+            }
+            // The agent must not inherit either end.
+            libc::fcntl(fds[0], libc::F_SETFD, libc::FD_CLOEXEC);
+            libc::fcntl(fds[1], libc::F_SETFD, libc::FD_CLOEXEC);
+
+            let wrapper = libc::getpid();
+            let guardian = libc::fork();
+            if guardian == -1 {
+                let error = std::io::Error::last_os_error();
+                libc::close(fds[0]);
+                libc::close(fds[1]);
+                return Err(error).wrap_err("outer-duty: failed to fork the guardian");
+            }
+            if guardian == 0 {
+                libc::close(fds[0]);
+                guardian_main(wrapper, fds[1], argv.as_ptr());
+            }
+            libc::close(fds[1]);
+            let agent = read_pid(fds[0]);
+            libc::close(fds[0]);
+            match agent {
+                Some(agent) => Ok((guardian, agent)),
+                None => {
+                    let mut status = 0;
+                    waitpid_retry(guardian, &mut status);
+                    Err(eyre!(
+                        "failed to spawn duty child: {} (guardian exited before starting it)",
+                        command[0]
+                    ))
+                }
+            }
+        }
+    }
+
+    /// Wrapper side: wait for the guardian and classify its end.
+    pub(super) fn wait_guardian(
+        guardian: libc::pid_t,
+        agent: libc::pid_t,
+    ) -> std::io::Result<std::process::ExitStatus> {
+        use std::os::unix::process::ExitStatusExt as _;
+        let mut status = 0;
+        unsafe {
+            if !waitpid_retry(guardian, &mut status) {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::WIFEXITED(status) {
+                return Ok(std::process::ExitStatus::from_raw(status));
+            }
+            // The guardian was killed: the agent lost its supervisor. We
+            // still hold the lock — kill the agent group before failing so
+            // the authority is never released over a live agent.
+            libc::killpg(agent, libc::SIGKILL);
+            wait_group_gone(agent);
+        }
+        Err(std::io::Error::other(
+            "the duty guardian died abnormally; the agent group was killed",
+        ))
+    }
+
+    /// The guardian process body. Never returns.
+    unsafe fn guardian_main(
+        wrapper: libc::pid_t,
+        report_fd: libc::c_int,
+        argv: *const *const libc::c_char,
+    ) -> ! {
+        unsafe {
+            // Own process group: signals aimed at the wrapper's group do
+            // not reach the guardian.
+            libc::setpgid(0, 0);
+            let mut previous: [libc::sigaction; 4] = std::mem::zeroed();
+            let mut ignore: libc::sigaction = std::mem::zeroed();
+            ignore.sa_sigaction = libc::SIG_IGN;
+            for (index, signal) in GUARDED_SIGNALS.iter().enumerate() {
+                libc::sigaction(*signal, &ignore, &mut previous[index]);
+            }
+
+            let kq = libc::kqueue();
+            watch_exit(kq, wrapper);
+            // The wrapper may already be gone (fork race): no agent yet,
+            // nothing to guard — the lock is released by our exit.
+            if libc::getppid() != wrapper {
+                libc::_exit(1);
+            }
+
+            let agent = libc::fork();
+            if agent == -1 {
+                libc::_exit(1);
+            }
+            if agent == 0 {
+                // Own process group (its id is the agent pid), original
+                // signal dispositions, then exec. CLOEXEC drops the lock
+                // fd and the report pipe.
+                libc::setpgid(0, 0);
+                for (index, signal) in GUARDED_SIGNALS.iter().enumerate() {
+                    libc::sigaction(*signal, &previous[index], std::ptr::null_mut());
+                }
+                libc::execvp(*argv, argv);
+                let message = b"outer-duty hold: failed to exec the duty child\n";
+                libc::write(2, message.as_ptr().cast(), message.len());
+                libc::_exit(127);
+            }
+            // Set the group from this side too, so it exists before the
+            // first kill regardless of scheduling.
+            libc::setpgid(agent, agent);
+            let bytes = agent.to_ne_bytes();
+            libc::write(report_fd, bytes.as_ptr().cast(), bytes.len());
+            libc::close(report_fd);
+            watch_exit(kq, agent);
+
+            loop {
+                let mut status = 0;
+                let reaped = libc::waitpid(agent, &mut status, libc::WNOHANG);
+                if reaped == agent {
+                    // Agent finished on its own: relay its code. Lingering
+                    // grandchildren hold no fd and are left alone.
+                    libc::_exit(exit_code(status));
+                }
+                if libc::getppid() != wrapper {
+                    // Wrapper died: kill the agent group, and release the
+                    // lock (by exiting) only once it is gone.
+                    libc::killpg(agent, libc::SIGKILL);
+                    waitpid_retry(agent, &mut status);
+                    wait_group_gone(agent);
+                    libc::_exit(128 + libc::SIGKILL);
+                }
+                wait_event(kq);
+            }
+        }
+    }
+
+    /// Register a one-shot NOTE_EXIT watch (best effort: the poll below
+    /// covers a failed registration).
+    unsafe fn watch_exit(kq: libc::c_int, pid: libc::pid_t) {
+        if kq == -1 {
+            return;
+        }
+        unsafe {
+            let mut change: libc::kevent = std::mem::zeroed();
+            change.ident = pid as libc::uintptr_t;
+            change.filter = libc::EVFILT_PROC;
+            change.flags = libc::EV_ADD | libc::EV_ONESHOT;
+            change.fflags = libc::NOTE_EXIT;
+            libc::kevent(kq, &change, 1, std::ptr::null_mut(), 0, std::ptr::null());
+        }
+    }
+
+    /// Sleep until a watched process exits or the poll interval elapses.
+    unsafe fn wait_event(kq: libc::c_int) {
+        unsafe {
+            if kq == -1 {
+                libc::usleep((POLL_MS as libc::useconds_t) * 1000);
+                return;
+            }
+            let timeout = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: POLL_MS * 1_000_000,
+            };
+            let mut event: libc::kevent = std::mem::zeroed();
+            libc::kevent(kq, std::ptr::null(), 0, &mut event, 1, &timeout);
+        }
+    }
+
+    /// Block until the process group has no live member (re-sending
+    /// SIGKILL), capped so the lock can never stay stuck forever.
+    unsafe fn wait_group_gone(group: libc::pid_t) {
+        unsafe {
+            let mut waited_ms = 0u32;
+            while waited_ms < GROUP_GONE_CAP_MS {
+                if libc::killpg(group, libc::SIGKILL) == -1 {
+                    return; // ESRCH: nobody left (EPERM cannot be ours).
+                }
+                libc::usleep(10_000);
+                waited_ms += 10;
+            }
+        }
+    }
+
+    /// `waitpid` retried across EINTR; false on any other failure.
+    unsafe fn waitpid_retry(pid: libc::pid_t, status: &mut libc::c_int) -> bool {
+        unsafe {
+            loop {
+                if libc::waitpid(pid, status, 0) == pid {
+                    return true;
+                }
+                if *libc::__error() != libc::EINTR {
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// Shell-convention exit code for a wait status.
+    fn exit_code(status: libc::c_int) -> libc::c_int {
+        if libc::WIFEXITED(status) {
+            libc::WEXITSTATUS(status)
+        } else {
+            128 + libc::WTERMSIG(status)
+        }
+    }
+
+    /// Read one native-endian pid from the report pipe (None on EOF or a
+    /// short read).
+    unsafe fn read_pid(fd: libc::c_int) -> Option<libc::pid_t> {
+        let mut bytes = [0u8; std::mem::size_of::<libc::pid_t>()];
+        let mut filled = 0usize;
+        unsafe {
+            while filled < bytes.len() {
+                let read = libc::read(
+                    fd,
+                    bytes.as_mut_ptr().add(filled).cast(),
+                    bytes.len() - filled,
+                );
+                if read > 0 {
+                    filled += read as usize;
+                } else if read == -1 && *libc::__error() == libc::EINTR {
+                    continue;
+                } else {
+                    return None;
+                }
+            }
+        }
+        Some(libc::pid_t::from_ne_bytes(bytes))
+    }
 }
 
 #[cfg(test)]
