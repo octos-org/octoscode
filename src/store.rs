@@ -8761,6 +8761,13 @@ impl Store {
                 self.state.push_background_activity(event);
                 None
             }
+            // judge.decisions.v1 (#3): latch the per-turn verdict into the
+            // session's autonomy mirror for the status-row marker. Display
+            // only — nothing branches on the verdict.
+            ClientEvent::JudgeDecision(event) => {
+                self.state.set_session_judge(event);
+                None
+            }
             ClientEvent::PeerClosed(e) => self.apply_peer_closed_event(e),
             ClientEvent::PeerGathered(event) => self.apply_peer_gathered_event(event),
             ClientEvent::SubProvidersMutation(event) => {
@@ -12371,6 +12378,10 @@ impl Store {
                         .loop_attributed_turns
                         .insert((event.session_id.clone(), event.turn_id.clone()));
                 }
+                // judge.decisions.v1 (#3): a new turn retires the previous
+                // round's status-row judge marker — the verdict described the
+                // round that just ended and must not read as this one's.
+                self.state.clear_session_judge(&event.session_id);
                 // The pre-first-token window is over for this session — the
                 // live_reply bound below carries the in-progress signal now.
                 self.state.pre_token_turns.remove(&event.session_id);
@@ -36627,6 +36638,55 @@ workspace_root: None,
         let content = &store.state.sessions[0].messages[0].content;
         assert!(content.contains("- [x] Fix store/model progress handling"));
         assert!(content.contains("- [x] Run tests"));
+    }
+
+    #[test]
+    fn judge_marker_cleared_when_next_turn_starts() {
+        let mut store = store_with_empty_session();
+        let session_id = store.state.sessions[0].id.clone();
+
+        // A verdict arrives for this round and latches.
+        store.apply_client_event(ClientEvent::JudgeDecision(
+            crate::model::JudgeDecisionParams {
+                session_id: session_id.0.clone(),
+                turn_id: Some("turn_1".into()),
+                keyword_tier: "cheap".into(),
+                judge_tier: Some("strong".into()),
+                judge_confidence: Some(0.99),
+                judge_agrees: Some(true),
+                judge_error: None,
+                judge_model: None,
+                has_cjk: false,
+            },
+        ));
+        assert!(
+            store
+                .state
+                .session_autonomy_for(&session_id)
+                .and_then(|state| state.last_judge.as_ref())
+                .is_some(),
+            "the verdict latches into last_judge"
+        );
+
+        // The NEXT turn starts — the marker retires with it (it survives the
+        // previous turn's own completion by design).
+        store.apply_event(AppUiEvent::Protocol(UiNotification::TurnStarted(
+            TurnStartedEvent {
+                session_id,
+                turn_id: TurnId::new(),
+                timestamp: chrono::Utc::now(),
+                topic: None,
+            },
+        )));
+        assert!(
+            store
+                .state
+                .session_autonomy_for(&SessionKey("local:test".into()))
+                .expect("autonomy entry")
+                .last_judge
+                .is_none(),
+            "turn/started clears the judge marker"
+        );
     }
 
     #[test]

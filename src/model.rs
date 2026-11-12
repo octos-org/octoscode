@@ -134,6 +134,13 @@ pub const APPUI_METHOD_PEER_CLOSED: &str = "peer/closed";
 /// vendored octos-core rev predates the variant, mirroring
 /// [`APPUI_METHOD_PEER_STAGED`].
 pub const APPUI_METHOD_BACKGROUND_ACTIVITY: &str = "background/activity";
+/// judge.decisions.v1 (#3): `judge/decision` — one notification per turn
+/// carrying the keyword-tier result, the judge verdict (tier, confidence,
+/// agrees, error code), and `has_cjk`. Display-only. Not a request method
+/// (never appears in `AppUiCommand::method()`); decoded tui-locally in the
+/// transport because the vendored octos-core rev predates the variant,
+/// mirroring [`APPUI_METHOD_BACKGROUND_ACTIVITY`].
+pub const APPUI_METHOD_JUDGE_DECISION: &str = "judge/decision";
 /// octos#1807: `turn/steer` — mid-turn prompt injection into the ACTIVE
 /// turn. Params `{session_id, expected_turn_id?, input}`; result
 /// `{turn_id, steered}`. `steered:true` = the text joined the live turn
@@ -280,6 +287,13 @@ pub const APPUI_FEATURE_CODING_LOOP_RUNTIME_V1: &str = "coding.loop_runtime.v1";
 /// receive a notification it cannot render. Tui-local mirror: the vendored
 /// octos-core rev predates the constant.
 pub const APPUI_FEATURE_BACKGROUND_ACTIVITY_V1: &str = "event.background_activity.v1";
+/// judge.decisions.v1 (#3): server pushes one `judge/decision` notification
+/// per turn (keyword-tier result, judge verdict + confidence + agrees flag,
+/// error code, `has_cjk`). When advertised the marker renders in the harness
+/// status row; when NOT negotiated the server never sends the frame, so an
+/// older TUI can never receive a notification it cannot render. Tui-local
+/// mirror: the vendored octos-core rev predates the constant.
+pub const APPUI_FEATURE_JUDGE_DECISIONS_V1: &str = "judge.decisions.v1";
 /// task-consume-turn-steer-dropped: server guarantees that accepted-but-
 /// undrained `turn/steer` inputs are returned as `turn/steer_dropped` BEFORE
 /// the turn's terminal frame. When advertised, a terminal without a preceding
@@ -713,6 +727,12 @@ pub struct SessionAutonomyState {
     /// Turn that authored the current `plan`, when known. The plan is per-turn
     /// working state, so it is cleared when this turn completes.
     pub plan_turn_id: Option<TurnId>,
+    /// judge.decisions.v1 (#3): the latest `judge/decision` verdict for this
+    /// session, rendered as a muted marker in the harness status row. Display
+    /// ONLY — nothing in the client may branch on the verdict. Cleared when
+    /// the NEXT turn starts (a verdict survives its own turn's completion so
+    /// the operator can still read how the finished round judged).
+    pub last_judge: Option<JudgeDecisionView>,
     /// When each TERMINAL agent was first observed terminal, by agent id —
     /// LOCAL `Instant`s stamped lazily by the strip's linger sweep (never the
     /// server's `updated_at_ms`; a remote server's clock can skew). Drives the
@@ -743,6 +763,7 @@ impl SessionAutonomyState {
             loops: Vec::new(),
             plan: None,
             plan_turn_id: None,
+            last_judge: None,
             terminal_seen: Vec::new(),
             unseen: Vec::new(),
         }
@@ -3833,6 +3854,64 @@ impl BackgroundActivityParams {
             .map(str::trim)
             .filter(|label| !label.is_empty())
             .unwrap_or(self.origin_id.as_str())
+    }
+}
+
+/// Params of the per-turn [`APPUI_METHOD_JUDGE_DECISION`] notification
+/// (judge.decisions.v1, #3): the keyword-tier result plus the judge verdict.
+/// `session_id` is REQUIRED and is the routing key (same discipline as
+/// [`BackgroundActivityParams`]). All judge fields but `keyword_tier` are
+/// optional — a tiered judge can fail (`judge_error`) without a verdict, or
+/// succeed without advertising its model. Display-only: nothing in the client
+/// may branch on the verdict.
+///
+/// Tui-local wire mirror (the vendored octos-core rev predates the
+/// `UiNotification` variant), decoded in the transport exactly like
+/// [`BackgroundActivityParams`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JudgeDecisionParams {
+    pub session_id: String,
+    #[serde(default)]
+    pub turn_id: Option<String>,
+    pub keyword_tier: String,
+    #[serde(default)]
+    pub judge_tier: Option<String>,
+    #[serde(default)]
+    pub judge_confidence: Option<f64>,
+    #[serde(default)]
+    pub judge_agrees: Option<bool>,
+    #[serde(default)]
+    pub judge_error: Option<String>,
+    #[serde(default)]
+    pub judge_model: Option<String>,
+    #[serde(default)]
+    pub has_cjk: bool,
+}
+
+/// Display-only view of one [`JudgeDecisionParams`] verdict, latched per
+/// session as [`SessionAutonomyState::last_judge`] (#3). Drops the wire
+/// routing field (`session_id`) and keeps only what the status-row marker
+/// renders. Nothing in the client may branch on these values.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JudgeDecisionView {
+    pub turn_id: Option<String>,
+    pub keyword_tier: String,
+    pub judge_tier: Option<String>,
+    pub confidence: Option<f64>,
+    pub agrees: Option<bool>,
+    pub error: Option<String>,
+}
+
+impl From<&JudgeDecisionParams> for JudgeDecisionView {
+    fn from(params: &JudgeDecisionParams) -> Self {
+        Self {
+            turn_id: params.turn_id.clone(),
+            keyword_tier: params.keyword_tier.clone(),
+            judge_tier: params.judge_tier.clone(),
+            confidence: params.judge_confidence,
+            agrees: params.judge_agrees,
+            error: params.judge_error.clone(),
+        }
     }
 }
 
@@ -7606,6 +7685,28 @@ impl AppState {
                 entry.plan = None;
                 entry.plan_turn_id = None;
             }
+        }
+    }
+
+    /// judge.decisions.v1 (#3): latch the latest `judge/decision` verdict for
+    /// the session's status-row marker. Display only — callers must never
+    /// branch on the verdict. `params.session_id` is the routing key (same
+    /// discipline as [`Self::set_session_plan`]).
+    pub fn set_session_judge(&mut self, params: JudgeDecisionParams) {
+        let entry = self.session_autonomy_mut(&SessionKey(params.session_id.clone()));
+        entry.last_judge = Some(JudgeDecisionView::from(&params));
+    }
+
+    /// judge.decisions.v1 (#3): retire the status-row judge marker when the
+    /// session's next turn starts — a verdict describes the round that just
+    /// ended, so it survives its own turn's completion but not a new turn.
+    pub fn clear_session_judge(&mut self, session_id: &SessionKey) {
+        if let Some(entry) = self
+            .session_autonomy
+            .iter_mut()
+            .find(|s| &s.session_id == session_id)
+        {
+            entry.last_judge = None;
         }
     }
 

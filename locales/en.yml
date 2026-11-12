@@ -219,6 +219,9 @@ app:
   statusbar:
     agents: "%{count} agents"
     actions: "%{count} actions"
+    judge_agree: "judge ✓ %{conf}"
+    judge_disagree: "judge ✗ %{judge}≠%{keyword} %{conf}"
+    judge_error: "judge ⚠ %{error}"
     re_entering: "re-entering"
     retrying_attempt_max: "retrying (attempt %{attempt}/%{max})"
     retrying_attempt: "retrying (attempt %{attempt})"
