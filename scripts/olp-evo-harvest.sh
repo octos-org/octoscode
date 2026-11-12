@@ -98,6 +98,23 @@ if [ ! -f "$BOARD" ]; then
     exit 2
 fi
 
+# Hub guard BEFORE any mkdir/flock/board write: on a multi-machine
+# deployment only the hub harvests (the EVO counter and the byte cursors
+# are per-machine state). Unconfigured = single machine = no-op. A dry
+# run writes nothing and stays available everywhere. Exit 3 off-hub.
+if [ "$DRY_RUN" -eq 0 ]; then
+    if [ -f "$(dirname "$0")/olp-hub-guard.sh" ]; then
+        . "$(dirname "$0")/olp-hub-guard.sh"
+        olp_hub_guard olp-evo-harvest || exit 3
+    elif [ -n "${OLP_HUB_HOST:-}" ] \
+        || [ -f "${OLP_HUB_HOST_FILE:-$HOME/.octos/outer/hub-host}" ]; then
+        # A lone copy of this script without the guard library: a hub is
+        # configured but cannot be checked, so refuse rather than guess.
+        echo "error: olp-evo-harvest: hub 已配置,但找不到 olp-hub-guard.sh,未写入任何内容。" >&2
+        exit 3
+    fi
+fi
+
 if [ "$DRY_RUN" -eq 1 ]; then
     # Dry run: read-only across board/sources/state; print pending cards.
     # No state dir/lock/board creation or modification.
