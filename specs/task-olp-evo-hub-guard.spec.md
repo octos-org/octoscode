@@ -104,6 +104,6 @@ Scenario: 未配置 hub 时行为不变(critical)
 
 Scenario: 单独拷贝的脚本缺守卫库时,未配置放行、已配置拒绝
   Test: evo_lone_script_copy_without_guard_library_fails_closed
-  Given 只拷贝了 `olp-evo-retro.sh` 与 `olp-evo-lib.py` 的目录,没有 `olp-hub-guard.sh`
+  Given 拷贝了 `olp-evo-retro.sh` 及其依赖(`olp-evo-lib.py`、`olp-preflight.sh`)的目录,唯独没有 `olp-hub-guard.sh`
   When 把 `OLP_HUB_HOST` 设为本机名运行;再不配置 hub 运行
   Then 第一次以退出码 3 拒绝且 stderr 提到 `olp-hub-guard.sh`,状态目录未创建;第二次成功

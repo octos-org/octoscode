@@ -183,7 +183,8 @@ fn evo_lone_script_copy_without_guard_library_fails_closed() {
     let sb = Sandbox::new();
     let lone = sb.repo.join("lone-scripts");
     std::fs::create_dir_all(&lone).unwrap();
-    for name in ["olp-evo-retro.sh", "olp-evo-lib.py"] {
+    // Everything the retro needs except the guard library itself.
+    for name in ["olp-evo-retro.sh", "olp-evo-lib.py", "olp-preflight.sh"] {
         std::fs::copy(script(name), lone.join(name)).unwrap();
     }
     let run = |hub: Option<&str>| {
