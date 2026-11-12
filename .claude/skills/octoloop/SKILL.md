@@ -50,6 +50,18 @@ QUICKSTART 的发现命令为准。
    `scripts/olp-board-append.sh`,flock 原子)→ 立编号条目唤醒内环 →
    内环 ACK 后**隔离 worktree 独立复验** → 采认代推。安全红线见
    BOOT §5。
+   项目若显式 opt-in 结构化黑板，先看 loop/板头声明再查 event `state`；新板
+   首事件前仍返回 legacy，但第一条派单必须用 `item`。之后依次
+   item→receive→ack→review，查询用 inbox，正哨用 sentinel 的文字唤醒+
+   账本判定，`events.jsonl` 负哨继续挂。DRIFT 停自动调度，按精确字节
+   `--recovery-file` 补录，或用 `void` 隔离不属于账本的字节，禁止模糊匹配或
+   口头忽略。结构化板上 `> ACK(`、`### ACK` 这类手写变体（见下文规模化纪律 4）
+   会直接报 `suspected_ack` DRIFT，不依赖放宽哨的匹配；示例放进已闭合围栏。
+   escalate 由作者 `resolve` 关闭，投错的 item 由作者 `withdraw`；等待时带
+   `--since-head` 只对新增状态报信号。opt-in 后未闭合围栏也会以
+   opener 字节证据触发 DRIFT；追加同种且足够长的闭合行后恢复写入，围栏内示例
+   仍不可 recovery。sentinel 的 `TIMEOUT` JSON 行与退出码 3 必须同时处理。安装、回执、迁移及拒绝
+   示例见 `docs/OLP_STRUCTURED_BOARD.md`；不得宣称所有项目已经切换。
 5. **retro(进化环)**:①触发——战役收官,或进化黑板新卡 ≥ 10 张;
    ②命令——`scripts/olp-evo-harvest.sh <repo> &&
    scripts/olp-evo-retro.sh <repo>`(采集→简报,记录目录在

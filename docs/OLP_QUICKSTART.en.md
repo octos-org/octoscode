@@ -52,9 +52,23 @@ onboarding card instead of this page:
 npm install -g @octos-org/octoscode
 
 # ② lay the OLP scaffolding in your project (idempotent; never overwrites an existing file)
+# Option A: default legacy mode
 cd your-project/
 curl -fsSL https://raw.githubusercontent.com/octos-org/octoscode/main/scripts/olp-init.sh | bash
-#   (or clone this repo and run scripts/olp-init.sh)
+
+# ③ start the inner loop
+octoscode --stdio-command 'octos serve --stdio --solo'
+```
+
+For the experimental structured board, choose option B **before the first
+init** and do not run option A first. The structured tools must come from an
+absolute path to a local octoscode checkout:
+
+```bash
+# Option B: structured mode (instead of option A; do not run both in sequence)
+cd your-project/
+OCTOSCODE_REPO=/absolute/path/to/octoscode
+OLP_BOARD_MODE=structured bash "$OCTOSCODE_REPO/scripts/olp-init.sh"
 
 # ③ start the inner loop
 octoscode --stdio-command 'octos serve --stdio --solo'
@@ -79,6 +93,25 @@ not do for you, because they are the operator's explicit decisions:
 1. **API keys**: paste them yourself in the onboarding wizard on first entry to
    the TUI (three fields, five minutes).
 2. **Granting sandbox-free permission**: see the next section.
+
+### 2.5 Optional structured board
+
+Options A and B are alternatives; set `OLP_BOARD_MODE=structured` on the first
+init. It affects newly generated files only and installs four
+adjacent Python tools and creates a receive→execute→ack loop, a board without a
+bare ACK placeholder, and an independent lock. Existing files are never
+overwritten; without Python, init reports that structured capability is
+unavailable while the legacy shell tools remain usable.
+
+First inspect the generated structured loop/board header, then query
+`olp-board-event.py state --board <canonical-board>`. A fresh opt-in board still
+reports legacy before its first event, but its first dispatch must use `item`.
+Ordinary legacy boards keep the text workflow; structured/mixed boards use
+item→receive→ack→review. Use inbox for queries/waits and sentinel for the
+positive signal (text wakes, ledger decides); keep the `events.jsonl` negative
+sentry. DRIFT blocks automatic dispatch until an exact byte-evidence recovery
+or `void` closes it. See [`OLP_STRUCTURED_BOARD.en.md`](OLP_STRUCTURED_BOARD.en.md)
+for commands and safety boundaries.
 
 ### 0b. Permission-tier semantics (read this first; it saves two days)
 
@@ -182,8 +215,9 @@ herdr users get a second injection channel: `herdr agent list` to see the panes,
 ## 5. Smoke test (two minutes)
 
 1. Say hello in the TUI and confirm the main-tier model answers.
-2. Have the inner loop ACK the first board entry (the "board enabled" entry that
-   `olp-init.sh` generates) — that closes the read/write loop.
+2. In legacy mode, have the inner loop ACK init's first entry. In structured
+   mode, use the installed event CLI for one item→receive→ack→review lifecycle.
+   Either path closes the read/write loop.
 3. With herdr: `herdr agent list` should show `octoscode | <pane> | idle`.
 
 ## 6. Failure quick-reference
@@ -207,6 +241,8 @@ herdr users get a second injection channel: `herdr agent list` to see the panes,
   complete set of field lessons
 - [`OLP_OUTER_BOOT.md`](OLP_OUTER_BOOT.md) — the outer operator card and tactics
   handbook
+- [`OLP_STRUCTURED_BOARD.en.md`](OLP_STRUCTURED_BOARD.en.md) — optional ledger,
+  migration, DRIFT, and reconciliation
 - [`OCTOLOOP_GUIDE.md`](OCTOLOOP_GUIDE.md) — full guide, mechanisms, platform
   matrix
 - README, "Quickstart (solo onboarding)" — the single-loop path, screen by

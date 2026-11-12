@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# For ledger-aware inbox and drift signals, use the adjacent Python tools.
 # OLP 板面侦听哨(随仓库发行版;`scripts/olp-init.sh` 会把它安装到
 # ~/.octos/outer/watch-board.sh 供外环运行态调用)。
 #
