@@ -14,13 +14,21 @@
 规则:
   - 条目 = 一个 `### <数字>` 标题到下一个 `###`/`##` 标题之前的全部行。
     代码围栏(```)里的标题不算。
-  - 已闭环 = 条目里最后一条 `ACK(` 行是 `ACK(done` 或 `ACK(wontdo`。
+  - 已闭环,满足其一即可:
+      a. 外环已经下了结论:板上关于 #N 最后出现的一行是采认或打回
+         (`> 外环(…)·采认(#N)` / `·打回(#N)`),或者 #N 被改判作废。结论
+         之后单元又推送、内环又 ACK 的,不算闭环。
+      b. 板上没有关于 #N 的任何判词或登记时,沿用旧规则:条目里最后一条
+         `ACK(` 行是 `ACK(done` 或 `ACK(wontdo`。
     `ACK(blocked`、没有 ACK、旧格式 `ACK:` 的条目不动。
   - 最近的 --keep 个编号条目(默认 10)不论是否闭环都原样保留。
-  - 桩保留标题、条目里所有 `ACK(` 行,以及写板助手 `--key` 留下的
-    `<!-- olp-key: … -->` 标记(归档后同一个键重发仍然命中):编号不断档(下一个编号仍是板上
-    最大号 +1),内环按"最小未 ACK 条目"找活时会跳过它,`#12` 的引用仍能
-    在板上找到并指向归档文件。
+  - 桩保留标题和条目里所有"给机器读"的行:`ACK(` 行、`unit:` 行、写板
+    助手 `--key` 留下的 `<!-- olp-key: … -->` 标记,以及署名的行首定式
+    (采认、打回、搁置、改判、单元的推送登记、内环的署名 ACK)。这些判词
+    按 `#N` 归属,物理上可能落在别的条目下面,不能跟着那个条目的正文离开
+    黑板。于是:编号不断档(下一个编号仍是板上最大号 +1),内环按"最小未
+    ACK 条目"找活时会跳过它,`#12` 的引用仍能在板上找到,收件箱、本地 PR
+    状态、hub 的推送钩子读到的内容不变。
   - 板的前言、`##` 小节、非编号标题的内容原样保留,顺序不变。
   - 归档文件只追加,每个条目前有一行 `<!-- olp-archived-entry: N … -->`;
     已在归档文件里的条目不会重复写入,中断后重跑是安全的。
@@ -86,10 +94,52 @@ def split_blocks(lines):
     return blocks
 
 
+UNIT_LINE = re.compile(r"^unit:\s*\S+\s*$")
+# 判词与登记的行首定式(剥掉 `> `、`**` 之后判断)。
+SIGNED_OUTER = re.compile(r"^外环\([^)]+\)·(采认|打回|搁置)\(#(\d+)\)")
+SIGNED_VOID = re.compile(r"^外环\([^)]+\)·改判\(作废 #(\d+)\)")
+SIGNED_PUSH = re.compile(r"^单元\([^)]+\)·本地复验通过\(#(\d+)\)")
+SIGNED_INNER_ACK = re.compile(
+    r"^内环\([^)]+\)·(?:#(\d+)\s*)?ACK\((done|wontdo|blocked)\)(?:[^:：]*[:：]\s*#(\d+))?"
+)
+
+
+def strip_quote(line):
+    s = line.lstrip()
+    while True:
+        if s.startswith("> "):
+            s = s[2:]
+        elif s.startswith(">"):
+            s = s[1:]
+        elif s.startswith("**"):
+            s = s[2:]
+        else:
+            break
+        s = s.lstrip()
+    return s
+
+
+def is_signed_form(line):
+    signed = strip_quote(line)
+    return bool(
+        SIGNED_OUTER.match(signed)
+        or SIGNED_VOID.match(signed)
+        or SIGNED_PUSH.match(signed)
+        or SIGNED_INNER_ACK.match(signed)
+    )
+
+
 def ack_lines(entry_lines):
-    """The lines a stub must keep, outside code fences and in order: the
-    entry's `ACK(` lines and the idempotency markers olp-board-append.sh
-    writes for `--key` (a resend must still find its key on the board)."""
+    """The lines a stub must keep, outside code fences and in order — every
+    line other tools read by machine:
+    - the entry's `ACK(` lines;
+    - the idempotency markers olp-board-append.sh writes for `--key` (a
+      resend must still find its key on the board);
+    - the `unit:` line (the hub's git hook reads it on a rework push);
+    - signed line-start forms: verdicts, snoozes, overrides, push records and
+      signed inner ACKs. They attach to an entry by `#N` and may physically
+      sit under a different entry, so they must not leave the board with it.
+    """
     out = []
     in_fence = False
     for line in entry_lines:
@@ -97,12 +147,69 @@ def ack_lines(entry_lines):
         if stripped.startswith("```") or stripped.startswith("~~~"):
             in_fence = not in_fence
             continue
-        if not in_fence and (line.startswith("ACK(") or line.startswith(KEY_MARK)):
+        if in_fence:
+            continue
+        bare = line.rstrip("\r\n")
+        if (
+            line.startswith("ACK(")
+            or line.startswith(KEY_MARK)
+            or UNIT_LINE.match(bare)
+            or is_signed_form(bare)
+        ):
             out.append(line)
     return out
 
 
-def is_closed(entry_lines):
+def board_verdicts(lines):
+    """Scan the whole board for signed forms. Returns (latest, voided):
+    latest[N] is the kind of the last event about #N among accepted /
+    returned / pushed / inner_ack; voided is the set of overridden entries."""
+    latest, voided = {}, set()
+    in_fence = False
+    current = None
+    for line in lines:
+        bare = line.rstrip("\r\n")
+        stripped = bare.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if bare.startswith("### ") or bare.startswith("## "):
+            m = HEADING.match(bare)
+            current = int(m.group(1)) if m else None
+            continue
+        signed = strip_quote(bare)
+        m = SIGNED_OUTER.match(signed)
+        if m:
+            if m.group(1) != "搁置":
+                latest[int(m.group(2))] = "accepted" if m.group(1) == "采认" else "returned"
+            continue
+        m = SIGNED_VOID.match(signed)
+        if m:
+            voided.add(int(m.group(1)))
+            continue
+        m = SIGNED_PUSH.match(signed)
+        if m:
+            latest[int(m.group(1))] = "pushed"
+            continue
+        m = SIGNED_INNER_ACK.match(signed)
+        if m:
+            ref = m.group(1) or m.group(3)
+            target = int(ref) if ref else current
+            if target is not None:
+                latest[target] = "inner_ack"
+    return latest, voided
+
+
+def is_closed(number, entry_lines, latest, voided):
+    """Closed when the outer loop has ruled on it — accepted, returned or
+    overridden, with nothing newer — or, for boards without verdict lines,
+    when the entry's own last ACK is done or wontdo."""
+    if number in voided:
+        return True
+    if number in latest:
+        return latest[number] in ("accepted", "returned")
     acks = [l for l in ack_lines(entry_lines) if l.startswith("ACK(")]
     if not acks:
         return False
@@ -169,10 +276,13 @@ def main():
 
         entry_positions = [i for i, b in enumerate(blocks) if b[0] == "entry"]
         protected = set(entry_positions[len(entry_positions) - args.keep:]) if args.keep else set()
+        latest, voided = board_verdicts(lines)
         targets = [
             i
             for i in entry_positions
-            if i not in protected and not is_stub(blocks[i][2]) and is_closed(blocks[i][2])
+            if i not in protected
+            and not is_stub(blocks[i][2])
+            and is_closed(blocks[i][1], blocks[i][2], latest, voided)
         ]
         if not targets:
             print("olp-board-archive: 没有可归档的条目")

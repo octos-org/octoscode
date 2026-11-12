@@ -299,6 +299,95 @@ ACK(done): 依赖到位,commit 123
     );
 }
 
+/// Scenario: 多机部署的卡按外环的结论闭环,给机器读的行留在板上
+#[test]
+fn board_archive_follows_outer_verdicts_and_keeps_machine_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = dir.path().join("board.md");
+    // Cluster-style cards have no ACK under the entry: the unit's push
+    // record and the outer loop's verdict are appended at the end of the
+    // board, physically under the last entry.
+    let verdicts = "\
+> 单元(m07)·本地复验通过(#1): task/1 @ aaaaaaaaaaaa 复验 m07-ver
+> 外环(hub)·采认(#1): 通过
+> 单元(m08)·本地复验通过(#2): task/2 @ bbbbbbbbbbbb 复验 m08-ver
+> 外环(hub)·采认(#2): 通过
+> 单元(m08)·本地复验通过(#2): task/2 @ cccccccccccc 复验 m08-ver
+> 内环(m07)·#5 ACK(done): commit x
+> 外环(hub)·打回(#5): 缺测试
+";
+    let text = format!(
+        "\
+### 1. 已采认
+unit: m07
+
+正文一。
+<!-- olp-key: hub:card-1 n=1 -->
+
+### 2. 采认之后单元又推送
+unit: m08
+
+正文二。
+
+### 3. 被作废
+
+正文三。
+
+### 4. 改判作废 #3
+> 外环(hub)·改判(作废 #3): 以本条为准
+
+正文四。
+
+### 5. 被打回
+unit: m07
+
+正文五。
+
+{verdicts}"
+    );
+    std::fs::write(&board, &text).unwrap();
+    let out = archive(&board, &["--keep", "0"], &[]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let listed = stdout(&out);
+    for n in ["#1 ", "#3 ", "#5 "] {
+        assert!(listed.contains(&format!("archived {n}")), "{listed}");
+    }
+    assert_eq!(listed.matches("archived #").count(), 3, "{listed}");
+
+    let after = read(&board);
+    let expected = format!(
+        "\
+### 1. 已采认
+unit: m07
+<!-- olp-key: hub:card-1 n=1 -->
+<!-- olp-archived: board.archive.md -->
+
+### 2. 采认之后单元又推送
+unit: m08
+
+正文二。
+
+### 3. 被作废
+<!-- olp-archived: board.archive.md -->
+
+### 4. 改判作废 #3
+> 外环(hub)·改判(作废 #3): 以本条为准
+
+正文四。
+
+### 5. 被打回
+unit: m07
+{verdicts}<!-- olp-archived: board.archive.md -->
+
+"
+    );
+    assert_eq!(after, expected);
+    let archived = read(&dir.path().join("board.archive.md"));
+    for body in ["正文一。", "正文三。", "正文五。"] {
+        assert!(archived.contains(body), "{archived}");
+    }
+}
+
 /// Scenario: 归档期间板被改动则不替换
 #[test]
 fn board_archive_aborts_when_board_changes_underneath() {
