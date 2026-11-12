@@ -3331,6 +3331,11 @@ fn appui_feature_tokens_for(old_server: bool) -> Vec<String> {
         UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1,
         UI_PROTOCOL_FEATURE_PLAN_TODOS_V1,
         crate::model::APPUI_FEATURE_BACKGROUND_ACTIVITY_V1,
+        // Requested only because the card is drawn from BOTH the live
+        // notification and the hydrated row (`fold_hydrated_peer_messages`).
+        // A client that asks for this and drops either one would show the
+        // stored prompt as a prompt its user typed.
+        crate::model::APPUI_FEATURE_PEER_TEAM_MESSAGE_RECORD_V1,
         UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2,
         crate::model::APPUI_FEATURE_TURN_STEER_DROPPED_V1,
         crate::model::APPUI_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,
@@ -3691,6 +3696,11 @@ fn rpc_value_to_app_event(
             return Ok(Some(background_activity_notification_to_client_event(
                 params,
             )));
+        }
+        // octos UPCR-2026-RF506E103: `peer/team/message_received`, decoded
+        // tui-locally for the same reason.
+        if method == crate::model::APPUI_METHOD_PEER_TEAM_MESSAGE_RECEIVED {
+            return Ok(Some(peer_team_message_received_to_client_event(params)));
         }
         return Ok(Some(notification_to_client_event(method, params)));
     }
@@ -4221,6 +4231,8 @@ fn success_response_to_app_event(
             }
         }
         methods::SESSION_HYDRATE => {
+            let mut result = result;
+            fold_hydrated_peer_messages(result.get_mut("messages"));
             let diagnostics =
                 context_cache_diagnostics_from_context_state(result.get("context_state"));
             match serde_json::from_value::<SessionHydrateResult>(result) {
@@ -4253,6 +4265,12 @@ fn success_response_to_app_event(
             Err(err) => Ok(Some(autonomy_decode_error(methods::SESSION_LIST, err))),
         },
         methods::SESSION_ROLLBACK => {
+            let mut result = result;
+            fold_hydrated_peer_messages(
+                result
+                    .get_mut("thread")
+                    .and_then(|thread| thread.get_mut("messages")),
+            );
             match serde_json::from_value::<SessionRollbackResult>(result) {
                 Ok(result) => Ok(Some(ClientEvent::SessionRollback(result))),
                 Err(err) => Ok(Some(autonomy_decode_error(methods::SESSION_ROLLBACK, err))),
@@ -5261,6 +5279,59 @@ fn background_activity_notification_to_client_event(params: Value) -> ClientEven
             ),
         )
         .into(),
+    }
+}
+
+/// octos UPCR-2026-RF506E103: decodes the durable
+/// `peer/team/message_received` notification into the typed
+/// [`ClientEvent::PeerTeamMessageReceived`] via the tui-local
+/// [`crate::model::PeerTeamMessageReceivedParams`] mirror. Malformed params
+/// surface as the standard `invalid_params` error event rather than wedging
+/// the stream.
+fn peer_team_message_received_to_client_event(params: Value) -> ClientEvent {
+    match serde_json::from_value::<crate::model::PeerTeamMessageReceivedParams>(params) {
+        Ok(event) => ClientEvent::PeerTeamMessageReceived(event),
+        Err(err) => app_error(
+            "invalid_params",
+            format!(
+                "failed to decode UI protocol params for {}: {err}",
+                crate::model::APPUI_METHOD_PEER_TEAM_MESSAGE_RECEIVED
+            ),
+        )
+        .into(),
+    }
+}
+
+/// octos UPCR-2026-RF506E103: a recorded workspace peer message comes back
+/// from `session/hydrate` and `session/rollback` as a `user` row whose
+/// `content` is the prompt the model was given and whose `peer_message` object
+/// names the sender and the message. The vendored `HydratedMessage` predates
+/// `peer_message` and would drop it, leaving a row indistinguishable from a
+/// prompt this client's user typed.
+///
+/// Until the pinned octos-core carries the field, fold it into the two fields
+/// the vendored row does keep, before the typed decode: `source` becomes
+/// [`crate::model::WORKSPACE_PEER_MESSAGE_SOURCE`] and `content` becomes the
+/// `peer_message` object as JSON. The store reads the pair back in
+/// `hydrated_peer_message_record`. A `peer_message` that is not an object
+/// still marks the row, so the store hides it instead of showing the stored
+/// prompt.
+pub(crate) fn fold_hydrated_peer_messages(messages: Option<&mut Value>) {
+    let Some(rows) = messages.and_then(Value::as_array_mut) else {
+        return;
+    };
+    for row in rows {
+        let Some(row) = row.as_object_mut() else {
+            continue;
+        };
+        let Some(record) = row.remove("peer_message").filter(|value| !value.is_null()) else {
+            continue;
+        };
+        row.insert(
+            "source".into(),
+            Value::String(crate::model::WORKSPACE_PEER_MESSAGE_SOURCE.into()),
+        );
+        row.insert("content".into(), Value::String(record.to_string()));
     }
 }
 
@@ -15242,5 +15313,107 @@ done
             notification,
             AppUiEvent::Protocol(UiNotification::Warning(_))
         ));
+    }
+
+    /// octos UPCR-2026-RF506E103 — the frame names the RECIPIENT session and
+    /// the thread the message starts; both must survive the tui-local decode,
+    /// which the vendored codec would turn into `unknown_notification`.
+    #[test]
+    fn should_decode_peer_team_message_received_when_the_frame_arrives() {
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "method": "peer/team/message_received",
+            "params": {
+                "session_id": "team:local:tui#coding-b",
+                "topic": "coding-b",
+                "thread_id": "0193-thread",
+                "message_id": "team:local:tui#coding-b:4:1762776000000000000",
+                "seq": 4,
+                "persisted_at": "2026-11-10T12:00:00Z",
+                "peer_message": {"from_agent": "workspace-1", "text": "rebase", "assignment": true}
+            }
+        })
+        .to_string();
+        let event = rpc_text_to_app_event_with_pending(&frame, &mut HashMap::new())
+            .expect("frame decodes")
+            .expect("client event");
+        let ClientEvent::PeerTeamMessageReceived(received) = event else {
+            panic!("expected a peer message event, got {event:?}");
+        };
+        assert_eq!(
+            received.session_id,
+            SessionKey("team:local:tui#coding-b".into())
+        );
+        assert_eq!(received.thread_id, "0193-thread");
+        assert_eq!(received.peer_message.from_agent, "workspace-1");
+        assert_eq!(received.peer_message.text, "rebase");
+        assert!(received.peer_message.assignment);
+
+        let malformed = json!({
+            "jsonrpc": "2.0",
+            "method": "peer/team/message_received",
+            "params": {"session_id": "team:local:tui#coding-b"}
+        })
+        .to_string();
+        let event = rpc_text_to_app_event_with_pending(&malformed, &mut HashMap::new())
+            .expect("frame decodes")
+            .expect("client event");
+        assert!(
+            !matches!(event, ClientEvent::PeerTeamMessageReceived(_)),
+            "a frame without a sender is an error event, never a card: {event:?}"
+        );
+    }
+
+    /// The vendored `HydratedMessage` has no `peer_message` field, so the
+    /// typed decode alone would hand the store the stored prompt as an
+    /// ordinary user row. The fold must mark the row before that decode.
+    #[test]
+    fn should_mark_hydrated_peer_message_rows_before_the_typed_decode() {
+        let mut result = json!({
+            "session_id": "team:local:tui#coding-b",
+            "cursor": {"stream": "session", "seq": 9},
+            "messages": [
+                {"seq": 0, "role": "user", "content": "typed prompt",
+                 "persisted_at": "2026-11-10T11:59:00Z"},
+                {"seq": 2, "role": "user", "content": "[workspace-peer-message] stored prompt",
+                 "thread_id": "0193-thread", "persisted_at": "2026-11-10T12:00:00Z",
+                 "peer_message": {"from_agent": "workspace-1", "text": "rebase"}},
+                {"seq": 4, "role": "user", "content": "[workspace-peer-message] other",
+                 "persisted_at": "2026-11-10T12:01:00Z", "peer_message": "not an object"}
+            ]
+        });
+        fold_hydrated_peer_messages(result.get_mut("messages"));
+        let hydrate: SessionHydrateResult =
+            serde_json::from_value(result).expect("folded result decodes");
+        let rows = hydrate.messages.expect("messages");
+
+        assert_eq!(rows[0].source, None, "a typed prompt is untouched");
+        assert_eq!(rows[0].content, "typed prompt");
+        for row in &rows[1..] {
+            assert_eq!(
+                row.source.as_deref(),
+                Some(crate::model::WORKSPACE_PEER_MESSAGE_SOURCE),
+                "every row the server marked is marked for the store"
+            );
+            assert!(
+                !row.content.contains("[workspace-peer-message]"),
+                "the stored prompt never reaches the store: {}",
+                row.content
+            );
+        }
+        let record: crate::model::PeerMessageRecord =
+            serde_json::from_str(&rows[1].content).expect("record round-trips");
+        assert_eq!(record.from_agent, "workspace-1");
+        assert_eq!(record.text, "rebase");
+        assert!(!record.assignment);
+    }
+
+    /// The record feature is asked for by default and withheld from servers
+    /// addressed with the compatibility baseline.
+    #[test]
+    fn should_request_peer_message_records_only_outside_the_old_server_baseline() {
+        let feature = crate::model::APPUI_FEATURE_PEER_TEAM_MESSAGE_RECORD_V1;
+        assert!(appui_feature_tokens_for(false).iter().any(|t| t == feature));
+        assert!(!appui_feature_tokens_for(true).iter().any(|t| t == feature));
     }
 }

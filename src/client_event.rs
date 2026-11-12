@@ -109,6 +109,12 @@ pub enum ClientEvent {
     /// OWNS the emitter. Durable ⇒ replayed on reconnect, so a client that
     /// disconnected mid-loop sees the whole run rather than losing its middle.
     BackgroundActivity(crate::model::BackgroundActivityParams),
+    /// octos UPCR-2026-RF506E103: durable `peer/team/message_received`
+    /// notification — another member of the workspace team sent this session a
+    /// message. The store shows it as an attributed card in the RECIPIENT
+    /// session. Durable ⇒ replayed on reconnect, so the store handler is
+    /// idempotent (a card whose thread is already shown is a no-op).
+    PeerTeamMessageReceived(crate::model::PeerTeamMessageReceivedParams),
     /// octos#1801 v2: `peer/gather` result — the peer blackboard rows
     /// (brief + latest result per staged peer). The store composes the
     /// `/gather` synthesis prompt from these and submits it into the CURRENT

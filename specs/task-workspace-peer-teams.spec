@@ -9,6 +9,8 @@ tags: [tui, oup, peers, workspace]
 Independent local launches share an authenticated WebSocket server and keep
 separate conversations. `/agents` discovers members, changes coordinator and
 sends messages using server-owned peer state. Explicit stdio remains supported.
+A message another member sends is shown to the recipient's user as a card
+attributed to the sending agent, never as a prompt that user typed.
 
 ## Acceptance
 
@@ -55,3 +57,31 @@ Scenario: older installed backends still launch
 Scenario: inherited data root selects the server's profile registry
   Test: inherited_octos_home_matches_server_profile_and_runtime_roots
   Implicit shared launches honor inherited OCTOS_HOME for profile discovery and runtime placement; an explicit data-dir still wins, and remote launches do not scan local profiles.
+
+Scenario: an incoming peer message is an attributed card
+  Test: peer_message_received_adds_one_card_to_the_recipient_session
+  With peer.team_message_record.v1 the recipient session shows one card naming the sending agent; the durable replay adds no second card and another session gets none.
+
+Scenario: the card survives reconnect and never shows the stored prompt
+  Test: hydrated_peer_message_row_is_the_card_and_never_the_stored_prompt
+  The hydrated record row becomes the same card in place, with the prompt the model was given nowhere in the transcript.
+
+Scenario: an unreadable record is hidden
+  Test: hydrated_peer_message_row_without_a_readable_record_is_hidden
+  A recorded row whose sender cannot be read is omitted instead of appearing as a prompt the user typed.
+
+Scenario: the card is drawn apart from the user's prompts
+  Test: peer_message_card_is_attributed_and_never_drawn_as_a_user_prompt
+  The card has its own header and gutter, labels an assignment, and shares no marker with the user block.
+
+Scenario: another agent's text cannot drive the terminal
+  Test: peer_message_card_strips_terminal_controls_and_requires_a_sender
+  Control sequences are removed from the sender and the body, the sender is one bounded line, and a card with no sender is not created.
+
+Scenario: a card is not the user's question or a rewind target
+  Test: rewind_turns_skip_peer_message_cards
+  The rewind picker neither offers nor counts a card, matching the server, and the pinned question header keeps the prompt the user typed (latest_question_skips_a_peer_message_card).
+
+Scenario: the record feature is requested and decoded locally
+  Test: should_decode_peer_team_message_received_when_the_frame_arrives
+  The notification decodes before the pinned codec, hydrate and rollback rows are marked before the typed decode (should_mark_hydrated_peer_message_rows_before_the_typed_decode), and the feature is withheld from the old-server baseline (should_request_peer_message_records_only_outside_the_old_server_baseline).

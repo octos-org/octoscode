@@ -47,7 +47,9 @@ pub(crate) fn latest(app: &AppState) -> Option<Question<'_>> {
         .messages
         .iter()
         .rev()
-        .find(|message| message.role.as_str() == "user" && !message.content.trim().is_empty())
+        .find(|message| {
+            crate::model::is_typed_user_message(message) && !message.content.trim().is_empty()
+        })
         .map(|message| Question {
             content: &message.content,
             label: "question_header.latest",
@@ -162,4 +164,36 @@ pub(super) fn render_detail(frame: &mut impl FrameLike, app: &AppState, palette:
         )),
         inner,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::SessionView;
+    use octos_core::{Message, SessionKey};
+
+    /// octos UPCR-2026-RF506E103 — the header pins what the USER last asked.
+    /// A message from another agent arriving afterwards must not replace it.
+    #[test]
+    fn latest_question_skips_a_peer_message_card() {
+        let card = crate::model::PeerMessageRecord {
+            from_agent: "workspace-1".into(),
+            text: "rebase onto main".into(),
+            assignment: false,
+        }
+        .into_card_message(Some("t-peer".into()), chrono::Utc::now())
+        .expect("card");
+        let session = SessionView {
+            id: SessionKey("local:test".into()),
+            title: "test".into(),
+            profile_id: Some("coding".into()),
+            messages: vec![Message::user("what I asked"), card],
+            tasks: vec![],
+            live_reply: None,
+        };
+        let app = AppState::new(vec![session], 0, "ready".into(), None, false);
+        let question = latest(&app).expect("a question is pinned");
+        assert_eq!(question.content, "what I asked");
+        assert_eq!(question.label, "question_header.latest");
+    }
 }

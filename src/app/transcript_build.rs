@@ -239,13 +239,7 @@ pub fn finalized_history_lines_range(
     };
     let anchored_activity_logs = anchored_turn_activity_logs(app, session);
     for (idx, message) in session.messages.iter().enumerate().skip(start) {
-        push_message_block(
-            &mut lines,
-            palette,
-            message.role.as_str(),
-            &message.content,
-            wrap_width,
-        );
+        push_committed_message_block(&mut lines, palette, message, wrap_width);
         // Committed reasoning renders here only when the session opted in via
         // the `/thinking` display toggle (off = codex-style quiet default).
         push_reasoning_block(
@@ -369,13 +363,7 @@ pub fn finalized_history_lines_range_dedup_live(
                 );
             }
         } else {
-            push_message_block(
-                &mut lines,
-                palette,
-                message.role.as_str(),
-                &message.content,
-                wrap_width,
-            );
+            push_committed_message_block(&mut lines, palette, message, wrap_width);
         }
         // Committed reasoning renders here only when the session opted in via
         // the `/thinking` display toggle (off = codex-style quiet default).
@@ -948,13 +936,7 @@ pub(super) fn transcript_render_model(
 
         for (idx, message) in session.messages.iter().enumerate() {
             let message_start = lines.len();
-            push_message_block(
-                &mut lines,
-                palette,
-                message.role.as_str(),
-                &message.content,
-                wrap_width,
-            );
+            push_committed_message_block(&mut lines, palette, message, wrap_width);
             // Codex-style: the verbose committed `reasoning_content` is
             // intentionally NOT rendered into scrollback. The data is kept on the
             // message for a future /thinking reveal; we just don't push it here.
@@ -1390,6 +1372,72 @@ pub(super) fn push_user_message_block(
             Span::styled("▌ ", gutter),
             Span::styled(text.to_string(), body),
         ]));
+    }
+}
+
+/// One committed transcript row. A recorded workspace peer message draws as
+/// an attributed card; every other row keeps the block of its role.
+pub(super) fn push_committed_message_block(
+    lines: &mut Vec<Line<'static>>,
+    palette: Palette,
+    message: &octos_core::Message,
+    width: usize,
+) {
+    if let Some(card) = crate::model::peer_message_card(message) {
+        push_peer_message_card(lines, palette, card, width);
+        return;
+    }
+    push_message_block(
+        lines,
+        palette,
+        message.role.as_str(),
+        &message.content,
+        width,
+    );
+}
+
+/// A message another member of the workspace team sent this session (octos
+/// UPCR-2026-RF506E103): a header naming the sender, then the body behind a
+/// plain gutter. It deliberately shares nothing with the user block (accent
+/// gutter, reverse-video body), so another agent's words never read as a
+/// prompt the user typed. The body is wrapped here, to `width`, so a long
+/// line keeps the gutter on every row instead of spilling out of the card.
+pub(super) fn push_peer_message_card(
+    lines: &mut Vec<Line<'static>>,
+    palette: Palette,
+    card: crate::model::PeerMessageCard<'_>,
+    width: usize,
+) {
+    if !lines.is_empty() && !line_is_blank(lines.last()) {
+        lines.push(Line::from(""));
+    }
+    let header = if card.assignment {
+        t!("workspace_team.assignment_card", agent = card.from_agent)
+    } else {
+        t!("workspace_team.message_card", agent = card.from_agent)
+    };
+    lines.push(Line::from(vec![
+        Span::styled("⇢ ", palette.muted()),
+        Span::styled(
+            header.into_owned(),
+            palette.muted().add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    if card.text.trim().is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("│ ", palette.muted()),
+            Span::styled("<empty>", palette.muted()),
+        ]));
+        return;
+    }
+    let budget = width.saturating_sub(2);
+    for raw_line in card.text.lines() {
+        for row in wrap_display_width(raw_line.trim_end(), budget) {
+            lines.push(Line::from(vec![
+                Span::styled("│ ", palette.muted()),
+                Span::styled(row, palette.text()),
+            ]));
+        }
     }
 }
 
