@@ -226,11 +226,11 @@ goal 达成后**必须显式收口**,否则变僵尸拦截后续 goal:
 |---|---|---|
 | Linux | 全功率 | 全部能力含 outer-duty 内核锁、bwrap 沙箱档 |
 | WSL2 | 等同 Linux | prctl//proc/bwrap/bash/herdr 全在,实战结论直接适用 |
-| macOS | 可用,两缺口 | ①outer-duty 锁不可用(Linux-only,多外环退回值班簿纪律层+operator 裁决);②bwrap 档为 Linux 特性,权限档 1-4 沙箱语义不成立;herdr 未验证,降级 tmux(`--` 分隔坑见 BOOT) |
+| macOS | 可用,一缺口 | outer-duty 锁可用(经守护进程实现死亡耦合);bwrap 档为 Linux 特性,权限档 1-4 沙箱语义不成立;herdr 未验证,降级 tmux(`--` 分隔坑见 BOOT) |
 | Windows 原生 | 不推荐 | octoscode 构建未完整验证(CI windows job backlog 在案);bash 脚本/herdr/tmux 缺失,外环驱动观测通道瘫;活 serve 的 goal archive/reopen 一律 fail closed;请用 WSL2 |
 
-注:①outer-duty 锁的权威语义见协议 R7(守护式死亡耦合,Linux-only,
-非 Linux unsupported 退出 2,Windows LockFileEx 另立条目);②值班簿
+注:①outer-duty 锁的权威语义见协议 R7(守护式死亡耦合,Linux 与 macOS,
+其他平台 unsupported 退出 2,Windows LockFileEx 另立条目);②值班簿
 在任何平台都只是提示性目录,不构成所有权;③平台能力变化时先改
 协议/模块 doc,本矩阵随后同步——本表不发明新承诺。
 

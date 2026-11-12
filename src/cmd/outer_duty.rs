@@ -1,7 +1,8 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 //! `octoscode outer-duty` (OUTER_LOOP_REVIEW #38/#38-r1): hold/check
-//! entrypoints over [`crate::outer_duty`]. Linux-only (#38-r1 adjudication; macOS builds strip the kernel-adjudication module).
+//! entrypoints over [`crate::outer_duty`]. Linux and macOS; other
+//! platforms strip the kernel-adjudication module.
 
 use super::OuterDutyArgs;
 use crate::outer_duty::{self, DutyState};
@@ -55,8 +56,9 @@ fn run_hold(args: &OuterDutyArgs, project: &std::path::Path) -> i32 {
         }
     };
     // #38-r2: spawn first (the sidecar wants the child pid), guardian
-    // death-coupled (setpgid + PDEATHSIG) — the wrapper is the sole fd
-    // holder and waits; child exit ends the wrapper and releases the lock.
+    // death-coupled (Linux: setpgid + PDEATHSIG, wrapper sole fd holder;
+    // macOS: a guardian process between wrapper and agent) — the wrapper
+    // waits; child exit ends the wrapper and releases the lock.
     let mut child = match outer_duty::spawn_holder_child(&args.command) {
         Ok(child) => child,
         Err(err) => {
@@ -72,8 +74,8 @@ fn run_hold(args: &OuterDutyArgs, project: &std::path::Path) -> i32 {
         &args.duties,
         Some(child.id()),
     );
-    // The wrapper keeps its fd while waiting — both holders must die before
-    // the lock is released.
+    // The wrapper keeps its fd while waiting — every fd holder must die
+    // before the lock is released.
     let status = match child.wait() {
         Ok(status) => status,
         Err(err) => {
