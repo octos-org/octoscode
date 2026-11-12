@@ -383,8 +383,8 @@ exactly the same way as one that is still working.
 | [`docs/OCTOLOOP_GUIDE.md`](docs/OCTOLOOP_GUIDE.md) | full guide, mechanisms, platform matrix |
 | [`docs/OCTOLOOP_FEATURES.md`](docs/OCTOLOOP_FEATURES.md) | one-page capability panorama |
 
-On platforms: Linux is full power. macOS works with two gaps — the outer-duty
-authority lock is Linux-only, and the sandbox tiers do not apply. On Windows,
+On platforms: Linux is full power. macOS works, including the outer-duty
+authority lock, with one gap — the sandbox tiers do not apply. On Windows,
 use WSL2.
 
 ---
