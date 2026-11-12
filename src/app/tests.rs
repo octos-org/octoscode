@@ -116,6 +116,7 @@ mod tests {
             emitted_at_ms: 1_760_000_000_000,
             dropped_count: None,
             suppressed: false,
+            report: None,
         }
     }
 
@@ -286,6 +287,214 @@ mod tests {
         assert!(
             lines.iter().any(|line| line.contains("suppressed")),
             "the marker row itself is visible: {lines:?}"
+        );
+    }
+
+    // ── agent progress reports (octos UPCR-2026-R3DB2ECCA) ───────────────
+
+    fn agent_report_row(kind: &str, text: &str) -> crate::model::BackgroundActivityParams {
+        crate::model::BackgroundActivityParams {
+            origin_kind: "agent".into(),
+            origin_label: None,
+            report: Some(crate::model::AgentReportParams {
+                kind: kind.into(),
+                turn_id: None,
+                next_step: None,
+                evidence: None,
+            }),
+            ..background_activity_row("dev:local:a", "main", "", text)
+        }
+    }
+
+    /// Once the turn a report came from is over, the reply is the agent's
+    /// current word. The report folds to its header so a finished turn's
+    /// blocker does not sit under a later answer as if it still held.
+    #[test]
+    fn agent_report_folds_to_its_header_when_its_turn_is_over() {
+        let mut app = two_session_app();
+        let turn = octos_core::ui_protocol::TurnId::new();
+        let mut blocker = agent_report_row("blocker", "tests need a key");
+        blocker.report.as_mut().expect("report").turn_id = Some(turn.0.to_string());
+        app.push_background_activity(blocker);
+
+        app.sessions[0].live_reply = Some(crate::model::LiveReply {
+            turn_id: turn.clone(),
+            text: String::new(),
+        });
+        let running = background_activity_lines(&app, &app.sessions[0].clone());
+        assert!(
+            running
+                .iter()
+                .any(|line| line.contains("Blocked: tests need a key")),
+            "shown while its turn runs: {running:?}"
+        );
+
+        app.sessions[0].live_reply = None;
+        let over = background_activity_lines(&app, &app.sessions[0].clone());
+        assert_eq!(over.len(), 1, "header only: {over:?}");
+        assert!(
+            over[0].contains("Agent reports · 1 · ctrl+o to expand"),
+            "{over:?}"
+        );
+
+        app.expanded_tool_outputs = true;
+        let expanded = background_activity_lines(&app, &app.sessions[0].clone());
+        assert!(
+            expanded
+                .iter()
+                .any(|line| line.contains("Blocked: tests need a key")),
+            "still readable on demand: {expanded:?}"
+        );
+    }
+
+    /// A staged peer's report shown in the session that staged it follows the
+    /// PEER's turn: current while the peer works, even when this session is
+    /// idle, and folded once the peer's turn is over.
+    #[test]
+    fn staged_peer_report_is_current_while_the_peer_turn_runs() {
+        let mut app = two_session_app();
+        app.sessions[1].id = SessionKey("dev:local:a#peer-reviewer".into());
+        let turn = octos_core::ui_protocol::TurnId::new();
+        let mut row = agent_report_row("milestone", "review/a.json ready");
+        row.origin_id = "peer-reviewer".into();
+        row.origin_label = Some("reviewer".into());
+        row.report.as_mut().expect("report").turn_id = Some(turn.0.to_string());
+        app.push_background_activity(row);
+
+        app.sessions[1].live_reply = Some(crate::model::LiveReply {
+            turn_id: turn.clone(),
+            text: String::new(),
+        });
+        let running = background_activity_lines(&app, &app.sessions[0].clone());
+        assert!(running[0].contains("reviewer reports · 1"), "{running:?}");
+        assert!(
+            running[1].contains("Progress: review/a.json ready"),
+            "shown while the peer works: {running:?}"
+        );
+
+        app.sessions[1].live_reply = None;
+        let over = background_activity_lines(&app, &app.sessions[0].clone());
+        assert_eq!(over.len(), 1, "header only: {over:?}");
+        assert!(over[0].contains("ctrl+o to expand"), "{over:?}");
+    }
+
+    /// A blocker must not read as one more routine line: the kind is spelled
+    /// out, and the agent's next step and evidence pointer are shown under it.
+    #[test]
+    fn agent_report_names_its_kind_next_step_and_evidence() {
+        let mut app = two_session_app();
+        let mut blocker = agent_report_row("blocker", "tests need\na key");
+        let report = blocker.report.as_mut().expect("report");
+        report.next_step = Some("ask the user".into());
+        report.evidence = Some("logs/test.txt".into());
+        app.push_background_activity(blocker);
+        let session = app.sessions[0].clone();
+
+        let lines = background_activity_lines(&app, &session);
+        assert!(lines[0].contains("Agent reports · 1"), "{lines:?}");
+        assert!(lines[1].contains("Blocked: tests need a key"), "{lines:?}");
+        assert!(lines[2].contains("next: ask the user"), "{lines:?}");
+        assert!(lines[3].contains("see: logs/test.txt"), "{lines:?}");
+        assert!(
+            !lines.iter().any(|line| line.contains("event(s)")),
+            "a report is not counted as an observed event: {lines:?}"
+        );
+    }
+
+    /// A kind this client does not know still shows, as plain progress, and a
+    /// staged peer's reports are headed by the peer's name.
+    #[test]
+    fn agent_report_draws_an_unknown_kind_as_progress_under_the_peer_name() {
+        let mut app = two_session_app();
+        let mut row = agent_report_row("celebration", "slides rendered");
+        row.origin_id = "peer-reviewer".into();
+        row.origin_label = Some("reviewer".into());
+        app.push_background_activity(row);
+        let session = app.sessions[0].clone();
+
+        let lines = background_activity_lines(&app, &session);
+        assert!(lines[0].contains("reviewer reports · 1"), "{lines:?}");
+        assert!(lines[1].contains("Progress: slides rendered"), "{lines:?}");
+    }
+
+    /// Collapsed, the newest report stays visible. Expanded, a correction sits
+    /// after the report it corrects instead of replacing it.
+    #[test]
+    fn agent_report_group_keeps_the_newest_report_and_shows_a_correction_in_order() {
+        let mut app = two_session_app();
+        app.push_background_activity(agent_report_row("milestone", "two rules conflict"));
+        app.push_background_activity(agent_report_row("correction", "only one rule conflicts"));
+        let session = app.sessions[0].clone();
+
+        let collapsed = background_activity_lines(&app, &session);
+        assert_eq!(collapsed.len(), 2, "header + newest report: {collapsed:?}");
+        assert!(collapsed[0].contains("Agent reports · 2"), "{collapsed:?}");
+        assert!(
+            collapsed[1].contains("Correction: only one rule conflicts"),
+            "{collapsed:?}"
+        );
+
+        app.expanded_tool_outputs = true;
+        let expanded = background_activity_lines(&app, &session);
+        let first = expanded
+            .iter()
+            .position(|line| line.contains("Progress: two rules conflict"))
+            .expect("the corrected report is still shown");
+        let second = expanded
+            .iter()
+            .position(|line| line.contains("Correction: only one rule conflicts"))
+            .expect("the correction is shown as a correction");
+        assert!(first < second, "{expanded:?}");
+    }
+
+    /// A reconnect can replay a report the client already holds. It is drawn
+    /// once. Observed rows keep their existing behaviour.
+    #[test]
+    fn replayed_agent_report_is_drawn_once() {
+        let mut app = two_session_app();
+        for _ in 0..2 {
+            app.push_background_activity(agent_report_row("milestone", "build is green"));
+            app.push_background_activity(background_activity_row(
+                "dev:local:a",
+                "monitor_01",
+                "ci-tail",
+                "tick",
+            ));
+        }
+        let session = app.sessions[0].clone();
+
+        let lines = background_activity_lines(&app, &session);
+        assert!(
+            lines.iter().any(|line| line.contains("Agent reports · 1")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("2 event(s)")),
+            "{lines:?}"
+        );
+    }
+
+    /// The server's cap marker for an agent origin carries no report. It is
+    /// shown as the marker, and it is not counted as a report.
+    #[test]
+    fn agent_report_cap_marker_is_shown_and_not_counted_as_a_report() {
+        let mut app = two_session_app();
+        app.push_background_activity(agent_report_row("milestone", "stage one done"));
+        let mut marker = agent_report_row("milestone", "further events are suppressed");
+        marker.report = None;
+        marker.suppressed = true;
+        marker.dropped_count = Some(3);
+        app.push_background_activity(marker);
+        let session = app.sessions[0].clone();
+
+        let lines = background_activity_lines(&app, &session);
+        assert!(
+            lines[0].contains("Agent reports · 1 · 3 dropped"),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("suppressed")),
+            "{lines:?}"
         );
     }
 

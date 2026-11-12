@@ -280,6 +280,15 @@ pub const APPUI_FEATURE_CODING_LOOP_RUNTIME_V1: &str = "coding.loop_runtime.v1";
 /// receive a notification it cannot render. Tui-local mirror: the vendored
 /// octos-core rev predates the constant.
 pub const APPUI_FEATURE_BACKGROUND_ACTIVITY_V1: &str = "event.background_activity.v1";
+/// octos UPCR-2026-R3DB2ECCA: the server offers the model a `report_progress`
+/// tool and delivers each report as a `background/activity` row whose
+/// `origin_kind` is [`BACKGROUND_ACTIVITY_ORIGIN_AGENT`], carrying an
+/// [`AgentReportParams`]. Requested only because this client draws those rows
+/// as the agent's own statement. Tui-local mirror: the vendored octos-core rev
+/// predates the constant.
+pub const APPUI_FEATURE_AGENT_REPORT_V1: &str = "event.agent_report.v1";
+/// `origin_kind` of an agent's own progress report (octos UPCR-2026-R3DB2ECCA).
+pub const BACKGROUND_ACTIVITY_ORIGIN_AGENT: &str = "agent";
 /// task-consume-turn-steer-dropped: server guarantees that accepted-but-
 /// undrained `turn/steer` inputs are returned as `turn/steer_dropped` BEFORE
 /// the turn's terminal frame. When advertised, a terminal without a preceding
@@ -3816,9 +3825,55 @@ pub struct BackgroundActivityParams {
     pub dropped_count: Option<u64>,
     #[serde(default)]
     pub suppressed: bool,
+    /// Present when the row is a progress report the agent published itself
+    /// (octos UPCR-2026-R3DB2ECCA). `text` is then the agent's summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<AgentReportParams>,
+}
+
+/// What an agent says its report is. The agent's own statement in every case:
+/// `Verification` is a check the agent ran itself, never an independent review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentReportKind {
+    Milestone,
+    Blocker,
+    Correction,
+    Verification,
+}
+
+/// The agent-authored part of a `background/activity` row (octos
+/// UPCR-2026-R3DB2ECCA). The server stamps the session, origin and turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentReportParams {
+    /// Wire kind. Kept as text so a kind this client does not know still
+    /// decodes; [`Self::kind`] draws it as a milestone.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+}
+
+impl AgentReportParams {
+    pub fn kind(&self) -> AgentReportKind {
+        match self.kind.as_str() {
+            "blocker" => AgentReportKind::Blocker,
+            "correction" => AgentReportKind::Correction,
+            "verification" => AgentReportKind::Verification,
+            _ => AgentReportKind::Milestone,
+        }
+    }
 }
 
 impl BackgroundActivityParams {
+    /// True for a row an agent published about its own work, as opposed to
+    /// an observed monitor or fleet line.
+    pub fn is_agent_report(&self) -> bool {
+        self.origin_kind == BACKGROUND_ACTIVITY_ORIGIN_AGENT
+    }
+
     /// Stable grouping key: one foldable group per emitting origin, so a
     /// 50-round monitor loop is ONE group rather than 50 loose lines.
     pub fn origin_key(&self) -> (String, String) {
@@ -9821,6 +9876,11 @@ impl AppState {
             .background_activity
             .entry(event.session_id.clone())
             .or_default();
+        // A replayed report is identical to the row already held. Drawing it
+        // again would show the agent saying the same thing twice.
+        if event.report.is_some() && rows.contains(&event) {
+            return;
+        }
         rows.push(event);
         if rows.len() > MAX_BACKGROUND_ACTIVITY_ROWS {
             let excess = rows.len() - MAX_BACKGROUND_ACTIVITY_ROWS;
