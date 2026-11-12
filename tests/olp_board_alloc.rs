@@ -269,6 +269,16 @@ fn board_append_legacy_body_is_appended_verbatim() {
         "### 1. old\n### 2. hand-numbered\nbody\n"
     );
 
+    // `{N}` anywhere but at the start of the first line is ordinary text —
+    // e.g. a harvest card quoting a board line. It is not substituted and
+    // does not make the append fail.
+    let quoted = "### EVO-0007（t，harvest）\nsymptom: 条目写了 ### {N}. 但没换号\n";
+    let out = append(&board, &[], quoted, &[]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "");
+    assert!(std::fs::read_to_string(&board).unwrap().ends_with(quoted));
+    std::fs::write(&board, "### 1. old\n### 2. hand-numbered\nbody\n").unwrap();
+
     // An empty body is a no-op, as before.
     let out = append(&board, &[], "", &[]);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
@@ -282,12 +292,11 @@ fn board_append_legacy_body_is_appended_verbatim() {
 #[test]
 fn board_append_rejects_invalid_input_before_touching_board() {
     let dir = tempfile::tempdir().unwrap();
-    let cases: [(&[&str], &str, &str); 5] = [
+    let cases: [(&[&str], &str, &str); 4] = [
         (&["--key", "has space"], "### {N}. x\n", "--key"),
         (&["--key", "a-->b"], "### {N}. x\n", "--key"),
         (&["--key", ""], "### {N}. x\n", "--key"),
         (&["--key", "k1"], "", "正文为空"),
-        (&[], "intro\n### {N}. not on the first line\n", "### {N}"),
     ];
     for (i, (args, body, needle)) in cases.iter().enumerate() {
         let board = dir.path().join(format!("board-{i}.md"));
