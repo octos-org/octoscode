@@ -45,12 +45,9 @@ fn append(board: &Path, args: &[&str], body: &str, env: &[(&str, &str)]) -> Outp
         cmd.env(k, v);
     }
     let mut child = cmd.spawn().unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(body.as_bytes())
-        .unwrap();
+    // The script may reject its arguments and exit before reading stdin; the
+    // write then fails with EPIPE, which is not the test's concern.
+    let _ = child.stdin.take().unwrap().write_all(body.as_bytes());
     child.wait_with_output().unwrap()
 }
 
