@@ -114,16 +114,17 @@ octoscode outer-duty hold --project <project> --signature <sig> \
   --duties <duties> -- <your agent start command>
 ```
 
-The lock **is** the authority: the wrapper is the only holder of the lock fd, and
-your agent is death-coupled to it via `PR_SET_PDEATHSIG` — wrapper dies ⇒ agent
-dies ⇒ lock `VACANT`. `outer-duty check --project <p>` only observes (exactly one
+The lock **is** the authority, and your agent is death-coupled to the wrapper —
+wrapper dies ⇒ agent dies ⇒ lock `VACANT`. On Linux the wrapper is the only
+holder of the lock fd and the kernel kills the agent via `PR_SET_PDEATHSIG`; on
+macOS a small guardian process between wrapper and agent holds the lock and kills
+the agent's process group before releasing it. `outer-duty check --project <p>` only observes (exactly one
 of `VACANT|HELD|ERROR` on stdout). A non-holder may add **signed annotations
 only**. Taking over a live lock belongs to the operator alone; there is no agent
 self-seizure. Metadata sidecars and TTLs are diagnostics and never adjudicate.
 
-**Linux-only** (flock + PDEATHSIG + /proc; exits 2 as unsupported elsewhere; not
-valid on NFS). On macOS the lock is unavailable — multi-outer coordination falls
-back to the duty roster as discipline plus operator arbitration. Pick a signature
+**Linux and macOS** (single-machine flock; exits 2 as unsupported elsewhere; not
+valid on NFS). Pick a signature
 like `外环(claude)` / `外环(codex)` and sign every board write.
 
 ### 3.1 Discover the scene
@@ -143,27 +144,35 @@ project of your start cwd.
 
 ### 3.2 Dispatch — append, never rewrite
 
-Take the current maximum number, then use +1:
-
-```bash
-grep -oE '^### [0-9]+' <board> | tail -1
-```
-
 Write through the atomic helper (flock-mutexed; body from stdin). It is at
 `scripts/olp-board-append.sh` inside the octoscode repo, and `olp-init.sh`
-installs a copy at `~/.octos/outer/board-append.sh` for every other project:
+installs a copy at `~/.octos/outer/board-append.sh` for every other project.
+**The helper allocates the number under the lock**: write `{N}` in the
+heading; the helper fills in the board's highest number + 1 and prints it on
+stdout, so concurrent writers never collide:
 
 ```bash
 ~/.octos/outer/board-append.sh <board> <<'EOF'
-### <n>. <title> (<date>, <signature>)
-...
+### {N}. <title> (<date>, <signature>)
+... body (use {N} to refer to the entry's own number, e.g. branch task/{N}) ...
 EOF
 ```
 
-If neither is present, an equivalent atomic append is
-`flock "<board>.lock" -c 'cat >> "<board>"' <<'EOF' … EOF` — note that
-`flock(1)` is util-linux and absent on stock macOS, where you must serialise
-board writes by convention instead.
+For writes that may be resent (network retry, offline-queue replay) add
+`--key <natural-key>`: when the key is already on the board nothing is
+appended and the original number is returned. Keys may only contain
+`[A-Za-z0-9._:/@+=-]`.
+
+The old style with a hand-written number (`### 12. …`) is still accepted, but
+nothing locks between reading the maximum and writing, so concurrent writers
+collide — do not use it for new entries. Update an older installed helper
+(one that does not know `{N}`) with
+`cp scripts/olp-board-append.sh ~/.octos/outer/board-append.sh`.
+
+The helper needs `flock(1)`: util-linux on Linux; `brew install flock` on
+macOS (a non-interactive ssh PATH has no Homebrew directories, so the helper
+also looks in `/opt/homebrew/bin` and `/usr/local/bin`). Without it the
+helper exits 2 and writes nothing.
 
 An entry must be **self-contained**: background, exact files and line numbers,
 direction of the fix, acceptance criteria, branch name (based on main), budget
@@ -181,6 +190,23 @@ translate**:
 > 外环(<sig>)·改判(作废 #N):<the instruction that now governs>
 > 外环(<sig>)·R2 记档(#N):<claim vs. re-verified fact>
 ```
+
+Three more line-initial formulas are read by the inbox
+(`scripts/olp-inbox.py`). They attach to an entry by `#N`, so they count
+wherever they are written on the board; **copy them verbatim** too:
+
+```
+> 外环(<sig>)·采认(#N):<verification evidence>            (accepted)
+> 外环(<sig>)·打回(#N):<reason; the rework goes in a new entry>   (returned)
+> 外环(<sig>)·搁置(#N) 至 YYYY-MM-DD:<what it waits for>   (snoozed until)
+```
+
+`olp-inbox.py <board>` derives from these lines and the ACK lines who each
+card is waiting on: **inbox** (the inner loop ACKed or a unit pushed; the
+outer loop must decide), **working** (waiting for the inner loop's ACK),
+**snoozed** (hidden until the date), **settled** (accepted, returned, voided
+or archived). Nothing is stored on the board; a card with no 采认 line stays
+in the inbox, so write one when verification passes.
 
 ### 3.3 Wake and steer the inner loop
 
@@ -291,7 +317,7 @@ editing config without a new session is paper insurance).
 |---|---|
 | Linux | full power, including the `outer-duty` kernel lock and bwrap tiers |
 | WSL2 | equivalent to Linux |
-| macOS | usable, two gaps: no `outer-duty` lock (Linux-only), and bwrap tiers do not apply |
+| macOS | usable, including the `outer-duty` lock; one gap: bwrap tiers do not apply |
 | Windows native | not recommended — use WSL2 |
 
 ## 7. Going deeper

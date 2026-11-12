@@ -42,9 +42,9 @@ QUICKSTART 的发现命令为准。
 4. **接管职责(主审权锁,R7/olp-v2)**:上岗必须经
    `octoscode outer-duty hold --project <项目> --signature <署名>
    --duties <职责> -- <你的 agent 启动命令>` 包裹启动——锁即
-   authority,**守护式死亡耦合**(wrapper 唯一持 fd;agent 经
-   PR_SET_PDEATHSIG 与 wrapper 同死,wrapper 亡⇒agent 必亡⇒VACANT;
-   Linux-only,非 Linux unsupported,Windows LockFileEx 另立);
+   authority,**守护式死亡耦合**(wrapper 亡⇒agent 必亡⇒VACANT;
+   Linux 经 PR_SET_PDEATHSIG,macOS 经持锁的守护进程;Linux 与 macOS
+   可用,其他平台 unsupported,Windows LockFileEx 另立);
    `outer-duty check` 仅观察、绝不夺取;非 holder 只读批注,活锁接管
    只归 operator(终止旧 holder 后再 acquire)。持锁后:署名落板(经
    `scripts/olp-board-append.sh`,flock 原子)→ 立编号条目唤醒内环 →

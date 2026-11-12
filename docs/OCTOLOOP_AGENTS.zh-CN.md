@@ -100,14 +100,16 @@ octoscode outer-duty hold --project <项目> --signature <署名> \
   --duties <职责> -- <你的 agent 启动命令>
 ```
 
-锁**即** authority:wrapper 是唯一持锁 fd 者,你的 agent 经
-`PR_SET_PDEATHSIG` 与之死亡耦合——wrapper 亡 ⇒ agent 必亡 ⇒ 锁 `VACANT`。
+锁**即** authority:你的 agent 与 wrapper 死亡耦合——wrapper 亡 ⇒ agent
+必亡 ⇒ 锁 `VACANT`。Linux 上 wrapper 是唯一持锁 fd 者,内核经
+`PR_SET_PDEATHSIG` 杀掉 agent;macOS 上 wrapper 与 agent 之间有一个持锁的
+守护进程,先杀掉 agent 进程组再放锁。
 `outer-duty check --project <p>` 仅观察(stdout 恰一态
 `VACANT|HELD|ERROR`)。非 holder **只可署名批注**。活锁接管只归 operator,
 无 agent 自助强夺。metadata sidecar 与一切 TTL 仅诊断,绝不参与裁定。
 
-**Linux-only**(flock + PDEATHSIG + /proc;其他平台显式 unsupported 退出 2;
-NFS 不适用)。macOS 上锁不可用——多外环退回值班簿纪律层 + operator 裁决。
+**Linux 与 macOS**(单机 flock;其他平台显式 unsupported 退出 2;
+NFS 不适用)。
 选定署名如 `外环(claude)` / `外环(codex)`,所有黑板写入必须署名。
 
 ### 3.1 发现现场
@@ -125,26 +127,29 @@ ls -t ~/.octos/instances/         # 按 mtime 对号(哈希 = 项目 cwd 的 Def
 
 ### 3.2 派单——只追加,不改写
 
-先取当前最大号,再 +1:
-
-```bash
-grep -oE '^### [0-9]+' <板> | tail -1
-```
-
 写入必须走原子追加助手(flock 互斥,正文从 stdin 喂)。助手在 octoscode
 仓库内是 `scripts/olp-board-append.sh`;`olp-init.sh` 会为其他项目在
-`~/.octos/outer/board-append.sh` 装一份:
+`~/.octos/outer/board-append.sh` 装一份。**编号由助手在锁内分配**:标题
+写 `{N}`,助手取板上最大号 +1 填入,并把编号打印到 stdout——多个写入方
+并发也不会撞号:
 
 ```bash
 ~/.octos/outer/board-append.sh <板> <<'EOF'
-### <编号>. <标题>(<日期>,<署名>)
-...正文...
+### {N}. <标题>(<日期>,<署名>)
+...正文(可以用 {N} 引用自己的编号,例如分支 task/{N})...
 EOF
 ```
 
-两处都没有时,等价的原子追加是
-`flock "<板>.lock" -c 'cat >> "<板>"' <<'EOF' … EOF`——注意 `flock(1)` 属
-util-linux,原生 macOS 没有,那里只能靠约定串行化黑板写入。
+可能重发的写入(断网重试、离线队列回放)加 `--key <自然键>`:同一个键
+已在板上时不再追加,返回原编号。键只允许 `[A-Za-z0-9._:/@+=-]`。
+
+自己写死编号的旧写法(`### 12. …`)仍然接受,但取号和写入之间没有锁,
+并发下会撞号,新条目不要用。旧版助手(不认 `{N}`)用
+`cp scripts/olp-board-append.sh ~/.octos/outer/board-append.sh` 更新。
+
+助手依赖 `flock(1)`:Linux 属 util-linux;macOS 用 `brew install flock`
+(非交互 ssh 的 PATH 不含 Homebrew 目录,助手会自己到 `/opt/homebrew/bin`
+与 `/usr/local/bin` 找)。找不到时助手退出码 2,不写入任何内容。
 
 条目必须**自包含**:背景、精确文件与行号、修法方向、验收标准、分支名
 (基于 main)、预算档,并写明"只 commit 不 push,主审复验后代推"。
@@ -158,6 +163,20 @@ util-linux,原生 macOS 没有,那里只能靠约定串行化黑板写入。
 > 外环(<署名>)·改判(作废 #N):<以本条为准的新指令>
 > 外环(<署名>)·R2 记档(#N):<声称 vs 复验事实>
 ```
+
+另有三条行首定式供收件箱(`scripts/olp-inbox.py`)机械识别。它们按 `#N`
+归属,写在板上任何位置都算,同样**逐字照抄**:
+
+```
+> 外环(<署名>)·采认(#N):<复验证据>
+> 外环(<署名>)·打回(#N):<原因;整改内容另立新条目>
+> 外环(<署名>)·搁置(#N) 至 YYYY-MM-DD:<等什么>
+```
+
+`olp-inbox.py <板>` 从这些行和 ACK 行算出每张卡现在等谁:**收件箱**
+(内环已 ACK 或单元已推送,等外环决定)、**进行中**(等内环 ACK)、**搁置**
+(到期前不打扰)、**已了结**(已采认、已打回、被改判作废、已归档)。状态
+不存进黑板;没有采认行的卡会一直留在收件箱,所以复验通过后要落采认行。
 
 ### 3.3 唤醒与纠偏
 
@@ -257,7 +276,7 @@ octoscode --stdio-command 'octos serve --stdio --solo --danger-full-access'
 |---|---|
 | Linux | 全功率,含 `outer-duty` 内核锁与 bwrap 沙箱档 |
 | WSL2 | 等同 Linux |
-| macOS | 可用,两缺口:无 `outer-duty` 锁(Linux-only)、bwrap 档不成立 |
+| macOS | 可用,含 `outer-duty` 锁;一缺口:bwrap 档不成立 |
 | Windows 原生 | 不推荐——请用 WSL2 |
 
 ## 7. 深入阅读

@@ -505,7 +505,7 @@ added without a row here.
 | `src/client_event.rs` | 377 | Decoded RPC results and autonomy results, in the shape the store reduces. |
 | `src/event_loop.rs` | 7047 | Terminal raw mode, alternate screen, draw loop, keyboard dispatch, backend polling, send-error handling. |
 | `src/model.rs` | 11612 | `AppState`, the TUI view models, `AppUiCommand`, and the mapping from AppUI snapshots/tasks/messages into renderable state. |
-| `src/outer_duty.rs` | 358 | Outer-duty kernel lock: fs2 try_lock_exclusive, VACANT/HELD/ERROR, atomic 0600 metadata sidecar (#38). |
+| `src/outer_duty.rs` | 358 | Outer-duty kernel lock: fs2 try_lock_exclusive, VACANT/HELD/ERROR, atomic 0600 metadata sidecar (#38); death coupling via PDEATHSIG on Linux and a guardian process on macOS. |
 | `src/olp_mcp.rs` | 397 | OLP-MCP outer-loop server: newline JSON-RPC stdio, mailbox quota/timeout, board audit (#31). |
 | `src/store.rs` | 37021 | The AppUI reducer: snapshots, RPC results, notifications, local commands, approvals, diffs, task output and queued prompts folded into `AppState`. |
 
