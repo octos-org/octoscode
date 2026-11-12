@@ -3331,6 +3331,7 @@ fn appui_feature_tokens_for(old_server: bool) -> Vec<String> {
         UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1,
         UI_PROTOCOL_FEATURE_PLAN_TODOS_V1,
         crate::model::APPUI_FEATURE_BACKGROUND_ACTIVITY_V1,
+        crate::model::APPUI_FEATURE_AGENT_REPORT_V1,
         UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2,
         crate::model::APPUI_FEATURE_TURN_STEER_DROPPED_V1,
         crate::model::APPUI_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,
@@ -9181,6 +9182,70 @@ mod tests {
         };
         assert_eq!(error.code, "invalid_params");
         assert!(error.message.contains("background/activity"));
+    }
+
+    /// octos UPCR-2026-R3DB2ECCA — an agent's progress report arrives on
+    /// `background/activity` with a `report` object. A kind this client does
+    /// not know must still decode instead of failing the whole frame.
+    #[test]
+    fn agent_report_frame_decodes_with_its_kind_turn_and_details() {
+        let frame = |kind: &str| {
+            json!({
+                "jsonrpc": "2.0",
+                "method": "background/activity",
+                "params": {
+                    "session_id": "coding:local:tui#coding",
+                    "profile_id": "coding",
+                    "origin_kind": "agent",
+                    "origin_id": "main",
+                    "text": "tests need a key",
+                    "emitted_at_ms": 1_760_000_000_000i64,
+                    "suppressed": false,
+                    "report": {
+                        "kind": kind,
+                        "turn_id": "0190a1b2-0000-7000-8000-000000000001",
+                        "next_step": "ask the user"
+                    }
+                }
+            })
+            .to_string()
+        };
+        let decode = |kind: &str| {
+            let event = rpc_text_to_app_event_with_pending(&frame(kind), &mut HashMap::new())
+                .expect("frame decodes")
+                .expect("client event");
+            let ClientEvent::BackgroundActivity(activity) = event else {
+                panic!("expected background activity event, got {event:?}");
+            };
+            activity
+        };
+
+        let activity = decode("blocker");
+        assert!(activity.is_agent_report());
+        assert_eq!(activity.text, "tests need a key");
+        let report = activity.report.expect("report object");
+        assert_eq!(report.kind(), crate::model::AgentReportKind::Blocker);
+        assert_eq!(
+            report.turn_id.as_deref(),
+            Some("0190a1b2-0000-7000-8000-000000000001")
+        );
+        assert_eq!(report.next_step.as_deref(), Some("ask the user"));
+        assert_eq!(report.evidence, None);
+
+        let unknown = decode("celebration").report.expect("report object");
+        assert_eq!(unknown.kind(), crate::model::AgentReportKind::Milestone);
+    }
+
+    /// The server offers the model `report_progress` only to a client that
+    /// asked for the capability, so not asking leaves the feature dead.
+    #[test]
+    fn agent_report_capability_is_requested_from_modern_servers_only() {
+        assert!(
+            appui_feature_header_for(false).contains(crate::model::APPUI_FEATURE_AGENT_REPORT_V1)
+        );
+        assert!(
+            !appui_feature_header_for(true).contains(crate::model::APPUI_FEATURE_AGENT_REPORT_V1)
+        );
     }
 
     /// octos#2019 — the client must ADVERTISE the capability, or the server
