@@ -26,7 +26,8 @@ estimate: 1d
 - 闭环判定:条目里围栏外最后一条以 `ACK(` 开头的行是 `ACK(done` 或 `ACK(wontdo`。
   `ACK(blocked`、无 ACK、旧格式 `ACK:` 的条目不动。是否已复验由运行工具的持锁外环负责,
   `--keep N`(默认 10)让最近 N 个编号条目不论是否闭环都原样保留。
-- 编号桩:原标题行 + 条目里所有围栏外的 `ACK(` 行(逐字、按原顺序)+
+- 编号桩:原标题行 + 条目里所有围栏外的 `ACK(` 行与 `<!-- olp-key: … -->` 行(逐字、按原
+  顺序;后者是写板助手 `--key` 的幂等标记,留在板上才能让归档后的重发仍然命中)+
   `<!-- olp-archived: <归档文件名> -->` + 一个空行。ACK 行逐字保留,进化环采集按
   `条目号 + 行内容哈希` 计算的 identity 不变,重扫不产生重复卡片。已是桩的条目跳过。
 - 归档文件:默认与板同目录的 `<板名去掉 .md>.archive.md`,只追加;每个条目前写
@@ -84,7 +85,7 @@ Scenario: 闭环判定只看围栏外的最后一条 ACK
   Test: board_archive_closure_uses_last_ack_outside_code_fences
   Given 条目分别为:围栏内含示例标题与 ACK(done)、先 done 后 blocked、旧格式 `ACK:`、先 blocked 后 done
   When 以 `--keep 0` 运行
-  Then 只有"先 blocked 后 done"的条目被归档,它的桩按原顺序保留两条 ACK 行;其余条目逐字不变
+  Then 只有"先 blocked 后 done"的条目被归档,它的桩按原顺序保留两条 ACK 行与 olp-key 标记;其余条目逐字不变
 
 ### Rule: safety — 幂等与并发
 Scenario: 重跑幂等,中断后不重复归档(critical)

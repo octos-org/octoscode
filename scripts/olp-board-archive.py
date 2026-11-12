@@ -17,7 +17,8 @@
   - 已闭环 = 条目里最后一条 `ACK(` 行是 `ACK(done` 或 `ACK(wontdo`。
     `ACK(blocked`、没有 ACK、旧格式 `ACK:` 的条目不动。
   - 最近的 --keep 个编号条目(默认 10)不论是否闭环都原样保留。
-  - 桩保留标题和条目里所有 `ACK(` 行:编号不断档(下一个编号仍是板上
+  - 桩保留标题、条目里所有 `ACK(` 行,以及写板助手 `--key` 留下的
+    `<!-- olp-key: … -->` 标记(归档后同一个键重发仍然命中):编号不断档(下一个编号仍是板上
     最大号 +1),内环按"最小未 ACK 条目"找活时会跳过它,`#12` 的引用仍能
     在板上找到并指向归档文件。
   - 板的前言、`##` 小节、非编号标题的内容原样保留,顺序不变。
@@ -52,6 +53,7 @@ import tempfile
 
 HEADING = re.compile(r"^### (\d+)")
 ARCHIVED_MARK = "<!-- olp-archived: "
+KEY_MARK = "<!-- olp-key: "
 ENTRY_MARK = re.compile(r"^<!-- olp-archived-entry: (\d+) ")
 
 
@@ -85,7 +87,9 @@ def split_blocks(lines):
 
 
 def ack_lines(entry_lines):
-    """The entry's `ACK(` lines outside code fences, in order."""
+    """The lines a stub must keep, outside code fences and in order: the
+    entry's `ACK(` lines and the idempotency markers olp-board-append.sh
+    writes for `--key` (a resend must still find its key on the board)."""
     out = []
     in_fence = False
     for line in entry_lines:
@@ -93,13 +97,13 @@ def ack_lines(entry_lines):
         if stripped.startswith("```") or stripped.startswith("~~~"):
             in_fence = not in_fence
             continue
-        if not in_fence and line.startswith("ACK("):
+        if not in_fence and (line.startswith("ACK(") or line.startswith(KEY_MARK)):
             out.append(line)
     return out
 
 
 def is_closed(entry_lines):
-    acks = ack_lines(entry_lines)
+    acks = [l for l in ack_lines(entry_lines) if l.startswith("ACK(")]
     if not acks:
         return False
     last = acks[-1]

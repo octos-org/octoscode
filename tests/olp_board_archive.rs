@@ -270,7 +270,9 @@ ACK: 旧格式不算闭环
 ### 4. 先 blocked 后 done
 
 ACK(blocked): 等依赖
+正文。
 ACK(done): 依赖到位,commit 123
+<!-- olp-key: m07:card-4 n=4 -->
 ";
     std::fs::write(&board, text).unwrap();
     let out = archive(&board, &["--keep", "0"], &[]);
@@ -287,10 +289,11 @@ ACK(done): 依赖到位,commit 123
         "### 1. 围栏里的标题和 ACK 不算\n\n```\n### 99. 示例条目\nACK(done): 这是示例\n```\n\n### 2. 先 done 后 blocked\n"
     ));
     assert!(after.contains("ACK: 旧格式不算闭环"));
-    // The stub keeps every ACK line of the entry, in order.
+    // The stub keeps every ACK line of the entry, in order, and the
+    // idempotency marker a keyed append left behind.
     assert!(
         after.ends_with(
-            "### 4. 先 blocked 后 done\nACK(blocked): 等依赖\nACK(done): 依赖到位,commit 123\n<!-- olp-archived: board.archive.md -->\n\n"
+            "### 4. 先 blocked 后 done\nACK(blocked): 等依赖\nACK(done): 依赖到位,commit 123\n<!-- olp-key: m07:card-4 n=4 -->\n<!-- olp-archived: board.archive.md -->\n\n"
         ),
         "{after}"
     );
