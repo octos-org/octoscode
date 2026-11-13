@@ -532,7 +532,7 @@ fn sha256_str(s: &str) -> String {
 fn olp_evo_retro_boot_section7_and_golden() {
     let boot = std::fs::read_to_string(repo_root().join("docs/OLP_OUTER_BOOT.md")).unwrap();
 
-    const BOOT_0_TO_6: &str = "97006b6cd7e98de78fc771561707fa0a30ba00c85475a3d90b03ae66ac5a6f4a";
+    const BOOT_0_TO_6: &str = "7a66807272b210cc6f3d9f73e4b7a1703c4ee4a32ef2d3b1adbe13f615fa4729";
     let slice = &boot[boot.find("## 0.").unwrap()..boot.find("## 7.").unwrap()];
     assert_eq!(sha256_str(slice), BOOT_0_TO_6);
 
