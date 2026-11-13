@@ -15,9 +15,9 @@ pub mod install_method;
 pub mod olp_mcp;
 // File identity uses dev/ino (`std::os::unix`); the OctoLoop runtime guard is
 // Unix-only, so the module is not built elsewhere.
+pub mod olp_runtime_watch;
 #[cfg(unix)]
 pub mod olp_runtime_watch_ledger;
-pub mod olp_runtime_watch;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod outer_duty;
 pub mod update;

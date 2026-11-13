@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use eyre::{bail, Result};
+use eyre::{Result, bail};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -414,6 +414,8 @@ struct Cycle<'a> {
     iso_time: &'a str,
     agent_status: &'a AgentObservation,
     identity_alerts: &'a [u32],
+    ledger: &'a LedgerObservation,
+    progress: &'a ProgressObservation,
 }
 
 fn observation_record(s: &IdentitySnapshot, c: &Cycle<'_>) -> serde_json::Value {
@@ -437,10 +439,13 @@ fn observation_record(s: &IdentitySnapshot, c: &Cycle<'_>) -> serde_json::Value 
             .iter()
             .map(|(pid, p)| json!({"pid": pid, "state": monitor_probe_json(p)}))
             .collect::<Vec<_>>(),
+        // A finished turn — seen through Herdr or in the ledger — is only
+        // ever "awaiting review": completion is not acceptance.
         "observation_state": match c.agent_status {
             AgentObservation::CompletionUnverifiedAwaitingReview => {
                 "awaiting_review"
             }
+            _ if c.ledger.turn_finished => "awaiting_review",
             _ => "watching",
         },
         "alerts": c.identity_alerts
@@ -451,13 +456,221 @@ fn observation_record(s: &IdentitySnapshot, c: &Cycle<'_>) -> serde_json::Value 
                     "pid": pid,
                 })
             })
+            .chain(c.ledger.alerts.iter().cloned())
+            .chain(c.progress.alert.iter().cloned())
             .collect::<Vec<_>>(),
+        "ledger": c.ledger.record,
+        "progress": c.progress.record,
         "agent_status": agent_status_json(c.agent_status),
         "agent_status_advisory": match c.agent_status {
             AgentObservation::Unknown => "herdr_unavailable_or_unknown_value",
             _ => "observed",
         },
     })
+}
+
+/// What one cycle learned from the live ledger.
+struct LedgerObservation {
+    /// The whitelisted poll result (offsets, turn state, unknown code).
+    record: serde_json::Value,
+    /// Target-turn alerts, tagged `"source": "ledger"`.
+    alerts: Vec<serde_json::Value>,
+    /// The ledger shows the target turn completed, cancelled or aborted.
+    turn_finished: bool,
+    /// New bytes were consumed after the initial backlog: the agent is doing
+    /// something, whether or not it is making progress.
+    activity: bool,
+}
+
+/// Incremental reader of the target turn's records in the live ledger. The
+/// parsing, scoping, rotation and privacy rules live in
+/// `olp_runtime_watch_ledger`; this layer only folds a poll into the record.
+#[cfg(unix)]
+struct LedgerLayer {
+    cursor: super::olp_runtime_watch_ledger::LedgerCursor,
+    last_offset: Option<u64>,
+}
+
+#[cfg(unix)]
+impl LedgerLayer {
+    fn new(s: &IdentitySnapshot) -> Self {
+        Self {
+            cursor: super::olp_runtime_watch_ledger::LedgerCursor::new(
+                s.ledger.clone(),
+                s.session.clone(),
+                s.turn_id.clone(),
+            ),
+            last_offset: None,
+        }
+    }
+
+    fn observe(&mut self) -> LedgerObservation {
+        use super::olp_runtime_watch_ledger::LedgerTurnState;
+        let poll = self.cursor.poll();
+        let alerts = poll
+            .alerts
+            .iter()
+            .filter_map(|a| serde_json::to_value(a).ok())
+            .map(|mut v| {
+                if let Some(map) = v.as_object_mut() {
+                    map.insert("source".into(), json!("ledger"));
+                }
+                v
+            })
+            .collect();
+        let turn_finished = matches!(
+            poll.turn_state.map(|t| t.state),
+            Some(LedgerTurnState::CompletionUnverified | LedgerTurnState::AwaitingReview)
+        );
+        // Reading the backlog that already existed is not new activity.
+        let activity =
+            !poll.initial_scan && self.last_offset.is_some_and(|prev| poll.byte_offset > prev);
+        self.last_offset = Some(poll.byte_offset);
+        LedgerObservation {
+            record: serde_json::to_value(&poll)
+                .unwrap_or_else(|_| json!({"observation_unknown": "ledger_unserializable"})),
+            alerts,
+            turn_finished,
+            activity,
+        }
+    }
+}
+
+/// The ledger reader identifies files by device and inode, so it is only
+/// built on Unix. Elsewhere the layer says so instead of guessing.
+#[cfg(not(unix))]
+struct LedgerLayer;
+
+#[cfg(not(unix))]
+impl LedgerLayer {
+    fn new(_s: &IdentitySnapshot) -> Self {
+        Self
+    }
+
+    fn observe(&mut self) -> LedgerObservation {
+        LedgerObservation {
+            record: json!({"observation_unknown": "ledger_unsupported_platform"}),
+            alerts: Vec::new(),
+            turn_finished: false,
+            activity: false,
+        }
+    }
+}
+
+/// What one cycle learned about real progress.
+struct ProgressObservation {
+    record: serde_json::Value,
+    alert: Option<serde_json::Value>,
+}
+
+/// Largest progress file read in full; a bigger one is fingerprinted by its
+/// length and modification time instead.
+const PROGRESS_MAX_READ: u64 = 16 * 1024 * 1024;
+
+/// Detects "busy but not moving": the bytes of the caller-named progress
+/// files and the repository HEAD stay the same for `--stall-seconds`. It is
+/// an advisory — a small read-only task legitimately changes nothing — and
+/// it never restarts, kills or prompts anything.
+struct ProgressTracker {
+    fingerprint: Option<String>,
+    last_change: Instant,
+    /// Whether the ledger showed activity at any point since `last_change`.
+    activity_since_change: bool,
+}
+
+impl ProgressTracker {
+    fn new() -> Self {
+        Self {
+            fingerprint: None,
+            last_change: Instant::now(),
+            activity_since_change: false,
+        }
+    }
+
+    fn git_head(repo: &std::path::Path) -> Option<String> {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(repo).args(["rev-parse", "HEAD"]);
+        let (status, out, err_len) = bounded_run(cmd)?;
+        if !status.success() || err_len != 0 {
+            return None;
+        }
+        let head = String::from_utf8(out).ok()?.trim().to_string();
+        (head.len() >= 40 && head.bytes().all(|b| b.is_ascii_hexdigit())).then_some(head)
+    }
+
+    fn observe(&mut self, s: &IdentitySnapshot, ledger_activity: bool) -> ProgressObservation {
+        if s.progress_file.is_empty() {
+            // Without named files there is nothing to compare: commits alone
+            // are too rare to tell a stall from normal work.
+            return ProgressObservation {
+                record: json!({"tracked_files": 0, "stall_detection": "disabled_no_progress_files"}),
+                alert: None,
+            };
+        }
+        let mut hasher = Sha256::new();
+        let mut missing: Vec<&PathBuf> = Vec::new();
+        for path in &s.progress_file {
+            hasher.update(path.to_string_lossy().as_bytes());
+            hasher.update([0u8]);
+            match std::fs::metadata(path) {
+                Ok(meta) if meta.is_file() && meta.len() <= PROGRESS_MAX_READ => {
+                    match std::fs::read(path) {
+                        Ok(bytes) => hasher.update(Sha256::digest(&bytes)),
+                        Err(_) => hasher.update(b"unreadable"),
+                    }
+                }
+                Ok(meta) if meta.is_file() => {
+                    hasher.update(meta.len().to_le_bytes());
+                    if let Ok(modified) = meta.modified() {
+                        if let Ok(d) = modified.duration_since(std::time::UNIX_EPOCH) {
+                            hasher.update(d.as_nanos().to_le_bytes());
+                        }
+                    }
+                }
+                _ => {
+                    hasher.update(b"missing");
+                    missing.push(path);
+                }
+            }
+        }
+        let head = Self::git_head(&s.repo);
+        hasher.update(head.as_deref().unwrap_or("head_unknown").as_bytes());
+        let fingerprint = hex(&hasher.finalize());
+
+        let changed = self
+            .fingerprint
+            .as_ref()
+            .is_some_and(|prev| *prev != fingerprint);
+        if self.fingerprint.is_none() || changed {
+            // First sight is the baseline, not progress; a real change resets.
+            self.fingerprint = Some(fingerprint);
+            self.last_change = Instant::now();
+            self.activity_since_change = false;
+        }
+        self.activity_since_change |= ledger_activity;
+        let age = self.last_change.elapsed().as_secs();
+        let stalled = age >= s.stall_seconds;
+        let alert = stalled.then(|| {
+            json!({
+                "kind": "stalled_no_progress",
+                "advisory": true,
+                "progress_age_seconds": age,
+                // Events without byte changes is a read-only livelock; no
+                // events at all is a silent stall. Neither is acted on here.
+                "activity": if self.activity_since_change { "events_continuing" } else { "no_events" },
+            })
+        });
+        ProgressObservation {
+            record: json!({
+                "tracked_files": s.progress_file.len(),
+                "missing_files": missing,
+                "git_head": match &head { Some(_) => "observed", None => "observation_unknown" },
+                "progress_age_seconds": age,
+                "changed_this_cycle": changed,
+            }),
+            alert,
+        }
+    }
 }
 
 /// RFC3339 UTC timestamp of "now" with second precision (chrono, existing dep).
@@ -575,6 +788,8 @@ pub fn run(args: OlpRuntimeWatchArgs) -> Result<i32> {
     // monitors). A later different birth => process_identity_changed alert;
     // a missing pid never overwrites its baseline.
     let mut births: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    let mut ledger_layer = LedgerLayer::new(s);
+    let mut progress_tracker = ProgressTracker::new();
     loop {
         seq += 1;
         let agent = probe_pid(s.agent_pid);
@@ -605,6 +820,8 @@ pub fn run(args: OlpRuntimeWatchArgs) -> Result<i32> {
                 }
             }
         }
+        let ledger = ledger_layer.observe();
+        let progress = progress_tracker.observe(s, ledger.activity);
         let iso_time = iso_now();
         let cycle = Cycle {
             agent: &agent,
@@ -614,6 +831,8 @@ pub fn run(args: OlpRuntimeWatchArgs) -> Result<i32> {
             iso_time: &iso_time,
             agent_status: &agent_status,
             identity_alerts: &identity_alerts,
+            ledger: &ledger,
+            progress: &progress,
         };
         println!("{}", observation_record(s, &cycle));
         if s.once {

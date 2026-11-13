@@ -501,7 +501,8 @@ added without a row here.
 | `src/cmd/update.rs` | 606 | `octoscode update` — install-method-aware updater (design §A). |
 | `src/cmd/olp_mcp.rs` | 20 | `octoscode olp-mcp-serve` entry — OUTER_LOOP_REVIEW #31 OLP-MCP server subcommand. |
 | `src/cmd/outer_duty.rs` | 98 | `octoscode outer-duty` entry — OUTER_LOOP_REVIEW #38 per-project duty lock (hold/check). |
-| `src/cmd/olp_runtime_watch_ledger.rs` | 945 | Runtime-guard ledger reader — incremental, session/turn-scoped JSONL polling into whitelisted alerts (read-only; Unix-only; no CLI wiring yet). |
+| `src/cmd/olp_runtime_watch.rs` | 1008 | `octoscode olp-runtime-watch` — observation-only runtime guard: bounded process probes, the target turn's ledger alerts, and a no-progress stall advisory, as NDJSON; never accepts a task. |
+| `src/cmd/olp_runtime_watch_ledger.rs` | 945 | Runtime-guard ledger reader — incremental, session/turn-scoped JSONL polling into whitelisted alerts (read-only; Unix-only); consumed by `olp_runtime_watch.rs`. |
 | `src/lib.rs` | 317 | Crate root — module declarations and the shared public surface. |
 | `src/main.rs` | 53 | Binary entry point: subcommand dispatch, then `event_loop::run`. |
 

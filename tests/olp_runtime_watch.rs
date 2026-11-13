@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! Real-subprocess tests for `octoscode olp-runtime-watch` (spec
 //! task-olp-runtime-watch: rules identity-snapshot + process-probe).
 //! Test-owned children are spawned, terminated, and reaped here; the guard
@@ -876,4 +878,276 @@ fn ps_boundary_matrix_through_cli() {
             "{label}: observed child died during watch"
         );
     }
+}
+
+/// Lines of a running watcher's stdout, delivered through a channel so the
+/// test can wait for a condition with a hard deadline instead of blocking.
+fn line_channel(stdout: std::process::ChildStdout) -> std::sync::mpsc::Receiver<String> {
+    use std::io::BufRead;
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines() {
+            let Ok(l) = line else { break };
+            if tx.send(l).is_err() {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+/// Receive records until `want` holds for one, or the deadline passes.
+/// Returns every record seen, the matching one last.
+fn records_until(
+    rx: &std::sync::mpsc::Receiver<String>,
+    timeout: std::time::Duration,
+    want: impl Fn(&serde_json::Value) -> bool,
+) -> Vec<serde_json::Value> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut seen = Vec::new();
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let line = rx
+            .recv_timeout(left)
+            .unwrap_or_else(|_| panic!("condition not met within {timeout:?}; saw {seen:?}"));
+        let rec: serde_json::Value = serde_json::from_str(&line).expect("strict NDJSON");
+        let hit = want(&rec);
+        seen.push(rec);
+        if hit {
+            return seen;
+        }
+    }
+}
+
+fn alert_kinds(rec: &serde_json::Value) -> Vec<String> {
+    rec["alerts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["kind"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn ledger_line(seq: u64, turn: &str, kind: &str, extra: &str) -> String {
+    format!(
+        "{{\"v\":1,\"seq\":{seq},\"event\":{{\"record_kind\":\"notification\",\"kind\":\"{kind}\",\"session_id\":\"s1\",\"turn_id\":\"{turn}\"{extra}}}}}\n"
+    )
+}
+
+/// Spawn a watcher over `ledger` for session s1 / turn t1 with two live
+/// test-owned processes as agent and backend.
+fn spawn_watcher(
+    dir: &std::path::Path,
+    ledger: &std::path::Path,
+    agent: &TestChild,
+    backend: &TestChild,
+    extra: &[&str],
+) -> TestChild {
+    TestChild(
+        binary()
+            .args([
+                "olp-runtime-watch",
+                "--agent",
+                "inner_test",
+                "--agent-pid",
+                &agent.id().to_string(),
+                "--backend-pid",
+                &backend.id().to_string(),
+                "--repo",
+                dir.to_str().unwrap(),
+                "--ledger",
+                ledger.to_str().unwrap(),
+                "--session",
+                "s1",
+                "--turn-id",
+                "t1",
+                "--task",
+                "guard",
+                "--interval-ms",
+                "60",
+            ])
+            .args(extra)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    )
+}
+
+/// Scenario: 目标 turn 工具失败被告警，旧/异 turn 记录被忽略；滚动后继续
+#[test]
+fn olp_runtime_watch_target_turn_error_alerted_rotation_followed() {
+    let agent = spawn_test_child();
+    let backend = spawn_test_child();
+    let dir = tempfile::tempdir().unwrap();
+    let failed = ",\"tool_call_id\":\"c1\",\"tool_name\":\"bash\",\"success\":false,\"output_preview\":\"SECRET-TOKEN\"";
+    let first = dir.path().join("ledger-1695000000-111.log");
+    std::fs::write(
+        &first,
+        format!(
+            "{}{}",
+            // A failure in another turn of the same session must be ignored.
+            ledger_line(1, "OLD-TURN", "tool_completed", failed),
+            ledger_line(2, "t1", "tool_completed", failed),
+        ),
+    )
+    .unwrap();
+    // The UI rolls its ledger within the session directory: the successor
+    // carries the turn's error and its completion.
+    std::fs::write(
+        dir.path().join("ledger-1695000100-111.log"),
+        format!(
+            "{}{}",
+            ledger_line(
+                3,
+                "t1",
+                "turn_error",
+                ",\"message\":\"quota exceeded SECRET-TOKEN\""
+            ),
+            ledger_line(4, "t1", "turn_completed", ""),
+        ),
+    )
+    .unwrap();
+
+    let mut watcher = spawn_watcher(dir.path(), &first, &agent, &backend, &[]);
+    let rx = line_channel(watcher.stdout.take().unwrap());
+    let timeout = std::time::Duration::from_secs(20);
+
+    // The target turn's tool failure is in the very first record.
+    let seen = records_until(&rx, timeout, |r| {
+        alert_kinds(r).contains(&"tool_failed".into())
+    });
+    let rec = seen.last().unwrap();
+    let alert = &rec["alerts"][0];
+    assert_eq!(alert["source"], "ledger");
+    assert_eq!(alert["turn"], "t1");
+    assert_eq!(alert["tool_name"], "bash");
+    assert_eq!(alert["tool_call_id"], "c1");
+    assert_eq!(
+        rec["alerts"].as_array().unwrap().len(),
+        1,
+        "the other turn is ignored: {rec}"
+    );
+    assert_eq!(rec["task_accepted"], false);
+
+    // After the old file goes quiet the reader follows the successor.
+    let mut all = seen;
+    all.extend(records_until(&rx, timeout, |r| {
+        alert_kinds(r).contains(&"turn_error".into())
+    }));
+    all.extend(records_until(&rx, timeout, |r| {
+        r["observation_state"] == "awaiting_review"
+    }));
+    let last = all.last().unwrap();
+    assert!(
+        last["ledger"]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("ledger-1695000100-111.log"),
+        "{last}"
+    );
+    for rec in &all {
+        assert_eq!(
+            rec["task_accepted"], false,
+            "a completed turn is never acceptance"
+        );
+        assert!(
+            !rec.to_string().contains("SECRET-TOKEN"),
+            "payloads never reach the output: {rec}"
+        );
+    }
+    // Each ledger alert is reported once, not on every heartbeat.
+    let tool_failed = all
+        .iter()
+        .filter(|r| alert_kinds(r).contains(&"tool_failed".into()))
+        .count();
+    assert_eq!(tool_failed, 1);
+}
+
+/// Scenario: 重复读事件+哈希不变触发停滞；真实字节变更重置
+#[test]
+fn olp_runtime_watch_stall_and_progress_reset() {
+    use std::io::Write;
+    let agent = spawn_test_child();
+    let backend = spawn_test_child();
+    let dir = tempfile::tempdir().unwrap();
+    let ledger = dir.path().join("ledger-1695000000-111.log");
+    std::fs::write(
+        &ledger,
+        ledger_line(1, "t1", "tool_completed", ",\"success\":true"),
+    )
+    .unwrap();
+    let source = dir.path().join("owned.rs");
+    std::fs::write(&source, "fn a() {}\n").unwrap();
+
+    let mut watcher = spawn_watcher(
+        dir.path(),
+        &ledger,
+        &agent,
+        &backend,
+        &[
+            "--progress-file",
+            source.to_str().unwrap(),
+            "--stall-seconds",
+            "1",
+        ],
+    );
+    let rx = line_channel(watcher.stdout.take().unwrap());
+    let timeout = std::time::Duration::from_secs(20);
+
+    // Not stalled at the start: first sight is the baseline.
+    let first = records_until(&rx, timeout, |_| true);
+    assert!(alert_kinds(&first[0]).is_empty(), "{}", first[0]);
+    assert_eq!(first[0]["progress"]["tracked_files"], 1);
+
+    // The agent keeps producing events (reads, searches) but the file's
+    // bytes never change: a read-only livelock.
+    let mut seq = 1;
+    let mut append = |n: usize| {
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&ledger)
+            .unwrap();
+        for _ in 0..n {
+            seq += 1;
+            f.write_all(ledger_line(seq, "t1", "tool_completed", ",\"success\":true").as_bytes())
+                .unwrap();
+        }
+    };
+    append(3);
+    let seen = records_until(&rx, timeout, |r| {
+        alert_kinds(r).contains(&"stalled_no_progress".into())
+    });
+    let stalled = seen.last().unwrap();
+    let alert = &stalled["alerts"][0];
+    assert_eq!(alert["advisory"], true);
+    assert_eq!(alert["activity"], "events_continuing", "{stalled}");
+    assert!(alert["progress_age_seconds"].as_u64().unwrap() >= 1);
+    assert_eq!(stalled["task_accepted"], false);
+    assert_eq!(stalled["agent"]["state"], "alive", "a stall is not a death");
+
+    // A real byte change resets the clock.
+    std::fs::write(&source, "fn a() { changed(); }\n").unwrap();
+    let seen = records_until(&rx, timeout, |r| {
+        r["progress"]["changed_this_cycle"] == true
+    });
+    let reset = seen.last().unwrap();
+    assert!(alert_kinds(reset).is_empty(), "{reset}");
+    assert_eq!(reset["progress"]["progress_age_seconds"], 0);
+
+    // Unchanged again, and silent this time: the stall comes back, labelled
+    // as no events.
+    let seen = records_until(&rx, timeout, |r| {
+        alert_kinds(r).contains(&"stalled_no_progress".into())
+    });
+    assert_eq!(seen.last().unwrap()["alerts"][0]["activity"], "no_events");
+
+    // A removed file is reported explicitly, and counts as a change.
+    std::fs::remove_file(&source).unwrap();
+    let seen = records_until(&rx, timeout, |r| {
+        r["progress"]["missing_files"]
+            .as_array()
+            .is_some_and(|m| m.len() == 1)
+    });
+    assert_eq!(seen.last().unwrap()["progress"]["changed_this_cycle"], true);
 }
