@@ -208,7 +208,7 @@ fn self_test_ask_outer_roundtrip() {
     }
 }
 
-/// Scenario: 90s 超时降级 — no answer present; compressed clock returns the
+/// Scenario: 超时降级 — no answer present; compressed clock returns the
 /// degraded guidance, never blocks, timeout audited.
 #[test]
 fn self_test_ask_outer_timeout_degrades() {

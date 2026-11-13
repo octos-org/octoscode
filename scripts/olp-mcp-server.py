@@ -10,7 +10,7 @@ Design decisions (pinned in the spec; do not reopen):
 - exactly two tools: ask_outer(question, context, tried),
   report_blocked(reason, needs). No request_review.
 - mailbox: questions -> ~/.octos/outer/mcp/questions/<ts>-<id>.json,
-  answers polled from answers/<id>.json; 90s timeout returns degraded
+  answers polled from answers/<id>.json; 50s timeout returns degraded
   guidance, never blocks a turn indefinitely.
 - audit: every Q/A (ask, answer, timeout, refusal) goes through
   ~/.octos/outer/board_append.sh signed MCP(ask_outer).
@@ -33,13 +33,15 @@ PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "olp-mcp"
 SERVER_VERSION = "0.1.0"
 SIGNATURE = "MCP(ask_outer)"
-ASK_TIMEOUT_SECS = 90.0
+# Below the MCP client's own 60 s tool-call timeout (octos-agent mcp.rs):
+# a call the client aborts never delivers the degraded guidance.
+ASK_TIMEOUT_SECS = 50.0
 ASK_POLL_INTERVAL_SECS = 0.5
 ASK_QUOTA_PER_SLICE = 3
 BOARD_RELATIVE = "OUTER_LOOP_MCP.md"
 
 DEGRADED_GUIDANCE = (
-    "外环 90s 未应答(超时降级):按黑板既有指导继续推进;若确实无法推进,"
+    "外环未在等待时间内应答(超时降级):按黑板既有指导继续推进;若确实无法推进,"
     "以 ACK(blocked) 收场并注明本次问询 id,外环会在线信箱补答。"
 )
 QUOTA_REFUSAL = (
@@ -106,7 +108,7 @@ TOOLS = [
     {
         "name": "ask_outer",
         "description": (
-            "Ask the outer loop a question and wait (<=90s) for the answer "
+            "Ask the outer loop a question and wait (<=50s) for the answer "
             "via the mailbox. Quota: 3 per slice; `tried` is mandatory."
         ),
         "inputSchema": {

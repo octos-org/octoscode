@@ -25,7 +25,7 @@
   "ack_wontdo|task book asks to bump protocol version, r6 is operator-only": 1,
   "override|以本条为准,切片 a 改走契约引用型。": 1,
   "r2_record|声称 verified,复验 lib <num>/<num> 不符。": 1,
-  "ask_outer_timeout|<hex> no answer in 90s": 2,
+  "ask_outer_timeout|no answer in 90s": 2,
   "report_blocked|inner stuck on step <num>": 1,
   "report_blocked|waiting for outer decision": 1,
   "goal_blocked|goal transitioned to `blocked`": 2,

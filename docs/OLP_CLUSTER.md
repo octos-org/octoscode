@@ -40,7 +40,8 @@ scripts/olp-unit.py heartbeat --unit m07 | ssh hub scripts/olp-unit.py receive
 ```
 
 `heartbeat` 只做本机巡检并把一条 JSON 打印到 stdout,发送由管道完成。每分钟跑
-一次(用 launchd 定时)。hub 不可达时这条命令失败,下一分钟再试即可——心跳是
+一次(macOS 用 launchd 定时,Linux 用 systemd 定时器,见
+`docs/OLP_KEEPALIVE.md`)。hub 不可达时这条命令失败,下一分钟再试即可——心跳是
 状态不是日志,不需要离线队列。
 
 巡检项:

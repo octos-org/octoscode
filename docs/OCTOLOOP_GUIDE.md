@@ -297,14 +297,14 @@ OctoLoop 把一个长程任务拆给两圈 agent 加一个人,三者模型档位
   可执行文件、`"args": ["olp-mcp-serve"]`,新会话生效)。
 - **`ask_outer(question, context, tried)`**:turn 内同步发问。信箱目录
   `~/.octos/outer/mcp/` 下 `questions/` → `answers/` → `consumed/`(取答
-  后归档)。**90s 超时降级**:超时返回降级指引而非卡死 turn。
+  后归档)。**50s 超时降级**:超时返回降级指引而非卡死 turn。
 - **`report_blocked(reason, needs)`**:直接把阻塞直报外环看板,不经
   信箱往返。
 - **两条防滥用闸**:每进程限 3 次问询;`tried` 参数必填(先说清自己
   试过什么)——防止内环把思考外包给强模型。
 - **审计**:全程记入 `OUTER_LOOP_MCP.md`,署名 `MCP(ask_outer)`。
 
-体感:内环遇分歧 90 秒内拿到外环(人工或外环 agent)的答复;超时则
+体感:内环遇分歧 50 秒内拿到外环(人工或外环 agent)的答复;超时则
 拿到"自行降级处理"的指引,turn 不被阻塞。
 
 ## 2. 核心纪律 R1–R6

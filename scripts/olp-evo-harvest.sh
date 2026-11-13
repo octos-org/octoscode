@@ -286,9 +286,17 @@ harvest_board() { # realpath
                 local mcp_reason
                 mcp_reason=$(python3 -c '
 import re, sys
-r = sys.argv[1][sys.argv[1].find("reason=") + len("reason="):]
-m = re.search(r"\s[a-z_]+=", r)
-print((r[: m.start()] if m else r)[:80])
+d = sys.argv[1]
+i = d.find("reason=")
+if i >= 0:
+    r = d[i + len("reason="):]
+    m = re.search(r"\s[a-z_]+=", r)
+    r = r[: m.start()] if m else r
+else:
+    # A timeout line has no reason= field ("id=<id> no answer in 90s"):
+    # the text after the id is the reason. The id is already its own field.
+    r = re.sub(r"^id=\S+\s*", "", d)
+print(r[:80])
 ' "$mcp_detail")
                 local mcp_trigger=ask_outer_timeout
                 [ "$mcp_kind" = blocked ] && mcp_trigger=report_blocked
@@ -409,9 +417,17 @@ harvest_mcp() { # realpath
             local reason
             reason=$(printf '%s' "$detail" | python3 -c '
 import re, sys
-r = sys.argv[1][sys.argv[1].find("reason=") + len("reason="):]
-m = re.search(r"\s[a-z_]+=", r)
-print((r[: m.start()] if m else r)[:80])
+d = sys.argv[1]
+i = d.find("reason=")
+if i >= 0:
+    r = d[i + len("reason="):]
+    m = re.search(r"\s[a-z_]+=", r)
+    r = r[: m.start()] if m else r
+else:
+    # A timeout line has no reason= field ("id=<id> no answer in 90s"):
+    # the text after the id is the reason. The id is already its own field.
+    r = re.sub(r"^id=\S+\s*", "", d)
+print(r[:80])
 ' "$detail")
             if [ "$kind" = blocked ]; then trigger=report_blocked; else trigger=ask_outer_timeout; fi
             lsha=$(printf '%s' "$line" | sha256sum | cut -d' ' -f1)

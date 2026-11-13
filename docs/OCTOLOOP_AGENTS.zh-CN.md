@@ -99,7 +99,7 @@ ACK(done|wontdo|blocked): <说明>
 
 同一目标反复试错超过约 30 分钟,那是方案空间塌不下来,不是力气不够——
 **主动要图纸**,不要硬磨。若挂了 MCP 第五信道,调用
-`ask_outer(question, context, tried)`(`tried` 必填,每片限 3 次,90s 超时
+`ask_outer(question, context, tried)`(`tried` 必填,每片限 3 次,50s 超时
 后按降级指引走)。否则写 `ACK(blocked): <试过什么、需要什么>` 并停下。
 
 ## 3. 外环职责

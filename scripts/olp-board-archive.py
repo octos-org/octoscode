@@ -24,7 +24,9 @@
   - 最近的 --keep 个编号条目(默认 10)不论是否闭环都原样保留。
   - 桩保留标题和条目里所有"给机器读"的行:`ACK(` 行、`unit:` 行、写板
     助手 `--key` 留下的 `<!-- olp-key: … -->` 标记,以及署名的行首定式
-    (采认、打回、搁置、改判、单元的推送登记、内环的署名 ACK)。这些判词
+    (采认、打回、搁置、改判、单元的推送登记、内环的署名 ACK、单元的负哨、
+    单元转发的 MCP blocked/timeout 审计行——后两种是进化环采集的信号,
+    留在板上,先归档后采集也不会漏)。这些判词
     按 `#N` 归属,物理上可能落在别的条目下面,不能跟着那个条目的正文离开
     黑板。于是:编号不断档(下一个编号仍是板上最大号 +1),内环按"最小未
     ACK 条目"找活时会跳过它,`#12` 的引用仍能在板上找到,收件箱、本地 PR
@@ -45,8 +47,9 @@
   - 板的行数变少。常驻的 olp-watch-board.sh 会自己重取基线;在归档那一
     刻前后追加的行可能落在基线之前,重要的一击哨请在归档后重新挂。
   - 进化环采集(olp-evo-harvest.sh)会把板识别为被替换并重扫;已采集的
-    信号按 identity 去重。**归档前先跑一次采集**:条目正文里的
-    改判/R2 记档行归档后不在板上,尚未采集的会被漏掉。
+    信号按 identity 去重。负哨与单元的 MCP 审计行留在桩里,不受归档
+    影响。**归档前仍应先跑一次采集**:条目正文里未署名的改判/R2 记档行
+    归档后不在板上,尚未采集的会被漏掉。
 
 退出码:0 成功(含无可归档);2 用法错误或板不存在;4 归档期间板被改动。
 """
@@ -102,6 +105,12 @@ SIGNED_PUSH = re.compile(r"^单元\([^)]+\)·本地复验通过\(#(\d+)\)")
 SIGNED_INNER_ACK = re.compile(
     r"^内环\([^)]+\)·(?:#(\d+)\s*)?ACK\((done|wontdo|blocked)\)(?:[^:：]*[:：]\s*#(\d+))?"
 )
+# 进化环采集(olp-evo-harvest.sh)在活板上读的单元信号:负哨,以及单元转发
+# 来的 MCP blocked / timeout 审计行。
+SIGNED_ALERT = re.compile(r"^单元\([^)]+\)·负哨\(")
+SIGNED_UNIT_MCP = re.compile(
+    r"^单元\([^)]+\)·-\s+\S+\s+\S+\s+MCP\(ask_outer\)\s+(?:blocked|timeout):"
+)
 
 
 def strip_quote(line):
@@ -126,6 +135,8 @@ def is_signed_form(line):
         or SIGNED_VOID.match(signed)
         or SIGNED_PUSH.match(signed)
         or SIGNED_INNER_ACK.match(signed)
+        or SIGNED_ALERT.match(signed)
+        or SIGNED_UNIT_MCP.match(signed)
     )
 
 
@@ -138,7 +149,10 @@ def ack_lines(entry_lines):
     - the `unit:` line (the hub's git hook reads it on a rework push);
     - signed line-start forms: verdicts, snoozes, overrides, push records and
       signed inner ACKs. They attach to an entry by `#N` and may physically
-      sit under a different entry, so they must not leave the board with it.
+      sit under a different entry, so they must not leave the board with it;
+    - the unit signals the evolution harvest reads on the live board:
+      negative-sentinel lines and forwarded MCP blocked / timeout lines.
+      Archiving before a harvest must not lose them.
     """
     out = []
     in_fence = False
