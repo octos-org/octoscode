@@ -303,7 +303,7 @@ fn olp_result_schema_fields_documented() {
 fn outer_duty_wiring_three_surfaces_consistent() {
     let protocol = read("docs/OUTER_LOOP_PROTOCOL.md");
     let boot = read("docs/OLP_OUTER_BOOT.md");
-    let skill = read(".claude/skills/octoloop/SKILL.md");
+    let skill = read("skills/octoloop/AGENTS.md");
     let agents = read("AGENTS.md");
     for (name, text) in [("protocol", &protocol), ("boot", &boot), ("skill", &skill)] {
         assert!(
