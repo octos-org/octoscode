@@ -12,7 +12,7 @@
 
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 fn repo_root() -> PathBuf {
@@ -103,6 +103,7 @@ impl Net {
             .env("OLP_UNIT_ID", "m07")
             .env("OLP_QUEUE_DIR", self.queue())
             .env("OLP_UNIT_CONF", self.dir.path().join("absent.conf"))
+            .env_remove("OLP_MIRROR")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -323,6 +324,75 @@ fn remote_mirror_is_a_read_only_copy_of_the_hub_board() {
     assert_eq!(std::fs::read_to_string(&mirror).unwrap(), before);
 }
 
+/// Scenario: 镜像路径来自配置时,同步是一条不带参数的命令
+#[test]
+fn remote_mirror_target_comes_from_configuration() {
+    let n = Net::new();
+    let from_conf = n.dir.path().join("unit/repo/.octos/OUTER_LOOP_REVIEW.md");
+    let from_env = n.dir.path().join("unit/env/board.md");
+    let from_flag = n.dir.path().join("unit/flag/board.md");
+    let conf = n.dir.path().join("mirror.conf");
+    std::fs::write(
+        &conf,
+        format!(
+            "hub = olp@hub-01\nunit = m07\nmirror = {}\n",
+            from_conf.display()
+        ),
+    )
+    .unwrap();
+    let run = |conf: &Path, args: &[&str], env: &[(&str, &str)]| {
+        let mut cmd = Command::new("python3");
+        cmd.arg("-B")
+            .arg(tool())
+            .args(args)
+            .env("OLP_SSH", n.fake_ssh())
+            .env("OLP_QUEUE_DIR", n.queue())
+            .env("OLP_UNIT_CONF", conf)
+            .env_remove("OLP_HUB")
+            .env_remove("OLP_UNIT_ID")
+            .env_remove("OLP_MIRROR")
+            // Not a repository the tool could guess a target from.
+            .current_dir(n.dir.path());
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        cmd.output().unwrap()
+    };
+
+    // No argument at all: the target is the configured one.
+    let out = run(&conf, &["mirror"], &[]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(std::fs::read_to_string(&from_conf).unwrap(), BOARD);
+    let mode = std::fs::metadata(&from_conf).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o444);
+
+    // The environment wins over the file, --to over both.
+    let env_target = from_env.to_str().unwrap();
+    let out = run(&conf, &["mirror"], &[("OLP_MIRROR", env_target)]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(std::fs::read_to_string(&from_env).unwrap(), BOARD);
+    let out = run(
+        &conf,
+        &["mirror", "--to", from_flag.to_str().unwrap()],
+        &[("OLP_MIRROR", env_target)],
+    );
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(std::fs::read_to_string(&from_flag).unwrap(), BOARD);
+
+    // A relative path in the configuration would depend on where the command
+    // happens to run: refused, nothing written.
+    let relative = n.dir.path().join("relative.conf");
+    std::fs::write(
+        &relative,
+        "hub = olp@hub-01\nunit = m07\nmirror = .octos/OUTER_LOOP_REVIEW.md\n",
+    )
+    .unwrap();
+    let out = run(&relative, &["mirror"], &[]);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stderr(&out).contains("绝对路径"), "{}", stderr(&out));
+    assert!(!n.dir.path().join(".octos").exists());
+}
+
 /// Scenario: 配置缺失或输入非法时不发起连接
 #[test]
 fn remote_requires_configuration_and_valid_input() {
@@ -335,6 +405,7 @@ fn remote_requires_configuration_and_valid_input() {
             .env("OLP_SSH", n.fake_ssh())
             .env("OLP_QUEUE_DIR", n.queue())
             .env("OLP_UNIT_CONF", n.dir.path().join("unit.conf"))
+            .env_remove("OLP_MIRROR")
             .env_remove("OLP_HUB")
             .env_remove("OLP_UNIT_ID")
             .stdin(Stdio::piped())

@@ -26,6 +26,10 @@ estimate: 1d
   `### {N}. <标题>(<日期>,<署名>)` / `unit: <单元号>` / 可选 `verify-of: #M` / 空行 / 正文,
   编号由写板脚本在锁内分配,正文里的 `{N}` 一并替换;⑥ 给了 `--wake <窗格>` 时执行
   `herdr --machine <单元号> agent prompt <窗格> <一句话,含条目号>`(`OLP_HERDR` 可替换程序)。
+  这句话写明第一步是同步镜像,并给出可以原样执行的命令
+  `python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py" mirror`:单元读的
+  是黑板的镜像,它上一次同步在这张卡写板之前;单元的项目目录里没有 `scripts/`,只给脚本名
+  时真实内环花了几分钟全盘搜索。
 - 幂等:键默认是 `dispatch:<单元号>:<sha256(单元号、标题、正文) 前 16 位>`,可用 `--key`
   指定。重跑同一条命令时,①命中,不再做健康、占用、回测检查(此时单元"正忙"的正是这张
   卡),不写第二张卡,只补做唤醒。
@@ -73,7 +77,7 @@ Scenario: 一条命令查单元、写板并唤醒(critical)
   Test: dispatch_writes_a_numbered_card_and_wakes_the_unit
   Given 一台登记过且心跳正常的单元 m07,一块空板
   When 带 `--wake` 派一张正文含 `task/{N}` 的卡
-  Then stdout 最后一行是 1;板上是带 `unit: m07` 的 #1,正文里的 `{N}` 已换成 1,并留有派发键;herdr 收到 `--machine m07 agent prompt <窗格> …#1…`;占用视图里 m07 为忙
+  Then stdout 最后一行是 1;板上是带 `unit: m07` 的 #1,正文里的 `{N}` 已换成 1,并留有派发键;herdr 收到 `--machine m07 agent prompt <窗格> …#1…`,这句话里有可原样执行的镜像同步命令;占用视图里 m07 为忙
 
 Scenario: 唤醒失败后原样重跑只补做唤醒(critical)
   Tags: critical

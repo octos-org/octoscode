@@ -12,7 +12,8 @@
                                  追加一行 `> 内环(<单元号>)·#N ACK(…): <说明>`
   flush                          把排队的写入按原顺序重发
   queue                          列出排队中的写入
-  mirror --to <本地路径>         把 hub 的黑板拉成本机的只读镜像
+  mirror [--to <本地路径>]       把 hub 的黑板拉成本机的只读镜像;不给 --to 时
+                                 用配置里的镜像路径
 
 hub 上的子命令
   serve --unit <单元号> --board <黑板路径>
@@ -23,6 +24,7 @@ hub 上的子命令
 单元的配置(命令行 > 环境变量 > 配置文件)
   hub 的 ssh 目标   --hub    OLP_HUB       hub=…
   本单元号          --unit   OLP_UNIT_ID   unit=…
+  镜像路径(mirror)  --to     OLP_MIRROR    mirror=…(绝对路径)
   配置文件 ${OLP_UNIT_CONF:-~/.octos/outer/unit.conf},每行 `键=值`。
 
 幂等与排队
@@ -43,6 +45,10 @@ hub 侧对单元写入的限制(serve)
   - 正文上限 256 KiB。
 
 只读镜像
+  内环**每次读板前先执行 `mirror`**:派卡之后大外环马上唤醒内环,定时同步
+  赶不上,镜像里可能还没有那张新卡。配置里写了 `mirror=` 之后这是一条不带
+  参数的命令。定时同步(每分钟一次)只作兜底,让人和别的工具看到的镜像不
+  太旧。
   `mirror` 把黑板拉到本机并设为只读,经临时文件原子替换。内环照常读这个
   镜像;写入一律走 append/ack。镜像永不回写。
 
@@ -274,7 +280,23 @@ def cmd_queue(args):
     return 0
 
 
+def mirror_target(args):
+    """--to, then OLP_MIRROR, then `mirror=` in unit.conf. There is no
+    guessed default: writing a read-only copy over the wrong file — say, the
+    live board of whatever repository the command happens to run in — is
+    worse than a usage error."""
+    target = args.to or os.environ.get("OLP_MIRROR") or load_conf().get("mirror") or ""
+    if not target:
+        raise Fail(2, "没有镜像路径(--to、OLP_MIRROR 或 unit.conf 里的 mirror=)")
+    if not os.path.isabs(target):
+        if args.to:
+            return os.path.abspath(target)
+        raise Fail(2, f"配置里的镜像路径必须是绝对路径: {target}")
+    return target
+
+
 def cmd_mirror(args):
+    target = mirror_target(args)
     hub, _ = resolve(args)
     code, out, err = ssh_run(hub, ["read"])
     if code == SSH_UNREACHABLE:
@@ -282,7 +304,6 @@ def cmd_mirror(args):
         return EX_TEMPFAIL
     if code != 0:
         raise Fail(code, f"hub 拒绝读取:{err.strip()}")
-    target = os.path.abspath(args.to)
     directory = os.path.dirname(target)
     os.makedirs(directory, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".mirror-", dir=directory)
@@ -381,7 +402,7 @@ def main():
 
     p = sub.add_parser("mirror")
     unit_flags(p)
-    p.add_argument("--to", required=True)
+    p.add_argument("--to")
     p.set_defaults(fn=cmd_mirror)
 
     p = sub.add_parser("serve")

@@ -94,7 +94,16 @@ def check_health(unit):
 
 def wake(unit, pane, number):
     herdr = os.environ.get("OLP_HERDR") or "herdr"
-    message = f"黑板新条目 #{number} 派给本单元,读板执行"
+    # The unit reads a mirror of the board. It was last synced before this
+    # card was written, so the wake names the sync as the first step — as a
+    # command that runs as written: a unit's project has no scripts/ of its
+    # own, and a real inner loop spent minutes searching the disk for the
+    # tool when the wake only gave its name.
+    message = (
+        f"黑板新条目 #{number} 派给本单元。先同步本机的黑板镜像:"
+        'python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py" mirror'
+        f" ,再读 #{number} 执行"
+    )
     try:
         r = subprocess.run(
             [herdr, "--machine", unit, "agent", "prompt", pane, message],

@@ -37,8 +37,12 @@ estimate: 1d
   `.rejected` 并跳过。hub 明确拒绝(退出码非 255)的新写入不入队。
 - "hub 已写入但回执丢失":客户端按不可达处理并保留队列项,之后重发由 hub 的键去重吸收,
   板上只出现一次。
-- 只读镜像:`mirror --to <路径>` 经 `read` 取全板,写临时文件、设为 0444、原子替换。hub
-  不可达时退出码 75,镜像不变。
+- 只读镜像:`mirror [--to <路径>]` 经 `read` 取全板,写临时文件、设为 0444、原子替换。hub
+  不可达时退出码 75,镜像不变。目标路径的来源依次是 `--to`、环境变量 `OLP_MIRROR`、
+  `unit.conf` 的 `mirror=`(后两者必须是绝对路径);都没有时退出码 2,不猜路径——把只读
+  副本写到错的文件上(比如命令恰好所在仓库的活板)比报用法错误更糟。配了 `mirror=` 之后
+  同步是一条不带参数的命令,内环每次读板前执行它:派卡后大外环立刻唤醒内环,定时同步赶
+  不上。
 - 配置优先级:命令行 > 环境变量(`OLP_HUB`、`OLP_UNIT_ID`)> 配置文件
   `${OLP_UNIT_CONF:-~/.octos/outer/unit.conf}`(`hub=`、`unit=`)。hub 目标必须以字母或
   数字开头且只含 `[A-Za-z0-9._@-]`。缺配置时退出码 2,不发起连接。
@@ -102,6 +106,12 @@ Scenario: 只读镜像
   Then 镜像内容等于黑板且权限为 0444;第二次拉取替换了只读文件;不可达时退出码 75 且镜像保持原样
 
 ### Rule: config — 配置与输入
+Scenario: 镜像路径来自配置时,同步是一条不带参数的命令
+  Test: remote_mirror_target_comes_from_configuration
+  Given 单元的配置文件里有 `mirror=<绝对路径>`;另有环境变量 `OLP_MIRROR` 指向别处;以及一份 `mirror=` 写成相对路径的配置
+  When 不带 `--to` 运行 mirror;带上环境变量再运行;带 `--to` 再运行;用相对路径的配置运行
+  Then 依次写到配置的路径、环境变量的路径、`--to` 的路径;相对路径的配置以退出码 2 拒绝且不写任何文件
+
 Scenario: 配置缺失或输入非法时不发起连接
   Test: remote_requires_configuration_and_valid_input
   Given 没有任何配置;只有 hub;hub 写成 ssh 选项的样子;以及一份配置文件
