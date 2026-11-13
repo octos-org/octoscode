@@ -1316,6 +1316,39 @@ fn olp_evo_harvest_mcp_partial_line_no_fire_until_newline() {
     assert_eq!(sb.evo_count(), 2);
 }
 
+/// A timeout line carries no `reason=` field ("id=<id> no answer in 90s").
+/// The reason is the text after the id — not the line with its first six
+/// characters cut off, which left half of the id in the retro title.
+#[test]
+fn olp_evo_harvest_mcp_timeout_reason_is_the_text_after_the_id() {
+    let sb = Sandbox::new("timeout-reason");
+    std::fs::write(
+        sb.repo.join(".octos/OUTER_LOOP_REVIEW.md"),
+        "### 1. base\n\nnothing\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &sb.mcp_path,
+        "- 2026-11-13 11:08:36 MCP(ask_outer) timeout: id=0a06174e2d90 no answer in 90s\n",
+    )
+    .unwrap();
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = std::fs::read_to_string(sb.evo_board()).unwrap_or_default();
+    let symptom = text
+        .lines()
+        .find(|l| l.starts_with("symptom: "))
+        .expect("card");
+    assert_eq!(
+        symptom,
+        "symptom: kind=timeout id=0a06174e2d90 reason=no answer in 90s"
+    );
+}
+
 /// #41-r5b ⑧: the MCP symptom carries reason= up to the NEXT key token
 /// (not just the first word).
 #[test]
@@ -1786,9 +1819,9 @@ fn olp_evo_harvest_unit_mcp_lines_become_mcp_cards() {
         symptoms[2],
         "kind=blocked id=- unit=m09 reason=hdc 连不上设备"
     );
-    assert!(
-        symptoms[0].starts_with("kind=timeout id=ab12cd34ef56 unit=m07 "),
-        "{symptoms:?}"
+    assert_eq!(
+        symptoms[0], "kind=timeout id=ab12cd34ef56 unit=m07 reason=no answer in 90s",
+        "a timeout line has no reason= field; the id must not leak into the reason"
     );
     let identities = field("identity: ");
     assert!(

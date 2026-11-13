@@ -60,8 +60,13 @@ rules:
 ACK(done|wontdo|blocked): <explanation>
 ```
 
-   (On a unit in a multi-machine deployment the board is a read-only mirror
-   and cannot be edited in place: use
+   (On a unit in a multi-machine deployment the board is a read-only mirror:
+   **run `scripts/olp-board-remote.py mirror` before every read**, or the
+   card you were just sent may not be in it yet. A unit's project has no
+   `scripts/` of its own: the tools live in the octoscode checkout on this
+   machine, whose location is recorded in `~/.octos/outer/octoscode-home` —
+   `python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py" mirror`. The mirror cannot be edited
+   in place: use
    `scripts/olp-board-remote.py ack <N> done|wontdo|blocked <explanation>`,
    which appends the same line to the authoritative board on the hub.)
 
@@ -111,7 +116,7 @@ If you burn more than ~30 minutes retrying the same approach, that is a
 solution-space stall, not a effort problem — **ask for a blueprint** instead of
 grinding. If the MCP fifth channel is mounted, call
 `ask_outer(question, context, tried)` (`tried` is mandatory, 3 calls per slice,
-90s timeout then a documented degrade). Otherwise write
+50s timeout then a documented degrade). Otherwise write
 `ACK(blocked): <what you tried, what you need>` and stop.
 
 ## 3. OUTER loop duty

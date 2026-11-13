@@ -54,7 +54,12 @@
 ACK(done|wontdo|blocked): <说明>
 ```
 
-   (多机部署的单元上,黑板是只读镜像,不能原地写:改用
+   (多机部署的单元上,黑板是只读镜像:**每次读板前先执行
+   `scripts/olp-board-remote.py mirror` 同步它**,否则可能读不到刚派来的卡。
+   单元的项目目录里没有 `scripts/`:这些脚本在本机的 octoscode 仓库里,仓库
+   位置记在 `~/.octos/outer/octoscode-home`,即
+   `python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py" mirror`。
+   镜像不能原地写:改用
    `scripts/olp-board-remote.py ack <N> done|wontdo|blocked <说明>`,它把同样
    内容的一行追加到 hub 的权威黑板。)
 
@@ -94,7 +99,7 @@ ACK(done|wontdo|blocked): <说明>
 
 同一目标反复试错超过约 30 分钟,那是方案空间塌不下来,不是力气不够——
 **主动要图纸**,不要硬磨。若挂了 MCP 第五信道,调用
-`ask_outer(question, context, tried)`(`tried` 必填,每片限 3 次,90s 超时
+`ask_outer(question, context, tried)`(`tried` 必填,每片限 3 次,50s 超时
 后按降级指引走)。否则写 `ACK(blocked): <试过什么、需要什么>` 并停下。
 
 ## 3. 外环职责

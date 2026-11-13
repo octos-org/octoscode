@@ -60,7 +60,7 @@ impl Cluster {
              shift\n\
              case \"$1\" in\n\
                append|read) SSH_ORIGINAL_COMMAND=\"$*\" exec python3 -B '{remote}' serve --unit m07 --board '{board}' ;;\n\
-               *) SSH_ORIGINAL_COMMAND=\"$*\" exec python3 -B '{answer}' serve --root '{root}' --max-age \"$(cat '{max_age}' 2>/dev/null || echo 90)\" ;;\n\
+               *) SSH_ORIGINAL_COMMAND=\"$*\" exec python3 -B '{answer}' serve --root '{root}' --max-age \"$(cat '{max_age}' 2>/dev/null || echo 50)\" ;;\n\
              esac\n",
             down = c.down().display(),
             remote = scripts().join("olp-board-remote.py").display(),

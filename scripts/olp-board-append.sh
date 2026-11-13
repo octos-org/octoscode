@@ -165,6 +165,11 @@ fi
 if [ -s "$BOARD" ] && [ -n "$(tail -c 1 "$BOARD")" ]; then
     echo >> "$BOARD"
 fi
+# 分配了编号的新条目以标题开头;板的最后一行不是空行时先空一行,标题不贴着
+# 上一条的末行(例如一行 `ACK:`)。旧写法(不带 `{N}`)仍然逐字追加。
+if [ -n "$N" ] && [ -s "$BOARD" ] && [ -n "$(tail -n 1 "$BOARD")" ]; then
+    echo >> "$BOARD"
+fi
 cat "$OUT" >> "$BOARD"
 if [ -n "$N" ]; then
     echo "$N"

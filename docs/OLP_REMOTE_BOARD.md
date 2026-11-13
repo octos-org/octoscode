@@ -65,11 +65,31 @@ EOF
 ## 5. 只读镜像
 
 ```bash
-scripts/olp-board-remote.py mirror --to <repo>/.octos/OUTER_LOOP_REVIEW.md
+# 一次性:记下本机 octoscode 仓库的位置(单元的项目目录里没有 scripts/,
+# 内环靠 ~/.octos/outer/octoscode-home 找到这些脚本)
+scripts/olp-install-skill.sh --home-only
+# 一次性:把镜像路径写进单元的配置(绝对路径)
+echo 'mirror = /path/to/repo/.octos/OUTER_LOOP_REVIEW.md' >> ~/.octos/outer/unit.conf
+# 之后同步镜像是一条不带参数的命令
+scripts/olp-board-remote.py mirror
 ```
 
 把 hub 的黑板拉到本机并设为只读。内环照常读这个文件;写入一律走上面的命令。
-每分钟同步一次即可。hub 不可达时镜像保持上一次的内容。镜像永不回写。
+hub 不可达时镜像保持上一次的内容(退出码 75)。镜像永不回写。`--to <路径>` 可以
+临时指定别的位置;没有 `--to` 也没有配置时命令以退出码 2 拒绝,不猜路径。
+
+**谁来同步:内环自己,每次读板之前。** 大外环派卡之后会立刻唤醒内环
+(`olp-dispatch.py --wake`),定时同步赶不上:内环被叫醒去读 #N 时,镜像里可能
+还没有 #N。所以:
+
+- 唤醒的那句话里写明了第一步,并给出可以原样执行的命令:
+  `python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py" mirror`;
+- 落地项目的上岗卡(`AGENTS.md`)里也写了"读板前先同步镜像";
+- 定时同步只作兜底,让人和别的工具看到的镜像不太旧:
+
+  ```bash
+  scripts/olp-launchd.py install mirror --interval 60 -- /usr/bin/python3 /path/scripts/olp-board-remote.py mirror
+  ```
 
 ## 6. 内环的提问:送到 hub,回答送回来
 
@@ -107,7 +127,8 @@ EOF
 command="/path/scripts/olp-answer.py serve",no-pty,no-port-forwarding ssh-ed25519 AAAA… hub-answer
 ```
 
-**内环只等 90 秒。** 超过这个时间的提问不再接受回答(单元会拒绝并说明),因为
+**内环只等 50 秒。**(octos 对一次 MCP 工具调用的上限是 60 秒,等待时间必须比它
+短,否则内环看到的是工具失败而不是降级指引。)超过这个时间的提问不再接受回答(单元会拒绝并说明),因为
 内环已经按降级指引继续了,没有人会读。这时改用黑板条目或 herdr 告诉那台单元。
 
 `report_blocked` 和超时的提问会被进化环采集哨收成卡(`report_blocked`、
