@@ -98,7 +98,7 @@ QUICKSTART 的发现命令为准。
 `scripts/olp-dispatch.py <单元> --board <板> --title … [--wake <窗格>]`
 (一步派卡,可安全重试)、`scripts/olp-inbox.py <板> --units`(单元占用)、
 `scripts/olp-local-pr.py status|promote`(本地 PR 状态与推 GitHub 的采认
-闸门)、`scripts/olp-answer.py`(回答单元里内环的提问,内环只等 90 秒)。
+闸门)、`scripts/olp-answer.py`(回答单元里内环的提问,内环只等 50 秒)。
 单元一侧的写板、推送、心跳、负哨见 `docs/OLP_REMOTE_BOARD.md`、
 `docs/OLP_LOCAL_GIT.md`、`docs/OLP_KEEPALIVE.md`。单机使用不需要这些。
 
@@ -132,7 +132,7 @@ R2 诚实验证声明(verified/partially/unverified)。
 - **本机复验方的打回**写在本机的返工板上,编号是 `#N-r1`、`#N-r2`,按它
   返工;它不是新的任务号。
 - **卡住时照常用 `ask_outer` / `report_blocked`**,提问会送到 hub。回答
-  只等 90 秒:等不到就按降级指引继续,并用 `ack <N> blocked` 把卡在哪里
+  只等 50 秒:等不到就按降级指引继续,并用 `ack <N> blocked` 把卡在哪里
   写到板上。
 
 ## 自主性纪律(实战沉淀:一次全链演练暴露的六类断点)

@@ -50,7 +50,7 @@
 | 权威账本 | `goal-ledgers/<goal_id>` | durable,重启幸存 |
 | 求助 | escalation(park 于 approval/question) | 分级升级,见 R3 |
 | 代码 | git log / diff | 审查对象 |
-| **主动问询(MCP 第五信道)** | `octoscode olp-mcp-serve` 子命令(#31 Rust 化,纯 stdlib)工具 `ask_outer`/`report_blocked`;信箱 `~/.octos/outer/mcp/questions|answers|consumed`,审计 `OUTER_LOOP_MCP.md` 署名 `MCP(ask_outer)` | 内环 turn 内同步发问,90s 超时降级,每片限 3 次+tried 必填(防思考外包);取答后归档 consumed/ |
+| **主动问询(MCP 第五信道)** | `octoscode olp-mcp-serve` 子命令(#31 Rust 化,纯 stdlib)工具 `ask_outer`/`report_blocked`;信箱 `~/.octos/outer/mcp/questions|answers|consumed`,审计 `OUTER_LOOP_MCP.md` 署名 `MCP(ask_outer)` | 内环 turn 内同步发问,50s 超时降级,每片限 3 次+tried 必填(防思考外包);取答后归档 consumed/ |
 
 ## 协议语义(核心规则)
 
@@ -162,7 +162,7 @@
    `["olp-mcp-serve"]`(契约测试 `cargo test --test olp_mcp_contract`
    七件自验;Python 原型已归档 scripts/reference/)后,内环模型 turn 内
    可原生调用 `ask_outer(question, context, tried)` — 信箱
-   `~/.octos/outer/mcp/` 传输,90s 超时降级,每片限 3 次、`tried` 必填
+   `~/.octos/outer/mcp/` 传输,50s 超时降级,每片限 3 次、`tried` 必填
    (防思考外包);取答后问题归档 `consumed/`,全程审计
    `OUTER_LOOP_MCP.md` 署名 `MCP(ask_outer)`。三个实测坑已入册:
    (a) 落点是 profiles/<id>.json 的 config 对象,**不是**

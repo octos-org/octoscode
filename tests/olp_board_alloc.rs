@@ -119,7 +119,7 @@ fn board_append_allocates_next_number_under_lock() {
 
     let text = std::fs::read_to_string(&board).unwrap();
     assert!(
-        text.ends_with("body\n### 20. 标题(2026-11-12,外环)\n分支 task/20,见 #20\n"),
+        text.ends_with("body\n\n### 20. 标题(2026-11-12,外环)\n分支 task/20,见 #20\n"),
         "{text}"
     );
     assert!(!text.contains("{N}"), "{text}");
@@ -130,6 +130,43 @@ fn board_append_allocates_next_number_under_lock() {
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     assert_eq!(stdout(&out).trim(), "1");
     assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "### 1. first\n");
+}
+
+/// Scenario: 标题不贴着上一条的末行
+#[test]
+fn board_append_separates_a_heading_from_a_non_blank_last_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = dir.path().join("OUTER_LOOP_REVIEW.md");
+    // The template olp-init.sh lays down ends with a bare `ACK:` line.
+    std::fs::write(&board, "### 1. 黑板启用\n\nACK:\n").unwrap();
+
+    let out = append(&board, &[], "### {N}. 第二张\nunit: m01\n", &[]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out).trim(), "2");
+    let text = std::fs::read_to_string(&board).unwrap();
+    assert_eq!(
+        text, "### 1. 黑板启用\n\nACK:\n\n### 2. 第二张\nunit: m01\n",
+        "one blank line before the new heading"
+    );
+
+    // Lines that are not headings still attach directly: a verdict or an ACK
+    // appended at the end belongs right under what is there.
+    let out = append(&board, &[], "> 外环(hub)·采认(#2): 通过\n", &[]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let text = std::fs::read_to_string(&board).unwrap();
+    assert!(
+        text.ends_with("unit: m01\n> 外环(hub)·采认(#2): 通过\n"),
+        "{text}"
+    );
+
+    // A board that already ends with a blank line gets no second one.
+    std::fs::write(&board, "### 1. a\n\n").unwrap();
+    let out = append(&board, &[], "### {N}. b\n", &[]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(
+        std::fs::read_to_string(&board).unwrap(),
+        "### 1. a\n\n### 2. b\n"
+    );
 }
 
 /// Scenario: 100 个并发写入方无重号、无交错
@@ -162,7 +199,10 @@ fn board_append_concurrent_writers_get_unique_numbers_and_intact_entries() {
     // No interleaving: each entry is exactly its own three lines, in order,
     // and the number inside the body is the number in the heading.
     let text = std::fs::read_to_string(&board).unwrap();
-    let lines: Vec<&str> = text.lines().collect();
+    // Entries are separated by one blank line.
+    assert_eq!(text.matches("\n\n").count(), WRITERS - 1, "{text}");
+    assert!(!text.contains("\n\n\n"), "{text}");
+    let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(lines.len(), WRITERS * 3, "{text}");
     for entry in lines.chunks(3) {
         let (n, who) = entry[0]

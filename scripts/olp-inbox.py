@@ -44,7 +44,7 @@
 待回答的提问
   内环的 ask_outer 在板上留一行 `MCP(ask_outer) ask: id=… question=…`(单元
   转发来的带 `> 单元(<单元号>)·` 署名)。还没有对应的 answer 或 timeout 行
-  的提问列在最前面——内环只等 90 秒。用 scripts/olp-answer.py 回答。
+  的提问列在最前面——内环只等 50 秒。用 scripts/olp-answer.py 回答。
 
 占用视图(--units)
   多机部署时一台单元同一时间只做一张卡。--units 按单元列出还占着它的
@@ -389,7 +389,7 @@ def main():
         return 0
 
     if questions:
-        # 内环只等 90 秒:提问排在最前面。
+        # 内环只等 50 秒:提问排在最前面。
         print(f"== 待回答的提问({len(questions)})")
         for q in questions:
             unit = f" [{q['unit']}]" if q["unit"] else ""

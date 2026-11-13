@@ -3,7 +3,7 @@
 
 内环卡住时会调用 ask_outer 向外环提问。提问存在单元本机的信箱里
 (~/.octos/outer/mcp/questions/),内环等回答文件出现在
-~/.octos/outer/mcp/answers/<id>.json,等不到就按降级指引继续(默认 90 秒)。
+~/.octos/outer/mcp/answers/<id>.json,等不到就按降级指引继续(默认 50 秒)。
 多机部署时大外环在 hub 上:提问的审计行会出现在 hub 的黑板上(见
 olp-board-remote.py 的 --sign),本工具负责把回答送回那台单元。
 
@@ -16,7 +16,7 @@ hub 上的子命令
 单元上的子命令
   serve [--root <目录>] [--max-age 秒]
       ssh 强制命令。只接受 list、show <id>、answer <id> 三个动作,只读写
-      信箱目录。--max-age 是内环等回答的时间(默认 90 秒,与 MCP 服务的
+      信箱目录。--max-age 是内环等回答的时间(默认 50 秒,与 MCP 服务的
       超时一致);更早的提问不再接受回答。在单元的 authorized_keys 里给 hub 的密钥配:
         command="/path/scripts/olp-answer.py serve",no-pty,no-port-forwarding ssh-ed25519 AAAA… hub-answer
 
@@ -25,7 +25,8 @@ hub 上的子命令
     的等待时间时拒绝,不会在信箱里留下没人读的回答。
   - 回答上限 64 KiB,必须是 UTF-8。写入经临时文件原子替换,内环不会读到
     半个文件。
-  - 内环只等 90 秒。来不及时回答会被拒绝(提问已不在等),这时改用黑板
+  - 内环只等 50 秒(MCP 客户端对一次工具调用的上限是 60 秒,等待时间必须
+    比它短)。来不及时回答会被拒绝(提问已不在等),这时改用黑板
     条目或 herdr 直接告诉那台单元。
   - 回答的落板由单元上的 MCP 服务自己做(它读到回答后记一行 answer 审计,
     经 --sign 转发回 hub 的黑板),本工具不写黑板。
@@ -219,7 +220,7 @@ def main():
         p.set_defaults(fn=fn)
     p = sub.add_parser("serve")
     p.add_argument("--root")
-    p.add_argument("--max-age", type=float, default=90.0)
+    p.add_argument("--max-age", type=float, default=50.0)
     p.set_defaults(fn=cmd_serve)
     try:
         args = ap.parse_args()

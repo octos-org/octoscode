@@ -107,7 +107,8 @@ EOF
 command="/path/scripts/olp-answer.py serve",no-pty,no-port-forwarding ssh-ed25519 AAAA… hub-answer
 ```
 
-**内环只等 90 秒。** 超过这个时间的提问不再接受回答(单元会拒绝并说明),因为
+**内环只等 50 秒。**(octos 对一次 MCP 工具调用的上限是 60 秒,等待时间必须比它
+短,否则内环看到的是工具失败而不是降级指引。)超过这个时间的提问不再接受回答(单元会拒绝并说明),因为
 内环已经按降级指引继续了,没有人会读。这时改用黑板条目或 herdr 告诉那台单元。
 
 `report_blocked` 和超时的提问会被进化环采集哨收成卡(`report_blocked`、
