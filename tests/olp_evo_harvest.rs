@@ -1679,3 +1679,66 @@ fn find_files(dir: &Path) -> Vec<PathBuf> {
     out.sort();
     out
 }
+
+/// Scenario: 多机部署的行首定式落卡并按 #N 归属
+#[test]
+fn olp_evo_harvest_cluster_forms_attach_by_entry_number() {
+    let sb = Sandbox::new("cluster-forms");
+    // In a multi-machine deployment these lines are appended at the END of
+    // the board, physically under the last entry (#213 here).
+    std::fs::write(
+        sb.repo.join(".octos/OUTER_LOOP_REVIEW.md"),
+        "### 212. 一张卡(2026-11-13,外环(hub))\nunit: m07\n\n\
+         ### 213. 另一张卡(2026-11-13,外环(hub))\nunit: m08\n\n\
+         > 内环(m07)·#212 ACK(blocked): 等上游修复\n\
+         > 内环(m08)·ACK(wontdo): #213(2026-11-13): 与 #212 重复\n\
+         > 内环(m07)·#212 ACK(done): 完成不触发\n\
+         > 内环(m07)·#212 checkpoint: 不是 ACK\n\
+         > 外环(hub)·打回(#212): 缺测试\n\
+         > 外环(hub)·采认(#213): 通过不触发\n\
+         > 外环(hub)·搁置(#212) 至 2026-12-01: 不触发\n\
+         > 单元(m07)·负哨(#212): turn_error turn=t1 seq=9\n\
+         > 单元(m07)·本地复验通过(#212): task/212 @ abc 复验 m07-ver\n\
+         正文里提到 外环(hub)·打回(#212) 与 单元(m07)·负哨(#212) 不触发\n",
+    )
+    .unwrap();
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines = read_lines(sb.evo_board());
+    let field = |name: &str| -> Vec<String> {
+        lines
+            .iter()
+            .filter(|l| l.starts_with(name))
+            .map(|l| l[name.len()..].to_string())
+            .collect()
+    };
+    assert_eq!(
+        field("trigger: "),
+        vec!["ack_blocked", "ack_wontdo", "returned", "unit_alert"]
+    );
+    // Each card names the entry its line refers to — not #213, the heading
+    // the lines physically sit under.
+    let identities = field("identity: ");
+    for (identity, want) in identities.iter().zip([
+        "#212#blocked#",
+        "#213#wontdo#",
+        "#212#returned#",
+        "#212#alert#",
+    ]) {
+        assert!(identity.contains(want), "{identity} should contain {want}");
+    }
+    let symptoms = field("symptom: ");
+    assert!(symptoms[0].contains("等上游修复"), "{symptoms:?}");
+    assert!(
+        symptoms[3].contains("turn_error turn=t1 seq=9"),
+        "{symptoms:?}"
+    );
+
+    // A rerun adds nothing.
+    assert!(sb.run(false).status.success());
+    assert_eq!(sb.evo_count(), 4);
+}

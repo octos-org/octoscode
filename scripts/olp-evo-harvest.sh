@@ -238,16 +238,51 @@ harvest_board() { # realpath
                 trigger=r2_record
             fi
         fi
+        # Cluster forms. In a multi-machine deployment a unit cannot write
+        # under an entry: its ACK, the outer loop's return and the unit's
+        # negative-sentinel lines are appended at the end of the board and
+        # name their entry as #N. They attach to THAT entry, not to the
+        # heading they happen to sit under.
+        local card_entry=$entry
+        if [ -z "$trigger" ]; then
+            local re_inner='^内环\([^)]+\)·(#([0-9]+)[[:space:]]*)?ACK\((blocked|wontdo)\)'
+            local re_inner_tail='ACK\((blocked|wontdo)\)(\([^)]*\))?(:|：)[[:space:]]*#([0-9]+)'
+            local re_returned='^外环\([^)]+\)·打回\(#([0-9]+)\)'
+            local re_alert='^单元\([^)]+\)·负哨\(#?([^)]*)\)'
+            if [[ $signed =~ $re_inner ]]; then
+                # Read the captures before another =~ overwrites them; an
+                # unmatched optional group is unset under `set -u`.
+                trigger=ack_${BASH_REMATCH[3]}
+                local inner_n=${BASH_REMATCH[2]:-}
+                if [ -n "$inner_n" ]; then
+                    card_entry=$inner_n
+                elif [[ $signed =~ $re_inner_tail ]]; then
+                    card_entry=${BASH_REMATCH[4]}
+                fi
+                rest=$trimmed
+            elif [[ $signed =~ $re_returned ]]; then
+                trigger=returned
+                card_entry=${BASH_REMATCH[1]}
+            elif [[ $signed =~ $re_alert ]]; then
+                trigger=unit_alert
+                local alert_task=${BASH_REMATCH[1]:-}
+                if [[ $alert_task =~ ^[0-9]+$ ]]; then
+                    card_entry=$alert_task
+                fi
+            fi
+        fi
         if [ -n "$trigger" ]; then
             lsha=$(printf '%s' "$line" | sha256sum | cut -d' ' -f1)
             local kind=blocked
             [ "$trigger" = ack_wontdo ] && kind=wontdo
             [ "$trigger" = override ] && kind=override
             [ "$trigger" = r2_record ] && kind=r2
-            ident="board:$rp#$entry#$kind#$lsha"
+            [ "$trigger" = returned ] && kind=returned
+            [ "$trigger" = unit_alert ] && kind=alert
+            ident="board:$rp#$card_entry#$kind#$lsha"
             # signed forms report the ORIGINAL line (contract: symptom 取原行前 200 字符)
             local symptom_base=${rest:-$trimmed}
-            case $trigger in override|r2_record) symptom_base=$trimmed ;; esac
+            case $trigger in override|r2_record|returned|unit_alert) symptom_base=$trimmed ;; esac
             # #12c: cut by Unicode characters, not locale bytes (LC_ALL=C
             # would otherwise split a UTF-8 sequence mid-character).
             local symptom
