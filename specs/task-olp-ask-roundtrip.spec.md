@@ -89,6 +89,12 @@ Scenario: 回答命令的输入检查与单元不可达
   When 分别运行
   Then 输入错误为退出码 2;不存在的提问为 3;强制命令对其他动作一律以 3 拒绝;不可达为 75
 
+Scenario: 早已超时的提问不再出现在列表里
+  Test: answer_list_hides_questions_that_timed_out_long_ago
+  Given 单元的信箱里有四个提问:刚提的、十分钟前超时的、两天前的、三十天前的
+  When 经强制命令 list;把 `--list-window` 调大后再 list;show 三十天前的那一条
+  Then 默认只列出前两条,stderr 报"另有 2 条"未列出;调大窗口后四条都列出;被隐藏的提问仍能 show;信箱里的文件一个没少
+
 ### Rule: evidence — 进入进化环
 Scenario: 单元转发来的 MCP 审计行落成既有的 MCP 类卡(critical)
   Tags: critical
@@ -96,9 +102,3 @@ Scenario: 单元转发来的 MCP 审计行落成既有的 MCP 类卡(critical)
   Given 活板上有单元署名的 ask、timeout、两台单元各一条同原因的 blocked、answer,以及一条未署名的 blocked
   When 运行采集,再运行一次
   Then 恰好三张卡:一张 ask_outer_timeout、两张 report_blocked;症状带单元号且两张 blocked 的 reason 相同;ask、answer 与未署名的行不落卡;第二次运行不新增卡
-
-Scenario: 早已超时的提问不再出现在列表里
-  Test: answer_list_hides_questions_that_timed_out_long_ago
-  Given 单元的信箱里有四个提问:刚提的、十分钟前超时的、两天前的、三十天前的
-  When 经强制命令 list;把 `--list-window` 调大后再 list;show 三十天前的那一条
-  Then 默认只列出前两条,stderr 报"另有 2 条"未列出;调大窗口后四条都列出;被隐藏的提问仍能 show;信箱里的文件一个没少
