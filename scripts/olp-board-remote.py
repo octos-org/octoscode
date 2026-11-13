@@ -6,7 +6,8 @@
 在 hub 本机、在 flock 下完成,并在 hub 不可达时不丢内容。
 
 单元上的子命令
-  append [--key <键>]            正文从 stdin 喂,追加到 hub 的黑板
+  append [--key <键>] [--sign]   正文从 stdin 喂,追加到 hub 的黑板;--sign
+                                 给每一行加上 `> 单元(<单元号>)·` 署名
   ack <N> done|wontdo|blocked <说明>
                                  追加一行 `> 内环(<单元号>)·#N ACK(…): <说明>`
   flush                          把排队的写入按原顺序重发
@@ -49,9 +50,10 @@ hub 侧对单元写入的限制(serve)
   内环的 ask_outer / report_blocked 会调用 ~/.octos/outer/board_append.sh
   记一行审计。在单元上把它写成:
       #!/bin/sh
-      exec python3 /path/scripts/olp-board-remote.py append
-  这些行就会出现在 hub 的黑板上(多余的参数被忽略)。回答仍要送回单元
-  本机的信箱,本工具不负责。
+      exec python3 /path/scripts/olp-board-remote.py append --sign
+  这些行就会带着单元的署名出现在 hub 的黑板上(多余的参数被忽略):
+      > 单元(m07)·- 2026-11-13 03:00:00 MCP(ask_outer) ask: id=ab12 question=…
+  大外环用 scripts/olp-answer.py 把回答送回单元本机的信箱。
 
 退出码:0 成功;2 用法或配置错误;3 hub 拒绝(serve 的规则);75 hub
 不可达,已排队;其余为 hub 上写板脚本的退出码。
@@ -233,6 +235,12 @@ def cmd_append(args):
         raise Fail(2, "正文超过 256 KiB")
     if not body.strip():
         raise Fail(2, "正文为空")
+    if args.sign:
+        # Lines that carry no signature of their own (the MCP server's audit
+        # entries) get the unit's, so the hub can tell whose they are.
+        text = body.decode("utf-8", "replace")
+        signed = [f"> 单元({unit})·{line}" for line in text.splitlines() if line.strip()]
+        body = ("\n".join(signed) + "\n").encode("utf-8")
     return deliver(hub, make_key(unit, args.key, body), body)
 
 
@@ -353,6 +361,7 @@ def main():
     p = sub.add_parser("append")
     unit_flags(p)
     p.add_argument("--key")
+    p.add_argument("--sign", action="store_true", help="给每一行加上 `> 单元(<单元号>)·` 署名")
     p.add_argument("ignored", nargs="*", help=argparse.SUPPRESS)
     p.set_defaults(fn=cmd_append)
 

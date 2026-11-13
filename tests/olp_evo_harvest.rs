@@ -1742,3 +1742,60 @@ fn olp_evo_harvest_cluster_forms_attach_by_entry_number() {
     assert!(sb.run(false).status.success());
     assert_eq!(sb.evo_count(), 4);
 }
+
+/// Scenario: 单元转发来的 MCP 审计行落成既有的 MCP 类卡
+#[test]
+fn olp_evo_harvest_unit_mcp_lines_become_mcp_cards() {
+    let sb = Sandbox::new("unit-mcp");
+    std::fs::write(
+        sb.repo.join(".octos/OUTER_LOOP_REVIEW.md"),
+        "### 212. 一张卡\nunit: m07\n\n\
+         > 单元(m07)·- 2026-11-13 03:00:00 MCP(ask_outer) ask: id=ab12cd34ef56 question=换设备还是等\n\
+         > 单元(m07)·- 2026-11-13 03:01:30 MCP(ask_outer) timeout: id=ab12cd34ef56 no answer in 90s\n\
+         > 单元(m07)·- 2026-11-13 03:02:00 MCP(ask_outer) blocked: reason=hdc 连不上设备 needs=换设备\n\
+         > 单元(m09)·- 2026-11-13 03:05:00 MCP(ask_outer) blocked: reason=hdc 连不上设备 needs=重启 hub\n\
+         > 单元(m07)·- 2026-11-13 03:06:00 MCP(ask_outer) answer: id=ffff00001111 answered (12 chars)\n\
+         - 2026-11-13 03:07:00 MCP(ask_outer) blocked: reason=未署名的行不在活板上采集\n",
+    )
+    .unwrap();
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines = read_lines(sb.evo_board());
+    let field = |name: &str| -> Vec<String> {
+        lines
+            .iter()
+            .filter(|l| l.starts_with(name))
+            .map(|l| l[name.len()..].to_string())
+            .collect()
+    };
+    assert_eq!(
+        field("trigger: "),
+        vec!["ask_outer_timeout", "report_blocked", "report_blocked"],
+        "ask and answer lines are not friction"
+    );
+    let symptoms = field("symptom: ");
+    assert_eq!(
+        symptoms[1],
+        "kind=blocked id=- unit=m07 reason=hdc 连不上设备"
+    );
+    assert_eq!(
+        symptoms[2],
+        "kind=blocked id=- unit=m09 reason=hdc 连不上设备"
+    );
+    assert!(
+        symptoms[0].starts_with("kind=timeout id=ab12cd34ef56 unit=m07 "),
+        "{symptoms:?}"
+    );
+    let identities = field("identity: ");
+    assert!(
+        identities[1].contains("#unit:m07#mcp_blocked#"),
+        "{identities:?}"
+    );
+
+    assert!(sb.run(false).status.success());
+    assert_eq!(sb.evo_count(), 3, "a rerun adds nothing");
+}

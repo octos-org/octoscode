@@ -41,6 +41,11 @@
   搁置行只有落在最后一件事**之后**才生效;之后内环又有新的 ACK 或推送,
   搁置自动失效,条目回到收件箱。
 
+待回答的提问
+  内环的 ask_outer 在板上留一行 `MCP(ask_outer) ask: id=… question=…`(单元
+  转发来的带 `> 单元(<单元号>)·` 署名)。还没有对应的 answer 或 timeout 行
+  的提问列在最前面——内环只等 90 秒。用 scripts/olp-answer.py 回答。
+
 占用视图(--units)
   多机部署时一台单元同一时间只做一张卡。--units 按单元列出还占着它的
   卡:派给它(以条目里最后一条 `unit:` 行为准)且还没有了结的条目。
@@ -178,6 +183,46 @@ def scan(board):
             first = events[number][0][0]
             warnings.append(f"第 {first} 行的判词指向 #{number},但板上没有这个条目")
     return entries, events, warnings
+
+
+MCP_AUDIT = re.compile(
+    r"MCP\(ask_outer\) (ask|answer|timeout): id=([A-Za-z0-9_-]+)(?: question=(.*))?"
+)
+UNIT_SIGNATURE = re.compile(r"^单元\(([^)]+)\)·")
+
+
+def pending_questions(board):
+    """Inner-loop questions (ask_outer) that have reached the board and have
+    neither been answered nor timed out. A unit forwards its MCP audit lines
+    signed as `> 单元(<unit>)·- <time> MCP(ask_outer) ask: id=… question=…`;
+    on a single machine the same lines appear unsigned."""
+    asked, closed = {}, set()
+    in_fence = False
+    with open(board, "r", encoding="utf-8", errors="replace") as f:
+        for no, raw in enumerate(f, start=1):
+            line = raw.rstrip("\r\n")
+            stripped = line.lstrip()
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            signed = strip_quote(line)
+            m = MCP_AUDIT.search(signed)
+            if not m:
+                continue
+            kind, ask_id = m.group(1), m.group(2)
+            if kind == "ask":
+                unit = UNIT_SIGNATURE.match(signed)
+                asked[ask_id] = {
+                    "id": ask_id,
+                    "unit": unit.group(1) if unit else None,
+                    "question": (m.group(3) or "").strip(),
+                    "line": no,
+                }
+            else:
+                closed.add(ask_id)
+    return [q for ask_id, q in asked.items() if ask_id not in closed]
 
 
 def classify(number, entry, events, today, warnings):
@@ -324,12 +369,16 @@ def main():
 
     order = [INBOX, WORKING, SNOOZED] + ([SETTLED] if args.all else [])
     counts = {p: sum(1 for i in items if i["partition"] == p) for p in PARTITION_ZH}
+    questions = [
+        q for q in pending_questions(args.board) if not args.unit or q["unit"] == args.unit
+    ]
     if args.json:
         json.dump(
             {
                 "today": today.isoformat(),
                 "counts": counts,
                 "items": [i for i in items if i["partition"] in order],
+                "questions": questions,
                 "warnings": warnings,
             },
             sys.stdout,
@@ -339,6 +388,14 @@ def main():
         sys.stdout.write("\n")
         return 0
 
+    if questions:
+        # 内环只等 90 秒:提问排在最前面。
+        print(f"== 待回答的提问({len(questions)})")
+        for q in questions:
+            unit = f" [{q['unit']}]" if q["unit"] else ""
+            print(f"id={q['id']}{unit} {q['question']}")
+            if q["unit"]:
+                print(f"    olp-answer.py answer {q['unit']} {q['id']}  (回答从 stdin 喂)")
     for partition in order:
         rows = [i for i in items if i["partition"] == partition]
         print(f"== {PARTITION_ZH[partition]}({len(rows)})")

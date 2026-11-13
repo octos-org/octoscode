@@ -271,6 +271,33 @@ harvest_board() { # realpath
                 fi
             fi
         fi
+        # A unit's MCP audit lines (report_blocked, an ask_outer that timed
+        # out) reach the hub's board signed by the unit. They are the same
+        # signals the MCP-board source yields on a single machine, so they
+        # become the same triggers with the same symptom shape.
+        if [ -z "$trigger" ]; then
+            local re_unit_mcp='^单元\(([^)]+)\)·-[[:space:]]+([^[:space:]]+[[:space:]]+[^[:space:]]+)[[:space:]]+MCP\(ask_outer\)[[:space:]]+(blocked|timeout):[[:space:]]+(.*)$'
+            if [[ $signed =~ $re_unit_mcp ]]; then
+                local mcp_unit=${BASH_REMATCH[1]} mcp_kind=${BASH_REMATCH[3]} mcp_detail=${BASH_REMATCH[4]}
+                local mcp_id='-'
+                if [[ $mcp_detail =~ id=([0-9a-fA-F]+) ]]; then
+                    mcp_id=${BASH_REMATCH[1]}
+                fi
+                local mcp_reason
+                mcp_reason=$(python3 -c '
+import re, sys
+r = sys.argv[1][sys.argv[1].find("reason=") + len("reason="):]
+m = re.search(r"\s[a-z_]+=", r)
+print((r[: m.start()] if m else r)[:80])
+' "$mcp_detail")
+                local mcp_trigger=ask_outer_timeout
+                [ "$mcp_kind" = blocked ] && mcp_trigger=report_blocked
+                lsha=$(printf '%s' "$line" | sha256sum | cut -d' ' -f1)
+                add_candidate "$mcp_trigger" review "$rp" "board:$rp#unit:$mcp_unit#mcp_$mcp_kind#$lsha" \
+                    "$line_no" "$line_off" "$(now_rfc3339)" \
+                    "kind=$mcp_kind id=$mcp_id unit=$mcp_unit reason=$(char_prefix "$mcp_reason" 80)"
+            fi
+        fi
         if [ -n "$trigger" ]; then
             lsha=$(printf '%s' "$line" | sha256sum | cut -d' ' -f1)
             local kind=blocked
