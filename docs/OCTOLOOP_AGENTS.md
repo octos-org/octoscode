@@ -60,6 +60,11 @@ rules:
 ACK(done|wontdo|blocked): <explanation>
 ```
 
+   (On a unit in a multi-machine deployment the board is a read-only mirror
+   and cannot be edited in place: use
+   `scripts/olp-board-remote.py ack <N> done|wontdo|blocked <explanation>`,
+   which appends the same line to the authoritative board on the hub.)
+
 - `done` — executed. Explanation carries evidence: commit hash, test results,
   and the verbatim verification commands you ran (crate / module / feature all
   spelled out).

@@ -54,6 +54,10 @@
 ACK(done|wontdo|blocked): <说明>
 ```
 
+   (多机部署的单元上,黑板是只读镜像,不能原地写:改用
+   `scripts/olp-board-remote.py ack <N> done|wontdo|blocked <说明>`,它把同样
+   内容的一行追加到 hub 的权威黑板。)
+
 - `done` — 已执行。说明里附证据:commit hash、测试结果,以及你跑过的
   **逐字复验命令**(crate / 模块 / feature 全写明)。
 - `wontdo` — 带证据的异议。说明里写为何不做。**外环只能接受或升级
