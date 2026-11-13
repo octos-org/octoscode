@@ -21,7 +21,7 @@ T3 Code 的 Inbox / Working / Settled 模型:只把"等我决定"的事放进收
 - 工具 `scripts/olp-inbox.py <board> [--json] [--unit U] [--all] [--today YYYY-MM-DD]`,纯
   Python 标准库(兼容 Python 3.9),只读黑板,不写任何文件。
 - **状态不存进黑板**,每次从现有的行算出来;黑板保持只追加。
-- 新增三个行首定式(逐字照抄;采集哨不触发):
+- 新增三个行首定式(逐字照抄;其中打回后来被采集哨收为 `returned`,见 task-olp-evo-cluster-signals):
   - `> 外环(<署名>)·采认(#N):<证据>`
   - `> 外环(<署名>)·打回(#N):<原因>`——整改内容仍按 R1/R5 另立新条目
   - `> 外环(<署名>)·搁置(#N) 至 YYYY-MM-DD:<等什么>`

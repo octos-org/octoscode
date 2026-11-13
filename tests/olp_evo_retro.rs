@@ -817,3 +817,67 @@ fn olp_evo_retro_writes_no_pycache() {
         "no __pycache__ may appear"
     );
 }
+
+/// Scenario: 多机部署的卡按症状分组,不按单元和卡号分组
+#[test]
+fn olp_evo_retro_groups_cluster_cards_across_units() {
+    let sb = Sandbox::new("cluster-cards");
+    sb.write_board(
+        "### EVO-0001（t，harvest）
+trigger: unit_alert
+source: review /r.md
+identity: board:/r.md#212#alert#aaaa
+symptom: > 单元(m07)·负哨(#212): stalled_no_progress turn=t1 age=900s activity=events_continuing
+### EVO-0002（t，harvest）
+trigger: unit_alert
+source: review /r.md
+identity: board:/r.md#305#alert#bbbb
+symptom: > 单元(m09)·负哨(#305): stalled_no_progress turn=t9 age=912s activity=events_continuing
+### EVO-0003（t，harvest）
+trigger: ack_blocked
+source: review /r.md
+identity: board:/r.md#212#blocked#cccc
+symptom: > 内环(m07)·#212 ACK(blocked): hdc 连不上设备
+### EVO-0004（t，harvest）
+trigger: ack_blocked
+source: review /r.md
+identity: board:/r.md#305#blocked#dddd
+symptom: > 内环(m09)·ACK(blocked): #305(2026-11-13): hdc 连不上设备
+### EVO-0005（t，harvest）
+trigger: returned
+source: review /r.md
+identity: board:/r.md#212#returned#eeee
+symptom: > 外环(hub)·打回(#212): 缺测试
+",
+    );
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let brief = sb.brief_text();
+    assert!(
+        brief.contains("layer=Execution"),
+        "unit_alert → Execution: {brief}"
+    );
+    assert!(
+        brief.contains("layer=Verification"),
+        "returned → Verification: {brief}"
+    );
+    // The same symptom from two units about two cards is ONE candidate.
+    assert_eq!(
+        brief.matches("recurrence_hint=2").count(),
+        2,
+        "the two stalls group, and the two blocked ACKs group: {brief}"
+    );
+    for signature in ["单元(m07)", "内环(m09)", "外环(hub)·打回"] {
+        assert!(
+            !brief
+                .lines()
+                .filter(|l| l.contains("recurrence_hint="))
+                .any(|l| l.contains(signature)),
+            "candidate keys carry the symptom, not the signature {signature}: {brief}"
+        );
+    }
+}
