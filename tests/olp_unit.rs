@@ -449,3 +449,94 @@ fn unit_heartbeat_reports_builtin_and_plugin_checks() {
     let out = hub.run(&["heartbeat", "--unit", "m01", "--require", "bogus"]);
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
 }
+
+/// Scenario: 心跳报告内环后端的启动权限
+#[test]
+fn unit_heartbeat_reports_launch_permission() {
+    let hub = Hub::new();
+    let ps = hub.dir.path().join("ps.txt");
+    let heartbeat = |listing: &str| -> (String, serde_json::Value) {
+        std::fs::write(&ps, listing).unwrap();
+        let out = hub.run(&[
+            "heartbeat",
+            "--unit",
+            "m01",
+            "--require",
+            "",
+            "--ps-output",
+            ps.to_str().unwrap(),
+        ]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let raw = stdout(&out);
+        let v = serde_json::from_str(&raw).unwrap();
+        (raw, v)
+    };
+
+    // The TUI wraps the backend and carries the same words in one argument;
+    // only real `octos serve` processes count.
+    let tui = "  4100 octoscode --stdio-command octos serve --stdio --solo --danger-full-access\n";
+    let full = format!(
+        "{tui}  4101 /opt/homebrew/bin/octos serve --stdio --solo --danger-full-access --api-key SECRET-TOKEN\n  4102 octos-jev serve --stdio --solo --danger-full-access\n  4103 /usr/bin/python3 other.py serve\n"
+    );
+    let (raw, hb) = heartbeat(&full);
+    assert_eq!(hb["permission"], "full");
+    assert_eq!(
+        hb["backends"],
+        serde_json::json!([
+            {"pid": 4101, "full_access": true, "solo": true},
+            {"pid": 4102, "full_access": true, "solo": true},
+        ])
+    );
+    assert!(
+        !raw.contains("SECRET-TOKEN"),
+        "only two flags leave the unit: {raw}"
+    );
+    assert!(!raw.contains("api-key"), "{raw}");
+
+    let (_, hb) = heartbeat("  4101 octos serve --stdio --solo\n");
+    assert_eq!(hb["permission"], "sandboxed");
+    let (_, hb) = heartbeat(
+        "  4101 octos serve --stdio --solo\n  4102 octos serve --stdio --solo --danger-full-access\n",
+    );
+    assert_eq!(hb["permission"], "mixed");
+    let (_, hb) = heartbeat(tui);
+    assert_eq!(hb["permission"], "none");
+    assert_eq!(hb["backends"], serde_json::json!([]));
+
+    // Through the hub: the status shows what the unit reported, and the
+    // permission does not change the health state.
+    hub.register("m01", "m01", "aa:bb:cc:dd:ee:01");
+    let mut reported = beat("m01", "m01", &["aa:bb:cc:dd:ee:01"], &[("disk", true)]);
+    reported["permission"] = serde_json::json!("full");
+    reported["backends"] = serde_json::json!([
+        {"pid": 4101, "full_access": true, "solo": true, "argv": ["--api-key", "SECRET-TOKEN"]},
+        {"pid": "x", "full_access": true},
+        "junk",
+    ]);
+    assert!(hub.receive(&reported).status.success());
+    let report = hub.status(&[]);
+    let row = &report["units"][0];
+    assert_eq!(row["state"], "healthy");
+    assert_eq!(row["permission"], "full");
+    assert_eq!(
+        row["backends"],
+        serde_json::json!([{"pid": 4101, "full_access": true, "solo": true}]),
+        "unknown fields and malformed entries are dropped"
+    );
+    assert!(!report.to_string().contains("SECRET-TOKEN"));
+    let text = stdout(&hub.run(&["status"]));
+    assert!(text.contains("权限 完全访问"), "{text}");
+
+    // A value outside the known set, or a heartbeat from an older tool
+    // without the field, is shown as unknown rather than trusted or failed.
+    for odd in [serde_json::json!("root"), serde_json::Value::Null] {
+        let mut b = beat("m01", "m01", &["aa:bb:cc:dd:ee:01"], &[("disk", true)]);
+        if !odd.is_null() {
+            b["permission"] = odd;
+        }
+        assert!(hub.receive(&b).status.success());
+        let row = hub.status(&[])["units"][0].clone();
+        assert_eq!(row["permission"], "unknown");
+        assert_eq!(row["state"], "healthy");
+    }
+}

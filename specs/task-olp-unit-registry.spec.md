@@ -33,6 +33,13 @@ estimate: 1d
   `${OLP_UNIT_CHECKS_DIR:-~/.octos/outer/unit-checks.d}` 下的可执行文件,退出 0 为通过,
   stdout 第一行为说明,10 秒超时。集群方案里"循环是否暂停、双哨是否在位、fallbacks 是否已
   快照"这几项要读会话内的权威状态面,脚本读不到,留给扩展检查,本任务不实现。
+- 启动权限:心跳带 `permission` 与 `backends`。读进程表(`ps -axo pid=,command=`),只算
+  argv[0] 的文件名是 `octos` 或 `octos-<后缀>` 且 argv[1] 是 `serve` 的进程——TUI 把同样的
+  字样放在一个参数里,不算后端。每个后端只取 `--danger-full-access` 与 `--solo` 两个开关,
+  命令行的其余部分不进心跳。`permission` 为 `full`(全带完全访问)、`sandboxed`(都不带)、
+  `mixed`、`none`(没有后端)、`unknown`(读不到进程表)。`receive` 只接受这五个值,其余或
+  缺失记为 `unknown`;`backends` 逐项清洗,未知字段丢弃。`status` 的文本与 JSON 都带这一
+  项。它是单元自报的告知信息:不参与健康判定,不是安全边界。
 - 接收:`receive` 从 stdin 读一条心跳(上限 256 KiB),单元必须已登记;带 `--unit` 时心跳
   自报的单元号必须与它一致。字段逐个清洗后落盘到 `heartbeat/<单元号>.json`,并写入 hub
   时钟的 `received_at`。`ok` 只有 JSON `true` 才算通过。
@@ -119,3 +126,9 @@ Scenario: 心跳带上内置巡检与扩展检查的结果
   Given 扩展检查目录里有一个通过的检查、一个失败的检查和一个不可执行的文件
   When 运行 `heartbeat --require disk`,并把输出交给 hub 侧的 `receive`
   Then 心跳里依次是 disk、通过的检查、失败的检查(不可执行的文件被忽略);hub 判为 degraded,原因含失败检查的名字与说明,且没有身份不符;未知的内置巡检项以退出码 2 拒绝
+
+Scenario: 心跳报告内环后端的启动权限
+  Test: unit_heartbeat_reports_launch_permission
+  Given 进程表里有 TUI 包裹进程、两个带完全访问的后端(其中一个的命令行含密钥)、一个无关进程;以及只有不带完全访问的后端、两种混合、只有 TUI 的进程表
+  When 分别生成心跳;把带额外字段与畸形条目的 `backends` 交给 hub;再交给 hub 一个未知的权限值和一条不带该字段的旧心跳
+  Then 权限依次为 full、sandboxed、mixed、none;后端只含 pid 与两个开关,密钥不出现在心跳里;hub 的状态显示 full 且健康状态不受影响,额外字段与畸形条目被丢弃;未知值与缺失都显示为 unknown

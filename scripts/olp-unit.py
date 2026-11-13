@@ -39,6 +39,17 @@
       只保证它在登记文件里唯一。
     - 是否失联按 hub 收到心跳的时间算,不看单元自己的时钟。
 
+启动权限
+    心跳带上本机内环后端(`octos serve`)的启动方式,hub 在 status 里显示:
+        full       完全访问:每个后端都带 --danger-full-access
+        sandboxed  沙箱:都不带
+        mixed      混合:有的带有的不带
+        none       没有后端在跑
+        unknown    读不到进程表,或心跳来自旧版本
+    只读取 --danger-full-access 与 --solo 两个开关,命令行的其余部分不离开
+    单元。这是单元**自报**的,用来让大外环知道各台机器的实际情况,不是
+    安全边界,也不参与健康判定。
+
 巡检项
     内置:serve(本机有 `octos serve` 进程)、disk(HOME 所在磁盘的空闲
     比例不低于阈值)。--require 选择必须通过的内置项。
@@ -265,6 +276,63 @@ def check_serve():
     return False, "没有 octos serve 进程"
 
 
+SERVE_ARGV0 = re.compile(r"^octos(-[a-z0-9]+)?$")
+PERMISSIONS = ("full", "sandboxed", "mixed", "none", "unknown")
+
+
+def serve_permission(ps_output_file=None):
+    """How the inner-loop backends on this machine were launched.
+
+    Reads the process table and looks at every `octos serve` backend (the
+    TUI that wraps it carries the same words inside one argument and is not
+    counted). Only two launch flags are read — `--danger-full-access` and
+    `--solo`; the rest of the command line never leaves the machine.
+
+    Returns (permission, backends): permission is "full" when every backend
+    has --danger-full-access, "sandboxed" when none has, "mixed" otherwise,
+    "none" when no backend runs, "unknown" when the process table cannot be
+    read."""
+    if ps_output_file:
+        try:
+            with open(ps_output_file, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            return "unknown", []
+    else:
+        try:
+            r = subprocess.run(
+                ["ps", "-axo", "pid=,command="], capture_output=True, text=True, timeout=10
+            )
+        except (OSError, subprocess.SubprocessError):
+            return "unknown", []
+        if r.returncode != 0:
+            return "unknown", []
+        text = r.stdout
+    backends = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 3 or not parts[0].isdigit():
+            continue
+        argv = parts[1:]
+        if not SERVE_ARGV0.match(os.path.basename(argv[0])) or argv[1] != "serve":
+            continue
+        backends.append(
+            {
+                "pid": int(parts[0]),
+                "full_access": "--danger-full-access" in argv,
+                "solo": "--solo" in argv,
+            }
+        )
+    if not backends:
+        return "none", []
+    full = [b["full_access"] for b in backends]
+    if all(full):
+        return "full", backends
+    if not any(full):
+        return "sandboxed", backends
+    return "mixed", backends
+
+
 def check_disk(min_free):
     usage = shutil.disk_usage(os.path.expanduser("~"))
     free = usage.free * 100.0 / usage.total if usage.total else 0.0
@@ -316,6 +384,9 @@ def cmd_heartbeat(args):
         "sent_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "checks": checks,
     }
+    permission, backends = serve_permission(args.ps_output)
+    beat["permission"] = permission
+    beat["backends"] = backends
     json.dump(beat, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
     return 0
@@ -360,9 +431,24 @@ def cmd_receive(args):
         for m in (beat.get("macs") if isinstance(beat.get("macs"), list) else [])
         if isinstance(m, str) and MAC_RE.match(m.lower())
     ]
+    permission = beat.get("permission")
+    if permission not in PERMISSIONS:
+        permission = "unknown"
+    backends = []
+    for b in beat.get("backends") if isinstance(beat.get("backends"), list) else []:
+        if isinstance(b, dict) and isinstance(b.get("pid"), int) and not isinstance(b.get("pid"), bool):
+            backends.append(
+                {
+                    "pid": b["pid"],
+                    "full_access": b.get("full_access") is True,
+                    "solo": b.get("solo") is True,
+                }
+            )
     stored = {
         "v": 1,
         "unit": unit,
+        "permission": permission,
+        "backends": backends[:64],
         "hostname": norm_host(str(beat.get("hostname", ""))),
         "macs": macs[:64],
         "sent_at": str(beat.get("sent_at", ""))[:40],
@@ -411,6 +497,13 @@ def evaluate(row, now, stale_after):
 
 
 STATE_ZH = {"healthy": "正常", "degraded": "降级", "stale": "失联", "offline": "离线"}
+PERMISSION_ZH = {
+    "full": "完全访问",
+    "sandboxed": "沙箱",
+    "mixed": "混合",
+    "none": "无后端",
+    "unknown": "未知",
+}
 
 
 def cmd_status(args):
@@ -428,6 +521,9 @@ def cmd_status(args):
                 "hostname": rows[unit]["hostname"],
                 "mac": rows[unit]["mac"],
                 "heartbeat_age_seconds": int(now - beat["received_at"]) if beat else None,
+                # 单元自报的启动权限;只是告知,不参与健康判定。
+                "permission": (beat or {}).get("permission", "unknown") if beat else None,
+                "backends": (beat or {}).get("backends", []) if beat else [],
             }
         )
     if args.json:
@@ -439,7 +535,11 @@ def cmd_status(args):
         return 0
     for r in report:
         age = "-" if r["heartbeat_age_seconds"] is None else f"{r['heartbeat_age_seconds']}s"
-        line = f"{r['unit']}\t{STATE_ZH[r['state']]}({r['state']})\t心跳 {age}\t{r['hostname']}"
+        permission = PERMISSION_ZH.get(r["permission"], "-")
+        line = (
+            f"{r['unit']}\t{STATE_ZH[r['state']]}({r['state']})\t心跳 {age}"
+            f"\t权限 {permission}\t{r['hostname']}"
+        )
         if r["reasons"]:
             line += "\t" + ";".join(r["reasons"])
         print(line)
@@ -488,6 +588,7 @@ def build_parser():
     p.add_argument("--unit", required=True)
     p.add_argument("--require", default="serve,disk")
     p.add_argument("--disk-min-free", type=float, default=10.0)
+    p.add_argument("--ps-output", help=argparse.SUPPRESS)
     p.set_defaults(fn=cmd_heartbeat)
 
     p = sub.add_parser("receive", help="(hub)从 stdin 接收一条心跳")
