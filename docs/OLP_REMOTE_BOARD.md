@@ -71,21 +71,47 @@ scripts/olp-board-remote.py mirror --to <repo>/.octos/OUTER_LOOP_REVIEW.md
 把 hub 的黑板拉到本机并设为只读。内环照常读这个文件;写入一律走上面的命令。
 每分钟同步一次即可。hub 不可达时镜像保持上一次的内容。镜像永不回写。
 
-## 6. 把内环的提问送到 hub
+## 6. 内环的提问:送到 hub,回答送回来
 
 内环的 `ask_outer` / `report_blocked` 会调用 `~/.octos/outer/board_append.sh`
 记一行审计。在单元上把这个文件写成:
 
 ```sh
 #!/bin/sh
-exec python3 /path/scripts/olp-board-remote.py append
+exec python3 /path/scripts/olp-board-remote.py append --sign
 ```
 
-这些行就会出现在 hub 的黑板上,大外环能看到单元在提问或阻塞。
+这些行就带着单元的署名出现在 hub 的黑板上:
 
-**没有解决的部分**:回答仍然要送回单元本机的信箱
-(`~/.octos/outer/mcp/answers/`)。大外环看到提问后,需要经 ssh 把回答写过去,
-或者用 herdr 直接对那台单元的窗格回复。
+```
+> 单元(m07)·- 2026-11-13 03:00:00 MCP(ask_outer) ask: id=ab12cd34ef56 question=换设备还是等
+```
+
+**大外环怎么回答**(在 hub 上):
+
+```bash
+scripts/olp-inbox.py <板>                       # 待回答的提问排在最前面
+scripts/olp-answer.py show m07 ab12cd34ef56     # 提问全文:问题、上下文、已经试过什么
+scripts/olp-answer.py answer m07 ab12cd34ef56 <<'EOF'
+换 d05,d03 标记离线。
+EOF
+```
+
+回答经 ssh 写进那台单元的信箱,内环的 `ask_outer` 随即拿到原文。单元上的 MCP
+服务读到回答后会记一行 `answer`,同样转发到 hub,提问就从收件箱里消失。
+
+在单元的 `~/.ssh/authorized_keys` 里给 hub 的密钥配强制命令,它只能列出、读取
+和回答信箱里的提问:
+
+```
+command="/path/scripts/olp-answer.py serve",no-pty,no-port-forwarding ssh-ed25519 AAAA… hub-answer
+```
+
+**内环只等 90 秒。** 超过这个时间的提问不再接受回答(单元会拒绝并说明),因为
+内环已经按降级指引继续了,没有人会读。这时改用黑板条目或 herdr 告诉那台单元。
+
+`report_blocked` 和超时的提问会被进化环采集哨收成卡(`report_blocked`、
+`ask_outer_timeout`),和单机上从 MCP 审计板采集到的是同一类证据。
 
 ## 7. 唤醒单元上的窗格
 
