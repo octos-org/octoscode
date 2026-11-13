@@ -477,8 +477,7 @@ fn olp_evo_retro_no_cards_exit_zero() {
 /// to the phase-0 baseline (origin/main 18907aa).
 #[test]
 fn olp_evo_retro_skill_step5_and_protected_sections_golden() {
-    let skill =
-        std::fs::read_to_string(repo_root().join(".claude/skills/octoloop/SKILL.md")).unwrap();
+    let skill = std::fs::read_to_string(repo_root().join("skills/octoloop/AGENTS.md")).unwrap();
 
     // protected-section constants (sha256, baseline 18907aa)
     const DESC: &str = "b2c32593cc6a5dacbc6e42ded9186c9ac94171c0d9d1883aa19f6ac760c5ccb4";

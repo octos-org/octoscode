@@ -27,8 +27,8 @@ octos serve,如 glm/kimi 档)在你的仓库里干活——读黑板、执行、
 都要过两双眼睛,这是整套系统的安全底线(纪律细节见机制篇(下))。
 
 **命名**:OLP 是协议名(Outer-Loop Protocol,文档与 ACK 定式沿用);
-**OctoLoop** 是产品名——用户视角的一键化封装(`.claude/skills/octoloop`
-三模式入口)。能力全景见 `docs/OCTOLOOP_FEATURES.md`。
+**OctoLoop** 是产品名——用户视角的一键化封装(`skills/octoloop/AGENTS.md`
+三模式入口,对所有 agent 通用)。能力全景见 `docs/OCTOLOOP_FEATURES.md`。
 
 ## 2. 安装与引导
 
@@ -65,9 +65,22 @@ octoscode --stdio-command 'octos serve --stdio --solo'
 
 ## 3. 三模式上手
 
-OctoLoop 的一键入口是 `.claude/skills/octoloop` 这张 skill 卡(即本仓库
-自带的 `/octoloop` 命令)。三个模式,**先选身份再动手**;权威规程在仓库
-文档,先读再动,不要凭记忆操作。
+OctoLoop 的一键入口是 `skills/octoloop/AGENTS.md`:一份纯 Markdown 的规程,
+对任何 agent 通用。三个模式,**先选身份再动手**;权威规程在仓库文档,先读
+再动,不要凭记忆操作。
+
+怎么用上它:
+
+| 场景 | 做法 |
+|---|---|
+| 在 octoscode 仓库里用 Claude Code | 不用装,`/octoloop` 直接可用(`.claude/skills/octoloop/SKILL.md` 是指向正文的薄卡) |
+| 在别的项目里用 Claude Code | 在 octoscode 仓库里执行一次 `scripts/olp-install-skill.sh`,之后任何项目都有 `/octoloop` |
+| 其他 agent(Codex、octos 内环等) | 让它读 `skills/octoloop/AGENTS.md`;或用 `scripts/olp-install-skill.sh --to <该 agent 读取指令的文件>` 装一张薄卡 |
+
+装出来的薄卡**不含固定路径**:它按"环境变量 `OCTOSCODE_HOME` → 文件
+`~/.octos/outer/octoscode-home` → 当前项目"的顺序找到 octoscode 仓库,再去读
+正文。正文随 `git pull` 更新,薄卡不用重装;仓库搬家后在新位置重跑一次安装
+脚本即可。
 
 ### 3.1 模式 init — 铺脚手架(首次/新机器)
 

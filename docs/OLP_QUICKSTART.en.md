@@ -26,8 +26,9 @@ outer loop alone**, so every commit passes two pairs of eyes.
 
 **On the names**: **OLP** is the protocol name (used by the docs and the ACK
 formula); **OctoLoop** is the product name — the one-command wrapper from the
-user's point of view (`.claude/skills/octoloop`, three modes: init / outer /
-inner; capability panorama in [`OCTOLOOP_FEATURES.md`](OCTOLOOP_FEATURES.md)).
+user's point of view (`skills/octoloop/AGENTS.md`, agent-neutral, three modes:
+init / outer / inner; install it for other projects with
+`scripts/olp-install-skill.sh`; capability panorama in [`OCTOLOOP_FEATURES.md`](OCTOLOOP_FEATURES.md)).
 
 An agent taking a role for the first time should read the self-contained
 onboarding card instead of this page:
