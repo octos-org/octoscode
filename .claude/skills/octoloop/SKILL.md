@@ -103,6 +103,26 @@ QUICKSTART 的发现命令为准。
 任何形态都要:黑板 ACK 定式、R4/R4b 工作区共存与树主权、
 R2 诚实验证声明(verified/partially/unverified)。
 
+**在多机部署的单元上做内环**(本机的 `~/.octos/outer/unit.conf` 里有
+`hub=` 与 `unit=` 就是这种情况;规则见协议附录 C):
+
+- **读板**读本机的只读镜像(`<repo>/.octos/OUTER_LOOP_REVIEW.md`,由
+  `scripts/olp-board-remote.py mirror` 同步)。它是只读的,不要改它。
+- **ACK 不在条目下面原地写**,而是
+  `scripts/olp-board-remote.py ack <N> done|wontdo|blocked <说明>`——它把
+  `> 内环(<单元号>)·#N ACK(…): …` 追加到 hub 的权威黑板。退出码 75 表示
+  hub 暂时连不上、已排队,继续干活即可,不要重复发。
+- **只做派给本单元的卡**(条目里的 `unit:` 行是本机的单元号),同一时间
+  一张;分支名是 `task/<N>`。
+- **仍然只 commit,不 push**。推送是本机复验方的事:复验通过后由它执行
+  `scripts/olp-task-push.sh <N> --verified-by <复验署名>`,把分支推到 hub
+  的本地仓库。自己直接 `git push` 会被 hub 拒收;任何人都不推 GitHub。
+- **本机复验方的打回**写在本机的返工板上,编号是 `#N-r1`、`#N-r2`,按它
+  返工;它不是新的任务号。
+- **卡住时照常用 `ask_outer` / `report_blocked`**,提问会送到 hub。回答
+  只等 90 秒:等不到就按降级指引继续,并用 `ack <N> blocked` 把卡在哪里
+  写到板上。
+
 ## 自主性纪律(实战沉淀:一次全链演练暴露的六类断点)
 
 外环的价值在**全程自主闭环**;下面每条都对应一次真实掉链、由
