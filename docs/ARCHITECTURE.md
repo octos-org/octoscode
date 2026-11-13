@@ -334,6 +334,14 @@ This list is kept complete by `tests/docs_drift.rs`.
 | `MonitorFired` | `monitor/fired` |
 | `MonitorUpdated` | `monitor/updated` |
 
+| AppUI command | Wire method |
+|---|---|
+| `CreateMonitor` | `monitor/create` |
+| `DeleteMonitor` | `monitor/delete` |
+| `ListMonitors` | `monitor/list` |
+| `PauseMonitor` | `monitor/pause` |
+| `ResumeMonitor` | `monitor/resume` |
+
 ### `background/`
 
 | Notification | Wire method |
