@@ -24,6 +24,10 @@ estimate: 1d
   `ssh -o BatchMode=yes -o ConnectTimeout=10 <目标> <动作> [id]` 到单元;目标默认等于单元号
   (约定主机名即单元号),`--to` 可改。单元侧 `serve [--root] [--max-age]` 是 ssh 强制命令,
   只接受这三个动作,只读写 `<root>/mcp/questions` 与 `<root>/mcp/answers`。
+- `list` 的范围:还在等的提问,加上最近 `--list-window` 秒(serve 的选项,默认 86400)内
+  超时的;更早超时的不列出,只在 stderr 报一个数。超时的提问文件留在信箱里不会自己消失
+  (MCP 服务只归档已回答的),不设窗口的话列表只增不减。本工具不删信箱里的文件,`show`
+  仍能按 id 看任何一条。
 - `answer` 的规则:提问 id 必须是信箱里还在的提问;提问文件的年龄不得超过 `--max-age`(默认
   50 秒,与 MCP 服务的等待时间一致)——超过则拒绝并提示改用黑板或 herdr,因为内环已按降级
   指引继续,回答没人读。回答上限 64 KiB、UTF-8、非空;写成 `answers/<id>.json`
@@ -84,6 +88,12 @@ Scenario: 回答命令的输入检查与单元不可达
   Given 非法单元号、含路径字符的 id、空回答、含空格的 id、写成 ssh 选项的目标;不存在的提问;强制命令收到的其他动作;单元不可达
   When 分别运行
   Then 输入错误为退出码 2;不存在的提问为 3;强制命令对其他动作一律以 3 拒绝;不可达为 75
+
+Scenario: 早已超时的提问不再出现在列表里
+  Test: answer_list_hides_questions_that_timed_out_long_ago
+  Given 单元的信箱里有四个提问:刚提的、十分钟前超时的、两天前的、三十天前的
+  When 经强制命令 list;把 `--list-window` 调大后再 list;show 三十天前的那一条
+  Then 默认只列出前两条,stderr 报"另有 2 条"未列出;调大窗口后四条都列出;被隐藏的提问仍能 show;信箱里的文件一个没少
 
 ### Rule: evidence — 进入进化环
 Scenario: 单元转发来的 MCP 审计行落成既有的 MCP 类卡(critical)
