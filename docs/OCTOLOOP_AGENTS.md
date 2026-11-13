@@ -111,7 +111,7 @@ If you burn more than ~30 minutes retrying the same approach, that is a
 solution-space stall, not a effort problem — **ask for a blueprint** instead of
 grinding. If the MCP fifth channel is mounted, call
 `ask_outer(question, context, tried)` (`tried` is mandatory, 3 calls per slice,
-90s timeout then a documented degrade). Otherwise write
+50s timeout then a documented degrade). Otherwise write
 `ACK(blocked): <what you tried, what you need>` and stop.
 
 ## 3. OUTER loop duty
