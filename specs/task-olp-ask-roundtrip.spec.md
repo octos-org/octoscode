@@ -91,4 +91,10 @@ Scenario: 单元转发来的 MCP 审计行落成既有的 MCP 类卡(critical)
   Test: olp_evo_harvest_unit_mcp_lines_become_mcp_cards
   Given 活板上有单元署名的 ask、timeout、两台单元各一条同原因的 blocked、answer,以及一条未署名的 blocked
   When 运行采集,再运行一次
-  Then 恰好三张卡:一张 ask_outer_timeout、两张 report_blocked;症状带单元号且两张 blocked 的 reason 相同;ask、answer 与未署名的行不落卡;第二次运行不新增卡
+  Then 恰好三张卡:一张 ask_outer_timeout、两张 report_blocked;症状带单元号且两张 blocked 的 reason 相同;timeout 行没有 `reason=` 字段,它的 reason 是 id 之后的文字(`no answer in 90s`),不含 id 的残片;ask、answer 与未署名的行不落卡;第二次运行不新增卡
+
+Scenario: 单机的 MCP 板上,超时行的 reason 是 id 之后的文字
+  Test: olp_evo_harvest_mcp_timeout_reason_is_the_text_after_the_id
+  Given MCP 审计板上有一行 `timeout: id=0a06174e2d90 no answer in 90s`
+  When 运行采集
+  Then 症状为 `kind=timeout id=0a06174e2d90 reason=no answer in 90s`
