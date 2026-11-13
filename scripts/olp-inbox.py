@@ -3,6 +3,7 @@
 
 用法:
   scripts/olp-inbox.py <board.md> [--json] [--unit <单元号>] [--all] [--today YYYY-MM-DD]
+  scripts/olp-inbox.py <board.md> --units [--json] [--unit <单元号>]
 
 黑板是按时间追加的流水账。条目多了以后,外环要从头扫一遍才知道"现在
 哪些事在等我"。本工具只读黑板,把每个编号条目归到四个分区之一:
@@ -39,6 +40,12 @@
   改判作废与归档桩不看先后,直接是已了结。
   搁置行只有落在最后一件事**之后**才生效;之后内环又有新的 ACK 或推送,
   搁置自动失效,条目回到收件箱。
+
+占用视图(--units)
+  多机部署时一台单元同一时间只做一张卡。--units 按单元列出还占着它的
+  卡:派给它(以条目里最后一条 `unit:` 行为准)且还没有了结的条目。
+  带 `unit:` 行的卡被打回后仍算占着那台单元(它要返工并重新推送),直到
+  采认、改判作废或归档。
 
 也顺带报告黑板的结构问题(warnings):同一个编号出现两次、搁置行的
 日期无法解析、判词指向板上不存在的条目。
@@ -192,6 +199,10 @@ def classify(number, entry, events, today, warnings):
     if last == "accepted":
         return SETTLED, "已采认", {}
     if last == "returned":
+        if entry["unit"]:
+            # 多机部署:打回沿派发路径退回这台单元,它返工后重新推送同一个
+            # 任务分支,所以这张卡还占着单元。
+            return WORKING, "已打回,等单元返工后重新推送", {}
         return SETTLED, "已打回(整改见后续条目)", {}
 
     # A snooze counts only when it is the latest thing said about the entry.
@@ -222,8 +233,29 @@ def classify(number, entry, events, today, warnings):
     return INBOX, REASON[last] + expired, {}
 
 
+def unit_load(board, today):
+    """Which cards each unit still holds. Returns (load, warnings), where
+    load maps a unit id to its open cards — every entry dispatched to it
+    (last `unit:` line) that is not settled — as dicts with number, title,
+    partition and reason. A unit with no open card maps to an empty list."""
+    entries, events, warnings = scan(board)
+    load = {}
+    for number in sorted(entries):
+        entry = entries[number]
+        if not entry["unit"]:
+            continue
+        cards = load.setdefault(entry["unit"], [])
+        partition, reason, _ = classify(number, entry, events, today, warnings)
+        if partition != SETTLED:
+            cards.append(
+                {"number": number, "title": entry["title"], "partition": partition, "reason": reason}
+            )
+    return load, warnings
+
+
 def main():
     ap = argparse.ArgumentParser(prog="olp-inbox.py", description="OLP 黑板收件箱")
+    ap.add_argument("--units", action="store_true", help="按单元列出还占着它的卡(占用视图)")
     ap.add_argument("board")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
     ap.add_argument("--unit", help="只看派给这个单元的条目")
@@ -244,6 +276,34 @@ def main():
             return 2
     else:
         today = datetime.date.today()
+
+    if args.units:
+        load, warnings = unit_load(args.board, today)
+        units = [
+            {"unit": u, "busy": bool(load[u]), "open": load[u]}
+            for u in sorted(load)
+            if not args.unit or u == args.unit
+        ]
+        if args.json:
+            json.dump(
+                {"today": today.isoformat(), "units": units, "warnings": warnings},
+                sys.stdout,
+                ensure_ascii=False,
+                indent=2,
+            )
+            sys.stdout.write("\n")
+            return 0
+        if not units:
+            print("板上没有派给单元的条目")
+        for u in units:
+            if not u["open"]:
+                print(f"{u['unit']}\t空闲")
+                continue
+            cards = ";".join(f"#{c['number']} {c['reason']}" for c in u["open"])
+            print(f"{u['unit']}\t忙\t{cards}")
+        for w in warnings:
+            print(f"warning: {w}", file=sys.stderr)
+        return 0
 
     entries, events, warnings = scan(args.board)
     items = []
