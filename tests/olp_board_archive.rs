@@ -388,6 +388,39 @@ unit: m07
     }
 }
 
+/// Scenario: 采集要读的单元信号留在桩里,先归档后采集也不漏
+#[test]
+fn board_archive_keeps_unit_signals_for_the_harvest() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = dir.path().join("board.md");
+    let signals = "\
+> 单元(m01)·负哨(#1): stalled_no_progress turn=t1 age=120s activity=no_events
+> 单元(m01)·- 2026-11-13 11:08:36 MCP(ask_outer) timeout: id=0a06174e2d90 no answer in 90s
+> 单元(m01)·- 2026-11-13 11:09:00 MCP(ask_outer) blocked: reason=设备连不上 needs=换设备
+";
+    let noise = "\
+> 单元(m01)·- 2026-11-13 11:06:57 MCP(ask_outer) ask: id=d68b85bb80d0 question=中文还是英文
+> 单元(m01)·- 2026-11-13 11:07:04 MCP(ask_outer) answer: id=d68b85bb80d0 answered (4 chars)
+> 单元(m01)·断网期间的一条进度
+";
+    let text =
+        format!("### 1. 一张卡\nunit: m01\n\n正文。\n{noise}{signals}> 外环(hub)·采认(#1): 通过\n");
+    std::fs::write(&board, &text).unwrap();
+    let out = archive(&board, &["--keep", "0"], &[]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+
+    let stub = read(&board);
+    for line in signals.lines() {
+        assert!(stub.contains(line), "the stub keeps {line:?}:\n{stub}");
+    }
+    for line in noise.lines() {
+        assert!(!stub.contains(line), "the stub drops {line:?}:\n{stub}");
+    }
+    assert!(!stub.contains("正文。"), "{stub}");
+    let archived = read(&dir.path().join("board.archive.md"));
+    assert!(archived.contains("正文。"), "{archived}");
+}
+
 /// Scenario: 归档期间板被改动则不替换
 #[test]
 fn board_archive_aborts_when_board_changes_underneath() {
