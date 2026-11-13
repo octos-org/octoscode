@@ -67,9 +67,9 @@
 ## 通信与信道
 
 - **纯 Rust MCP 第五信道**(#31):`octoscode olp-mcp-serve` 子命令,
-  turn 内同步问外环(ask_outer/report_blocked 两工具、90s 超时降级、
+  turn 内同步问外环(ask_outer/report_blocked 两工具、50s 超时降级、
   每进程限 3 次 + tried 必填、board 审计、取答归档)。缺省:profile
-  mcp_servers 挂载即开。体感:内环遇分歧 90s 内拿到外环人工作答,
+  mcp_servers 挂载即开。体感:内环遇分歧 50s 内拿到外环人工作答,
   超时得降级指引不卡 turn。
 - **startup --prompt**(#30):Omarchy 默认 Agent 唤起即用;引导完成
   后恰好一次自动 turn/start(派发前重连补发/派发后不重发)。

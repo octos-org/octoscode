@@ -482,7 +482,7 @@ fn olp_evo_retro_skill_step5_and_protected_sections_golden() {
     // protected-section constants (sha256, baseline 18907aa)
     const DESC: &str = "b2c32593cc6a5dacbc6e42ded9186c9ac94171c0d9d1883aa19f6ac760c5ccb4";
     const INIT: &str = "71cd93889dcf5a437f0cd35e08ce069e1f8f589f2d0243553dd9017d6d73bcee";
-    const INNER: &str = "399f47b733d179e3f8841407ae1b96c1626e6257a8c9920da87e4532e8fa749c";
+    const INNER: &str = "06f8aabd9f230505184d66ea7ef7804577fdd58cb64d94c269e8cd8ae5243dcd";
     const DISC: &str = "adbb09472cc51deae4184c80c989e916ba9d1c03360487bfaa86a5c22a263f84";
 
     let desc_line = skill
