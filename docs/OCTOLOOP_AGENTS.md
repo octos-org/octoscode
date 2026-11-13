@@ -49,7 +49,11 @@ rules:
 2. **Execute** the lowest-numbered entry that has no `ACK(` line yet. Entries
    already ACKed, and anything under `Historical record`, are audit-only —
    **never replay them**.
-3. **Commit, never push.** Push authority is the outer loop's.
+3. **Commit, never push.** Push authority is the outer loop's. (One
+   exception, for a unit in a multi-machine deployment: after local
+   verification passes, the verifier pushes `task/<N>` to the hub's local
+   repository with `scripts/olp-task-push.sh`. That hands the commit over; it
+   does not publish it. Pushing to GitHub stays with the outer loop.)
 4. **ACK** under that entry, as a single line in the v1 formula:
 
 ```

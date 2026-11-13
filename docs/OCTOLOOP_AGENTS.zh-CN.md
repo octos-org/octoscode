@@ -45,7 +45,9 @@
 1. **读** `<repo>/.octos/OUTER_LOOP_REVIEW.md` 的 `Active` 区。
 2. **执行**编号最小且尚无 `ACK(` 行的条目。已 ACK 的条目与
    `Historical record` 区只供审计——**绝不重放**。
-3. **只 commit,绝不 push。** 推送权在外环。
+3. **只 commit,绝不 push。** 推送权在外环。(多机部署的单元例外只有一条:
+   本机复验通过后,由复验方用 `scripts/olp-task-push.sh` 把 `task/<N>` 推到
+   hub 的本地仓库。那是交出 commit,不是发布;推 GitHub 仍然只在外环。)
 4. **落 ACK**,在该条目下写一行 v1 定式:
 
 ```
