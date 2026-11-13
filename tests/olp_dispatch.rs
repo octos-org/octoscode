@@ -186,6 +186,15 @@ fn dispatch_writes_a_numbered_card_and_wakes_the_unit() {
         "{log}"
     );
     assert!(log.contains("#1"), "{log}");
+    // The unit reads a mirror that was synced before this card existed: the
+    // wake names the sync as the first step, as a command that runs as
+    // written (a unit's project has no scripts/ directory of its own).
+    assert!(
+        log.contains(
+            r#"python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py" mirror"#
+        ),
+        "{log}"
+    );
     assert_eq!(h.busy("m07"), Some(true));
 }
 

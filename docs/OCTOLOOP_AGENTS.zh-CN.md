@@ -54,7 +54,12 @@
 ACK(done|wontdo|blocked): <说明>
 ```
 
-   (多机部署的单元上,黑板是只读镜像,不能原地写:改用
+   (多机部署的单元上,黑板是只读镜像:**每次读板前先执行
+   `scripts/olp-board-remote.py mirror` 同步它**,否则可能读不到刚派来的卡。
+   单元的项目目录里没有 `scripts/`:这些脚本在本机的 octoscode 仓库里,仓库
+   位置记在 `~/.octos/outer/octoscode-home`,即
+   `python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py" mirror`。
+   镜像不能原地写:改用
    `scripts/olp-board-remote.py ack <N> done|wontdo|blocked <说明>`,它把同样
    内容的一行追加到 hub 的权威黑板。)
 
