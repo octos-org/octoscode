@@ -47,9 +47,13 @@ QUICKSTART 的发现命令为准。
    可用,其他平台 unsupported,Windows LockFileEx 另立);
    `outer-duty check` 仅观察、绝不夺取;非 holder 只读批注,活锁接管
    只归 operator(终止旧 holder 后再 acquire)。持锁后:署名落板(经
-   `scripts/olp-board-append.sh`,flock 原子)→ 立编号条目唤醒内环 →
-   内环 ACK 后**隔离 worktree 独立复验** → 采认代推。安全红线见
-   BOOT §5。
+   `scripts/olp-board-append.sh`,flock 原子;标题写 `### {N}.`,编号由
+   助手在锁内分配,不要自己取最大号 +1)→ 立编号条目唤醒内环 →
+   内环 ACK 后**隔离 worktree 独立复验** → 落判词定式
+   `> 外环(<署名>)·采认(#N):<证据>`(不过则 `·打回(#N):<原因>`,整改另立
+   新条目;暂时动不了的 `·搁置(#N) 至 YYYY-MM-DD:`)→ 代推。每轮先看
+   `scripts/olp-inbox.py <板>`:收件箱里是等你决定的卡(已 ACK 待复验、
+   待回答的提问),没有采认行的卡会一直留在那里。安全红线见 BOOT §5。
 5. **retro(进化环)**:①触发——战役收官,或进化黑板新卡 ≥ 10 张;
    ②命令——`scripts/olp-evo-harvest.sh <repo> &&
    scripts/olp-evo-retro.sh <repo>`(采集→简报,记录目录在
@@ -58,7 +62,10 @@ QUICKSTART 的发现命令为准。
    operator 发布或明示委托;④authority——未持 outer-duty 锁只读简报
    不写记录;⑤采集哨只认带署名的行首定式
    `> 外环(<署名>)·改判(作废 #N):` /
-   `> 外环(<署名>)·R2 记档(#N):`,纪律里的散文"R2 记档"不落卡。
+   `> 外环(<署名>)·R2 记档(#N):` / `> 外环(<署名>)·打回(#N):`,纪律里的
+   散文"R2 记档"不落卡;多机部署另收 `> 内环(<单元>)·#N ACK(blocked|wontdo):`、
+   `> 单元(<单元>)·负哨(#N):` 与单元转发来的 MCP blocked/timeout 行
+   (都只在 hub 上采集)。
    ⑥阶段 2/3 工具面(全部只读或只写自家状态目录):监视器
    `scripts/olp-watch-board.sh <板> <token> --harvest <repo>` 命中即采集并常驻
    (不带 `--harvest` 仍一击退出);`scripts/olp-evo-metrics.sh <repo>
@@ -69,6 +76,19 @@ QUICKSTART 的发现命令为准。
    stdout(仓内只许写 `specs/drafts/`,主审补选择器后才入 `specs/`);
    `scripts/olp-evo-index.sh <repo>` 生成 `knowledge/context/evolution/INDEX.md`;
    回放基线 `fixtures/evolution/replay/`(合成夹具,实现 commit 不得改)。
+
+**黑板变长时**:`scripts/olp-board-archive.py <板> [--keep N] [--dry-run]`
+把已闭环条目的正文移到归档文件,板上留编号桩(归档前先跑一次采集)。
+
+**多机部署(一台 hub 带多台单元)**:规则见协议附录 C(三道关:单元内
+复验 → 大外环审核 → 人审核),操作见 `docs/OLP_CLUSTER.md`。外环在 hub
+上用到的命令:`scripts/olp-unit.py status`(单元健康与启动权限)、
+`scripts/olp-dispatch.py <单元> --board <板> --title … [--wake <窗格>]`
+(一步派卡,可安全重试)、`scripts/olp-inbox.py <板> --units`(单元占用)、
+`scripts/olp-local-pr.py status|promote`(本地 PR 状态与推 GitHub 的采认
+闸门)、`scripts/olp-answer.py`(回答单元里内环的提问,内环只等 90 秒)。
+单元一侧的写板、推送、心跳、负哨见 `docs/OLP_REMOTE_BOARD.md`、
+`docs/OLP_LOCAL_GIT.md`、`docs/OLP_KEEPALIVE.md`。单机使用不需要这些。
 
 ## 模式 inner — 内环形态选型(执行侧)
 
