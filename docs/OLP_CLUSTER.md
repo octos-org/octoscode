@@ -116,6 +116,37 @@ scripts/olp-dispatch.py m08 --board <板> --title 'R1 冒烟:#212' --verify-of 2
 EOF
 ```
 
+## 4c. 负哨:单元上的异常不沉默
+
+每台单元在内环旁边跑一个只观察的守护,并把值得知道的事送到 hub:
+
+```bash
+octoscode olp-runtime-watch --agent <herdr 名字> --agent-pid <pid> --backend-pid <pid> \
+    --repo <仓库> --ledger <当前 UI ledger> --session <会话> --turn-id <turn> \
+    --task 212 --progress-file <本卡要改的文件> --stall-seconds 900 \
+  | scripts/olp-alert-forward.py
+```
+
+守护每个周期输出一行 NDJSON:进程是否还在、目标 turn 有没有报错或结束、命名的文件有没有
+真实变化。它只观察——不杀进程、不重启、不写板,`task_accepted` 恒为 false。
+
+转发器把下面这些事各报一次(持续期间不重复),落到 hub 的黑板:
+
+| 种类 | 含义 |
+|---|---|
+| `agent_missing` / `backend_missing` | 内环或后端进程不在了 |
+| `watcher_missing` | 观测哨进程不在了 |
+| `process_identity_changed` | pid 被别的进程复用 |
+| `turn_error` | 目标 turn 报错 |
+| `stalled_no_progress` | 超过阈值没有真实进展(提示性质:小的只读任务本来就不改文件) |
+
+```
+> 单元(m07)·负哨(#212): turn_error turn=01a0d877… seq=9
+```
+
+大外环在 hub 上对 `负哨(` 挂哨。单次工具失败默认不转发(正常工作中很常见),需要时加
+`--include tool_failed`。hub 不可达时由远程写板的队列兜住。
+
 ## 5. 不自动做的事
 
 - **不自动改派。** 单元失联后,卡是否改派由大外环或 operator 决定。
