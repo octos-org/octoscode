@@ -29,6 +29,10 @@ hub 上的子命令
     条目或 herdr 直接告诉那台单元。
   - 回答的落板由单元上的 MCP 服务自己做(它读到回答后记一行 answer 审计,
     经 --sign 转发回 hub 的黑板),本工具不写黑板。
+  - `list` 列出还在等的提问,以及最近 24 小时内超时的(serve 的
+    --list-window 秒,可调)。更早超时的不再列出,只在 stderr 报一个数:
+    超时的提问文件留在单元的信箱里不会自己消失,不设窗口的话列表只增不减。
+    `show <id>` 仍然能看任何一条。本工具不删信箱里的文件。
 
 退出码:0 成功;2 用法错误;3 单元拒绝(没有这个提问、动作不允许);
 75 单元不可达。
@@ -156,11 +160,22 @@ def cmd_serve(args):
     asks = pending(questions_dir)
 
     if words == ["list"]:
+        hidden = 0
         for ask_id, (path, payload) in asks.items():
             head = str(payload.get("question", "")).replace("\n", " ")[:120]
             age = max(0.0, time.time() - os.path.getmtime(path))
+            if age > args.max_age and age > args.list_window:
+                # Timed out long ago. The file stays in the mailbox; without a
+                # window the listing would only ever grow.
+                hidden += 1
+                continue
             state = "等待中" if age <= args.max_age else "已超时"
             print(f"{ask_id}\t{state}\t{int(age)}s\t{head}")
+        if hidden:
+            print(
+                f"olp-answer: 另有 {hidden} 条提问早已超时(超过 {int(args.list_window)} 秒),未列出",
+                file=sys.stderr,
+            )
         return 0
     if len(words) == 2 and words[0] in ("show", "answer") and ID_RE.match(words[1]):
         ask_id = words[1]
@@ -218,6 +233,7 @@ def main():
         p.add_argument("--to")
         p.set_defaults(fn=fn)
     p = sub.add_parser("serve")
+    p.add_argument("--list-window", type=float, default=86400.0)
     p.add_argument("--root")
     p.add_argument("--max-age", type=float, default=90.0)
     p.set_defaults(fn=cmd_serve)

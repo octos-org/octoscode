@@ -357,3 +357,72 @@ fn answer_validates_input_and_reports_an_unreachable_unit() {
     let out = c.python("olp-answer.py", &["list", "m07"], None);
     assert_eq!(out.status.code(), Some(75), "{}", stderr(&out));
 }
+
+/// Scenario: 早已超时的提问不再出现在列表里
+#[test]
+fn answer_list_hides_questions_that_timed_out_long_ago() {
+    let dir = tempfile::tempdir().unwrap();
+    let questions = dir.path().join("mcp/questions");
+    std::fs::create_dir_all(&questions).unwrap();
+    let now = std::time::SystemTime::now();
+    let ago = |secs: u64| now - std::time::Duration::from_secs(secs);
+    for (id, age) in [
+        ("aaaa00000001", 5u64),
+        ("aaaa00000002", 600),
+        ("aaaa00000003", 2 * 86400),
+        ("aaaa00000004", 30 * 86400),
+    ] {
+        let path = questions.join(format!("20261113T000000-{id}.json"));
+        std::fs::write(
+            &path,
+            format!(r#"{{"id":"{id}","ts":"t","question":"问题 {id}","context":"c","tried":"t"}}"#),
+        )
+        .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(ago(age))
+            .unwrap();
+    }
+    let serve = |original: &str, extra: &[&str]| {
+        Command::new("python3")
+            .arg("-B")
+            .arg(scripts().join("olp-answer.py"))
+            .args(["serve", "--root", dir.path().to_str().unwrap()])
+            .args(extra)
+            .env("SSH_ORIGINAL_COMMAND", original)
+            .output()
+            .unwrap()
+    };
+
+    let out = serve("list", &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let listed = stdout(&out);
+    assert!(listed.contains("aaaa00000001\t等待中"), "{listed}");
+    assert!(listed.contains("aaaa00000002\t已超时"), "{listed}");
+    assert!(
+        !listed.contains("aaaa00000003"),
+        "older than a day: {listed}"
+    );
+    assert!(!listed.contains("aaaa00000004"), "{listed}");
+    assert!(
+        stderr(&out).contains("另有 2 条"),
+        "the hidden ones are counted: {}",
+        stderr(&out)
+    );
+
+    // The window is adjustable, and nothing was deleted: a hidden question
+    // can still be shown by id.
+    let out = serve("list", &["--list-window", "3000000"]);
+    assert_eq!(stdout(&out).lines().count(), 4, "{}", stdout(&out));
+    assert!(stderr(&out).is_empty(), "{}", stderr(&out));
+    let out = serve("show aaaa00000004", &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("问题 aaaa00000004"),
+        "{}",
+        stdout(&out)
+    );
+    assert_eq!(std::fs::read_dir(&questions).unwrap().count(), 4);
+}
