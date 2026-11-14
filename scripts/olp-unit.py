@@ -18,6 +18,9 @@
         汇总每个单元的状态。
     check <单元号> [--stale-after 秒]
         派卡前的检查:只有"正常"退出 0。
+    where <单元号>
+        输出 local(登记的主机名就是本机,即单机部署)或 remote。派卡的
+        唤醒与回答提问据此决定走本机还是 ssh。
   单元上:
     heartbeat --unit <单元号> [--require serve,disk] [--disk-min-free 百分比]
         做本机巡检,把一条心跳(JSON)打印到 stdout。发送由调用方完成:
@@ -546,6 +549,20 @@ def cmd_status(args):
     return 0
 
 
+def is_local_unit(unit):
+    """A unit registered with this machine's hostname is this machine."""
+    row = load_registry().get(unit)
+    return bool(row) and row["hostname"] == norm_host(socket.gethostname())
+
+
+def cmd_where(args):
+    unit = check_unit_name(args.unit)
+    if unit not in load_registry():
+        raise Fail(EXIT_USAGE, f"单元未登记: {unit}")
+    print("local" if is_local_unit(unit) else "remote")
+    return 0
+
+
 def cmd_check(args):
     unit = check_unit_name(args.unit)
     rows = load_registry()
@@ -590,6 +607,10 @@ def build_parser():
     p.add_argument("--disk-min-free", type=float, default=10.0)
     p.add_argument("--ps-output", help=argparse.SUPPRESS)
     p.set_defaults(fn=cmd_heartbeat)
+
+    p = sub.add_parser("where", help="(hub)单元就是本机(local)还是另一台机器(remote)")
+    p.add_argument("unit")
+    p.set_defaults(fn=cmd_where)
 
     p = sub.add_parser("receive", help="(hub)从 stdin 接收一条心跳")
     p.add_argument("--unit")

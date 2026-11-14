@@ -12,6 +12,8 @@ hub 上的子命令
   show <单元号> <提问id>        提问的全文(问题、上下文、已经试过什么)
   answer <单元号> <提问id>      回答从 stdin 喂,写进单元的信箱
   选项:--to <ssh 目标>(默认就是单元号——约定单元的主机名等于单元号)
+        单元登记的主机名就是本机时(单机部署,`olp-unit.py where` 输出
+        local),默认在本机直接运行单元一侧,不经 ssh;也可以写 --to local。
 
 单元上的子命令
   serve [--root <目录>] [--max-age 秒]
@@ -67,16 +69,41 @@ class Fail(Exception):
 # --- hub side ------------------------------------------------------------
 
 
+LOCAL = "local"
+
+
+def unit_is_local(unit):
+    """Ask the unit registry whether the unit is this machine (single-machine
+    deployment). An unregistered unit or a missing tool means "not local"."""
+    tool = os.path.join(os.path.dirname(os.path.abspath(__file__)), "olp-unit.py")
+    try:
+        r = subprocess.run([sys.executable, "-B", tool, "where", unit],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0 and r.stdout.strip() == "local"
+
+
 def target_of(args):
     if not UNIT_RE.match(args.unit):
         raise Fail(2, f"单元号不合法: {args.unit}")
-    target = args.to or args.unit
+    target = args.to or (LOCAL if unit_is_local(args.unit) else args.unit)
     if not TARGET_RE.match(target):
         raise Fail(2, f"--to 不是合法的 ssh 目标: {target}")
     return target
 
 
 def ssh_run(target, remote_args, stdin_bytes=None):
+    if target == LOCAL:
+        # Single machine: the unit's forced command, run here.
+        env = dict(os.environ)
+        env["SSH_ORIGINAL_COMMAND"] = " ".join(shlex.quote(a) for a in remote_args)
+        cmd = [sys.executable, "-B", os.path.abspath(__file__), "serve"]
+        try:
+            r = subprocess.run(cmd, input=stdin_bytes, capture_output=True, timeout=60, env=env)
+        except (OSError, subprocess.SubprocessError) as e:
+            return EX_TEMPFAIL, b"", f"无法在本机运行单元一侧: {e}"
+        return r.returncode, r.stdout, r.stderr.decode("utf-8", "replace")
     ssh = os.environ.get("OLP_SSH") or "ssh"
     cmd = [ssh, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", target] + remote_args
     try:
@@ -152,7 +179,11 @@ def pending(questions_dir):
 
 
 def cmd_serve(args):
-    root = args.root or os.path.join(os.path.expanduser("~"), ".octos", "outer")
+    # Same default as the MCP server (OLP_MCP_OUTER_ROOT), so a single-machine
+    # answer reaches the mailbox the inner loop's MCP server reads.
+    root = args.root or os.environ.get("OLP_MCP_OUTER_ROOT") or os.path.join(
+        os.path.expanduser("~"), ".octos", "outer"
+    )
     questions_dir, answers_dir = mailbox(root)
     try:
         words = shlex.split(os.environ.get("SSH_ORIGINAL_COMMAND", ""))

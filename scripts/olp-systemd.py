@@ -12,6 +12,7 @@
           olp-unit.py heartbeat --unit <单元号> | ssh <hub> receive
       hub 上这把密钥应配了强制命令(见 docs/OLP_CLUSTER.md),所以远端
       实际执行的是 `olp-unit.py receive --unit <单元号>`。
+      单机部署写 --hub local:心跳直接交给本机的 `olp-unit.py receive`,不经 ssh。
   install <名字> (--interval 秒 | --keepalive) [--env K=V]... -- <命令> [参数…]
       注册任意命令。--interval 定时执行;--keepalive 常驻,退出即重启。
   uninstall <名字>
@@ -282,6 +283,12 @@ def cmd_heartbeat(args):
         f"python3 -B {shlex.quote(tool)} heartbeat --unit {shlex.quote(args.unit)}"
         f" | ssh -o BatchMode=yes -o ConnectTimeout=10 {shlex.quote(args.hub)} receive"
     )
+    if args.hub == "local":
+        # Single machine: hand the heartbeat to the hub side directly.
+        pipeline = (
+            f"python3 -B {shlex.quote(tool)} heartbeat --unit {shlex.quote(args.unit)}"
+            f" | python3 -B {shlex.quote(tool)} receive --unit {shlex.quote(args.unit)}"
+        )
     units = build_units("heartbeat", ["/bin/sh", "-c", pipeline], args.interval, False, args.env)
     return write_and_load(args, "heartbeat", units)
 

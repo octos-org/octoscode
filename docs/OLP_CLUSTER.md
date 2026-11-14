@@ -269,3 +269,34 @@ octoscode olp-runtime-watch --agent <herdr 名字> --agent-pid <pid> --backend-p
 
 之后就可以用 §4b 的一条命令派卡。重启单元后:心跳和 herdr 服务自己回来,内环
 不会(§5),这时 hub 把单元判为降级并拒绝派卡,直到有人在窗格里重新启动内环。
+
+## 8. 单机:hub 与单元在同一台机器
+
+单机是集群的一个特例:一台机器既是 hub 又是单元。集群的工具照常用,只是 hub 与单元
+之间不经 ssh——hub 一侧的处理程序(与 ssh 强制命令同一段代码、同样的规则)在本机直接
+运行。
+
+| 信道 | 集群 | 单机 |
+|---|---|---|
+| 写板、ACK、镜像 | `unit.conf` 的 `hub = <ssh 别名>` | `hub = local`,另加 `board = <黑板绝对路径>` |
+| 推送任务分支 | `git remote add hub ssh://…` | 在工作仓库里执行一次 `scripts/olp-git-hub.py connect-local --unit m01 --repo <裸仓库>` |
+| 心跳 | `heartbeat --hub <心跳别名>` | `heartbeat --hub local` |
+| 回答提问、唤醒窗格 | hub 经 ssh 与 `herdr --machine` | 单元登记的主机名就是本机时,自动在本机进行 |
+
+最短的配置(单元号 `m01`):
+
+```bash
+scripts/olp-unit.py register m01 --hostname "$(hostname -s)" --mac <本机网口地址>
+printf 'hub = local\nunit = m01\nboard = %s\nmirror = %s\n' <黑板> <黑板> > ~/.octos/outer/unit.conf
+scripts/olp-git-hub.py init <裸仓库> --board <黑板>
+( cd <项目> && scripts/olp-git-hub.py connect-local --unit m01 --repo <裸仓库> )
+scripts/olp-launchd.py heartbeat --unit m01 --hub local      # Linux:olp-systemd.py
+```
+
+内环在本机的同一个项目里工作时,镜像路径就是黑板本身,`mirror` 什么也不做;内环直接读
+黑板,写入仍走 `olp-board-remote.py ack/append`(规则由 hub 一侧检查)。`olp-unit.py where
+m01` 输出 `local` 表示 hub 把这台单元认作本机。
+
+**单机没有身份隔离。** 同一个用户下,单元号来自配置;直接 `git push <裸仓库路径>` 能绕开
+推送规则。单机模式防的是误操作(内环推错分支、给自己写采认),不防有意绕开。要真正的隔离,
+用两台机器(或同一台机器上的两个用户)加 ssh 强制命令。

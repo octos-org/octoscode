@@ -30,7 +30,8 @@ scripts/olp-launchd.py heartbeat --unit m07 --hub olp@hub-01
 
 每 60 秒执行一次 `olp-unit.py heartbeat --unit m07 | ssh olp@hub-01 receive`。
 hub 上这把密钥配了强制命令(见单元登记的说明),远端实际执行的是
-`olp-unit.py receive --unit m07`。
+`olp-unit.py receive --unit m07`。单机部署(hub 就是本机)写 `--hub local`,心跳直接交给本机的
+`olp-unit.py receive`,不经 ssh。
 
 ## 3. 注册别的常驻任务
 

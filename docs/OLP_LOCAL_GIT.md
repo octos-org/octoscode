@@ -78,3 +78,15 @@ hub 的钩子会拒收:
 
 黑板登记失败不回滚推送,只在推送方的输出里告警——这时请直接告知大外环。
 hub 上的写板脚本依赖 `flock`,非交互 ssh 的 PATH 里要能找到它。
+
+## 单机:hub 仓库在本机
+
+hub 与单元在同一台机器时,在单元的工作仓库里执行一次:
+
+```bash
+scripts/olp-git-hub.py connect-local --unit m01 --repo /srv/olp/hub.git
+```
+
+它把 `hub` 远程指向本机的裸仓库,并让 git 的推送与拉取经同一个 `serve` 进行,单元号由
+这里给出,推送规则不变。之后 `scripts/olp-task-push.sh` 照常使用。同一个用户下没有身份
+隔离,见 `docs/OLP_CLUSTER.md` §8。
