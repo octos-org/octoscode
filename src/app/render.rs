@@ -2279,6 +2279,29 @@ fn diff_preview_modal_lines(
 
     if let Some(preview) = &diff.preview {
         for (file_idx, file) in preview.files.iter().enumerate() {
+            if diff.browsing && !diff.files_open && file_idx != diff.selected_file {
+                continue;
+            }
+            if diff.browsing && diff.files_open {
+                let (added, removed) = super::diff_file_line_counts(file);
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "{} {}  +{added} -{removed}",
+                        if file_idx == diff.selected_file {
+                            "›"
+                        } else {
+                            " "
+                        },
+                        file.path
+                    ),
+                    if file_idx == diff.selected_file {
+                        palette.selected()
+                    } else {
+                        palette.text()
+                    },
+                )));
+                continue;
+            }
             if !lines.is_empty() {
                 lines.push(Line::from(""));
             }
@@ -2395,7 +2418,14 @@ pub(super) fn render_diff_preview_modal(
 
     let visible_height = usize::from(area.height.saturating_sub(2)).max(1);
     let max_scroll = lines.len().saturating_sub(visible_height);
-    let scroll_from_bottom = diff.scroll.min(max_scroll);
+    let scroll_from_bottom = if diff.browsing && diff.files_open {
+        max_scroll.saturating_sub(
+            diff.selected_file
+                .saturating_sub(visible_height.saturating_sub(1)),
+        )
+    } else {
+        diff.scroll.min(max_scroll)
+    };
     let scroll_top =
         u16::try_from(max_scroll.saturating_sub(scroll_from_bottom)).unwrap_or(u16::MAX);
 
@@ -2406,10 +2436,26 @@ pub(super) fn render_diff_preview_modal(
     let pane = Paragraph::new(Text::from(lines))
         .block(
             titled_block(
-                t!("app.diff.title").to_string(),
+                if diff.browsing {
+                    t!(if diff.workspace {
+                        "app.diff.workspace"
+                    } else {
+                        "app.diff.turn"
+                    })
+                    .into_owned()
+                } else {
+                    t!("app.diff.title").to_string()
+                },
                 palette,
                 true,
-                Some(t!("app.hint.diff_preview_modal").into_owned()),
+                Some(
+                    t!(if diff.browsing && diff.files_open {
+                        "app.hint.diff_files"
+                    } else {
+                        "app.hint.diff_preview_modal"
+                    })
+                    .into_owned(),
+                ),
             )
             .border_style(palette.selected()),
         )

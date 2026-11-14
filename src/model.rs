@@ -856,6 +856,11 @@ pub enum AppUiCommand {
     RespondUserQuestion(UserQuestionRespondParams),
     ListApprovalScopes(ApprovalScopesListParams),
     GetDiffPreview(DiffPreviewGetParams),
+    GetWorkspaceDiff {
+        session_id: SessionKey,
+        profile_id: Option<String>,
+        request_id: String,
+    },
     ListTasks(TaskListParams),
     CancelTask(TaskCancelParams),
     RestartTaskFromNode(TaskRestartFromNodeParams),
@@ -983,6 +988,7 @@ impl AppUiCommand {
             Self::RespondUserQuestion(_) => octos_core::ui_protocol::methods::USER_QUESTION_RESPOND,
             Self::ListApprovalScopes(_) => octos_core::ui_protocol::methods::APPROVAL_SCOPES_LIST,
             Self::GetDiffPreview(_) => octos_core::ui_protocol::methods::DIFF_PREVIEW_GET,
+            Self::GetWorkspaceDiff { .. } => "diff/workspace/get",
             Self::ListTasks(_) => octos_core::ui_protocol::methods::TASK_LIST,
             Self::CancelTask(_) => octos_core::ui_protocol::methods::TASK_CANCEL,
             Self::RestartTaskFromNode(_) => {
@@ -6527,6 +6533,10 @@ pub fn transcript_wrap_width_for(width: u16) -> usize {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DiffPreviewPaneState {
+    pub workspace: bool,
+    pub browsing: bool,
+    pub files_open: bool,
+    pub workspace_request_id: Option<String>,
     pub active: bool,
     pub loading: bool,
     pub turn_id: Option<TurnId>,
@@ -6573,6 +6583,10 @@ impl DiffPreviewPaneState {
             selected_hunk: 0,
             side_by_side: self.side_by_side,
             expanded: false,
+            workspace: false,
+            browsing: false,
+            files_open: false,
+            workspace_request_id: None,
         };
     }
 
@@ -6623,7 +6637,7 @@ impl DiffPreviewPaneState {
     /// preview falls back to inline handling instead of a near-blank modal
     /// that swallows every plain key.
     pub fn overlay_active(&self) -> bool {
-        self.active && self.expanded && self.has_renderable_diff()
+        self.active && self.expanded && (self.browsing || self.has_renderable_diff())
     }
 
     pub fn close(&mut self) {
@@ -9358,6 +9372,9 @@ impl AppState {
     pub fn switch_selected_session(&mut self, index: usize) {
         if index >= self.sessions.len() {
             return;
+        }
+        if index != self.selected_session {
+            self.diff_preview.close();
         }
         self.persist_composer_draft_for_selected_session();
         self.stash_pending_messages_for_selected_session();
