@@ -19,7 +19,7 @@ hub 上的子命令
   serve --unit <单元号> --board <黑板路径>
       ssh 强制命令。只接受 `append <键>` 与 `read` 两个动作,黑板路径由
       这一行决定。在 hub 的 authorized_keys 里给每个单元的密钥配:
-        command="/path/scripts/olp-board-remote.py serve --unit m07 --board /path/OUTER_LOOP_REVIEW.md",no-pty,no-port-forwarding ssh-ed25519 AAAA…
+        command="/path/bin/octoscode olp remote serve --unit m07 --board /path/OUTER_LOOP_REVIEW.md",no-pty,no-port-forwarding ssh-ed25519 AAAA…
 
 单机(hub 与单元在同一台机器)
   hub 写成 `local`:hub 一侧的 `serve`(规则与 ssh 强制命令完全相同)在本机
@@ -62,7 +62,7 @@ hub 侧对单元写入的限制(serve)
   内环的 ask_outer / report_blocked 会调用 ~/.octos/outer/board_append.sh
   记一行审计。在单元上把它写成:
       #!/bin/sh
-      exec python3 /path/scripts/olp-board-remote.py append --sign
+      exec /path/bin/octoscode olp remote append --sign
   这些行就会带着单元的署名出现在 hub 的黑板上(多余的参数被忽略):
       > 单元(m07)·- 2026-11-13 03:00:00 MCP(ask_outer) ask: id=ab12 question=…
   大外环用 scripts/olp-answer.py 把回答送回单元本机的信箱。

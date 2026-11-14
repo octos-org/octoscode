@@ -950,3 +950,185 @@ fn duty_create_dir_failure_is_error() {
     );
     std::fs::set_permissions(&ro_home, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
+
+/// A `hold` wrapper running as the session leader and foreground of a
+/// fresh pseudo-terminal — what a terminal or a herdr pane gives it.
+struct PtyHold {
+    master: std::fs::File,
+    wrapper: std::process::Child,
+    output: String,
+}
+
+impl PtyHold {
+    #[allow(unsafe_code)]
+    fn spawn(env: &TempHome, agent: &str) -> Self {
+        use std::os::fd::FromRawFd as _;
+        use std::os::unix::process::CommandExt as _;
+        let (master, slave) = unsafe {
+            let fd = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+            assert!(fd >= 0, "posix_openpt");
+            assert_eq!(libc::grantpt(fd), 0, "grantpt");
+            assert_eq!(libc::unlockpt(fd), 0, "unlockpt");
+            let name = std::ffi::CStr::from_ptr(libc::ptsname(fd))
+                .to_str()
+                .unwrap()
+                .to_string();
+            (std::fs::File::from_raw_fd(fd), name)
+        };
+        let open_slave = || {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&slave)
+                .unwrap()
+        };
+        let mut cmd = duty(env.home().as_path());
+        cmd.args([
+            "hold",
+            "--project",
+            env.project().to_str().unwrap(),
+            "--signature",
+            "tty-holder",
+            "--duties",
+            "primary-review",
+            "--",
+            "/bin/sh",
+            "-c",
+            agent,
+        ])
+        .stdin(open_slave())
+        .stdout(open_slave())
+        .stderr(open_slave());
+        unsafe {
+            cmd.pre_exec(|| {
+                // New session whose controlling terminal is the pty: the
+                // wrapper's group becomes the terminal's foreground.
+                if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        warmup();
+        let wrapper = cmd.spawn().expect("spawn hold under a pty");
+        Self {
+            master,
+            wrapper,
+            output: String::new(),
+        }
+    }
+
+    fn type_bytes(&mut self, bytes: &[u8]) {
+        use std::io::Write as _;
+        self.master.write_all(bytes).unwrap();
+    }
+
+    /// Read terminal output until `needle` appears; false on timeout.
+    #[allow(unsafe_code)]
+    fn expect(&mut self, needle: &str) -> bool {
+        use std::io::Read as _;
+        use std::os::fd::AsRawFd as _;
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !self.output.contains(needle) {
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            let mut poll = libc::pollfd {
+                fd: self.master.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            if unsafe { libc::poll(&mut poll, 1, 100) } <= 0 {
+                continue;
+            }
+            let mut buf = [0u8; 4096];
+            match self.master.read(&mut buf) {
+                Ok(read) if read > 0 => {
+                    self.output.push_str(&String::from_utf8_lossy(&buf[..read]))
+                }
+                _ => std::thread::sleep(Duration::from_millis(50)),
+            }
+        }
+        true
+    }
+
+    /// Wait for the wrapper to stop (`stopped`) or exit; the raw status.
+    #[allow(unsafe_code)]
+    fn wait_status(&mut self, stopped: bool) -> Option<libc::c_int> {
+        let pid = self.wrapper.id() as libc::pid_t;
+        let flags = libc::WNOHANG | if stopped { libc::WUNTRACED } else { 0 };
+        for _ in 0..400 {
+            let mut status = 0;
+            if unsafe { libc::waitpid(pid, &mut status, flags) } == pid {
+                return Some(status);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        None
+    }
+}
+
+impl Drop for PtyHold {
+    fn drop(&mut self) {
+        let _ = self.wrapper.kill();
+    }
+}
+
+/// 契约 11(preflight 2026-11-14:交互式 agent 被 SIGTTIN 停住): a wrapper
+/// that is the foreground of its terminal hands the terminal to the
+/// agent, so an agent reading the terminal gets the line typed into it
+/// and exits normally; the wrapper relays its exit code.
+#[test]
+fn duty_interactive_agent_reads_the_terminal() {
+    let env = TempHome::new("tty-read");
+    let mut hold = PtyHold::spawn(&env, "read line; echo \"agent-got:$line\"; exit 3");
+    hold.type_bytes(b"hello\n");
+    assert!(
+        hold.expect("agent-got:hello"),
+        "the agent must read the terminal (SIGTTIN would stop it); output: {:?}",
+        hold.output
+    );
+    let status = hold.wait_status(false).expect("wrapper must exit");
+    assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 3);
+    assert_eq!(
+        check_state(env.home().as_path(), env.project().as_path()),
+        "VACANT"
+    );
+}
+
+/// 契约 12: ^Z stops the agent ⇒ the wrapper stops too (its job shows as
+/// stopped and the lock stays HELD); continuing the wrapper gives the
+/// terminal back to the agent, which reads the next line.
+#[test]
+#[allow(unsafe_code)]
+fn duty_interactive_agent_stop_is_relayed() {
+    let env = TempHome::new("tty-stop");
+    let mut hold = PtyHold::spawn(
+        &env,
+        "read a; echo \"first:$a\"; read b; echo \"second:$b\"; exit 7",
+    );
+    hold.type_bytes(b"one\n");
+    assert!(hold.expect("first:one"), "output: {:?}", hold.output);
+    hold.type_bytes(b"\x1a"); // ^Z: SIGTSTP to the terminal's foreground
+    let stopped = hold.wait_status(true).expect("wrapper must stop on ^Z");
+    assert!(
+        libc::WIFSTOPPED(stopped),
+        "a stopped agent must stop the wrapper, status {stopped:#x}"
+    );
+    assert_eq!(
+        check_state(env.home().as_path(), env.project().as_path()),
+        "HELD",
+        "a stopped job keeps its authority"
+    );
+    unsafe {
+        libc::kill(hold.wrapper.id() as libc::pid_t, libc::SIGCONT);
+    }
+    hold.type_bytes(b"two\n");
+    assert!(
+        hold.expect("second:two"),
+        "after continue the agent must own the terminal again; output: {:?}",
+        hold.output
+    );
+    let status = hold.wait_status(false).expect("wrapper must exit");
+    assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 7);
+}

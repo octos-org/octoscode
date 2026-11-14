@@ -8,6 +8,11 @@
 //! so siblings they load (the board-append helper, the hub guard, the
 //! onboarding cards) are where they look for them. Later phases replace the
 //! scripts with Rust one group at a time; the command surface stays.
+//!
+//! Scripts get `OCTOSCODE_BIN` (this binary), so that what they write into
+//! hooks, git settings and keepalive jobs calls `<octoscode> olp …` rather
+//! than a script inside one version's directory; `olp-bundle/current` links
+//! to the directory of the binary that ran last (the skill reads it).
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -38,8 +43,16 @@ const BUNDLE: &[(&str, &[u8])] = &[
         include_bytes!("../../scripts/olp-board-remote.py"),
     ),
     (
+        "scripts/olp-cli-lib.py",
+        include_bytes!("../../scripts/olp-cli-lib.py"),
+    ),
+    (
         "scripts/olp-dispatch.py",
         include_bytes!("../../scripts/olp-dispatch.py"),
+    ),
+    (
+        "scripts/olp-doctor.py",
+        include_bytes!("../../scripts/olp-doctor.py"),
     ),
     (
         "scripts/olp-evo-harvest.sh",
@@ -200,6 +213,13 @@ const COMMANDS: &[Entry] = &[
         "olp-install-skill.sh",
         &[],
         "安装 /octoloop 全局入口",
+    ),
+    script(
+        "doctor",
+        None,
+        "olp-doctor.py",
+        &[],
+        "检查钩子、保活任务、ssh 强制命令等处写下的命令还能不能用:olp doctor [--repo R] [--work W] [--json]",
     ),
     script(
         "board",
@@ -469,6 +489,7 @@ fn bundle_dir() -> std::io::Result<PathBuf> {
     let tag: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
     let dir = root.join(&tag);
     if dir.join(".complete").is_file() {
+        point_current(&root, &tag);
         return Ok(dir);
     }
     // Write to a private directory, then rename into place: two first runs
@@ -496,10 +517,33 @@ fn bundle_dir() -> std::io::Result<PathBuf> {
         let _ = std::fs::remove_dir_all(&staged);
     }
     if dir.join(".complete").is_file() {
+        point_current(&root, &tag);
         Ok(dir)
     } else {
         Err(std::io::Error::other(format!("无法写入 {}", dir.display())))
     }
+}
+
+/// Keep `<root>/current` pointing at this binary's directory: a path that
+/// stays valid across upgrades (`olp skill install` records it). Best effort.
+fn point_current(root: &Path, tag: &str) {
+    #[cfg(unix)]
+    {
+        let link = root.join("current");
+        if std::fs::read_link(&link).is_ok_and(|target| target == Path::new(tag)) {
+            return;
+        }
+        // A fresh link renamed over the old one: readers never see none.
+        let staged = root.join(format!(".current-{}", std::process::id()));
+        let _ = std::fs::remove_file(&staged);
+        if std::os::unix::fs::symlink(tag, &staged).is_ok()
+            && std::fs::rename(&staged, &link).is_err()
+        {
+            let _ = std::fs::remove_file(&staged);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (root, tag);
 }
 
 fn interpreter(file: &str) -> OsString {
@@ -524,6 +568,9 @@ fn run_script(file: &str, fixed: &[&str], args: &[String], cwd: Option<&Path>) -
         cmd.arg("-B");
     }
     cmd.arg(&path).args(fixed).args(args);
+    if let Ok(exe) = std::env::current_exe() {
+        cmd.env("OCTOSCODE_BIN", exe);
+    }
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);
     }
