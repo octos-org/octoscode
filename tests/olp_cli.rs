@@ -58,6 +58,19 @@ impl Sb {
             .env("HOME", self.p("home"))
             .env("OCTOSCODE_OLP_BUNDLE", self.p("bundle"))
             .env("OLP_UNITS_DIR", self.p("units"))
+            // Whoever runs `octoscode olp` has octoscode on PATH; olp init's
+            // dependency check looks for it there.
+            .env("PATH", {
+                let bin = Path::new(env!("CARGO_BIN_EXE_octoscode"))
+                    .parent()
+                    .unwrap()
+                    .to_path_buf();
+                let mut paths = vec![bin];
+                paths.extend(std::env::split_paths(
+                    &std::env::var_os("PATH").unwrap_or_default(),
+                ));
+                std::env::join_paths(paths).unwrap()
+            })
             .env_remove("OLP_HUB")
             .env_remove("OLP_UNIT_ID")
             .stdin(Stdio::piped())
