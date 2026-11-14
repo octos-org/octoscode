@@ -47,14 +47,14 @@ npm install -g @octos-org/octoscode
 
 # ② 在你的项目目录铺 OLP 脚手架(幂等,绝不覆盖已有文件)
 cd your-project/
-curl -fsSL https://raw.githubusercontent.com/octos-org/octoscode/main/scripts/olp-init.sh | bash
-#   (或 clone 本仓库后运行 scripts/olp-init.sh)
+octoscode olp init .
+#   (octoscode 尚无 olp 子命令的旧版:clone 本仓库后运行 scripts/olp-init.sh)
 
 # ③ 启动内环
 octoscode --stdio-command 'octos serve --stdio --solo'
 ```
 
-`olp-init.sh` 做六件事:依赖体检(缺什么、怎么装,一屏说清)、生成
+`octoscode olp init`(即 `olp-init.sh`)做六件事:依赖体检(缺什么、怎么装,一屏说清)、生成
 `.octos/loop.md`(内环维护循环)与 `.octos/OUTER_LOOP_REVIEW.md`(黑板
 模板)、把黑板加进 `.gitignore`(分支无关,防跨分支裂脑)、铺 `AGENTS.md`
 自包含上岗卡(落地项目的 agent 读它即可上岗;`OLP_INIT_LANG=zh` 取中文
@@ -176,3 +176,8 @@ herdr 用户另有驾驶舱注入:`herdr agent list` 看窗格,
 - [OUTER_LOOP_PROTOCOL.md](OUTER_LOOP_PROTOCOL.md) — 协议全文:ACK 语法、
   result.md schema、多外环规则、预算治理、实战教训全集
 - README「Quickstart (solo onboarding)」— 单环(不带外环)的逐屏引导
+
+## 附:统一入口
+
+所有 OctoLoop 工具都可以用 `octoscode olp <组> <动作>` 调用,不需要知道 `scripts/` 在哪:
+`octoscode olp` 列出全部命令,对照表见 `docs/OLP_CLI.md`。
