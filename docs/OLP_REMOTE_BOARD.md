@@ -86,7 +86,8 @@ hub 不可达时镜像保持上一次的内容(退出码 75)。镜像永不回�
 (`olp-dispatch.py --wake`),定时同步赶不上:内环被叫醒去读 #N 时,镜像里可能
 还没有 #N。所以:
 
-- 唤醒的那句话里写明了第一步,并给出可以原样执行的命令:
+- 唤醒的那句话里写明了第一步,并给出可以原样执行的命令:主用
+  `octoscode olp remote mirror`,备用
   `python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py" mirror`;
 - 落地项目的上岗卡(`AGENTS.md`)里也写了"读板前先同步镜像";
 - 定时同步只作兜底,让人和别的工具看到的镜像不太旧:
