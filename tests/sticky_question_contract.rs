@@ -162,6 +162,8 @@ fn question_tracks_selected_session_queue_and_steering_without_using_the_draft()
     assert!(render(&mut s, 80, 24)[0].contains("QUEUED_QUESTION"));
     s.state.pending_messages.clear();
     s.state.pending_turn_steers.push_back(PendingTurnSteer {
+        dispatch_order: 0,
+        local_id: None,
         session_id: SessionKey("A".into()),
         turn_id: turn.clone(),
         prompt: "STEERING_QUESTION".into(),

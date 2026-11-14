@@ -24,6 +24,7 @@ use crossterm::{
     },
 };
 use eyre::Result;
+#[cfg(any(unix, test))]
 use octos_core::app_ui::AppUiEvent;
 use ratatui::backend::{Backend, CrosstermBackend};
 
@@ -817,12 +818,13 @@ fn drain_pending_autonomy_hydration(backend: &mut dyn AppUiBackend, store: &mut 
 
 fn send_command(backend: &mut dyn AppUiBackend, store: &mut Store, command: AppUiCommand) {
     let method = command.method();
-    if let Err(err) = backend.send(command) {
+    if let Err(err) = backend.send(command.clone()) {
         // OUTER_LOOP_REVIEW #27: never swallow a failed send silently — the
         // user (composer input above all) must see that THIS command did not
         // reach the backend, named by method, instead of the TUI sitting
         // quiet after a "reconnected" status while input goes nowhere.
-        store.apply_event(AppUiEvent::error(
+        store.apply_client_event(crate::transport::command_error_event(
+            &command,
             "send_failed",
             format!("命令未送达 backend({method} 发送失败): {err:#}"),
         ));
