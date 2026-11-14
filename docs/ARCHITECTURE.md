@@ -499,6 +499,7 @@ added without a row here.
 | `src/cmd/install_method.rs` | 746 | Install-method detection for `octoscode update`/`doctor` (design §A.3). |
 | `src/cmd/mod.rs` | 273 | `octoscode` subcommands: `update` and `doctor` (design doc). |
 | `src/cmd/update.rs` | 606 | `octoscode update` — install-method-aware updater (design §A). |
+| `src/cmd/olp.rs` | 681 | `octoscode olp <组> <动作>` — the one entry point for the OctoLoop tools (docs/OLP_CLI.md); phase one runs the scripts bundled into the binary from a per-version directory. |
 | `src/cmd/olp_mcp.rs` | 20 | `octoscode olp-mcp-serve` entry — OUTER_LOOP_REVIEW #31 OLP-MCP server subcommand. |
 | `src/cmd/outer_duty.rs` | 98 | `octoscode outer-duty` entry — OUTER_LOOP_REVIEW #38 per-project duty lock (hold/check). |
 | `src/cmd/olp_runtime_watch.rs` | 1008 | `octoscode olp-runtime-watch` — observation-only runtime guard: bounded process probes, the target turn's ledger alerts, and a no-progress stall advisory, as NDJSON; never accepts a task. |

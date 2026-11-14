@@ -12,6 +12,7 @@ pub mod config;
 pub mod doctor;
 pub mod github;
 pub mod install_method;
+pub mod olp;
 pub mod olp_mcp;
 // File identity uses dev/ino (`std::os::unix`); the OctoLoop runtime guard is
 // Unix-only, so the module is not built elsewhere.
@@ -35,6 +36,7 @@ const SUBCOMMANDS: &[&str] = &[
     "update",
     "doctor",
     "config",
+    "olp",
     "olp-mcp-serve",
     "olp-runtime-watch",
     "outer-duty",
@@ -57,6 +59,7 @@ where
         Some(Route::Update(args)) => Ok(Some(update::run(args)?.exit_code())),
         Some(Route::Doctor(args)) => Ok(Some(doctor::run(args)?)),
         Some(Route::Config(args)) => Ok(Some(config::run(args)?)),
+        Some(Route::Olp(rest)) => Ok(Some(olp::run(&rest))),
         Some(Route::OlpMcpServe) => Ok(Some(olp_mcp::run())),
         Some(Route::OlpRuntimeWatch(args)) => Ok(Some(olp_runtime_watch::run(args)?)),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -73,6 +76,9 @@ where
 enum Route {
     Update(UpdateArgs),
     Doctor(DoctorArgs),
+    /// `octoscode olp …` — the one entry point for the OctoLoop tools
+    /// (docs/OLP_CLI.md); everything after `olp`.
+    Olp(Vec<String>),
     /// `octoscode olp-mcp-serve` — OUTER_LOOP_REVIEW #31: the Rust OLP-MCP
     /// outer-loop server (newline-delimited JSON-RPC over stdio).
     OlpMcpServe,
@@ -173,6 +179,7 @@ fn route(argv: &[String]) -> Option<Route> {
         "update" => Some(Route::Update(UpdateCli::parse_from(&sub_argv).into_args())),
         "doctor" => Some(Route::Doctor(DoctorCli::parse_from(&sub_argv).into_args())),
         "config" => Some(Route::Config(ConfigCli::parse_from(&sub_argv).into_args())),
+        "olp" => Some(Route::Olp(argv.iter().skip(2).cloned().collect())),
         "olp-mcp-serve" => Some(Route::OlpMcpServe),
         "olp-runtime-watch" => match OlpRuntimeWatchCli::parse_from(&sub_argv).into_args() {
             Ok(args) => Some(Route::OlpRuntimeWatch(args)),

@@ -14,6 +14,10 @@ Markdown,没有哪个 agent 专有的指令。Claude Code 经
 `.claude/skills/octoloop/SKILL.md` 这张薄卡加载它;其他 agent 直接读本
 文件,或用 `scripts/olp-install-skill.sh` 装一张指向它的薄卡。
 
+**统一入口**:下文 scripts 目录里的每个 olp 工具都可以写成 `octoscode olp <组> <动作>`(对照表在
+`docs/OLP_CLI.md`),参数、输出、退出码相同,在任何目录都能用;只装了 octoscode、没有仓库
+checkout 的机器上只能用这种写法。
+
 **路径怎么解析**:下文的 `docs/…`、`scripts/…`、`knowledge/…` 都相对
 **octoscode 仓库根**(记作 `OCTOSCODE_HOME`);`.octos/…` 与脚本参数
 `<repo>` 指**当前项目**。当前项目就是 octoscode 时两者相同。在别的项目里
@@ -28,6 +32,7 @@ Markdown,没有哪个 agent 专有的指令。Claude Code 经
 
 | 要做的事 | 读 | 主要命令 |
 |---|---|---|
+| 用统一入口跑任何 OctoLoop 工具(不用找 `scripts/`) | `docs/OLP_CLI.md` | `octoscode olp <组> <动作>`,如 `octoscode olp dispatch`、`octoscode olp remote mirror` |
 | 单机第一次上手、装依赖、冒烟 | `docs/OLP_QUICKSTART.md`(英文 `docs/OLP_QUICKSTART.en.md`) | `scripts/olp-init.sh` |
 | 单机当外环:派单、观测、复验、代推 | `docs/OLP_OUTER_BOOT.md`,纪律与定式见 `docs/OUTER_LOOP_PROTOCOL.md` | `octoscode outer-duty`、`scripts/olp-watch-board.sh`、`scripts/olp-board-append.sh` |
 | 在单元上组织实现与对抗复验 | 本文件 unit 模式;协议附录 C | `herdr agent start`、`scripts/olp-task-push.sh` |
