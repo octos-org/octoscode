@@ -35,6 +35,7 @@ Markdown,没有哪个 agent 专有的指令。Claude Code 经
 | 单元上写板、同步镜像、断网排队;回答单元的提问 | `docs/OLP_REMOTE_BOARD.md` | `scripts/olp-board-remote.py`、`scripts/olp-answer.py` |
 | hub 建本地 git 仓库;单元推任务分支 | `docs/OLP_LOCAL_GIT.md` | `scripts/olp-git-hub.py`、`scripts/olp-task-push.sh` |
 | 看哪些本地 PR 在等审核、采认后推 GitHub | `docs/OLP_LOCAL_PR.md`;怎么采认见本文件 outer 模式第 4 步 | `scripts/olp-local-pr.py status`、`promote`;收件箱 `scripts/olp-inbox.py` |
+| 单元上的内环用 Claude Code 或 Codex(启动、挂 MCP、审批与沙箱) | `docs/OLP_INNER_AGENTS.md` | `herdr agent start --kind claude`、`--kind codex` |
 | 心跳等常驻任务开机自启、崩溃重启 | `docs/OLP_KEEPALIVE.md` | macOS `scripts/olp-launchd.py`,Linux `scripts/olp-systemd.py` |
 | 守着单元上的内环,异常报到 hub(负哨) | `docs/OLP_CLUSTER.md` §4c | `octoscode olp-runtime-watch`、`scripts/olp-alert-forward.py` |
 | 黑板太长、归档已了结的卡 | `docs/OLP_OUTER_BOOT.md` §7 | `scripts/olp-board-archive.py` |
