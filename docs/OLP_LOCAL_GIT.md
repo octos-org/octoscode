@@ -19,8 +19,11 @@ scripts/olp-git-hub.py init /srv/olp/hub.git --board <repo>/.octos/OUTER_LOOP_RE
 在 hub 的 `~/.ssh/authorized_keys` 里,每个单元一行:
 
 ```
-command="/path/scripts/olp-git-hub.py serve --unit m07 --repo /srv/olp/hub.git",no-pty,no-port-forwarding,no-agent-forwarding ssh-ed25519 AAAA… m07-git
+command="/path/bin/octoscode olp repo serve --unit m07 --repo /srv/olp/hub.git",no-pty,no-port-forwarding,no-agent-forwarding ssh-ed25519 AAAA… m07-git
 ```
+
+`/path/bin/octoscode` 写 `command -v octoscode` 的结果(sshd 执行强制命令时 PATH
+很短)。升级 octoscode 后不用改;`octoscode olp doctor` 检查这些行。
 
 这个密钥只能对这个仓库做 git 推送与拉取,钩子看到的单元号由这一行决定,单元
 自己改不了。**不要给单元发不带强制命令的密钥**:不带单元号的推送被视为 hub

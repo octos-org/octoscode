@@ -110,6 +110,13 @@ if [ "$MODE" = print ]; then
 fi
 
 # 1. 记录仓库位置(唯一存放路径的地方,一行,随时可改)。
+# 经 `octoscode olp skill install` 运行时,这里是某个版本的工具目录
+# (olp-bundle/<哈希>);记它旁边的 current 链接,它总指向最近运行的版本。
+CURRENT="$(dirname "$REPO")/current"
+if [ -n "${OCTOSCODE_BIN:-}" ] && [ -L "$CURRENT" ] &&
+    [ "$(cd "$CURRENT" 2>/dev/null && pwd -P)" = "$REPO" ]; then
+    REPO="$CURRENT"
+fi
 HOME_FILE="$HOME/.octos/outer/octoscode-home"
 mkdir -p "$(dirname "$HOME_FILE")"
 printf '%s\n' "$REPO" > "$HOME_FILE"

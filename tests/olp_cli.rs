@@ -87,7 +87,10 @@ impl Sb {
         let dirs: Vec<PathBuf> = std::fs::read_dir(self.p("bundle"))
             .unwrap()
             .map(|e| e.unwrap().path())
-            .filter(|p| p.is_dir() && !p.file_name().unwrap().to_string_lossy().starts_with('.'))
+            .filter(|p| {
+                let name = p.file_name().unwrap().to_string_lossy();
+                p.is_dir() && !name.starts_with('.') && name != "current"
+            })
             .collect();
         assert_eq!(dirs.len(), 1, "{dirs:?}");
         dirs[0].clone()
@@ -352,4 +355,263 @@ fn olp_native_commands_and_keepalive_pick_the_right_implementation() {
             stdout(&out)
         );
     }
+}
+
+fn git_in(dir: &Path, args: &[&str]) -> Output {
+    Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .unwrap()
+}
+
+/// What the built binary writes as the command to call later.
+fn bin_olp() -> String {
+    format!("{} olp", env!("CARGO_BIN_EXE_octoscode"))
+}
+
+/// Scenario: 经 octoscode olp 写下的钩子、本机推送设置、心跳任务调用 octoscode olp,推送照常经钩子
+#[test]
+fn olp_wiring_calls_octoscode_not_the_bundle() {
+    let sb = Sb::new();
+    std::fs::write(
+        sb.p("board.md"),
+        "# board\n\n## Active\n\n### 1 task one\nunit: m01\n",
+    )
+    .unwrap();
+    let hub = sb.p("hub.git");
+    let out = sb.olp(
+        &[
+            "repo",
+            "init",
+            hub.to_str().unwrap(),
+            "--board",
+            sb.p("board.md").to_str().unwrap(),
+        ],
+        "",
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    for name in ["pre-receive", "post-receive"] {
+        let hook = std::fs::read_to_string(hub.join("hooks").join(name)).unwrap();
+        assert!(
+            hook.contains(&format!("exec {} repo hook {name}", bin_olp())),
+            "{hook}"
+        );
+        assert!(!hook.contains("olp-bundle"), "{hook}");
+    }
+
+    // Single machine: the unit's work repository pushes through local-pack.
+    let work = sb.p("cwd");
+    assert!(git_in(&work, &["init", "-q"]).status.success());
+    assert!(
+        git_in(&work, &["commit", "-q", "--allow-empty", "-m", "seed"])
+            .status
+            .success()
+    );
+    let out = sb.olp(
+        &[
+            "repo",
+            "connect-local",
+            "--unit",
+            "m01",
+            "--repo",
+            hub.to_str().unwrap(),
+        ],
+        "",
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let pack = stdout(&git_in(&work, &["config", "remote.hub.receivepack"]));
+    assert!(
+        pack.starts_with(&format!("{} repo local-pack --unit m01", bin_olp())),
+        "{pack}"
+    );
+    assert!(
+        git_in(&work, &["checkout", "-q", "-b", "task/1"])
+            .status
+            .success()
+    );
+    assert!(
+        git_in(&work, &["commit", "-q", "--allow-empty", "-m", "t1"])
+            .status
+            .success()
+    );
+    let sha = stdout(&git_in(&work, &["rev-parse", "HEAD"]));
+    let push = git_in(
+        &work,
+        &[
+            "push",
+            "-o",
+            &format!("olp-verified={}:m01-v", sha.trim()),
+            "hub",
+            "task/1",
+        ],
+    );
+    assert!(push.status.success(), "{}", stderr(&push));
+    if has_flock() {
+        let board = std::fs::read_to_string(sb.p("board.md")).unwrap();
+        assert!(board.contains("本地复验通过(#1)"), "{board}");
+    }
+
+    let jobs = sb.p("jobs");
+    let out = sb.olp(
+        &[
+            "keepalive",
+            "heartbeat",
+            "--unit",
+            "m01",
+            "--hub",
+            "local",
+            "--no-load",
+            "--dir",
+            jobs.to_str().unwrap(),
+        ],
+        "",
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let job: String = std::fs::read_dir(&jobs)
+        .unwrap()
+        .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap())
+        .collect();
+    assert!(
+        job.contains(&format!("{} unit heartbeat --unit m01", bin_olp()))
+            && job.contains(&format!("{} unit receive --unit m01", bin_olp())),
+        "{job}"
+    );
+    assert!(!job.contains("olp-unit.py"), "{job}");
+}
+
+/// Scenario: skill install 经 octoscode olp 运行时记录 current 链接,它指向本版本的工具目录
+#[test]
+fn olp_skill_install_records_the_current_link() {
+    let sb = Sb::new();
+    let out = sb.olp(&["skill", "install", "--home-only"], "");
+    assert!(out.status.success(), "{}", stderr(&out));
+    let recorded = std::fs::read_to_string(sb.p("home/.octos/outer/octoscode-home")).unwrap();
+    let current = sb.p("bundle").join("current");
+    assert!(recorded.trim().ends_with("/bundle/current"), "{recorded}");
+    assert_eq!(
+        std::fs::canonicalize(recorded.trim()).unwrap(),
+        std::fs::canonicalize(&current).unwrap()
+    );
+    assert_eq!(
+        std::fs::canonicalize(&current).unwrap(),
+        std::fs::canonicalize(sb.bundle()).unwrap()
+    );
+    assert!(current.join("skills/octoloop/AGENTS.md").is_file());
+}
+
+/// Scenario: doctor 把固定在某一版本工具目录的命令报 warn,路径消失后报 fail 并给出修复命令
+#[test]
+fn olp_doctor_flags_pinned_then_missing_wiring() {
+    let sb = Sb::new();
+    std::fs::write(sb.p("board.md"), "# board\n\n## Active\n").unwrap();
+    // A hub repository whose hooks an older version wrote: they name a
+    // script inside that version's tool directory.
+    let old = sb.p("bundle/00000000deadbeef/scripts");
+    std::fs::create_dir_all(&old).unwrap();
+    let script = old.join("olp-git-hub.py");
+    std::fs::write(&script, "").unwrap();
+    let hub = sb.p("hub.git");
+    assert!(
+        git_in(
+            &sb.p("cwd"),
+            &["init", "-q", "--bare", hub.to_str().unwrap()]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        git_in(
+            &hub,
+            &["config", "olp.board", sb.p("board.md").to_str().unwrap()]
+        )
+        .status
+        .success()
+    );
+    for name in ["pre-receive", "post-receive"] {
+        let path = hub.join("hooks").join(name);
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nexec python3 -B {} hook {name}\n",
+                script.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::create_dir_all(sb.p("home/.ssh")).unwrap();
+    std::fs::write(
+        sb.p("home/.ssh/authorized_keys"),
+        format!(
+            "command=\"{}/olp-unit.py receive --unit m02\",no-pty ssh-ed25519 AAAA k\n",
+            old.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(old.join("olp-unit.py"), "").unwrap();
+
+    let doctor = |sb: &Sb| {
+        let out = sb.olp(&["doctor", "--repo", hub.to_str().unwrap(), "--json"], "");
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("{e}: {}{}", stdout(&out), stderr(&out)));
+        (out.status.code(), report)
+    };
+    let (code, report) = doctor(&sb);
+    assert_eq!(code, Some(0), "{report}");
+    assert_eq!(report["counts"]["warn"], 3, "{report}");
+    assert_eq!(report["counts"]["fail"], 0, "{report}");
+
+    std::fs::remove_dir_all(sb.p("bundle/00000000deadbeef")).unwrap();
+    let (code, report) = doctor(&sb);
+    assert_eq!(code, Some(1), "{report}");
+    assert_eq!(report["counts"]["fail"], 3, "{report}");
+    let fixes: Vec<String> = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["fix"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert!(
+        fixes
+            .iter()
+            .any(|f| f.starts_with("octoscode olp repo init ")),
+        "{fixes:?}"
+    );
+    assert!(
+        fixes.iter().any(|f| f.contains(&format!(
+            "command=\"{} unit receive --unit m02\"",
+            bin_olp()
+        ))),
+        "{fixes:?}"
+    );
+
+    // Fixed the suggested way: everything is fine again.
+    let out = sb.olp(
+        &[
+            "repo",
+            "init",
+            hub.to_str().unwrap(),
+            "--board",
+            sb.p("board.md").to_str().unwrap(),
+        ],
+        "",
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    std::fs::write(
+        sb.p("home/.ssh/authorized_keys"),
+        format!(
+            "command=\"{} unit receive --unit m02\",no-pty ssh-ed25519 AAAA k\n",
+            bin_olp()
+        ),
+    )
+    .unwrap();
+    let (code, report) = doctor(&sb);
+    assert_eq!(code, Some(0), "{report}");
+    assert_eq!(report["counts"]["ok"], 3, "{report}");
 }

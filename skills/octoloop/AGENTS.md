@@ -40,6 +40,7 @@ Markdown,没有哪个 agent 专有的指令。Claude Code 经
 | 看哪些本地 PR 在等审核、采认后推 GitHub | `docs/OLP_LOCAL_PR.md`;怎么采认见本文件 outer 模式第 4 步 | `octoscode olp repo status`、`promote`;收件箱 `octoscode olp inbox` |
 | 单元上的内环用 Claude Code 或 Codex(启动、挂 MCP、审批与沙箱) | `docs/OLP_INNER_AGENTS.md` | `herdr agent start --kind claude`、`--kind codex` |
 | 心跳等常驻任务开机自启、崩溃重启 | `docs/OLP_KEEPALIVE.md` | `octoscode olp keepalive`(macOS 走 launchd,Linux 走 systemd) |
+| 升级 octoscode 后,检查钩子、保活任务、ssh 强制命令里写的命令还能不能用 | `docs/OLP_CLI.md` §3 | `octoscode olp doctor` |
 | 守着单元上的内环,异常报到 hub(负哨) | `docs/OLP_CLUSTER.md` §4c | `octoscode olp guard watch`、`octoscode olp guard forward` |
 | 黑板太长、归档已了结的卡 | `docs/OLP_OUTER_BOOT.md` §7 | `octoscode olp board archive` |
 | 进化环:采集摩擦信号、出 retro 简报 | `docs/OLP_OUTER_BOOT.md` §7,本文件 outer 模式第 5 步 | `octoscode olp evo harvest`、`octoscode olp evo retro` |
@@ -64,6 +65,7 @@ octoscode 仓库在哪,参数、输出、退出码与原脚本相同(全表见 `
 |---|---|
 | `octoscode olp init [目录]` | `scripts/olp-init.sh`(在项目目录里运行) |
 | `octoscode olp skill install …` | `scripts/olp-install-skill.sh …` |
+| `octoscode olp doctor …` | `scripts/olp-doctor.py …` |
 | `octoscode olp board append\|inbox\|archive\|watch\|summary …` | `scripts/olp-board-append.sh`、`scripts/olp-inbox.py`、`scripts/olp-board-archive.py`、`scripts/olp-watch-board.sh`、`scripts/olp-summary.py` |
 | `octoscode olp dispatch …`(即 `card dispatch`) | `scripts/olp-dispatch.py …` |
 | `octoscode olp unit <子命令> …` | `scripts/olp-unit.py <子命令> …` |
