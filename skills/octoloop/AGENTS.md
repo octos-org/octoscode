@@ -12,11 +12,7 @@ OctoLoop = OLP(Outer-Loop Protocol,协议名,当前 olp/v3)之上的产品化封
 **本文件对任何 agent 通用**(Claude Code、Codex、octos 内环等):它是纯
 Markdown,没有哪个 agent 专有的指令。Claude Code 经
 `.claude/skills/octoloop/SKILL.md` 这张薄卡加载它;其他 agent 直接读本
-文件,或用 `scripts/olp-install-skill.sh` 装一张指向它的薄卡。
-
-**统一入口**:下文 scripts 目录里的每个 olp 工具都可以写成 `octoscode olp <组> <动作>`(对照表在
-`docs/OLP_CLI.md`),参数、输出、退出码相同,在任何目录都能用;只装了 octoscode、没有仓库
-checkout 的机器上只能用这种写法。
+文件,或用 `octoscode olp skill install` 装一张指向它的薄卡。
 
 **路径怎么解析**:下文的 `docs/…`、`scripts/…`、`knowledge/…` 都相对
 **octoscode 仓库根**(记作 `OCTOSCODE_HOME`);`.octos/…` 与脚本参数
@@ -33,33 +29,62 @@ checkout 的机器上只能用这种写法。
 | 要做的事 | 读 | 主要命令 |
 |---|---|---|
 | 用统一入口跑任何 OctoLoop 工具(不用找 `scripts/`) | `docs/OLP_CLI.md` | `octoscode olp <组> <动作>`,如 `octoscode olp dispatch`、`octoscode olp remote mirror` |
-| 单机第一次上手、装依赖、冒烟 | `docs/OLP_QUICKSTART.md`(英文 `docs/OLP_QUICKSTART.en.md`) | `scripts/olp-init.sh` |
-| 单机当外环:派单、观测、复验、代推 | `docs/OLP_OUTER_BOOT.md`,纪律与定式见 `docs/OUTER_LOOP_PROTOCOL.md` | `octoscode outer-duty`、`scripts/olp-watch-board.sh`、`scripts/olp-board-append.sh` |
-| 在单元上组织实现与对抗复验 | 本文件 unit 模式;协议附录 C | `herdr agent start`、`scripts/olp-task-push.sh` |
-| 把一台机器接成 hub 或单元(多机部署) | `docs/OLP_CLUSTER.md` §7 上线清单,规则见协议附录 C | `scripts/olp-unit.py`、`scripts/olp-install-skill.sh --home-only` |
-| 集群当大外环:从全景台目标规划、派卡(指定实现方与复验方)、汇总进展 | 本文件 outer 模式"集群里的大外环";`docs/OLP_CLUSTER.md` §4b | `scripts/olp-dispatch.py --impl --review`、`scripts/olp-summary.py` |
-| hub 上给单元派卡、看单元健康与占用 | `docs/OLP_CLUSTER.md` §4、§4b | `scripts/olp-dispatch.py`、`scripts/olp-unit.py status`、`scripts/olp-inbox.py --units` |
-| 单元上写板、同步镜像、断网排队;回答单元的提问 | `docs/OLP_REMOTE_BOARD.md` | `scripts/olp-board-remote.py`、`scripts/olp-answer.py` |
-| hub 建本地 git 仓库;单元推任务分支 | `docs/OLP_LOCAL_GIT.md` | `scripts/olp-git-hub.py`、`scripts/olp-task-push.sh` |
-| 看哪些本地 PR 在等审核、采认后推 GitHub | `docs/OLP_LOCAL_PR.md`;怎么采认见本文件 outer 模式第 4 步 | `scripts/olp-local-pr.py status`、`promote`;收件箱 `scripts/olp-inbox.py` |
+| 单机第一次上手、装依赖、冒烟 | `docs/OLP_QUICKSTART.md`(英文 `docs/OLP_QUICKSTART.en.md`) | `octoscode olp init` |
+| 单机当外环:派单、观测、复验、代推 | `docs/OLP_OUTER_BOOT.md`,纪律与定式见 `docs/OUTER_LOOP_PROTOCOL.md` | `octoscode olp duty`、`octoscode olp board watch`、`octoscode olp board append` |
+| 在单元上组织实现与对抗复验 | 本文件 unit 模式;协议附录 C | `herdr agent start`、`octoscode olp repo push` |
+| 把一台机器接成 hub 或单元(多机部署) | `docs/OLP_CLUSTER.md` §7 上线清单,规则见协议附录 C | `octoscode olp unit`、`octoscode olp skill install --home-only` |
+| 集群当大外环:从全景台目标规划、派卡(指定实现方与复验方)、汇总进展 | 本文件 outer 模式"集群里的大外环";`docs/OLP_CLUSTER.md` §4b | `octoscode olp dispatch --impl --review`、`octoscode olp summary` |
+| hub 上给单元派卡、看单元健康与占用 | `docs/OLP_CLUSTER.md` §4、§4b | `octoscode olp dispatch`、`octoscode olp unit status`、`octoscode olp inbox --units` |
+| 单元上写板、同步镜像、断网排队;回答单元的提问 | `docs/OLP_REMOTE_BOARD.md` | `octoscode olp remote`、`octoscode olp ask` |
+| hub 建本地 git 仓库;单元推任务分支 | `docs/OLP_LOCAL_GIT.md` | `octoscode olp repo`、`octoscode olp repo push` |
+| 看哪些本地 PR 在等审核、采认后推 GitHub | `docs/OLP_LOCAL_PR.md`;怎么采认见本文件 outer 模式第 4 步 | `octoscode olp repo status`、`promote`;收件箱 `octoscode olp inbox` |
 | 单元上的内环用 Claude Code 或 Codex(启动、挂 MCP、审批与沙箱) | `docs/OLP_INNER_AGENTS.md` | `herdr agent start --kind claude`、`--kind codex` |
-| 心跳等常驻任务开机自启、崩溃重启 | `docs/OLP_KEEPALIVE.md` | macOS `scripts/olp-launchd.py`,Linux `scripts/olp-systemd.py` |
-| 守着单元上的内环,异常报到 hub(负哨) | `docs/OLP_CLUSTER.md` §4c | `octoscode olp-runtime-watch`、`scripts/olp-alert-forward.py` |
-| 黑板太长、归档已了结的卡 | `docs/OLP_OUTER_BOOT.md` §7 | `scripts/olp-board-archive.py` |
-| 进化环:采集摩擦信号、出 retro 简报 | `docs/OLP_OUTER_BOOT.md` §7,本文件 outer 模式第 5 步 | `scripts/olp-evo-harvest.sh`、`scripts/olp-evo-retro.sh` |
-| 两个 octos peer 审查员的初审结论不一致,用实际执行的测试裁决(只适用于以 octos peer 方式跑的审查,不是通用的人工仲裁) | `docs/OLP_REVIEW_EVIDENCE.md` | `scripts/olp-review-evidence.py`;只读的进度视图 `scripts/olp-review-monitor.py` |
-| 给落地项目的 agent 一张自包含的上岗卡 | `docs/OCTOLOOP_AGENTS.zh-CN.md`(英文 `docs/OCTOLOOP_AGENTS.md`),由 `olp-init.sh` 铺成项目的 `AGENTS.md` | `scripts/olp-init.sh` |
+| 心跳等常驻任务开机自启、崩溃重启 | `docs/OLP_KEEPALIVE.md` | `octoscode olp keepalive`(macOS 走 launchd,Linux 走 systemd) |
+| 守着单元上的内环,异常报到 hub(负哨) | `docs/OLP_CLUSTER.md` §4c | `octoscode olp guard watch`、`octoscode olp guard forward` |
+| 黑板太长、归档已了结的卡 | `docs/OLP_OUTER_BOOT.md` §7 | `octoscode olp board archive` |
+| 进化环:采集摩擦信号、出 retro 简报 | `docs/OLP_OUTER_BOOT.md` §7,本文件 outer 模式第 5 步 | `octoscode olp evo harvest`、`octoscode olp evo retro` |
+| 两个 octos peer 审查员的初审结论不一致,用实际执行的测试裁决(只适用于以 octos peer 方式跑的审查,不是通用的人工仲裁) | `docs/OLP_REVIEW_EVIDENCE.md` | `octoscode olp review`;只读的进度视图 `octoscode olp review monitor` |
+| 给落地项目的 agent 一张自包含的上岗卡 | `docs/OCTOLOOP_AGENTS.zh-CN.md`(英文 `docs/OCTOLOOP_AGENTS.md`),由 `olp-init.sh` 铺成项目的 `AGENTS.md` | `octoscode olp init` |
 | 想通读原理,或查某项能力的缺省状态 | `docs/OCTOLOOP_GUIDE.md`、`docs/OCTOLOOP_FEATURES.md` | — |
 
 单元上的内环通常不加载本文件,它读的是项目里的 `AGENTS.md` 上岗卡;两处
 的单元规则要保持一致。
+
+## 命令写法:主用 octoscode olp,备用 scripts 目录里的脚本
+
+所有 OctoLoop 工具都**主用** `octoscode olp <组> <动作>`:在任何目录都能用,不需要知道
+octoscode 仓库在哪,参数、输出、退出码与原脚本相同(全表见 `docs/OLP_CLI.md`)。
+
+**它不可用时改用备用写法**:octoscode 仓库 scripts 目录里对应的 olp 脚本,参数完全一样(仓库位置
+按上文 `OCTOSCODE_HOME` 的规则找)。"不可用"指入口本身出了问题——octoscode 太旧、没有
+`olp` 子命令,提示"没有这个组",或报"无法准备工具目录""无法运行"。工具自己的报错(用法
+错误、被 hub 拒绝等)两种写法都会一样出现,换写法没有用,按报错处理。
+
+| 主用 | 备用 |
+|---|---|
+| `octoscode olp init [目录]` | `scripts/olp-init.sh`(在项目目录里运行) |
+| `octoscode olp skill install …` | `scripts/olp-install-skill.sh …` |
+| `octoscode olp board append\|inbox\|archive\|watch\|summary …` | `scripts/olp-board-append.sh`、`scripts/olp-inbox.py`、`scripts/olp-board-archive.py`、`scripts/olp-watch-board.sh`、`scripts/olp-summary.py` |
+| `octoscode olp dispatch …`(即 `card dispatch`) | `scripts/olp-dispatch.py …` |
+| `octoscode olp unit <子命令> …` | `scripts/olp-unit.py <子命令> …` |
+| `octoscode olp remote <子命令> …` | `scripts/olp-board-remote.py <子命令> …` |
+| `octoscode olp repo init\|serve\|connect-local …` | `scripts/olp-git-hub.py init\|serve\|connect-local …` |
+| `octoscode olp repo push <N> …` | `scripts/olp-task-push.sh <N> …` |
+| `octoscode olp repo status\|promote …` | `scripts/olp-local-pr.py status\|promote …` |
+| `octoscode olp ask list\|show\|answer\|serve …` | `scripts/olp-answer.py …` |
+| `octoscode olp ask mcp` | `octoscode olp-mcp-serve` |
+| `octoscode olp guard watch …`、`guard forward` | `octoscode olp-runtime-watch …`、`scripts/olp-alert-forward.py` |
+| `octoscode olp keepalive …` | macOS `scripts/olp-launchd.py …`,Linux `scripts/olp-systemd.py …` |
+| `octoscode olp duty hold\|check …` | `octoscode outer-duty hold\|check …` |
+| `octoscode olp evo harvest\|retro\|metrics\|index\|skeleton …` | `scripts/olp-evo-harvest.sh`、`scripts/olp-evo-retro.sh`、`scripts/olp-evo-metrics.sh`、`scripts/olp-evo-index.sh`、`scripts/olp-evo-spec-skeleton.sh` |
+| `octoscode olp review …` | `scripts/olp-review-evidence.py`、`scripts/olp-review-monitor.py`、`scripts/olp-review-evidence-cargo.py` |
 
 ## 模式 init — 铺脚手架(首次/新机器)
 
 引导运行仓库的一键引导脚本,再核对依赖清单:
 
 ```bash
-bash scripts/olp-init.sh          # 铺脚手架(黑板/信箱/监视器接线)
+octoscode olp init .              # 铺脚手架(黑板/信箱/监视器接线);备用:bash scripts/olp-init.sh
 ```
 
 脚本按需询问(不假设环境);完成后逐项核对
@@ -98,16 +123,17 @@ macOS 与 Linux 各自的前提也在那里。步骤在单元和 hub 之间来�
    可用,其他平台 unsupported,Windows LockFileEx 另立);
    `outer-duty check` 仅观察、绝不夺取;非 holder 只读批注,活锁接管
    只归 operator(终止旧 holder 后再 acquire)。持锁后:署名落板(经
-   `scripts/olp-board-append.sh`,flock 原子;标题写 `### {N}.`,编号由
+   `octoscode olp board append`,flock 原子;标题写 `### {N}.`,编号由
    助手在锁内分配,不要自己取最大号 +1)→ 立编号条目唤醒内环 →
    内环 ACK 后**隔离 worktree 独立复验** → 落判词定式
    `> 外环(<署名>)·采认(#N):<证据>`(不过则 `·打回(#N):<原因>`,整改另立
    新条目;暂时动不了的 `·搁置(#N) 至 YYYY-MM-DD:`)→ 代推。每轮先看
-   `scripts/olp-inbox.py <板>`:收件箱里是等你决定的卡(已 ACK 待复验、
+   `octoscode olp inbox <板>`:收件箱里是等你决定的卡(已 ACK 待复验、
    待回答的提问),没有采认行的卡会一直留在那里。安全红线见 BOOT §5。
 5. **retro(进化环)**:①触发——战役收官,或进化黑板新卡 ≥ 10 张;
-   ②命令——`scripts/olp-evo-harvest.sh <repo> &&
-   scripts/olp-evo-retro.sh <repo>`(采集→简报,记录目录在
+   ②命令——`octoscode olp evo harvest <repo> &&
+   octoscode olp evo retro <repo>`(备用 `scripts/olp-evo-harvest.sh`、
+   `scripts/olp-evo-retro.sh`;采集→简报,记录目录在
    `knowledge/context/evolution/`);③处置——每次最多推进 3 条记录;
    立案条件 hint ≥ 2 或主审目视跨 goal/跨条目复发,或 S1;issue 由
    operator 发布或明示委托;④authority——未持 outer-duty 锁只读简报
@@ -118,17 +144,17 @@ macOS 与 Linux 各自的前提也在那里。步骤在单元和 hub 之间来�
    `> 单元(<单元>)·负哨(#N):` 与单元转发来的 MCP blocked/timeout 行
    (都只在 hub 上采集)。
    ⑥阶段 2/3 工具面(全部只读或只写自家状态目录):监视器
-   `scripts/olp-watch-board.sh <板> <token> --harvest <repo>` 命中即采集并常驻
-   (不带 `--harvest` 仍一击退出);`scripts/olp-evo-metrics.sh <repo>
+   `octoscode olp board watch <板> <token> --harvest <repo>` 命中即采集并常驻
+   (不带 `--harvest` 仍一击退出);`octoscode olp evo metrics <repo>
    [--since EVO-NNNN] [--json] [--baseline <json>] [--stall <板>
    --stall-threshold <分钟> [--now <ISO>]]` 窗口化诊断(非 KPI:含
    `increase:/decrease:`、`stall:`、`fake_verified:`,不作红线);
-   `scripts/olp-evo-spec-skeleton.sh <FLAW-NNN.md>` 从记录直出契约骨架到
+   `octoscode olp evo skeleton <FLAW-NNN.md>` 从记录直出契约骨架到
    stdout(仓内只许写 `specs/drafts/`,主审补选择器后才入 `specs/`);
-   `scripts/olp-evo-index.sh <repo>` 生成 `knowledge/context/evolution/INDEX.md`;
+   `octoscode olp evo index <repo>` 生成 `knowledge/context/evolution/INDEX.md`;
    回放基线 `fixtures/evolution/replay/`(合成夹具,实现 commit 不得改)。
 
-**黑板变长时**:`scripts/olp-board-archive.py <板> [--keep N] [--dry-run]`
+**黑板变长时**:`octoscode olp board archive <板> [--keep N] [--dry-run]`
 把已闭环条目的正文移到归档文件,板上留编号桩(归档前先跑一次采集)。
 
 **集群里的大外环(一台 hub 带多台单元,olp/v3)**:规则见协议附录 C,操作见
@@ -139,21 +165,21 @@ macOS 与 Linux 各自的前提也在那里。步骤在单元和 hub 之间来�
 2. **规划成卡**:把目标拆成单元能独立完成的卡,每张卡写清背景、精确文件、验收
    标准,并**指定单元里的分工**:实现方一个、复验方至少一个且与实现方不同,
    按任务挑 agent(例如 `--impl octoscode --review codex,claude`)。
-3. **派发**:`scripts/olp-dispatch.py <单元> --board <板> --title … --impl … --review …
+3. **派发**:`octoscode olp dispatch <单元> --board <板> --title … --impl … --review …
    --wake <单元主持的窗格>`。一台单元同一时间一张卡,按单元健康与占用分配。
-4. **汇总**:`scripts/olp-summary.py --board <板> --repo <hub 仓库> [--json]`,
+4. **汇总**:`octoscode olp summary --board <板> --repo <hub 仓库> [--json]`,
    把卡、单元、本地 PR、提问、负哨收成一份,回报给全景台。
 5. **收单**:单元复验通过后会推到 hub 并回执 `ACK(done)`。**大外环不复验**——
    只核对手续:有本地复验记录、`ACK(done)` 带各复验方的证据、改动范围与卡相符;
-   齐了就写采认、`scripts/olp-local-pr.py promote` 推 GitHub 开 PR,人在 GitHub
+   齐了就写采认、`octoscode olp repo promote` 推 GitHub 开 PR,人在 GitHub
    上最后把关。手续不全就打回。
 6. 回到第 1 步,直到全景台上的目标完成。
 
-外环在 hub 上用到的其他命令:`scripts/olp-unit.py status`(单元健康与启动权限)、
-`scripts/olp-dispatch.py <单元> --board <板> --title … [--wake <窗格>]`
-(一步派卡,可安全重试)、`scripts/olp-inbox.py <板> --units`(单元占用)、
-`scripts/olp-local-pr.py status|promote`(本地 PR 状态与推 GitHub 的采认
-闸门)、`scripts/olp-answer.py`(回答单元里内环的提问,内环只等 50 秒)。
+外环在 hub 上用到的其他命令:`octoscode olp unit status`(单元健康与启动权限)、
+`octoscode olp dispatch <单元> --board <板> --title … [--wake <窗格>]`
+(一步派卡,可安全重试)、`octoscode olp inbox <板> --units`(单元占用)、
+`octoscode olp repo status|promote`(本地 PR 状态与推 GitHub 的采认
+闸门)、`octoscode olp ask`(回答单元里内环的提问,内环只等 50 秒)。
 单元一侧的写板、推送、心跳、负哨见 `docs/OLP_REMOTE_BOARD.md`、
 `docs/OLP_LOCAL_GIT.md`、`docs/OLP_KEEPALIVE.md`。单机使用不需要这些。
 
@@ -188,19 +214,19 @@ operator:
 `hub=` 与 `unit=` 就是这种情况;规则见协议附录 C):
 
 - **读板**读本机的只读镜像(`<repo>/.octos/OUTER_LOOP_REVIEW.md`)。**每次
-  读板前先执行 `scripts/olp-board-remote.py mirror` 同步它**:大外环派卡后
+  读板前先执行 `octoscode olp remote mirror` 同步它**:大外环派卡后
   会立刻唤醒你,镜像里可能还没有那张新卡。它是只读的,不要改它。
 - **你是实现方还是复验方,看单元主持怎么分配**(卡上的 `impl:`、`review:`
   行;见 unit 模式)。实现方做完**不向 hub 回执**,而是写到单元复验板
   `.octos/UNIT_BOARD.md`:`> 实现(<种类>)·提交(#N-rK): <提交号>`,然后告诉
   单元主持;向 hub 回执是单元主持在复验通过后的事。卡住、`wontdo` 时照常用
-  `scripts/olp-board-remote.py ack <N> blocked|wontdo <说明>` 直接告诉 hub——
+  `octoscode olp remote ack <N> blocked|wontdo <说明>` 直接告诉 hub——
   它把 `> 内环(<单元号>)·#N ACK(…): …` 追加到 hub 的权威黑板。退出码 75 表示
   hub 暂时连不上、已排队,继续干活即可,不要重复发。
 - **只做派给本单元的卡**(条目里的 `unit:` 行是本机的单元号),同一时间
   一张;分支名是 `task/<N>`。
 - **仍然只 commit,不 push**。推送是单元主持的事:全部复验方通过后由它执行
-  `scripts/olp-task-push.sh <N> --verified-by <单元号>-<复验方>+<复验方>`,把分支
+  `octoscode olp repo push <N> --verified-by <单元号>-<复验方>+<复验方>`,把分支
   推到 hub 的本地仓库。自己直接 `git push` 会被 hub 拒收;任何人都不推 GitHub。
 - **复验方的打回**写在单元复验板上,编号是 `#N-r1`、`#N-r2`,按它返工;它不是
   新的任务号。
@@ -213,14 +239,14 @@ operator:
 集群(协议附录 C,olp/v3)里每台单元有一个**单元主持**:大外环派卡时唤醒的就是
 它。它不写代码,只组织单元里的内环,确保**复验通过才交回 hub**——大外环不复验。
 
-1. **读卡**:`scripts/olp-board-remote.py mirror` 同步镜像,读派给本单元的卡。
+1. **读卡**:`octoscode olp remote mirror` 同步镜像,读派给本单元的卡。
    `impl:` 行是实现方的种类,`review:` 行是复验方的种类(一个或多个)。没有这两行
    时自己定:实现方一个,复验方至少一个且与实现方不同。
 2. **备好内环**:每个角色一个 herdr 窗格、一个独立的克隆(复验方的克隆与实现方
    分开,复验方之间也分开)。没在跑的按 inner 模式的表**免沙箱启动**。要推送的
    克隆(实现方的)必须接好 hub 远程:跨机器是 `git remote add hub ssh://<推送别名>/…`;
    单机部署(`unit.conf` 里 `hub = local`)在克隆里执行一次
-   `scripts/olp-git-hub.py connect-local --unit <单元号> --repo <hub 仓库>`——直接
+   `octoscode olp repo connect-local --unit <单元号> --repo <hub 仓库>`——直接
    用路径当远程会绕开推送规则,hub 会拒收带复验记录的推送。
 3. **实现**:把卡交给实现方(`herdr agent prompt`),写清分支 `task/<N>`、轮次
    `#N-r1`、做完写单元复验板。等它写下 `> 实现(<种类>)·提交(#N-r1): <提交号>`。
@@ -228,15 +254,15 @@ operator:
    提交、跑全部测试、找问题;要求它们独立结论、不看彼此。每个复验方在单元复验
    板写 `> 复验(<种类>)·通过(#N-r1): <跑了什么、结论>` 或 `·打回(#N-r1): <问题>`。
 5. **返工**:有一个打回就把打回的内容交给实现方做 `#N-r2`,再从第 4 步来。轮次
-   太多(例如 3 轮)仍过不了,就 `scripts/olp-board-remote.py ack <N> blocked <原因>`
+   太多(例如 3 轮)仍过不了,就 `octoscode olp remote ack <N> blocked <原因>`
    交回 hub,由大外环改派或拆卡。
 6. **交回**:全部通过后由你推送
-   `scripts/olp-task-push.sh <N> --verified-by <单元号>-<复验方>+<复验方>`(在实现
-   方的克隆里),再 `scripts/olp-board-remote.py ack <N> done <说明>`:提交号、
+   `octoscode olp repo push <N> --verified-by <单元号>-<复验方>+<复验方>`(在实现
+   方的克隆里),再 `octoscode olp remote ack <N> done <说明>`:提交号、
    轮次、每个复验方跑了什么与结论。hub 凭这些收单,不会替你补做复验。
 
 单元复验板 `.octos/UNIT_BOARD.md` 不入库(`olp-init.sh` 已把它加进
-`.gitignore`),写入用 `scripts/olp-board-append.sh <板>`。
+`.gitignore`),写入用 `octoscode olp board append <板>`。
 
 ## 自主性纪律(实战沉淀:一次全链演练暴露的六类断点)
 

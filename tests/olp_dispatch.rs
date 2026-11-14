@@ -190,9 +190,10 @@ fn dispatch_writes_a_numbered_card_and_wakes_the_unit() {
     // wake names the sync as the first step, as a command that runs as
     // written (a unit's project has no scripts/ directory of its own).
     assert!(
-        log.contains(
-            r#"python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py" mirror"#
-        ),
+        log.contains("先同步本机的黑板镜像:octoscode olp remote mirror(不可用时:")
+            && log.contains(
+                r#"python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py" mirror"#
+            ),
         "{log}"
     );
     assert_eq!(h.busy("m07"), Some(true));

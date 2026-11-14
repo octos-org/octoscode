@@ -26,8 +26,9 @@ estimate: 1d
   `### {N}. <标题>(<日期>,<署名>)` / `unit: <单元号>` / 可选 `verify-of: #M` / 空行 / 正文,
   编号由写板脚本在锁内分配,正文里的 `{N}` 一并替换;⑥ 给了 `--wake <窗格>` 时执行
   `herdr --machine <单元号> agent prompt <窗格> <一句话,含条目号>`(`OLP_HERDR` 可替换程序)。
-  这句话写明第一步是同步镜像,并给出可以原样执行的命令
-  `python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py" mirror`:单元读的
+  这句话写明第一步是同步镜像,并给出可以原样执行的命令:主用 `octoscode olp remote mirror`,
+  括号里给备用的 `python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py" mirror`
+  (octoscode 太旧、没有 `olp` 子命令时用):单元读的
   是黑板的镜像,它上一次同步在这张卡写板之前;单元的项目目录里没有 `scripts/`,只给脚本名
   时真实内环花了几分钟全盘搜索。
 - 幂等:键默认是 `dispatch:<单元号>:<sha256(单元号、标题、正文) 前 16 位>`,可用 `--key`

@@ -46,7 +46,8 @@
 2. **执行**编号最小且尚无 `ACK(` 行的条目。已 ACK 的条目与
    `Historical record` 区只供审计——**绝不重放**。
 3. **只 commit,绝不 push。** 推送权在外环。(多机部署的单元例外只有一条:
-   全部复验方通过后,由单元主持用 `scripts/olp-task-push.sh` 把 `task/<N>` 推到
+   全部复验方通过后,由单元主持用 `octoscode olp repo push`(备用
+   `scripts/olp-task-push.sh`)把 `task/<N>` 推到
    hub 的本地仓库。那是交出 commit,不是发布;推 GitHub 仍然只在外环。)
 4. **落 ACK**,在该条目下写一行 v1 定式:
 
@@ -55,12 +56,13 @@ ACK(done|wontdo|blocked): <说明>
 ```
 
    (多机部署的单元上,黑板是只读镜像:**每次读板前先执行
-   `scripts/olp-board-remote.py mirror` 同步它**,否则可能读不到刚派来的卡。
-   单元的项目目录里没有 `scripts/`:这些脚本在本机的 octoscode 仓库里,仓库
-   位置记在 `~/.octos/outer/octoscode-home`,即
+   `octoscode olp remote mirror` 同步它**,否则可能读不到刚派来的卡。这条命令在
+   任何目录都能用。它不可用时(octoscode 太旧、没有 `olp` 子命令)用备用写法:
+   脚本在本机的 octoscode 仓库里,仓库位置记在 `~/.octos/outer/octoscode-home`,即
    `python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py" mirror`。
    镜像不能原地写:改用
-   `scripts/olp-board-remote.py ack <N> done|wontdo|blocked <说明>`,它把同样
+   `octoscode olp remote ack <N> done|wontdo|blocked <说明>`(备用
+   `scripts/olp-board-remote.py ack …`),它把同样
    内容的一行追加到 hub 的权威黑板。olp/v3 起单元里分工:卡上的 `impl:` 行是
    实现方、`review:` 行是复验方。**实现方做完不向 hub 回执 done**,而是在单元
    复验板 `.octos/UNIT_BOARD.md` 写 `> 实现(<种类>)·提交(#N-rK): <提交号>` 并告诉

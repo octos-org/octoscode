@@ -111,14 +111,14 @@ def wake(unit, pane, number, impl="", reviewers=()):
     herdr = os.environ.get("OLP_HERDR") or "herdr"
     # The unit reads a mirror of the board. It was last synced before this
     # card was written, so the wake names the sync as the first step — as a
-    # command that runs as written: a unit's project has no scripts/ of its
-    # own, and a real inner loop spent minutes searching the disk for the
-    # tool when the wake only gave its name.
-    message = (
-        f"黑板新条目 #{number} 派给本单元。先同步本机的黑板镜像:"
-        'python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py" mirror'
-        f" ,再读 #{number} 执行"
+    # command that runs as written from any directory (a real inner loop once
+    # spent minutes searching the disk for a tool given only by name), with
+    # the script path as the fallback for an octoscode without `olp`.
+    sync = (
+        "octoscode olp remote mirror"
+        '(不可用时:python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py" mirror)'
     )
+    message = f"黑板新条目 #{number} 派给本单元。先同步本机的黑板镜像:{sync},再读 #{number} 执行"
     if impl or reviewers:
         # olp/v3: the pane woken for a card with roles is the unit host, who
         # organises the work rather than doing it. Say so, and where the
@@ -127,8 +127,7 @@ def wake(unit, pane, number, impl="", reviewers=()):
             f"黑板新条目 #{number} 派给本单元,指定实现方 {impl or '(由你定)'}、"
             f"复验方 {'、'.join(reviewers) or '(由你定)'}。你是单元主持,不要自己实现:"
             "按 $(cat ~/.octos/outer/octoscode-home)/skills/octoloop/AGENTS.md 的"
-            "「模式 unit」组织实现与对抗复验,全部复验通过才推送并向 hub 回执。第一步同步镜像:"
-            'python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py" mirror'
+            f"「模式 unit」组织实现与对抗复验,全部复验通过才推送并向 hub 回执。第一步同步镜像:{sync}"
         )
     try:
         r = subprocess.run(

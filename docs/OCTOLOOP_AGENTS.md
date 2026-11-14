@@ -52,7 +52,8 @@ rules:
 3. **Commit, never push.** Push authority is the outer loop's. (One
    exception, for a unit in a multi-machine deployment: once every reviewer
    has passed the work, the unit host pushes `task/<N>` to the hub's local
-   repository with `scripts/olp-task-push.sh`. That hands the commit over; it
+   repository with `octoscode olp repo push` (fallback:
+   `scripts/olp-task-push.sh`). That hands the commit over; it
    does not publish it. Pushing to GitHub stays with the outer loop.)
 4. **ACK** under that entry, as a single line in the v1 formula:
 
@@ -61,13 +62,15 @@ ACK(done|wontdo|blocked): <explanation>
 ```
 
    (On a unit in a multi-machine deployment the board is a read-only mirror:
-   **run `scripts/olp-board-remote.py mirror` before every read**, or the
-   card you were just sent may not be in it yet. A unit's project has no
-   `scripts/` of its own: the tools live in the octoscode checkout on this
-   machine, whose location is recorded in `~/.octos/outer/octoscode-home` —
+   **run `octoscode olp remote mirror` before every read**, or the card you
+   were just sent may not be in it yet. That command works from any
+   directory. If it is unavailable (an octoscode too old to have `olp`), use
+   the fallback: the script in the octoscode checkout on this machine, whose
+   location is recorded in `~/.octos/outer/octoscode-home` —
    `python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py" mirror`. The mirror cannot be edited
    in place: use
-   `scripts/olp-board-remote.py ack <N> done|wontdo|blocked <explanation>`,
+   `octoscode olp remote ack <N> done|wontdo|blocked <explanation>`
+   (fallback: `scripts/olp-board-remote.py ack …`),
    which appends the same line to the authoritative board on the hub. Since
    olp/v3 the unit splits the work: the card's `impl:` line names the
    implementer and its `review:` line the reviewers. **The implementer does not

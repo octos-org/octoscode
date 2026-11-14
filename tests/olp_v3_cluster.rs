@@ -176,7 +176,8 @@ fn v3_dispatch_names_the_implementer_and_reviewers_per_card() {
     assert!(
         log.contains("实现方 claude、复验方 codex")
             && log.contains("你是单元主持")
-            && log.contains("模式 unit"),
+            && log.contains("模式 unit")
+            && log.contains("第一步同步镜像:octoscode olp remote mirror"),
         "{log}"
     );
 
