@@ -27,8 +27,58 @@ struct Hub {
 
 impl Hub {
     fn new() -> Self {
-        Self {
+        let hub = Self {
             dir: tempfile::tempdir().unwrap(),
+        };
+        // A stand-in for herdr, so the developer's own herdr (and whatever
+        // agents it runs) never leaks into a test. `agent list` prints
+        // herdr/agents.json; `pane process-info --pane P` prints
+        // herdr/proc-P.json. Missing files mean "no agents" / an error.
+        let dir = hub.herdr_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = format!(
+            "#!/bin/sh\nd='{d}'\ncase \"$1 $2\" in\n  'agent list') cat \"$d/agents.json\" 2>/dev/null || echo '{{\"result\":{{\"agents\":[]}}}}' ;;\n  'pane process-info') f=\"$d/proc-$(echo \"$4\" | tr : _).json\"; cat \"$f\" 2>/dev/null || echo '{{\"error\":{{\"code\":\"pane_not_found\"}}}}' ;;\n  *) exit 2 ;;\nesac\n",
+            d = dir.display()
+        );
+        let fake = hub.dir.path().join("herdr");
+        std::fs::write(&fake, script).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        hub
+    }
+
+    fn herdr_dir(&self) -> PathBuf {
+        self.dir.path().join("herdr-state")
+    }
+
+    /// What the stand-in herdr reports: agents as (name, kind, status, pane),
+    /// and for each pane the argv of its foreground process.
+    fn set_agents(&self, agents: &[(&str, &str, &str, &str)], argvs: &[(&str, &[&str])]) {
+        let list: Vec<serde_json::Value> = agents
+            .iter()
+            .map(|(name, kind, status, pane)| {
+                serde_json::json!({"name": name, "agent": kind, "agent_status": status, "pane_id": pane})
+            })
+            .collect();
+        std::fs::write(
+            self.herdr_dir().join("agents.json"),
+            serde_json::json!({"result": {"agents": list}}).to_string(),
+        )
+        .unwrap();
+        for (pane, argv) in argvs {
+            let name = std::path::Path::new(argv[0])
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            std::fs::write(
+                self.herdr_dir()
+                    .join(format!("proc-{}.json", pane.replace(':', "_"))),
+                serde_json::json!({"result": {"process_info": {"foreground_processes": [
+                    {"name": name, "argv0": name, "argv": argv, "pid": 1}
+                ]}}})
+                .to_string(),
+            )
+            .unwrap();
         }
     }
 
@@ -45,7 +95,8 @@ impl Hub {
         cmd.arg("-B")
             .arg(tool())
             .env("OLP_UNITS_DIR", self.units_dir())
-            .env("OLP_UNIT_CHECKS_DIR", self.checks_dir());
+            .env("OLP_UNIT_CHECKS_DIR", self.checks_dir())
+            .env("OLP_HERDR", self.dir.path().join("herdr"));
         cmd
     }
 
@@ -539,4 +590,198 @@ fn unit_heartbeat_reports_launch_permission() {
         assert_eq!(row["permission"], "unknown");
         assert_eq!(row["state"], "healthy");
     }
+}
+
+/// Scenario: 心跳经 herdr 认出任何一种内环
+#[test]
+fn unit_heartbeat_recognises_any_kind_of_inner_loop() {
+    let hub = Hub::new();
+    let ps = hub.dir.path().join("ps.txt");
+    std::fs::write(&ps, "").unwrap();
+    let heartbeat = |require: &str| -> serde_json::Value {
+        let out = hub.run(&[
+            "heartbeat",
+            "--unit",
+            "m01",
+            "--require",
+            require,
+            "--disk-min-free",
+            "0",
+            "--ps-output",
+            ps.to_str().unwrap(),
+        ]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        serde_json::from_str(&stdout(&out)).unwrap()
+    };
+    let check = |b: &serde_json::Value, name: &str| -> (bool, String) {
+        let c = b["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap_or_else(|| panic!("no {name} check: {b}"));
+        (
+            c["ok"].as_bool().unwrap(),
+            c["detail"].as_str().unwrap().to_string(),
+        )
+    };
+
+    // No agent: the default `agent` check fails; no octos backend either.
+    let b = heartbeat("agent,disk");
+    assert!(!check(&b, "agent").0, "{b}");
+    assert_eq!(b["permission"], "none");
+
+    // Claude Code and Codex inner loops pass the check; their launch
+    // permission is read from the argv of the pane's process. Without a
+    // full-access flag it is unknown: their config files may decide.
+    hub.set_agents(
+        &[
+            ("cc", "claude", "idle", "w1:p1"),
+            ("cx", "codex", "working", "w2:p1"),
+        ],
+        &[
+            ("w1:p1", &["claude"]),
+            ("w2:p1", &["/opt/homebrew/bin/codex", "--model", "x"]),
+        ],
+    );
+    let b = heartbeat("agent,disk");
+    let (ok, detail) = check(&b, "agent");
+    assert!(ok, "{detail}");
+    assert!(
+        detail.contains("claude(idle)") && detail.contains("codex(working)"),
+        "{detail}"
+    );
+    assert_eq!(
+        b["agents"],
+        serde_json::json!([
+            {"kind": "claude", "status": "idle", "pane": "w1:p1"},
+            {"kind": "codex", "status": "working", "pane": "w2:p1"},
+        ])
+    );
+    assert_eq!(b["permission"], "unknown");
+    // The `serve` check is still available (it reads the real process table,
+    // so only its presence is checked here).
+    let _ = check(&heartbeat("serve"), "serve");
+
+    // Full-access launch flags of each kind.
+    for (kind, argv, full) in [
+        (
+            "claude",
+            vec!["claude", "--dangerously-skip-permissions"],
+            true,
+        ),
+        (
+            "claude",
+            vec!["claude", "--permission-mode", "bypassPermissions"],
+            true,
+        ),
+        ("claude", vec!["claude", "--permission-mode=default"], false),
+        (
+            "codex",
+            vec!["codex", "--dangerously-bypass-approvals-and-sandbox"],
+            true,
+        ),
+        ("codex", vec!["codex", "--yolo"], true),
+        ("codex", vec!["codex", "-s", "danger-full-access"], true),
+        ("codex", vec!["codex", "--sandbox=workspace-write"], false),
+    ] {
+        hub.set_agents(&[("a", kind, "idle", "w9:p1")], &[("w9:p1", &argv)]);
+        let b = heartbeat("agent");
+        let want = if full { "full" } else { "sandboxed" };
+        assert_eq!(b["permission"], want, "{kind} {argv:?}: {b}");
+        assert_eq!(b["agent_permissions"][0]["full_access"], full);
+    }
+    // Mixed with an octos backend that has full access.
+    std::fs::write(
+        &ps,
+        "  4101 octos serve --stdio --solo --danger-full-access\n",
+    )
+    .unwrap();
+    hub.set_agents(
+        &[("a", "codex", "idle", "w9:p1")],
+        &[("w9:p1", &["codex", "-s", "read-only"])],
+    );
+    assert_eq!(heartbeat("agent")["permission"], "mixed");
+
+    // herdr cannot be asked: the check fails and says why; the permission
+    // is unknown rather than "none".
+    std::fs::write(&ps, "").unwrap();
+    let out = hub
+        .cmd()
+        .env("OLP_HERDR", "/nonexistent/herdr")
+        .args([
+            "heartbeat",
+            "--unit",
+            "m01",
+            "--require",
+            "agent",
+            "--ps-output",
+            ps.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    let b: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(b["checks"][0]["ok"], false);
+    assert!(
+        b["checks"][0]["detail"].as_str().unwrap().contains("herdr"),
+        "{b}"
+    );
+    assert_eq!(b["permission"], "unknown");
+
+    // The hub shows the kinds and treats a Claude Code unit like any other.
+    let Some(mac) = b["macs"]
+        .as_array()
+        .and_then(|m| m.first())
+        .and_then(|m| m.as_str())
+    else {
+        eprintln!("SKIP (explicit): host reports no MAC address; stopping before the hub checks");
+        return;
+    };
+    hub.set_agents(
+        &[("cc", "claude", "idle", "w1:p1")],
+        &[("w1:p1", &["claude"])],
+    );
+    let raw = {
+        let out = hub.run(&[
+            "heartbeat",
+            "--unit",
+            "m01",
+            "--disk-min-free",
+            "0",
+            "--ps-output",
+            ps.to_str().unwrap(),
+        ]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        stdout(&out)
+    };
+    let b: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    hub.register("m01", b["hostname"].as_str().unwrap(), mac);
+    assert!(
+        hub.run_stdin(&["receive", "--unit", "m01"], raw.as_bytes())
+            .status
+            .success()
+    );
+    let (state, why) = hub.state_of("m01", &[]);
+    assert_eq!(state, "healthy", "default checks are agent,disk: {why}");
+    let out = hub.run(&["status"]);
+    assert!(stdout(&out).contains("内环 claude"), "{}", stdout(&out));
+
+    // The hub keeps only well-formed kind/status/pane tokens.
+    let mut forged = b.clone();
+    forged["agents"] = serde_json::json!([
+        {"kind": "codex", "status": "idle", "pane": "w2:p1", "argv": ["--api-key", "SECRET"]},
+        {"kind": "claude; rm -rf /", "status": "idle", "pane": "w3:p1"},
+        "junk",
+    ]);
+    assert!(hub.receive(&forged).status.success());
+    let row = &hub.status(&[])["units"][0];
+    assert_eq!(
+        row["agents"],
+        serde_json::json!([{"kind": "codex", "status": "idle", "pane": "w2:p1"}])
+    );
+    let stored = std::fs::read_to_string(hub.heartbeat_file("m01")).unwrap();
+    assert!(
+        !stored.contains("SECRET") && !stored.contains("rm -rf"),
+        "{stored}"
+    );
 }

@@ -47,9 +47,14 @@ scripts/olp-unit.py heartbeat --unit m07 | ssh hub scripts/olp-unit.py receive
 
 巡检项:
 
-- 内置 `serve`:本机有 `octos serve` 进程。
+- 内置 `agent`:herdr 里至少有一个内环(`herdr agent list`),哪一种都行——
+  octoscode、Claude Code、Codex。心跳同时报告有哪些内环、各自状态,hub 的
+  `status` 里显示为"内环"一列。herdr 不在 PATH 上时用环境变量 `OLP_HERDR` 指定;
+  两个保活工具注册心跳时会记下 herdr 的位置。
+- 内置 `serve`:本机有 `octos serve` 进程。只适用于 octos 内环;需要时显式选它。
 - 内置 `disk`:HOME 所在磁盘空闲比例不低于阈值(默认 10%,`--disk-min-free`)。
-- `--require serve,disk` 选择必须通过的内置项。
+- `--require` 选择必须通过的内置项,默认 `agent,disk`。保活工具注册心跳时也接受
+  `--require`,原样传过去。
 - 扩展:`~/.octos/outer/unit-checks.d/` 下每个可执行文件是一项检查。退出 0 为
   通过,其余为不通过;stdout 第一行作为说明;10 秒超时。项目专用的检查(设备
   是否在线、循环是否暂停、双哨是否在位、fallbacks 是否已快照)放在这里。
@@ -81,17 +86,26 @@ scripts/olp-unit.py check m07       # 只有"正常"退出 0
 
 是否失联按 **hub 收到心跳的时间**算,不看单元自己的时钟。
 
-`status` 还显示每台单元内环后端的**启动权限**,由心跳自报:
+`status` 还显示每台单元内环的**启动权限**,由心跳自报:
 
 | 显示 | 含义 |
 |---|---|
-| 完全访问 `full` | 每个 `octos serve` 后端都带 `--danger-full-access` |
-| 沙箱 `sandboxed` | 都不带 |
-| 混合 `mixed` | 有的带有的不带 |
-| 无后端 `none` | 没有后端在跑 |
-| 未知 `unknown` | 读不到进程表,或心跳来自旧版本 |
+| 完全访问 `full` | 每个内环都以完全访问启动 |
+| 沙箱 `sandboxed` | 都没有 |
+| 混合 `mixed` | 有的有有的没有 |
+| 无内环 `none` | 没有内环在跑 |
+| 未知 `unknown` | 读不到进程表或 herdr;或者有 Claude Code / Codex 内环没带完全访问的启动参数;或心跳来自旧版本 |
 
-心跳只上报 `--danger-full-access` 与 `--solo` 两个开关,命令行的其余部分不离开单元。
+"完全访问"只看启动参数:
+
+| 内环 | 算完全访问的启动参数 |
+|---|---|
+| octoscode | 后端 `octos serve` 带 `--danger-full-access` |
+| Claude Code | `--dangerously-skip-permissions`,或 `--permission-mode bypassPermissions` |
+| Codex | `--dangerously-bypass-approvals-and-sandbox`、`--yolo`,或 `--sandbox danger-full-access` |
+
+Claude Code 与 Codex 的权限也可以写在它们各自的配置文件里;本工具不读配置,所以没带
+上面这些参数时显示"未知",而不是"沙箱"。心跳只上报这几个开关,命令行的其余部分不离开单元。
 这一项只是告知,不参与健康判定,也不是安全边界(它是单元自报的)。权限档 1–4 靠
 Linux 的 bwrap 沙箱实现,在 macOS 上不成立,所以 Mac mini 上要跑构建的内环通常都是
 完全访问;这一列让大外环一眼看到有没有哪台机器是例外。
