@@ -107,6 +107,17 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   else
     ok "进化黑板已被忽略"
   fi
+  # 单元本机的复验板(UNIT_BOARD.md,olp/v3):记一张卡在单元里的实现与对抗
+  # 复验轮次,是单元的工作纸,同样不入库。
+  if ! git check-ignore -q .octos/UNIT_BOARD.md 2>/dev/null; then
+    if [ -s .gitignore ] && [ "$(tail -c 1 .gitignore | od -An -tuC | tr -d ' ')" != "10" ]; then
+      printf '\n' >> .gitignore
+    fi
+    printf '.octos/UNIT_BOARD.md\n' >> .gitignore
+    ok "单元复验板已加入 .gitignore"
+  else
+    ok "单元复验板已被忽略"
+  fi
 fi
 
 say ""

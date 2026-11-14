@@ -67,6 +67,7 @@ import sys
 
 HEADING = re.compile(r"^### (\d+)[.．]?\s*(.*)$")
 UNIT_LINE = re.compile(r"^unit:\s*(\S+)\s*$")
+ROLE_LINE = re.compile(r"^(impl|review):\s*(\S.*?)\s*$")
 ACK = re.compile(r"^ACK\((done|wontdo|blocked)\)")
 SIGNED = re.compile(r"^外环\(([^)]+)\)·(采认|打回|搁置)\(#(\d+)\)(.*)$")
 VOID = re.compile(r"^外环\(([^)]+)\)·改判\(作废 #(\d+)\)")
@@ -137,6 +138,8 @@ def scan(board):
                             "title": m.group(2).strip(),
                             "line": no,
                             "unit": None,
+                            "impl": None,
+                            "review": [],
                             "archived": False,
                             "acks": [],
                         }
@@ -152,6 +155,13 @@ def scan(board):
                 m = UNIT_LINE.match(line)
                 if m:
                     entry["unit"] = m.group(1)
+                    continue
+                m = ROLE_LINE.match(line)
+                if m:
+                    if m.group(1) == "impl":
+                        entry["impl"] = m.group(2)
+                    else:
+                        entry["review"] = [r.strip() for r in m.group(2).split(",") if r.strip()]
                     continue
                 if line.startswith(ARCHIVED_MARK):
                     entry["archived"] = True
@@ -361,6 +371,8 @@ def main():
             "number": number,
             "title": entry["title"],
             "unit": entry["unit"],
+            "impl": entry["impl"],
+            "review": entry["review"],
             "partition": partition,
             "reason": reason,
         }
@@ -401,7 +413,10 @@ def main():
         print(f"== {PARTITION_ZH[partition]}({len(rows)})")
         for i in rows:
             unit = f" [{i['unit']}]" if i["unit"] else ""
-            print(f"#{i['number']}{unit} {i['title']}")
+            roles = ""
+            if i["impl"] or i["review"]:
+                roles = f" (实现 {i['impl'] or '-'},复验 {'、'.join(i['review']) or '-'})"
+            print(f"#{i['number']}{unit}{roles} {i['title']}")
             print(f"    {i['reason']}")
     if not args.all:
         print(f"== 已了结({counts[SETTLED]}),--all 查看")

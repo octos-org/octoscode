@@ -119,6 +119,12 @@ scripts/olp-dispatch.py m07 --board <板> --title '修复启动崩溃' --wake w1
 EOF
 ```
 
+olp/v3 起由大外环按卡指定单元里的分工:`--impl <种类>` 是实现方,`--review
+<种类>[,<种类>…]` 是对抗复验的复验方(herdr 的 agent 种类名,例如
+`--impl octoscode --review codex,claude`)。卡上会多出 `impl:`、`review:` 两行,
+单元主持据此组织实现与复验(skill 的 unit 模式);复验全部通过,单元才推送并
+回执。大外环不复验,只核对手续后收单(协议附录 C)。
+
 依次完成:查单元健康(`olp-unit.py check`)→ 查单元空闲 → 在锁内分配编号并
 写板(条目带 `unit: m07`,正文里的 `{N}` 换成编号)→ 用 herdr 唤醒那台单元的
 窗格。stdout 最后一行是编号,随后对 `本地复验通过(#N)` 挂正哨。
@@ -195,6 +201,17 @@ octoscode olp-runtime-watch --agent <herdr 名字> --agent-pid <claude 或 codex
 
 大外环在 hub 上对 `负哨(` 挂哨。单次工具失败默认不转发(正常工作中很常见),需要时加
 `--include tool_failed`。hub 不可达时由远程写板的队列兜住。
+
+## 4d. 汇总:交给项目全景台
+
+```bash
+scripts/olp-summary.py --board <板> --repo <hub 仓库> --name <项目名>          # 给人看
+scripts/olp-summary.py --board <板> --repo <hub 仓库> --name <项目名> --json   # 给程序读
+```
+
+把卡(含实现方与复验方、所处分区)、各区计数、单元状态、本地 PR、待答提问、未了结
+卡上的负哨收成一份。全景台不在 OctoLoop 里,用哪个工具由用户指定;大外环把这份汇总
+回报给它,再从它读下一步的目标。命令只读,不写任何文件。
 
 ## 5. 不自动做的事
 

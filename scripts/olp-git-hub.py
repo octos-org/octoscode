@@ -65,7 +65,7 @@ import sys
 UNIT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 TASK_REF = re.compile(r"^refs/heads/task/([0-9]{1,9})$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
-SIGNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,63}$")
+SIGNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}$")
 HEADING = re.compile(r"^### (\d+)")
 UNIT_LINE = re.compile(r"^unit:\s*(\S+)\s*$")
 ZERO = re.compile(r"^0+$")
@@ -242,7 +242,19 @@ def hook_pre_receive():
     unit = os.environ.get("OLP_UNIT", "")
     updates = read_updates()
     if not unit:
-        return 0  # hub 本机上大外环的推送
+        # hub 本机上大外环的推送,不受单元规则约束。但带着本地复验记录的推送
+        # 是单元在交活:它没有经过 serve,说明这个克隆的 hub 远程没接好(单机
+        # 部署时漏了 connect-local)。照收会绕开推送规则、黑板上也不会登记,
+        # 所以拒收并说明怎么接。
+        if any(o.startswith("olp-verified=") for o in push_options()):
+            print(
+                "olp-hub: 拒收:这是单元带复验记录的推送,却没有经过 serve(没有单元号)。"
+                "单机部署时先在这个克隆里执行 "
+                "scripts/olp-git-hub.py connect-local --unit <单元号> --repo <hub 仓库>,再推送",
+                file=sys.stderr,
+            )
+            return 1
+        return 0
     if not UNIT_RE.match(unit):
         print(f"olp-hub: 拒收:单元号不合法 {unit}", file=sys.stderr)
         return 1

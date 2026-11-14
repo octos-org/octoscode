@@ -1,6 +1,6 @@
 ---
 name: octoloop
-description: OctoLoop 一键入口——一个 skill 上手双环全能力。三模式:init(引导铺设脚手架并核依赖)/outer(外环上岗:派单、观测、复验、代推)/inner(内环形态选型:octoscode 标准、免审批窗格、强档车道)
+description: OctoLoop 一键入口——一个 skill 上手双环全能力。四模式:init(引导铺设脚手架并核依赖)/outer(外环上岗:单机派单复验代推,集群规划派发汇总)/inner(内环形态选型:octoscode 标准、免审批窗格、强档车道)/unit(单元主持:组织实现与对抗复验)
 ---
 
 # /octoloop — 双环一键入口

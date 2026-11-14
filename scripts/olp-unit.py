@@ -67,7 +67,9 @@
 巡检项
     内置:agent(herdr 里至少有一个内环,任何一种)、serve(本机有
     `octos serve` 进程,只适用于 octos 内环)、disk(HOME 所在磁盘的空闲
-    比例不低于阈值)。--require 选择必须通过的内置项,默认 agent,disk。
+    比例不低于阈值)、full(每个内环都以完全访问启动——olp/v3 要求内环
+    免沙箱,见下文"启动权限")。--require 选择必须通过的内置项,默认
+    agent,disk,full。
     扩展:${OLP_UNIT_CHECKS_DIR:-~/.octos/outer/unit-checks.d} 下的每个
     可执行文件是一项检查——退出 0 为通过,其余为不通过,stdout 第一行作
     为说明,10 秒超时。项目专用的检查(设备、循环是否暂停等)放在这里。
@@ -464,6 +466,18 @@ def serve_permission(ps_output_file=None):
     return "mixed", backends
 
 
+def check_full(permission):
+    """olp/v3: inner loops run without a sandbox. A unit whose inner loops
+    are not all launched with full access is not given cards."""
+    if permission == "full":
+        return True, "内环都以完全访问启动"
+    return False, {
+        "sandboxed": "内环以沙箱启动;olp/v3 要求免沙箱",
+        "mixed": "有内环以沙箱启动;olp/v3 要求全部免沙箱",
+        "none": "没有内环在跑",
+    }.get(permission, "看不出内环是否免沙箱(启动参数里没有完全访问的开关)")
+
+
 def check_disk(min_free):
     usage = shutil.disk_usage(os.path.expanduser("~"))
     free = usage.free * 100.0 / usage.total if usage.total else 0.0
@@ -498,15 +512,23 @@ def run_plugin_checks():
 def cmd_heartbeat(args):
     unit = check_unit_name(args.unit)
     agents, agents_why = inner_agents()
+    octos_permission, backends = serve_permission(args.ps_output)
+    others = agent_permissions(agents)
+    permission = combine_permission(octos_permission, others)
+    if agents is None and permission == "none":
+        # No octos backend, and herdr could not say whether another kind of
+        # inner loop runs: that is not "none".
+        permission = "unknown"
     builtin = {
         "agent": lambda: check_agent(agents, agents_why),
         "serve": check_serve,
         "disk": lambda: check_disk(args.disk_min_free),
+        "full": lambda: check_full(permission),
     }
     required = [r for r in (args.require or "").split(",") if r]
     for r in required:
         if r not in builtin:
-            raise Fail(EXIT_USAGE, f"未知的内置巡检项: {r}(可选 agent、serve、disk)")
+            raise Fail(EXIT_USAGE, f"未知的内置巡检项: {r}(可选 agent、serve、disk、full)")
     checks = []
     for name in required:
         ok, detail = builtin[name]()
@@ -520,13 +542,6 @@ def cmd_heartbeat(args):
         "sent_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "checks": checks,
     }
-    octos_permission, backends = serve_permission(args.ps_output)
-    others = agent_permissions(agents)
-    permission = combine_permission(octos_permission, others)
-    if agents is None and permission == "none":
-        # No octos backend, and herdr could not say whether another kind of
-        # inner loop runs: that is not "none".
-        permission = "unknown"
     beat["permission"] = permission
     beat["backends"] = backends
     beat["agents"] = [
@@ -758,7 +773,7 @@ def build_parser():
 
     p = sub.add_parser("heartbeat", help="(单元)巡检并把心跳打印到 stdout")
     p.add_argument("--unit", required=True)
-    p.add_argument("--require", default="agent,disk")
+    p.add_argument("--require", default="agent,disk,full")
     p.add_argument("--disk-min-free", type=float, default=10.0)
     p.add_argument("--ps-output", help=argparse.SUPPRESS)
     p.set_defaults(fn=cmd_heartbeat)

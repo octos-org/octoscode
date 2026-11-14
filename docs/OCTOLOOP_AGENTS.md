@@ -1,6 +1,6 @@
 # OctoLoop — Agent Onboarding Card
 
-> protocol: olp/v2 — any agent reading this file operates under OLP v2 (R6 version negotiation).
+> protocol: olp/v3 — any agent reading this file operates under OLP v3 (R6 version negotiation).
 >
 > **OctoLoop** is the product name; **OLP** (Outer-Loop Protocol) is the protocol name.
 > 中文版:[OCTOLOOP_AGENTS.zh-CN.md](https://github.com/octos-org/octoscode/blob/main/docs/OCTOLOOP_AGENTS.zh-CN.md)
@@ -50,8 +50,8 @@ rules:
    already ACKed, and anything under `Historical record`, are audit-only —
    **never replay them**.
 3. **Commit, never push.** Push authority is the outer loop's. (One
-   exception, for a unit in a multi-machine deployment: after local
-   verification passes, the verifier pushes `task/<N>` to the hub's local
+   exception, for a unit in a multi-machine deployment: once every reviewer
+   has passed the work, the unit host pushes `task/<N>` to the hub's local
    repository with `scripts/olp-task-push.sh`. That hands the commit over; it
    does not publish it. Pushing to GitHub stays with the outer loop.)
 4. **ACK** under that entry, as a single line in the v1 formula:
@@ -68,7 +68,13 @@ ACK(done|wontdo|blocked): <explanation>
    `python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py" mirror`. The mirror cannot be edited
    in place: use
    `scripts/olp-board-remote.py ack <N> done|wontdo|blocked <explanation>`,
-   which appends the same line to the authoritative board on the hub.)
+   which appends the same line to the authoritative board on the hub. Since
+   olp/v3 the unit splits the work: the card's `impl:` line names the
+   implementer and its `review:` line the reviewers. **The implementer does not
+   ACK done to the hub**; it writes `> 实现(<kind>)·提交(#N-rK): <commit>` on the
+   unit board `.octos/UNIT_BOARD.md` and tells the unit host. Reviewers write
+   their verdicts on the same board; when all pass, the unit host pushes and
+   ACKs the hub. Inner loops on a unit always run unsandboxed.)
 
 - `done` — executed. Explanation carries evidence: commit hash, test results,
   and the verbatim verification commands you ran (crate / module / feature all
@@ -276,9 +282,14 @@ Fail → **a new entry** with the evidence. Never rewrite the old one.
 
 ### 3.6 Red lines
 
-1. Never push what you have not independently re-verified.
-2. Never press an operator's approval — granting sandbox-free permission is a
-   human action. Ask, with the exact command ready.
+1. Never push what you have not independently re-verified. In a cluster
+   (olp/v3) verification happens on the unit: the hub pushes on the unit's
+   verification record and does not verify again.
+2. Never press an operator's approval. Granting sandbox-free permission is a
+   human action — **with one exception**: inner loops on a cluster unit must
+   run unsandboxed (protocol R8), and an agent may launch them that way.
+   Everywhere else (a shared machine, the outer loop's own session) ask, with
+   the exact command ready.
 3. Respect the queue: the inner loop eats entries in board order. To jump the
    queue, state the case in an entry and let the operator decide.
 4. Shared machine: ≤2 concurrent compiles, `--test-threads=8`, and confirm
@@ -288,7 +299,8 @@ Fail → **a new entry** with the evidence. Never rewrite the old one.
 ## 4. Operator-only actions
 
 These are never delegated to an agent: pasting API keys, granting sandbox-free
-permission (`--danger-full-access` / permission tier 5), taking over a live
+permission (`--danger-full-access` / permission tier 5; inner loops on a
+cluster unit excepted, see protocol R8), taking over a live
 `outer-duty` lock, and publishing issues.
 
 Standard inner-loop start command:

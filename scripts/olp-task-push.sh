@@ -47,7 +47,7 @@ case "$N" in
 esac
 [ -n "$SIGNER" ] || die "缺少 --verified-by:本地复验通过后由复验方推送"
 case "$SIGNER" in
-    *[!A-Za-z0-9._@-]* | [!A-Za-z0-9]*) die "复验署名只允许 [A-Za-z0-9._@-],且以字母或数字开头" ;;
+    *[!A-Za-z0-9._@+-]* | [!A-Za-z0-9]*) die "复验署名只允许 [A-Za-z0-9._@+-],且以字母或数字开头(多个复验方用 + 连接,如 m07-codex+claude)" ;;
 esac
 
 BRANCH="task/$N"

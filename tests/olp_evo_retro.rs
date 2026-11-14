@@ -480,10 +480,10 @@ fn olp_evo_retro_skill_step5_and_protected_sections_golden() {
     let skill = std::fs::read_to_string(repo_root().join("skills/octoloop/AGENTS.md")).unwrap();
 
     // protected-section constants (sha256, baseline 18907aa)
-    const DESC: &str = "b2c32593cc6a5dacbc6e42ded9186c9ac94171c0d9d1883aa19f6ac760c5ccb4";
+    const DESC: &str = "a395bc353a405a643f8c8f60c2f2fed6bdeb9fa6adb2003b50129759d391cf06";
     const INIT: &str = "2907f0de1b0b8bfce017ffec8e8cd282447a5527732165bf099298e55f85654a";
-    const INNER: &str = "e290bcee04072b2fecf9a22153a86a92779ef11a597215b16046fb7ecca14395";
-    const DISC: &str = "adbb09472cc51deae4184c80c989e916ba9d1c03360487bfaa86a5c22a263f84";
+    const INNER: &str = "68f561d92b16853961f3e9841875cafda3e909c3aa7ade0a9350ef98ab931d56";
+    const DISC: &str = "d3758cb6f9585d7bb8857ce67e8f7b68875c833bb8a1461e44d9603bdecf4fcb";
 
     let desc_line = skill
         .lines()

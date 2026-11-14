@@ -97,7 +97,7 @@ def split_blocks(lines):
     return blocks
 
 
-UNIT_LINE = re.compile(r"^unit:\s*\S+\s*$")
+UNIT_LINE = re.compile(r"^(unit|impl|review|verify-of):\s*\S.*$")
 # 判词与登记的行首定式(剥掉 `> `、`**` 之后判断)。
 SIGNED_OUTER = re.compile(r"^外环\([^)]+\)·(采认|打回|搁置)\(#(\d+)\)")
 SIGNED_VOID = re.compile(r"^外环\([^)]+\)·改判\(作废 #(\d+)\)")
