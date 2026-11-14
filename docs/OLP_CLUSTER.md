@@ -163,6 +163,19 @@ octoscode olp-runtime-watch --agent <herdr 名字> --agent-pid <pid> --backend-p
   | scripts/olp-alert-forward.py
 ```
 
+`--backend-pid` 和 `--ledger/--session/--turn-id` 只适用于 octos 内环。内环是 Claude Code
+或 Codex 时不给它们(ledger 三项要么一起给,要么都不给):
+
+```bash
+octoscode olp-runtime-watch --agent <herdr 名字> --agent-pid <claude 或 codex 的 pid> \
+    --repo <仓库> --task 212 --progress-file <本卡要改的文件> --stall-seconds 900 \
+  | scripts/olp-alert-forward.py
+```
+
+这时没有 turn 一层(不报 `turn_error`),停滞提示靠 herdr 的状态区分"在忙但文件不动"
+(`events_continuing`)和"什么都没做"(`no_events`)。agent 的 pid 用
+`herdr pane process-info --pane <窗格>` 查。
+
 守护每个周期输出一行 NDJSON:进程是否还在、目标 turn 有没有报错或结束、命名的文件有没有
 真实变化。它只观察——不杀进程、不重启、不写板,`task_accepted` 恒为 false。
 

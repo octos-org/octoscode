@@ -20,7 +20,13 @@ use sha2::{Digest, Sha256};
 #[derive(Debug, Parser)]
 #[command(
     name = "octoscode olp-runtime-watch",
-    about = "Observe agent runtime, live ledger, and progress files; never accepts tasks"
+    about = "Observe agent runtime, live ledger, and progress files; never accepts tasks",
+    long_about = "Observe agent runtime, live ledger, and progress files; never accepts tasks.\n\n\
+Works for any inner loop herdr knows (octoscode, Claude Code, Codex). The \
+octos-specific inputs are optional: without --backend-pid there is no backend \
+probe; without --ledger/--session/--turn-id (given together or not at all) \
+there is no turn layer, and herdr's `working` status stands in for ledger \
+activity in the stall advisory."
 )]
 pub struct OlpRuntimeWatchCli {
     /// Herdr agent name to observe.
@@ -29,24 +35,24 @@ pub struct OlpRuntimeWatchCli {
     /// Agent process id (> 0).
     #[arg(long)]
     agent_pid: u32,
-    /// Backend process id (> 0).
+    /// Backend process id (> 0); octos only. Omit for Claude Code / Codex.
     #[arg(long)]
-    backend_pid: u32,
+    backend_pid: Option<u32>,
     /// Existing watcher/monitor pid; repeatable.
     #[arg(long = "monitor-pid")]
     monitor_pid: Vec<u32>,
     /// Repository root directory.
     #[arg(long)]
     repo: PathBuf,
-    /// Live UI-protocol JSONL ledger (regular file).
+    /// Live UI-protocol JSONL ledger (regular file); octos only.
     #[arg(long)]
-    ledger: PathBuf,
-    /// Wire session id.
+    ledger: Option<PathBuf>,
+    /// Wire session id (with --ledger).
     #[arg(long)]
-    session: String,
-    /// Target turn id.
+    session: Option<String>,
+    /// Target turn id (with --ledger).
     #[arg(long)]
-    turn_id: String,
+    turn_id: Option<String>,
     /// Task identity words; repeatable.
     #[arg(long = "task")]
     task: Vec<String>,
@@ -69,17 +75,33 @@ pub struct OlpRuntimeWatchCli {
 pub struct IdentitySnapshot {
     pub agent: String,
     pub agent_pid: u32,
-    pub backend_pid: u32,
+    pub backend_pid: Option<u32>,
     pub monitor_pid: Vec<u32>,
     pub repo: PathBuf,
-    pub ledger: PathBuf,
-    pub session: String,
-    pub turn_id: String,
+    pub ledger: Option<TurnLedger>,
     pub task: Vec<String>,
     pub progress_file: Vec<PathBuf>,
     pub stall_seconds: u64,
     pub interval_ms: u64,
     pub once: bool,
+}
+
+/// The octos turn the ledger layer follows. Inner loops without a ledger
+/// (Claude Code, Codex) have none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnLedger {
+    pub path: PathBuf,
+    pub session: String,
+    pub turn_id: String,
+}
+
+impl IdentitySnapshot {
+    fn ledger_json(&self) -> (serde_json::Value, serde_json::Value, serde_json::Value) {
+        match &self.ledger {
+            Some(l) => (json!(l.path), json!(l.session), json!(l.turn_id)),
+            None => (json!(null), json!(null), json!(null)),
+        }
+    }
 }
 
 /// Parsed, validated arguments ready to run.
@@ -343,7 +365,8 @@ pub enum AgentObservation {
 }
 
 pub fn herdr_agent_status(name: &str) -> AgentObservation {
-    let mut cmd = Command::new("herdr");
+    let herdr = std::env::var_os("OLP_HERDR").unwrap_or_else(|| "herdr".into());
+    let mut cmd = Command::new(herdr);
     cmd.args(["agent", "get", name]);
     let Some((status, raw, err_len)) = bounded_run(cmd) else {
         return AgentObservation::Unknown;
@@ -408,7 +431,7 @@ fn probe_json(p: &ProbeState) -> serde_json::Value {
 /// Everything one observation cycle contributes to the snapshot record.
 struct Cycle<'a> {
     agent: &'a ProbeState,
-    backend: &'a ProbeState,
+    backend: Option<&'a ProbeState>,
     monitors: &'a [(u32, ProbeState)],
     seq: u64,
     iso_time: &'a str,
@@ -419,6 +442,7 @@ struct Cycle<'a> {
 }
 
 fn observation_record(s: &IdentitySnapshot, c: &Cycle<'_>) -> serde_json::Value {
+    let (ledger, session, turn_id) = s.ledger_json();
     json!({
         "seq": c.seq,
         "observation_time": c.iso_time,
@@ -427,14 +451,14 @@ fn observation_record(s: &IdentitySnapshot, c: &Cycle<'_>) -> serde_json::Value 
             "agent_pid": s.agent_pid,
             "backend_pid": s.backend_pid,
             "repo": s.repo,
-            "ledger": s.ledger,
-            "session": s.session,
-            "turn_id": s.turn_id,
+            "ledger": ledger,
+            "session": session,
+            "turn_id": turn_id,
             "task": s.task,
         },
         "task_accepted": false,
         "agent": probe_json(c.agent),
-        "backend": probe_json(c.backend),
+        "backend": c.backend.map(probe_json).unwrap_or_else(|| json!({"state": "not_observed"})),
         "monitors": c.monitors
             .iter()
             .map(|(pid, p)| json!({"pid": pid, "state": monitor_probe_json(p)}))
@@ -493,12 +517,12 @@ struct LedgerLayer {
 
 #[cfg(unix)]
 impl LedgerLayer {
-    fn new(s: &IdentitySnapshot) -> Self {
+    fn new(l: &TurnLedger) -> Self {
         Self {
             cursor: super::olp_runtime_watch_ledger::LedgerCursor::new(
-                s.ledger.clone(),
-                s.session.clone(),
-                s.turn_id.clone(),
+                l.path.clone(),
+                l.session.clone(),
+                l.turn_id.clone(),
             ),
             last_offset: None,
         }
@@ -543,7 +567,7 @@ struct LedgerLayer;
 
 #[cfg(not(unix))]
 impl LedgerLayer {
-    fn new(_s: &IdentitySnapshot) -> Self {
+    fn new(_l: &TurnLedger) -> Self {
         Self
     }
 
@@ -554,6 +578,17 @@ impl LedgerLayer {
             turn_finished: false,
             activity: false,
         }
+    }
+}
+
+/// No ledger was given (an inner loop that is not octos): the layer reports
+/// that it observes nothing, rather than guessing.
+fn no_ledger_observation() -> LedgerObservation {
+    LedgerObservation {
+        record: json!({"not_observed": "no_ledger"}),
+        alerts: Vec::new(),
+        turn_finished: false,
+        activity: false,
     }
 }
 
@@ -694,7 +729,7 @@ impl OlpRuntimeWatchCli {
     pub fn into_args(self) -> Result<OlpRuntimeWatchArgs> {
         for (name, pid) in [
             ("agent-pid", self.agent_pid),
-            ("backend-pid", self.backend_pid),
+            ("backend-pid", self.backend_pid.unwrap_or(1)),
         ] {
             if pid == 0 {
                 bail!("olp-runtime-watch: --{name} must be a positive pid");
@@ -706,9 +741,32 @@ impl OlpRuntimeWatchCli {
         if self.agent.trim().is_empty() {
             bail!("olp-runtime-watch: --agent must be non-empty");
         }
-        if self.session.trim().is_empty() || self.turn_id.trim().is_empty() {
-            bail!("olp-runtime-watch: --session and --turn-id must be non-empty");
-        }
+        let ledger = match (self.ledger, self.session, self.turn_id) {
+            (None, None, None) => None,
+            (Some(path), Some(session), Some(turn_id)) => {
+                if session.trim().is_empty() || turn_id.trim().is_empty() {
+                    bail!("olp-runtime-watch: --session and --turn-id must be non-empty");
+                }
+                let meta = std::fs::metadata(&path)
+                    .map_err(|e| eyre::eyre!("--ledger {}: {e}", path.display()))?;
+                if !meta.is_file() {
+                    bail!(
+                        "olp-runtime-watch: --ledger {} is not a regular file",
+                        path.display()
+                    );
+                }
+                Some(TurnLedger {
+                    path,
+                    session,
+                    turn_id,
+                })
+            }
+            _ => {
+                return Err(eyre::eyre!(
+                    "olp-runtime-watch: --ledger, --session and --turn-id go together (all three, or none for an inner loop without an octos ledger)"
+                ));
+            }
+        };
         if self.task.iter().all(|t| t.trim().is_empty()) {
             bail!("olp-runtime-watch: --task requires at least one non-empty entry");
         }
@@ -723,14 +781,6 @@ impl OlpRuntimeWatchCli {
                 self.repo.display()
             );
         }
-        let ledger = std::fs::metadata(&self.ledger)
-            .map_err(|e| eyre::eyre!("--ledger {}: {e}", self.ledger.display()))?;
-        if !ledger.is_file() {
-            bail!(
-                "olp-runtime-watch: --ledger {} is not a regular file",
-                self.ledger.display()
-            );
-        }
         for f in &self.progress_file {
             std::fs::metadata(f)
                 .map_err(|e| eyre::eyre!("--progress-file {}: {e}", f.display()))?;
@@ -742,9 +792,7 @@ impl OlpRuntimeWatchCli {
                 backend_pid: self.backend_pid,
                 monitor_pid: self.monitor_pid,
                 repo: self.repo,
-                ledger: self.ledger,
-                session: self.session,
-                turn_id: self.turn_id,
+                ledger,
                 task: self.task,
                 progress_file: self.progress_file,
                 stall_seconds: self.stall_seconds,
@@ -758,6 +806,7 @@ impl OlpRuntimeWatchCli {
 
 /// Checkpoint-era initial snapshot line.
 pub fn initial_snapshot_json(s: &IdentitySnapshot) -> serde_json::Value {
+    let (ledger, session, turn_id) = s.ledger_json();
     json!({
         "identity": {
             "agent": s.agent,
@@ -765,9 +814,9 @@ pub fn initial_snapshot_json(s: &IdentitySnapshot) -> serde_json::Value {
             "backend_pid": s.backend_pid,
             "monitor_pid": s.monitor_pid,
             "repo": s.repo,
-            "ledger": s.ledger,
-            "session": s.session,
-            "turn_id": s.turn_id,
+            "ledger": ledger,
+            "session": session,
+            "turn_id": turn_id,
             "task": s.task,
         },
         "progress_file": s.progress_file,
@@ -788,12 +837,12 @@ pub fn run(args: OlpRuntimeWatchArgs) -> Result<i32> {
     // monitors). A later different birth => process_identity_changed alert;
     // a missing pid never overwrites its baseline.
     let mut births: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
-    let mut ledger_layer = LedgerLayer::new(s);
+    let mut ledger_layer = s.ledger.as_ref().map(LedgerLayer::new);
     let mut progress_tracker = ProgressTracker::new();
     loop {
         seq += 1;
         let agent = probe_pid(s.agent_pid);
-        let backend = probe_pid(s.backend_pid);
+        let backend = s.backend_pid.map(probe_pid);
         let monitors: Vec<(u32, ProbeState)> =
             s.monitor_pid.iter().map(|p| (*p, probe_pid(*p))).collect();
         let agent_status = herdr_agent_status(&s.agent);
@@ -802,7 +851,7 @@ pub fn run(args: OlpRuntimeWatchArgs) -> Result<i32> {
         // touches its baseline.
         let mut identity_alerts: Vec<u32> = Vec::new();
         for (pid, state) in std::iter::once((s.agent_pid, &agent))
-            .chain(std::iter::once((s.backend_pid, &backend)))
+            .chain(s.backend_pid.zip(backend.as_ref()))
             .chain(monitors.iter().map(|(p, s)| (*p, s)))
         {
             if let ProbeState::Alive(birth) = state {
@@ -820,12 +869,21 @@ pub fn run(args: OlpRuntimeWatchArgs) -> Result<i32> {
                 }
             }
         }
-        let ledger = ledger_layer.observe();
-        let progress = progress_tracker.observe(s, ledger.activity);
+        let ledger = match ledger_layer.as_mut() {
+            Some(layer) => layer.observe(),
+            None => no_ledger_observation(),
+        };
+        // Without a ledger, herdr's `working` status is the only sign that
+        // the agent is doing something between file changes.
+        let activity = match ledger_layer {
+            Some(_) => ledger.activity,
+            None => matches!(agent_status, AgentObservation::Working),
+        };
+        let progress = progress_tracker.observe(s, activity);
         let iso_time = iso_now();
         let cycle = Cycle {
             agent: &agent,
-            backend: &backend,
+            backend: backend.as_ref(),
             monitors: &monitors,
             seq,
             iso_time: &iso_time,

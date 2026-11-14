@@ -1151,3 +1151,138 @@ fn olp_runtime_watch_stall_and_progress_reset() {
     });
     assert_eq!(seen.last().unwrap()["progress"]["changed_this_cycle"], true);
 }
+
+/// Scenario: 没有 octos ledger 与后端的内环(Claude Code、Codex)也能被守护
+#[test]
+fn watch_without_ledger_or_backend_uses_herdr_status_for_activity() {
+    let stub_dir = tempfile::tempdir().unwrap();
+    let herdr = stub_dir.path().join("herdr");
+    let status_file = stub_dir.path().join("status");
+    std::fs::write(&status_file, "working").unwrap();
+    std::fs::write(
+        &herdr,
+        format!(
+            "#!/bin/sh\nprintf '{{\"result\":{{\"agent\":{{\"agent\":\"claude\",\"name\":\"cc\",\"agent_status\":\"%s\"}}}}}}\\n' \"$(cat '{}')\"\n",
+            status_file.display()
+        ),
+    )
+    .unwrap();
+    make_executable(&herdr);
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("r");
+    std::fs::create_dir_all(&repo).unwrap();
+    let progress = repo.join("README.md");
+    std::fs::write(&progress, "x\n").unwrap();
+    let mut agent = spawn_test_child();
+    let agent_pid = agent.id().to_string();
+    let run = |extra: &[&str]| {
+        let mut cmd = binary();
+        cmd.args([
+            "olp-runtime-watch",
+            "--agent",
+            "cc",
+            "--agent-pid",
+            &agent_pid,
+            "--repo",
+            repo.to_str().unwrap(),
+            "--task",
+            "7",
+            "--progress-file",
+            progress.to_str().unwrap(),
+            "--stall-seconds",
+            "1",
+            "--interval-ms",
+            "600",
+        ])
+        .args(extra)
+        // OLP_HERDR names the herdr to ask, as on a unit whose job PATH is short.
+        .env("OLP_HERDR", &herdr);
+        cmd
+    };
+
+    // Three cycles, ~1.2 s: long enough for the 1 s stall advisory.
+    let mut cmd = run(&[]);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let records = collect_heartbeats_with_deadline(stdout, 3, std::time::Duration::from_secs(20));
+    let _ = child.kill();
+    let _ = child.wait();
+    let records: Vec<serde_json::Value> = records
+        .iter()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let last = records.last().expect("records");
+    assert_eq!(last["identity"]["backend_pid"], serde_json::Value::Null);
+    assert_eq!(last["identity"]["ledger"], serde_json::Value::Null);
+    assert_eq!(last["identity"]["turn_id"], serde_json::Value::Null);
+    assert_eq!(
+        last["backend"],
+        serde_json::json!({"state": "not_observed"})
+    );
+    assert_eq!(
+        last["ledger"],
+        serde_json::json!({"not_observed": "no_ledger"})
+    );
+    assert_eq!(last["agent"]["state"], "alive");
+    assert_eq!(
+        last["agent_status"],
+        serde_json::json!({"state": "working"})
+    );
+    assert_eq!(last["task_accepted"], false);
+    let stall = last["alerts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["kind"] == "stalled_no_progress")
+        .unwrap_or_else(|| panic!("a stall advisory after 1 s: {last}"));
+    // herdr said `working` the whole time: busy without progress.
+    assert_eq!(stall["activity"], "events_continuing", "{stall}");
+
+    // herdr says idle: the turn is over, awaiting review; no activity.
+    std::fs::write(&status_file, "idle").unwrap();
+    let mut cmd = run(&[]);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    let records = collect_heartbeats_with_deadline(
+        child.stdout.take().unwrap(),
+        3,
+        std::time::Duration::from_secs(20),
+    );
+    let _ = child.kill();
+    let _ = child.wait();
+    let records: Vec<serde_json::Value> = records
+        .iter()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let last = records.last().unwrap();
+    assert_eq!(last["observation_state"], "awaiting_review");
+    let stall = last["alerts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["kind"] == "stalled_no_progress")
+        .expect("stall");
+    assert_eq!(stall["activity"], "no_events");
+
+    // The agent process goes away: still reported, with no backend involved.
+    reap(&mut agent.0);
+    let mut cmd = run(&["--once"]);
+    let (code, text, stderr, _) = bounded_cli_run(&mut cmd, std::time::Duration::from_secs(15));
+    assert_eq!(code, Some(0), "{stderr}");
+    let last = parse_lines(&text).pop().unwrap();
+    assert_eq!(last["agent"]["state"], "process_missing");
+
+    // The ledger flags go together.
+    for partial in [
+        vec!["--ledger", progress.to_str().unwrap()],
+        vec!["--session", "s1", "--turn-id", "t1"],
+    ] {
+        let mut cmd = run(&partial);
+        cmd.arg("--once");
+        let (code, _, stderr, _) = bounded_cli_run(&mut cmd, std::time::Duration::from_secs(15));
+        assert_ne!(code, Some(0), "{partial:?}");
+        assert!(stderr.contains("go together"), "{stderr}");
+    }
+}
