@@ -3,6 +3,7 @@
 
 Spec: specs/task-evo-review-evidence.spec.md (review-monitor rules)
 渲染四区块: lifecycle / current-turn / last-outcome / deliverables。
+另有只作展示的 progress 区块(agent 自述的进度报告)。
 runtime 复合身份(runtime+session+goal+profile,非裸 goal_01)。
 
 只读纪律(fail-closed):
@@ -31,6 +32,10 @@ runtime 复合身份(runtime+session+goal+profile,非裸 goal_01)。
   * events/supervisor 负向事件(goal_transition blocked / escalation)只从
     本 runtime 的 events.jsonl 归属,不吞并其他 runtime。
   * 官方 olp-watch-board.sh 正哨协议不改,板文件只读。
+  * progress 区块(octos UPCR-2026-R3DB2ECCA / R5992A477)只读本 session 的
+    ui-protocol ledger: 目录名必须恰为 wire session 字节 hex(带 NUL+~cwd
+    后缀,不猜测、不跟符号链接),行内 session_id 必须同源。agent 自述仅作
+    展示,永不参与 lifecycle / current-turn / last-outcome 裁决。
 """
 from __future__ import annotations
 
@@ -1080,6 +1085,131 @@ def negative_events(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# progress — agent-authored reports (octos UPCR-2026-R3DB2ECCA / R5992A477)
+# ---------------------------------------------------------------------------
+
+_REPORT_KINDS = {"milestone", "blocker", "correction", "verification"}
+_PROGRESS_SHOWN = 5
+_PROGRESS_TEXT_CAP = 240
+_PROGRESS_TAIL_BYTES = 2 * 1024 * 1024
+_PROGRESS_NOTE = "agent 自述;不是验证、批准或完成声明,不参与任何状态裁决"
+
+
+def _one_line(text, cap: int) -> str | None:
+    """Display-safe single line: printable characters only, bounded."""
+    if not isinstance(text, str):
+        return None
+    line = " ".join("".join(ch if ch.isprintable() else " " for ch in text).split())
+    if not line:
+        return None
+    return line if len(line) <= cap else line[: cap - 1] + "…"
+
+
+def agent_progress(runtime_dir: Path | None, session: str | None) -> dict:
+    """本 session ledger 里 agent 自己发布的进度报告(只读,仅展示)。
+
+    octos 把 `report_progress` 报告、以及 staged peer 的 `peer_publish`
+    checkpoint,以 `background/activity`(origin_kind=agent)写入发起 session
+    的 ledger。这里按 ledger `seq` 去重,取最近若干条。
+
+    fail-closed: 目录名必须恰为 wire session 的字节 hex(真实 NUL+~cwd
+    后缀);不做同 channel 推断,不跟符号链接;行内 session_id 必须等于去掉
+    cwd 后缀的同一 session。任一不满足 → unavailable 或跳过该行。
+    """
+
+    def unavailable(reason: str) -> dict:
+        return {"state": "unavailable", "reason": reason, "reports": [], "note": _PROGRESS_NOTE}
+
+    if runtime_dir is None:
+        return unavailable("no runtime dir")
+    if not isinstance(session, str) or not session:
+        return unavailable("no session")
+    if "\x00" not in session or not _CWD_SUFFIX_RE.search(session):
+        return unavailable("session has no wire cwd suffix; ledger not guessed")
+    ledger_dir = runtime_dir / "ui-protocol" / session.encode("utf-8").hex()
+    if ledger_dir.is_symlink() or not ledger_dir.is_dir():
+        return unavailable("no ledger for this exact session")
+    bare = _CWD_SUFFIX_RE.sub("", session)
+
+    rows: dict[int, dict] = {}
+    skipped = 0
+    truncated = False
+    for path in sorted(ledger_dir.glob("ledger-*.log")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            with path.open("rb") as fh:
+                size = fh.seek(0, os.SEEK_END)
+                start = max(0, size - _PROGRESS_TAIL_BYTES)
+                fh.seek(start)
+                data = fh.read()
+        except OSError:
+            skipped += 1
+            continue
+        if start > 0:
+            truncated = True
+            data = data.split(b"\n", 1)[-1]  # drop the partial first line
+        for raw in data.splitlines():
+            if b'"background_activity"' not in raw:
+                continue
+            try:
+                rec = json.loads(raw.decode("utf-8", errors="replace"))
+            except json.JSONDecodeError:
+                skipped += 1
+                continue
+            ev = rec.get("event") if isinstance(rec, dict) else None
+            if (
+                not isinstance(ev, dict)
+                or ev.get("kind") != "background_activity"
+                or ev.get("origin_kind") != "agent"
+            ):
+                continue
+            seq = rec.get("seq")
+            if rec.get("v") != 1 or type(seq) is not int or ev.get("session_id") != bare:
+                skipped += 1
+                continue
+            report = ev.get("report") if isinstance(ev.get("report"), dict) else {}
+            label = _one_line(ev.get("origin_label"), 64)
+            if ev.get("origin_id") == "main":
+                origin = "main"
+            else:
+                origin = f"peer {label or _one_line(ev.get('origin_id'), 64) or '?'}"
+            if ev.get("suppressed") is True:
+                kind = "suppressed"
+            elif report.get("kind") in _REPORT_KINDS:
+                kind = report["kind"]
+            else:
+                kind = "milestone"
+            row = {
+                "seq": seq,
+                "recorded_at": rec.get("recorded_at")
+                if isinstance(rec.get("recorded_at"), str)
+                else None,
+                "origin": origin,
+                "kind": kind,
+                "text": _one_line(ev.get("text"), _PROGRESS_TEXT_CAP) or "",
+            }
+            for key in ("next_step", "evidence"):
+                value = _one_line(report.get(key), _PROGRESS_TEXT_CAP)
+                if value:
+                    row[key] = value
+            rows[seq] = row
+
+    ordered = [rows[k] for k in sorted(rows)]
+    out = {
+        "state": "ok",
+        "total": len(ordered),
+        "reports": ordered[-_PROGRESS_SHOWN:],
+        "note": _PROGRESS_NOTE,
+    }
+    if skipped:
+        out["skipped"] = skipped
+    if truncated:
+        out["window_truncated"] = True
+    return out
+
+
 def render(
     review_dir: Path,
     board: Path | None,
@@ -1188,6 +1318,7 @@ def render(
         },
         "ack_events": ack_evs,
         "events": negative_events(runtime_dir, filter_goal, profile, eff_session),
+        "progress": agent_progress(runtime_dir, eff_session),
     }
     diags = []
     if state_corrupt:
@@ -1232,6 +1363,21 @@ def human(result: dict) -> str:
     d = result["deliverables"]
     files = d["files"] if isinstance(d, dict) else d
     out.append("[deliverables] " + (", ".join(files) or "(none)") + " (accepted=false)")
+    pg = result.get("progress") or {}
+    if pg.get("state") != "ok":
+        out.append(f"[progress] unavailable ({pg.get('reason')})")
+    elif not pg["reports"]:
+        out.append("[progress] (no agent reports)")
+    else:
+        extra = f", last {len(pg['reports'])} shown" if pg["total"] > len(pg["reports"]) else ""
+        out.append(f"[progress] {pg['total']} agent report(s){extra} — self-reported, not a review verdict")
+        for r in pg["reports"]:
+            more = "".join(
+                f" | {label}: {r[key]}"
+                for key, label in (("next_step", "next"), ("evidence", "see"))
+                if r.get(key)
+            )
+            out.append(f"  #{r['seq']} {r['origin']} {r['kind']}: {r['text']}{more}")
     for ev in result["ack_events"]:
         out.append(f"[ack-event] {ev['type']} ack={ev.get('ack')} line={ev.get('line')} "
                    f"{ev.get('new_sha256') or ev.get('sha256') or ''}")
