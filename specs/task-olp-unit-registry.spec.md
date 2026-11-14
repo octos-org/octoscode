@@ -28,16 +28,27 @@ estimate: 1d
   `unit`、`hostname`、`macs`、`sent_at`、`checks`),不负责传输。传输由调用方的管道完成
   (`… | ssh hub olp-unit.py receive`),所以工具本身不依赖 ssh,可以脱机测试。心跳是状态
   不是日志,hub 不可达时不排队。
-- 巡检项:内置 `serve`(有 `octos serve` 进程)与 `disk`(HOME 所在磁盘空闲比例 ≥
-  `--disk-min-free`,默认 10%),由 `--require` 选择;扩展检查为
+- 巡检项:内置 `agent`(herdr 里至少有一个内环,任何一种:octoscode、Claude Code、
+  Codex;以 `herdr agent list` 为准,`OLP_HERDR` 可指定 herdr)、`serve`(有 `octos serve`
+  进程,只适用于 octos 内环)与 `disk`(HOME 所在磁盘空闲比例 ≥ `--disk-min-free`,默认
+  10%),由 `--require` 选择,默认 `agent,disk`。按进程名找 Claude Code、Codex 不可靠——
+  开发机上常有别的 claude/codex 进程(外环自己、Codex 的后台服务)——所以以 herdr 报告的
+  窗格为准。心跳带 `agents`(每项只有 kind、status、pane);`receive` 只保留三个字段都是
+  短的纯 token 的项。扩展检查为
   `${OLP_UNIT_CHECKS_DIR:-~/.octos/outer/unit-checks.d}` 下的可执行文件,退出 0 为通过,
   stdout 第一行为说明,10 秒超时。集群方案里"循环是否暂停、双哨是否在位、fallbacks 是否已
   快照"这几项要读会话内的权威状态面,脚本读不到,留给扩展检查,本任务不实现。
 - 启动权限:心跳带 `permission` 与 `backends`。读进程表(`ps -axo pid=,command=`),只算
   argv[0] 的文件名是 `octos` 或 `octos-<后缀>` 且 argv[1] 是 `serve` 的进程——TUI 把同样的
   字样放在一个参数里,不算后端。每个后端只取 `--danger-full-access` 与 `--solo` 两个开关,
-  命令行的其余部分不进心跳。`permission` 为 `full`(全带完全访问)、`sandboxed`(都不带)、
-  `mixed`、`none`(没有后端)、`unknown`(读不到进程表)。`receive` 只接受这五个值,其余或
+  命令行的其余部分不进心跳。Claude Code 与 Codex 内环的启动参数取自 `herdr pane
+  process-info`(窗格前台进程的 argv):Claude Code 的 `--dangerously-skip-permissions`、
+  `--permission-mode bypassPermissions`,Codex 的
+  `--dangerously-bypass-approvals-and-sandbox`、`--yolo`、`--sandbox danger-full-access`
+  算完全访问;明确给了别的模式算沙箱;什么都没给算看不出来(权限可能在它们的配置文件里,
+  本工具不读),整机记为 `unknown`。`permission` 为 `full`(全带完全访问)、`sandboxed`
+  (都不带)、`mixed`、`none`(没有内环)、`unknown`(读不到进程表或 herdr,或有看不出来
+  的内环)。`receive` 只接受这五个值,其余或
   缺失记为 `unknown`;`backends` 逐项清洗,未知字段丢弃。`status` 的文本与 JSON 都带这一
   项。它是单元自报的告知信息:不参与健康判定,不是安全边界。
 - 接收:`receive` 从 stdin 读一条心跳(上限 256 KiB),单元必须已登记;带 `--unit` 时心跳
@@ -132,3 +143,10 @@ Scenario: 心跳报告内环后端的启动权限
   Given 进程表里有 TUI 包裹进程、两个带完全访问的后端(其中一个的命令行含密钥)、一个无关进程;以及只有不带完全访问的后端、两种混合、只有 TUI 的进程表
   When 分别生成心跳;把带额外字段与畸形条目的 `backends` 交给 hub;再交给 hub 一个未知的权限值和一条不带该字段的旧心跳
   Then 权限依次为 full、sandboxed、mixed、none;后端只含 pid 与两个开关,密钥不出现在心跳里;hub 的状态显示 full 且健康状态不受影响,额外字段与畸形条目被丢弃;未知值与缺失都显示为 unknown
+
+Scenario: 心跳经 herdr 认出任何一种内环(critical)
+  Tags: critical
+  Test: unit_heartbeat_recognises_any_kind_of_inner_loop
+  Given 一个替身 herdr,依次报告:没有内环;一个 Claude Code 和一个 Codex 内环;带各种启动参数的单个内环;读不到
+  When 运行心跳,并把一条 Claude Code 单元的心跳交给 hub
+  Then 没有内环时 agent 检查不过、权限为无内环;两种内环都让 agent 检查通过并列出 kind 与状态,没带完全访问参数时权限为未知;七组启动参数分别判为完全访问或沙箱,与 octos 后端混合时为混合;读不到 herdr 时检查不过并说明原因、权限为未知;hub 按默认检查把 Claude Code 单元判为正常,status 显示内环一列;伪造的 agents 项被丢弃,多余字段不落盘

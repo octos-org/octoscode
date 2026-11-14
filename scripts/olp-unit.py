@@ -42,20 +42,32 @@
       只保证它在登记文件里唯一。
     - 是否失联按 hub 收到心跳的时间算,不看单元自己的时钟。
 
+内环是谁
+    内环可以是 octoscode(octos)、Claude Code 或 Codex。单元上的内环跑在
+    herdr 的窗格里,心跳以 `herdr agent list` 为准报告有哪些内环、各自
+    状态(字段 agents)。herdr 不在 PATH 上时用环境变量 OLP_HERDR 指定。
+
 启动权限
-    心跳带上本机内环后端(`octos serve`)的启动方式,hub 在 status 里显示:
-        full       完全访问:每个后端都带 --danger-full-access
-        sandboxed  沙箱:都不带
-        mixed      混合:有的带有的不带
-        none       没有后端在跑
-        unknown    读不到进程表,或心跳来自旧版本
-    只读取 --danger-full-access 与 --solo 两个开关,命令行的其余部分不离开
-    单元。这是单元**自报**的,用来让大外环知道各台机器的实际情况,不是
-    安全边界,也不参与健康判定。
+    心跳带上本机内环的启动方式,hub 在 status 里显示:
+        full       完全访问:每个内环都以完全访问启动
+        sandboxed  沙箱:都没有
+        mixed      混合:有的有有的没有
+        none       没有内环在跑
+        unknown    看不出来:读不到进程表;或者有 Claude Code / Codex 内环
+                   没带完全访问的启动参数——它们的权限可能来自各自的配置
+                   文件,本工具不读配置
+    完全访问的判定只看启动参数:octos 后端的 --danger-full-access;
+    Claude Code 的 --dangerously-skip-permissions 或
+    --permission-mode bypassPermissions;Codex 的
+    --dangerously-bypass-approvals-and-sandbox 或
+    --sandbox danger-full-access。命令行的其余部分不离开单元。这是单元
+    **自报**的,用来让大外环知道各台机器的实际情况,不是安全边界,也不
+    参与健康判定。
 
 巡检项
-    内置:serve(本机有 `octos serve` 进程)、disk(HOME 所在磁盘的空闲
-    比例不低于阈值)。--require 选择必须通过的内置项。
+    内置:agent(herdr 里至少有一个内环,任何一种)、serve(本机有
+    `octos serve` 进程,只适用于 octos 内环)、disk(HOME 所在磁盘的空闲
+    比例不低于阈值)。--require 选择必须通过的内置项,默认 agent,disk。
     扩展:${OLP_UNIT_CHECKS_DIR:-~/.octos/outer/unit-checks.d} 下的每个
     可执行文件是一项检查——退出 0 为通过,其余为不通过,stdout 第一行作
     为说明,10 秒超时。项目专用的检查(设备、循环是否暂停等)放在这里。
@@ -279,6 +291,122 @@ def check_serve():
     return False, "没有 octos serve 进程"
 
 
+def herdr_bin():
+    return os.environ.get("OLP_HERDR") or shutil.which("herdr") or "herdr"
+
+
+def herdr_json(args):
+    """Run a herdr command that prints JSON. Returns (result, error text)."""
+    try:
+        r = subprocess.run(
+            [herdr_bin(), *args], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, f"无法运行 herdr: {e}"
+    try:
+        doc = json.loads(r.stdout or "{}")
+    except ValueError:
+        return None, (r.stderr.strip() or "herdr 的输出不是 JSON")[:200]
+    if isinstance(doc, dict) and doc.get("error"):
+        err = doc["error"]
+        return None, str(err.get("message") or err.get("code") or err)[:200]
+    if r.returncode != 0 or not isinstance(doc, dict):
+        return None, (r.stderr.strip() or f"herdr 退出码 {r.returncode}")[:200]
+    return doc.get("result") or {}, ""
+
+
+def inner_agents():
+    """The inner loops herdr knows on this machine: [{name, kind, status, pane}].
+    None (with a reason) when herdr cannot be asked."""
+    result, err = herdr_json(["agent", "list"])
+    if result is None:
+        return None, err
+    agents = []
+    for a in result.get("agents") or []:
+        if not isinstance(a, dict):
+            continue
+        agents.append(
+            {
+                "name": str(a.get("name") or ""),
+                "kind": str(a.get("agent") or "unknown"),
+                "status": str(a.get("agent_status") or "unknown"),
+                "pane": str(a.get("pane_id") or ""),
+            }
+        )
+    return agents, ""
+
+
+def check_agent(agents, why):
+    if agents is None:
+        return False, f"读不到 herdr 里的内环:{why}"
+    if not agents:
+        return False, "herdr 里没有内环"
+    shown = "、".join(f"{a['kind']}({a['status']})" for a in agents)
+    return True, f"{len(agents)} 个内环:{shown}"
+
+
+def full_access_flags(kind, argv):
+    """True / False from the launch flags of a Claude Code or Codex process;
+    None when the flags say nothing (the agent's config file decides)."""
+    if kind == "claude":
+        if "--dangerously-skip-permissions" in argv:
+            return True
+        for i, a in enumerate(argv):
+            if a == "--permission-mode" and i + 1 < len(argv):
+                return argv[i + 1] == "bypassPermissions"
+            if a.startswith("--permission-mode="):
+                return a.split("=", 1)[1] == "bypassPermissions"
+        return None
+    if kind == "codex":
+        if "--dangerously-bypass-approvals-and-sandbox" in argv or "--yolo" in argv:
+            return True
+        for i, a in enumerate(argv):
+            if a in ("-s", "--sandbox") and i + 1 < len(argv):
+                return argv[i + 1] == "danger-full-access"
+            if a.startswith("--sandbox="):
+                return a.split("=", 1)[1] == "danger-full-access"
+        return None
+    return None
+
+
+def agent_permissions(agents):
+    """Launch permission of each Claude Code / Codex inner loop, read from the
+    argv of the pane's foreground process (herdr pane process-info)."""
+    out = []
+    for a in agents or []:
+        if a["kind"] not in ("claude", "codex") or not a["pane"]:
+            continue
+        result, _ = herdr_json(["pane", "process-info", "--pane", a["pane"]])
+        procs = ((result or {}).get("process_info") or {}).get("foreground_processes") or []
+        argv = next(
+            (p.get("argv") or [] for p in procs if p.get("name") == a["kind"] or p.get("argv0") == a["kind"]),
+            None,
+        )
+        full = full_access_flags(a["kind"], argv) if argv is not None else None
+        out.append({"kind": a["kind"], "pane": a["pane"], "full_access": full})
+    return out
+
+
+def combine_permission(octos_permission, others):
+    """Fold the octos backends' permission and the other inner loops' into one."""
+    if octos_permission == "unknown" or any(o["full_access"] is None for o in others):
+        return "unknown"
+    values = [o["full_access"] for o in others]
+    if octos_permission == "full":
+        values.append(True)
+    elif octos_permission == "sandboxed":
+        values.append(False)
+    elif octos_permission == "mixed":
+        values += [True, False]
+    if not values:
+        return "none"
+    if all(values):
+        return "full"
+    if not any(values):
+        return "sandboxed"
+    return "mixed"
+
+
 SERVE_ARGV0 = re.compile(r"^octos(-[a-z0-9]+)?$")
 PERMISSIONS = ("full", "sandboxed", "mixed", "none", "unknown")
 
@@ -369,11 +497,16 @@ def run_plugin_checks():
 
 def cmd_heartbeat(args):
     unit = check_unit_name(args.unit)
-    builtin = {"serve": check_serve, "disk": lambda: check_disk(args.disk_min_free)}
+    agents, agents_why = inner_agents()
+    builtin = {
+        "agent": lambda: check_agent(agents, agents_why),
+        "serve": check_serve,
+        "disk": lambda: check_disk(args.disk_min_free),
+    }
     required = [r for r in (args.require or "").split(",") if r]
     for r in required:
         if r not in builtin:
-            raise Fail(EXIT_USAGE, f"未知的内置巡检项: {r}(可选 serve、disk)")
+            raise Fail(EXIT_USAGE, f"未知的内置巡检项: {r}(可选 agent、serve、disk)")
     checks = []
     for name in required:
         ok, detail = builtin[name]()
@@ -387,9 +520,19 @@ def cmd_heartbeat(args):
         "sent_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "checks": checks,
     }
-    permission, backends = serve_permission(args.ps_output)
+    octos_permission, backends = serve_permission(args.ps_output)
+    others = agent_permissions(agents)
+    permission = combine_permission(octos_permission, others)
+    if agents is None and permission == "none":
+        # No octos backend, and herdr could not say whether another kind of
+        # inner loop runs: that is not "none".
+        permission = "unknown"
     beat["permission"] = permission
     beat["backends"] = backends
+    beat["agents"] = [
+        {"kind": a["kind"], "status": a["status"], "pane": a["pane"]} for a in agents or []
+    ]
+    beat["agent_permissions"] = others
     json.dump(beat, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
     return 0
@@ -437,6 +580,15 @@ def cmd_receive(args):
     permission = beat.get("permission")
     if permission not in PERMISSIONS:
         permission = "unknown"
+    # Inner loops as herdr reported them: only kind, status and pane, each a
+    # short plain token, so nothing else the unit sends reaches the hub's files.
+    agents = []
+    for a in beat.get("agents") if isinstance(beat.get("agents"), list) else []:
+        if not isinstance(a, dict):
+            continue
+        fields = {k: a.get(k) for k in ("kind", "status", "pane")}
+        if all(isinstance(v, str) and re.match(r"^[A-Za-z0-9:_.-]{1,40}$", v) for v in fields.values()):
+            agents.append(fields)
     backends = []
     for b in beat.get("backends") if isinstance(beat.get("backends"), list) else []:
         if isinstance(b, dict) and isinstance(b.get("pid"), int) and not isinstance(b.get("pid"), bool):
@@ -452,6 +604,7 @@ def cmd_receive(args):
         "unit": unit,
         "permission": permission,
         "backends": backends[:64],
+        "agents": agents[:64],
         "hostname": norm_host(str(beat.get("hostname", ""))),
         "macs": macs[:64],
         "sent_at": str(beat.get("sent_at", ""))[:40],
@@ -504,7 +657,7 @@ PERMISSION_ZH = {
     "full": "完全访问",
     "sandboxed": "沙箱",
     "mixed": "混合",
-    "none": "无后端",
+    "none": "无内环",
     "unknown": "未知",
 }
 
@@ -527,6 +680,7 @@ def cmd_status(args):
                 # 单元自报的启动权限;只是告知,不参与健康判定。
                 "permission": (beat or {}).get("permission", "unknown") if beat else None,
                 "backends": (beat or {}).get("backends", []) if beat else [],
+                "agents": (beat or {}).get("agents", []) if beat else [],
             }
         )
     if args.json:
@@ -539,9 +693,10 @@ def cmd_status(args):
     for r in report:
         age = "-" if r["heartbeat_age_seconds"] is None else f"{r['heartbeat_age_seconds']}s"
         permission = PERMISSION_ZH.get(r["permission"], "-")
+        kinds = ",".join(sorted({a.get("kind", "?") for a in r["agents"]})) or "-"
         line = (
             f"{r['unit']}\t{STATE_ZH[r['state']]}({r['state']})\t心跳 {age}"
-            f"\t权限 {permission}\t{r['hostname']}"
+            f"\t内环 {kinds}\t权限 {permission}\t{r['hostname']}"
         )
         if r["reasons"]:
             line += "\t" + ";".join(r["reasons"])
@@ -603,7 +758,7 @@ def build_parser():
 
     p = sub.add_parser("heartbeat", help="(单元)巡检并把心跳打印到 stdout")
     p.add_argument("--unit", required=True)
-    p.add_argument("--require", default="serve,disk")
+    p.add_argument("--require", default="agent,disk")
     p.add_argument("--disk-min-free", type=float, default=10.0)
     p.add_argument("--ps-output", help=argparse.SUPPRESS)
     p.set_defaults(fn=cmd_heartbeat)
