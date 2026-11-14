@@ -119,7 +119,8 @@ macOS 与 Linux 各自的前提也在那里。步骤在单元和 hub 之间来�
    扫描,但**发现 ≠ 接管**。
 4. **接管职责(主审权锁,R7/olp-v2)**:上岗必须经
    `octoscode outer-duty hold --project <项目> --signature <署名>
-   --duties <职责> -- <你的 agent 启动命令>` 包裹启动——锁即
+   --duties <职责> -- <你的 agent 启动命令>` 包裹启动(Codex 写
+   `codex --no-daemon`,否则会话在共享后台服务里、不受锁约束,`hold` 拒绝)——锁即
    authority,**守护式死亡耦合**(wrapper 亡⇒agent 必亡⇒VACANT;
    Linux 经 PR_SET_PDEATHSIG,macOS 经持锁的守护进程;Linux 与 macOS
    可用,其他平台 unsupported,Windows LockFileEx 另立);

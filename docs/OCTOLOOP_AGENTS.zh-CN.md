@@ -117,6 +117,9 @@ octoscode outer-duty hold --project <项目> --signature <署名> \
   --duties <职责> -- <你的 agent 启动命令>
 ```
 
+Codex 必须以 `codex --no-daemon` 启动:默认情况下它的会话在共享的后台服务里,
+终端程序退出后工作照常继续,锁约束不到它,`hold` 会拒绝。
+
 锁**即** authority:你的 agent 与 wrapper 死亡耦合——wrapper 亡 ⇒ agent
 必亡 ⇒ 锁 `VACANT`。Linux 上 wrapper 是唯一持锁 fd 者,内核经
 `PR_SET_PDEATHSIG` 杀掉 agent;macOS 上 wrapper 与 agent 之间有一个持锁的
