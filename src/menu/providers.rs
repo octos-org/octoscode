@@ -82,6 +82,7 @@ pub fn core_menu_registry() -> MenuRegistry {
         Provider::Agents,
         Provider::Loops,
         Provider::LoopActions,
+        Provider::LoopDeleteConfirm,
         Provider::Rewind,
         Provider::Model,
         Provider::ModelConfig,
@@ -135,6 +136,7 @@ enum Provider {
     Agents,
     Loops,
     LoopActions,
+    LoopDeleteConfirm,
     Rewind,
     Model,
     ModelConfig,
@@ -183,6 +185,7 @@ impl MenuProvider for Provider {
             Self::Agents => crate::menu::registry::MENU_AGENTS,
             Self::Loops => crate::menu::registry::MENU_LOOPS,
             Self::LoopActions => crate::menu::registry::MENU_LOOP_ACTIONS,
+            Self::LoopDeleteConfirm => crate::menu::registry::MENU_LOOP_DELETE_CONFIRM,
             Self::Rewind => MENU_REWIND,
             Self::Model => MENU_MODEL,
             Self::ModelConfig => MENU_MODEL_CONFIG,
@@ -231,6 +234,7 @@ impl MenuProvider for Provider {
             Self::Agents => agents_menu(ctx),
             Self::Loops => loops_menu(ctx),
             Self::LoopActions => loop_actions_menu(ctx),
+            Self::LoopDeleteConfirm => loop_delete_confirm_menu(ctx),
             Self::Rewind => rewind_menu(ctx),
             Self::Model => model_menu(ctx),
             Self::ModelConfig => model_config_menu(ctx),
@@ -1501,20 +1505,71 @@ fn loop_actions_menu(ctx: &MenuContext<'_>) -> MenuBuildResult {
         _ => &["delete"],
     };
     for verb in verbs {
-        items.push(MenuItem::new(
-            format!("loop_actions.{verb}"),
-            t!(format!("menu.loop_actions.verb.{verb}")).into_owned(),
+        let action = if *verb == "delete" {
+            MenuAction::Local(LocalAction::RequestDeleteLoop(crate::model::LoopIdParams {
+                session_id: record.session_id.clone(),
+                loop_id: record.loop_id.clone(),
+            }))
+        } else {
             MenuAction::Local(LocalAction::RunSlashCommand(format!(
                 "/loop {verb} {}",
                 record.loop_id
-            ))),
-        ));
+            )))
+        };
+        let mut item = MenuItem::new(
+            format!("loop_actions.{verb}"),
+            t!(format!("menu.loop_actions.verb.{verb}")).into_owned(),
+            action,
+        );
+        if *verb == "delete" {
+            item.state = MenuItemState::default().destructive();
+        }
+        items.push(item);
     }
 
     MenuBuildResult::Ready(MenuSpec {
         id: MenuId::from(crate::menu::registry::MENU_LOOP_ACTIONS),
         title: t!("menu.loop_actions.title_for", id = record.loop_id.clone()).into_owned(),
         subtitle: None,
+        items,
+        tabs: Vec::new(),
+        searchable: false,
+        search_placeholder: None,
+        footer_hint: Some(t!("menu.footer.esc_back").into_owned()),
+        preview: None,
+        mode: MenuMode::SingleSelect,
+    })
+}
+
+/// Yes/No confirmation for the exact session and loop captured by the delete
+/// row. Selecting the row only stages this request; Yes alone emits the mutation.
+fn loop_delete_confirm_menu(ctx: &MenuContext<'_>) -> MenuBuildResult {
+    let Some(request) = ctx.app.pending_loop_delete else {
+        return MenuBuildResult::Unavailable(MenuStatusSpec {
+            id: MenuId::from(crate::menu::registry::MENU_LOOP_DELETE_CONFIRM),
+            title: t!("menu.loop_delete.title", id = "").into_owned(),
+            message: t!("menu.loop_delete.no_target").into_owned(),
+            footer_hint: Some(t!("menu.footer.esc_back").into_owned()),
+        });
+    };
+    let items = vec![
+        MenuItem::new(
+            "loop_delete.yes",
+            t!("menu.loop_delete.yes"),
+            MenuAction::Local(LocalAction::ConfirmDeleteLoop(request.clone())),
+        )
+        .with_description(t!("menu.loop_delete.yes_desc"))
+        .with_state(MenuItemState::default().destructive()),
+        MenuItem::new(
+            "loop_delete.no",
+            t!("menu.loop_delete.no"),
+            MenuAction::Close,
+        ),
+    ];
+    MenuBuildResult::Ready(MenuSpec {
+        id: MenuId::from(crate::menu::registry::MENU_LOOP_DELETE_CONFIRM),
+        title: t!("menu.loop_delete.title", id = request.loop_id.clone()).into_owned(),
+        subtitle: Some(t!("menu.loop_delete.subtitle").into_owned()),
         items,
         tabs: Vec::new(),
         searchable: false,
