@@ -1628,6 +1628,7 @@ impl Store {
         // `sessions` (a sole-row removal that should never happen — the master
         // always exists) clamps to a safe 0 rather than dangling past the end.
         self.state.sessions.remove(idx);
+        self.state.mark_committed_history_changed();
         self.state.prune_background_completion_rows();
         if idx < self.state.selected_session {
             self.state.selected_session -= 1;
@@ -10799,6 +10800,7 @@ impl Store {
                     .map(|(id, row)| ((session_id.clone(), id), row)),
             );
             let messages = projection.messages;
+            self.state.mark_committed_history_changed();
             let mut turn_anchors = projection.turn_anchors;
             let (replaced_existing, rendered_history_changed) =
                 if let Some(session) = self.find_session_mut(&session_id) {
@@ -14252,6 +14254,7 @@ impl Store {
         message.content = crate::sanitize::strip_terminal_controls(&message.content).into_owned();
         let owner = crate::model::BackgroundCompletionRow::new(session.messages.len(), &message);
         session.messages.push(message);
+        self.state.mark_committed_history_changed();
         if !message_id.is_empty() {
             self.state.background_completion_rows.insert(key, owner);
         }
@@ -14581,6 +14584,7 @@ impl Store {
     }
 
     fn commit_live_reply(&mut self, event: TurnCompletedEvent) -> Option<AppUiCommand> {
+        let mut committed_history_changed = false;
         self.state.pre_token_turns.remove(&event.session_id);
         self.discard_whitespace_only_native_segment(&event.session_id, &event.turn_id);
         self.state
@@ -14773,6 +14777,7 @@ impl Store {
                     message.reasoning_content = reasoning;
                     if !message.content.trim().is_empty() || message.reasoning_content.is_some() {
                         session.messages.push(message);
+                        committed_history_changed = true;
                     }
                     (
                         t!("status.turn_completed", title = title, seq = seq).into_owned(),
@@ -14803,6 +14808,7 @@ impl Store {
                         );
                         message.reasoning_content = reasoning;
                         session.messages.push(message);
+                        committed_history_changed = true;
                     }
                     (
                         t!("status.turn_completed", title = title, seq = seq).into_owned(),
@@ -14813,6 +14819,9 @@ impl Store {
                 }
             }
         };
+        if committed_history_changed {
+            self.state.mark_committed_history_changed();
+        }
         if let Some(reasoning) = restore_reasoning {
             self.state
                 .live_reasoning
@@ -14893,6 +14902,7 @@ impl Store {
     }
 
     fn fail_live_reply(&mut self, event: TurnErrorEvent) -> Option<AppUiCommand> {
+        let mut committed_history_changed = false;
         // Spec task-quota-exhausted-card: mark quota terminals so the status
         // bar renders the amber Quota state instead of the generic Error.
         if classify_quota_failure(&event.code, &event.message).is_some() {
@@ -15073,6 +15083,7 @@ impl Store {
                     );
                     message.reasoning_content = reasoning;
                     session.messages.push(message);
+                    committed_history_changed = true;
                     (status, true, true, None)
                 }
                 Some(live_reply) if was_finalized_by_switch => {
@@ -15090,6 +15101,7 @@ impl Store {
                     );
                     message.reasoning_content = reasoning;
                     session.messages.push(message);
+                    committed_history_changed = true;
                     session.live_reply = Some(live_reply);
                     (
                         format!("Turn error {}: {}", event.code, event.message),
@@ -15128,9 +15140,13 @@ impl Store {
                     );
                     message.reasoning_content = reasoning;
                     session.messages.push(message);
+                    committed_history_changed = true;
                     (status, true, true, None)
                 }
             };
+        if committed_history_changed {
+            self.state.mark_committed_history_changed();
+        }
         if let Some(reasoning) = restore_reasoning {
             self.state
                 .live_reasoning
@@ -16053,6 +16069,9 @@ impl Store {
                 session.messages.push(message);
                 committed = true;
             }
+        }
+        if committed {
+            self.state.mark_committed_history_changed();
         }
         // Capture the prior turn's tool activity on BOTH paths (committed
         // non-empty AND dropped empty) so a switch-dropped empty turn's chip
