@@ -2331,6 +2331,10 @@ impl Store {
                 }))
             }
             AgentsCommand::Spawn { count, prompt } => {
+                if self.state.focused_session_is_peer() {
+                    self.state.status = t!("status.peer_session_read_only").into_owned();
+                    return None;
+                }
                 if self.state.active_turn().is_some() {
                     self.state.status = t!("status.cannot_spawn_active_turn").into_owned();
                     return None;
@@ -20889,6 +20893,31 @@ mod tests {
         assert!(
             store.state.status.contains("read-only"),
             "the status explains the peer is read-only: {}",
+            store.state.status
+        );
+    }
+
+    #[test]
+    fn agents_spawn_on_peer_focused_session_is_read_only() {
+        let peer = SessionKey("local:main#peer-refactor".into());
+        let mut store = store_with_two_sessions("local:a", "local:main#peer-refactor");
+        store.state.opened_peer_sessions.insert(peer);
+        store.state.selected_session = 1;
+        store.state.target = Some("ws://example.test/ui-protocol".into());
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods_and_features(
+            [crate::model::APPUI_METHOD_AGENT_LIST],
+            [crate::model::APPUI_FEATURE_CODING_AUTONOMY_V1],
+        ));
+        store.state.composer = "/agents spawn 1 inspect logs".into();
+
+        let command = store.compose_command();
+        assert!(
+            command.is_none(),
+            "spawn must not submit a prompt turn to a read-only peer: {command:?}"
+        );
+        assert!(
+            store.state.status.contains("read-only"),
+            "spawn must use the peer read-only refusal: {}",
             store.state.status
         );
     }
@@ -43752,6 +43781,7 @@ workspace_root: None,
                     make_agent("ag-1", "completed"),
                     make_agent("ag-2", "interrupted"),
                     make_agent("ag-3", "failed"),
+                    make_agent("ag-4", "closed"),
                 ],
             }),
         }));
@@ -43765,7 +43795,7 @@ workspace_root: None,
             .state
             .session_autonomy_for(&session_id)
             .expect("mirror");
-        assert_eq!(mirror.agents.len(), 3, "the mirror keeps every agent");
+        assert_eq!(mirror.agents.len(), 4, "the mirror keeps every agent");
     }
 
     /// `ready` / `cleared` / `active` are non-terminal wire statuses the server
