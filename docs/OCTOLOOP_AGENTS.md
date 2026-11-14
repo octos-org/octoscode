@@ -137,6 +137,10 @@ octoscode outer-duty hold --project <project> --signature <sig> \
   --duties <duties> -- <your agent start command>
 ```
 
+Codex must be started as `codex --no-daemon`: by default its session lives in a
+shared background server that keeps working after the terminal program exits,
+out of the lock's reach, and `hold` refuses it.
+
 The lock **is** the authority, and your agent is death-coupled to the wrapper —
 wrapper dies ⇒ agent dies ⇒ lock `VACANT`. On Linux the wrapper is the only
 holder of the lock fd and the kernel kills the agent via `PR_SET_PDEATHSIG`; on

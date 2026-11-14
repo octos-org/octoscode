@@ -25,8 +25,13 @@
 
 ```bash
 herdr agent start inner --kind claude --pane <窗格号> -- --mcp-config <mcp 配置文件>
-herdr agent start inner --kind codex  --pane <窗格号> -- <Codex 的 -c 参数,见 §3、§4>
+herdr agent start inner --kind codex  --pane <窗格号> -- --no-daemon <Codex 的 -c 参数,见 §3、§4>
 ```
+
+Codex 要带 `--no-daemon`。不带时它的会话在共享的后台服务(`codex app-server
+daemon`)里,窗格里的程序只是客户端:关掉窗格或杀掉它,工作照常继续("Any running
+work continues"),执行的命令挂在后台服务下面;负哨守护盯着的进程也就不是真正干活
+的那个。
 
 第一次在某个目录里启动,两者都会问"信任这个目录吗",要人确认一次(之后记住)。
 Codex 有新版本时还会先问要不要升级。这些提示出现时 herdr 报 `blocked`,

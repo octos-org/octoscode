@@ -48,6 +48,10 @@ fn run_hold(args: &OuterDutyArgs, project: &std::path::Path) -> i32 {
         eprintln!("outer-duty hold: a child command after `--` is required");
         return 2;
     }
+    if let Some(refusal) = shared_server_refusal(&args.command) {
+        eprintln!("outer-duty hold: {refusal}");
+        return 2;
+    }
     let hold = match outer_duty::acquire(project) {
         Ok(hold) => hold,
         Err(err) => {
@@ -84,6 +88,37 @@ fn run_hold(args: &OuterDutyArgs, project: &std::path::Path) -> i32 {
         }
     };
     code_of(status)
+}
+
+/// Codex keeps an interactive session in its shared background server
+/// (`codex app-server daemon`) unless started with `--no-daemon`: the
+/// terminal program is only a client, and when it goes away "any running
+/// work continues" in the server, which is not a descendant of this
+/// wrapper. The lock would then be released while that work still writes
+/// (preflight 2026-11-14). Such a command is refused before the lock is
+/// taken. `exec` and `review` run in the process itself.
+fn shared_server_refusal(command: &[String]) -> Option<String> {
+    let program = std::path::Path::new(&command[0]).file_name()?.to_str()?;
+    if program != "codex" {
+        return None;
+    }
+    let args = &command[1..];
+    let in_process = |a: &String| {
+        matches!(
+            a.as_str(),
+            "--no-daemon" | "exec" | "e" | "review" | "-h" | "--help" | "-V" | "--version"
+        )
+    };
+    if args.iter().any(in_process) {
+        return None;
+    }
+    Some(format!(
+        "codex without --no-daemon runs the session in its shared background server, \
+         which keeps working after this wrapper is gone, so the duty lock cannot bind it; \
+         start it as `{} --no-daemon{}`",
+        command[0],
+        args.iter().map(|a| format!(" {a}")).collect::<String>()
+    ))
 }
 
 #[cfg(unix)]

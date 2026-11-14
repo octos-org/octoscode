@@ -464,6 +464,11 @@ fn proc_alive_with_start(pid: u32, starttime: u64) -> bool {
     let Some(rest) = stat.rsplit(')').next() else {
         return false;
     };
+    // A zombie has exited; it lingers until its parent (in a container,
+    // often a shell as PID 1) reaps it.
+    if rest.split_whitespace().next() == Some("Z") {
+        return false;
+    }
     let start: u64 = rest
         .split_whitespace()
         .nth(19)
@@ -820,6 +825,72 @@ fn duty_lock_digest_golden_and_convergence() {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// 契约 11(preflight 2026-11-14:Codex 的共享后台服务): without
+/// `--no-daemon`, Codex runs the session in a shared server that keeps
+/// working after the wrapper dies, outside the lock's reach — `hold`
+/// refuses such a command before taking the lock (exit 2, the program
+/// never runs). With `--no-daemon`, and for `codex exec`, it runs.
+#[test]
+fn duty_refuses_codex_without_no_daemon() {
+    let env = TempHome::new("codex-daemon");
+    let project = env.project();
+    let bin_dir = env.0.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let ran = env.0.join("ran");
+    let codex = bin_dir.join("codex");
+    std::fs::write(
+        &codex,
+        format!("#!/bin/sh\necho \"$*\" >> '{}'\n", ran.display()),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let hold = |extra: &[&str]| {
+        let mut cmd = duty(env.home().as_path());
+        cmd.args([
+            "hold",
+            "--project",
+            project.to_str().unwrap(),
+            "--signature",
+            "s",
+            "--duties",
+            "d",
+            "--",
+            codex.to_str().unwrap(),
+        ])
+        .args(extra);
+        cmd.output().unwrap()
+    };
+
+    let out = hold(&["--dangerously-bypass-approvals-and-sandbox"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("--no-daemon"), "{stderr}");
+    assert!(!ran.exists(), "a refused command never runs");
+    assert!(
+        !env.lock_path().exists(),
+        "a refused command never takes the lock"
+    );
+
+    let out = hold(&["--no-daemon", "--dangerously-bypass-approvals-and-sandbox"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = hold(&["exec", "hi"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        std::fs::read_to_string(&ran).unwrap(),
+        "--no-daemon --dangerously-bypass-approvals-and-sandbox\nexec hi\n"
+    );
+    assert_eq!(
+        check_state(env.home().as_path(), project.as_path()),
+        "VACANT"
+    );
 }
 
 /// End the real child by removing its sentinel and wait for VACANT.

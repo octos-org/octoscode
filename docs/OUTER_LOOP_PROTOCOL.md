@@ -123,7 +123,10 @@
   NFS 不适用。macOS 边界:可承受 wrapper 或 guardian 任一被杀,二者在
   同一瞬间均被 SIGKILL 时 agent 成为孤儿(Linux 由内核保证,无此边界);
   wrapper 亡时 macOS 杀整个进程组(含孙辈),严于 Linux;本切片 fencing 为文档层纪律,硬 gate(board-append/push
-  校验 lease)为后续条目。
+  校验 lease)为后续条目。锁只约束 wrapper 的后代:Codex 默认把会话放在共享的
+  后台服务(`codex app-server daemon`)里,终端程序只是客户端,它退出后"正在进行
+  的工作会继续",不受锁约束——外环用 Codex 时必须以 `codex --no-daemon` 启动,
+  `hold` 拒绝不带它的交互式 codex(退出码 2,不取锁)。
 - **R8 — 内环免沙箱(olp/v3 起)**:单元上的内环一律以完全访问启动——
   octoscode 的后端带 `--danger-full-access`,Claude Code 带
   `--dangerously-skip-permissions`,Codex 带
