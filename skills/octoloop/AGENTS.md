@@ -118,8 +118,9 @@ R2 诚实验证声明(verified/partially/unverified)。
 **在多机部署的单元上做内环**(本机的 `~/.octos/outer/unit.conf` 里有
 `hub=` 与 `unit=` 就是这种情况;规则见协议附录 C):
 
-- **读板**读本机的只读镜像(`<repo>/.octos/OUTER_LOOP_REVIEW.md`,由
-  `scripts/olp-board-remote.py mirror` 同步)。它是只读的,不要改它。
+- **读板**读本机的只读镜像(`<repo>/.octos/OUTER_LOOP_REVIEW.md`)。**每次
+  读板前先执行 `scripts/olp-board-remote.py mirror` 同步它**:大外环派卡后
+  会立刻唤醒你,镜像里可能还没有那张新卡。它是只读的,不要改它。
 - **ACK 不在条目下面原地写**,而是
   `scripts/olp-board-remote.py ack <N> done|wontdo|blocked <说明>`——它把
   `> 内环(<单元号>)·#N ACK(…): …` 追加到 hub 的权威黑板。退出码 75 表示
