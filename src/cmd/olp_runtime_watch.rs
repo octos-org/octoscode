@@ -761,9 +761,11 @@ impl OlpRuntimeWatchCli {
                     turn_id,
                 })
             }
-            _ => bail!(
-                "olp-runtime-watch: --ledger, --session and --turn-id go together (all three, or none for an inner loop without an octos ledger)"
-            ),
+            _ => {
+                bail!(
+                    "olp-runtime-watch: --ledger, --session and --turn-id go together (all three, or none for an inner loop without an octos ledger)"
+                )
+            }
         };
         if self.task.iter().all(|t| t.trim().is_empty()) {
             bail!("olp-runtime-watch: --task requires at least one non-empty entry");
