@@ -27,8 +27,8 @@ octos serve,如 glm/kimi 档)在你的仓库里干活——读黑板、执行、
 都要过两双眼睛,这是整套系统的安全底线(纪律细节见机制篇(下))。
 
 **命名**:OLP 是协议名(Outer-Loop Protocol,文档与 ACK 定式沿用);
-**OctoLoop** 是产品名——用户视角的一键化封装(`.claude/skills/octoloop`
-三模式入口)。能力全景见 `docs/OCTOLOOP_FEATURES.md`。
+**OctoLoop** 是产品名——用户视角的一键化封装(`skills/octoloop/AGENTS.md`
+三模式入口,对所有 agent 通用)。能力全景见 `docs/OCTOLOOP_FEATURES.md`。
 
 ## 2. 安装与引导
 
@@ -65,9 +65,22 @@ octoscode --stdio-command 'octos serve --stdio --solo'
 
 ## 3. 三模式上手
 
-OctoLoop 的一键入口是 `.claude/skills/octoloop` 这张 skill 卡(即本仓库
-自带的 `/octoloop` 命令)。三个模式,**先选身份再动手**;权威规程在仓库
-文档,先读再动,不要凭记忆操作。
+OctoLoop 的一键入口是 `skills/octoloop/AGENTS.md`:一份纯 Markdown 的规程,
+对任何 agent 通用。三个模式,**先选身份再动手**;权威规程在仓库文档,先读
+再动,不要凭记忆操作。
+
+怎么用上它:
+
+| 场景 | 做法 |
+|---|---|
+| 在 octoscode 仓库里用 Claude Code | 不用装,`/octoloop` 直接可用(`.claude/skills/octoloop/SKILL.md` 是指向正文的薄卡) |
+| 在别的项目里用 Claude Code | 在 octoscode 仓库里执行一次 `scripts/olp-install-skill.sh`,之后任何项目都有 `/octoloop` |
+| 其他 agent(Codex、octos 内环等) | 让它读 `skills/octoloop/AGENTS.md`;或用 `scripts/olp-install-skill.sh --to <该 agent 读取指令的文件>` 装一张薄卡 |
+
+装出来的薄卡**不含固定路径**:它按"环境变量 `OCTOSCODE_HOME` → 文件
+`~/.octos/outer/octoscode-home` → 当前项目"的顺序找到 octoscode 仓库,再去读
+正文。正文随 `git pull` 更新,薄卡不用重装;仓库搬家后在新位置重跑一次安装
+脚本即可。
 
 ### 3.1 模式 init — 铺脚手架(首次/新机器)
 
@@ -226,11 +239,11 @@ goal 达成后**必须显式收口**,否则变僵尸拦截后续 goal:
 |---|---|---|
 | Linux | 全功率 | 全部能力含 outer-duty 内核锁、bwrap 沙箱档 |
 | WSL2 | 等同 Linux | prctl//proc/bwrap/bash/herdr 全在,实战结论直接适用 |
-| macOS | 可用,两缺口 | ①outer-duty 锁不可用(Linux-only,多外环退回值班簿纪律层+operator 裁决);②bwrap 档为 Linux 特性,权限档 1-4 沙箱语义不成立;herdr 未验证,降级 tmux(`--` 分隔坑见 BOOT) |
+| macOS | 可用,一缺口 | outer-duty 锁可用(经守护进程实现死亡耦合);bwrap 档为 Linux 特性,权限档 1-4 沙箱语义不成立;herdr 未验证,降级 tmux(`--` 分隔坑见 BOOT) |
 | Windows 原生 | 不推荐 | octoscode 构建未完整验证(CI windows job backlog 在案);bash 脚本/herdr/tmux 缺失,外环驱动观测通道瘫;活 serve 的 goal archive/reopen 一律 fail closed;请用 WSL2 |
 
-注:①outer-duty 锁的权威语义见协议 R7(守护式死亡耦合,Linux-only,
-非 Linux unsupported 退出 2,Windows LockFileEx 另立条目);②值班簿
+注:①outer-duty 锁的权威语义见协议 R7(守护式死亡耦合,Linux 与 macOS,
+其他平台 unsupported 退出 2,Windows LockFileEx 另立条目);②值班簿
 在任何平台都只是提示性目录,不构成所有权;③平台能力变化时先改
 协议/模块 doc,本矩阵随后同步——本表不发明新承诺。
 
@@ -284,14 +297,14 @@ OctoLoop 把一个长程任务拆给两圈 agent 加一个人,三者模型档位
   可执行文件、`"args": ["olp-mcp-serve"]`,新会话生效)。
 - **`ask_outer(question, context, tried)`**:turn 内同步发问。信箱目录
   `~/.octos/outer/mcp/` 下 `questions/` → `answers/` → `consumed/`(取答
-  后归档)。**90s 超时降级**:超时返回降级指引而非卡死 turn。
+  后归档)。**50s 超时降级**:超时返回降级指引而非卡死 turn。
 - **`report_blocked(reason, needs)`**:直接把阻塞直报外环看板,不经
   信箱往返。
 - **两条防滥用闸**:每进程限 3 次问询;`tried` 参数必填(先说清自己
   试过什么)——防止内环把思考外包给强模型。
 - **审计**:全程记入 `OUTER_LOOP_MCP.md`,署名 `MCP(ask_outer)`。
 
-体感:内环遇分歧 90 秒内拿到外环(人工或外环 agent)的答复;超时则
+体感:内环遇分歧 50 秒内拿到外环(人工或外环 agent)的答复;超时则
 拿到"自行降级处理"的指引,turn 不被阻塞。
 
 ## 2. 核心纪律 R1–R6

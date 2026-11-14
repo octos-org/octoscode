@@ -166,6 +166,14 @@ impl Drop for Sandbox {
     }
 }
 
+/// #12c: chmod +x for PATH-stub scripts (portable unix mode set).
+fn make_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perm = std::fs::metadata(path).unwrap().permissions();
+    perm.set_mode(0o755);
+    std::fs::set_permissions(path, perm).unwrap();
+}
+
 fn copy_dir(src: &Path, dst: &Path) {
     std::fs::create_dir_all(dst).unwrap();
     for entry in std::fs::read_dir(src).unwrap() {
@@ -556,6 +564,312 @@ fn olp_evo_harvest_missing_ts_events_dedup_across_reruns() {
     let out2 = sb.run(false);
     assert!(out2.status.success());
     assert_eq!(sb.evo_count(), 1, "ts-less event must dedup on rerun");
+}
+
+/// #12c: GNU capability preflight. With no GNU stat -c / realpath -m
+/// reachable and no usable brew, the script must exit 2 BEFORE any
+/// realpath/sha256sum use, state mkdir, or board write, with actionable
+/// guidance. With GNU capability reachable (PATH or brew discovery), a
+/// DIRECT launch — no scripts/verify.sh PATH fixup — must succeed.
+#[test]
+fn olp_evo_harvest_fails_before_writes_when_gnu_tools_missing() {
+    if !ensure_gnu_tooling_or_skip() {
+        panic!("host lacks required tooling; see stderr");
+    }
+    let sb = Sandbox::new("gnu-miss");
+    let board_text = "### 1. A\n\nACK(blocked): x\n";
+    std::fs::write(sb.repo.join(".octos/OUTER_LOOP_REVIEW.md"), board_text).unwrap();
+
+    // --- negative A: all-platform validation, GNU shapes rejected. The
+    // uname=Linux stub bypasses Darwin discovery entirely, so the probe
+    // result alone decides — deterministic on every host.
+    let stub = sb.root.join("stubs");
+    std::fs::create_dir_all(&stub).unwrap();
+    for (name, body) in [
+        (
+            "stat",
+            "#!/bin/sh\n[ \"$1\" = \"-c\" ] && exit 1\nexec /usr/bin/stat \"$@\"\n",
+        ),
+        (
+            "realpath",
+            "#!/bin/sh\n[ \"$1\" = \"-m\" ] && exit 1\nexec /usr/bin/realpath \"$@\"\n",
+        ),
+        ("uname", "#!/bin/sh\necho Darwin\n"),
+    ] {
+        let p = stub.join(name);
+        std::fs::write(&p, body).unwrap();
+        make_executable(&p);
+    }
+    std::fs::write(stub.join("uname"), "#!/bin/sh\necho Linux\n").unwrap();
+    make_executable(&stub.join("uname"));
+    let run_restricted = |stub_dir: &Path| {
+        Command::new("bash")
+            .arg(script())
+            .arg(&sb.repo)
+            .env("PATH", format!("{}:/usr/bin:/bin", stub_dir.display()))
+            .env("OLP_EVO_STATE", &sb.state_root)
+            .env("OLP_EVO_EVENTS", "")
+            .env("OLP_EVO_MCP_BOARD", "/nonexistent")
+            .output()
+            .unwrap()
+    };
+    let out = run_restricted(&stub);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "missing GNU tools must exit 2: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("coreutils"), "guidance names the fix: {err}");
+    assert!(err.contains("verify.sh") && err.contains("brew"), "{err}");
+    assert!(
+        find_files(&sb.state_root).is_empty(),
+        "zero side effects: state root must stay empty"
+    );
+    assert_eq!(
+        std::fs::read_dir(&sb.state_root)
+            .map(|d| d.count())
+            .unwrap_or(0),
+        0,
+        "state root must contain no entries at all (incl. empty dirs)"
+    );
+    assert!(!sb.evo_board().exists(), "evo board must not be created");
+    assert_eq!(
+        std::fs::read_to_string(sb.repo.join(".octos/OUTER_LOOP_REVIEW.md")).unwrap(),
+        board_text,
+        "review board untouched"
+    );
+
+    // --- negative B: ONLY flock missing (everything else capable) — the
+    // all-platform final validation must still fail BEFORE any write.
+    let ok = sb.root.join("stubs-ok");
+    std::fs::create_dir_all(&ok).unwrap();
+    // #7: SEALED PATH — no host /usr/bin:/bin fallback (a Linux host
+    // would satisfy flock from /usr/bin and the premise would not hold).
+    // General-purpose tools the script uses outside the probe, resolved
+    // from the host BEFORE the run (Linux /usr/bin is already GNU; on
+    // Darwin fall back to the brew gnubin dir the probe would discover).
+    let gnu_src = if Path::new("/opt/homebrew/opt/coreutils/libexec/gnubin").is_dir() {
+        PathBuf::from("/opt/homebrew/opt/coreutils/libexec/gnubin")
+    } else {
+        PathBuf::from("/usr/bin")
+    };
+    for name in [
+        "date", "dd", "od", "tr", "wc", "cut", "mkdir", "cat", "rm", "cp",
+    ] {
+        std::fs::copy(gnu_src.join(name), ok.join(name)).unwrap();
+        make_executable(&ok.join(name));
+    }
+    for (name, body) in [
+        (
+            "stat",
+            "#!/bin/sh\nif [ \"$1\" = \"-c\" ]; then echo 0; exit 0; fi\nexec /usr/bin/stat \"$@\"\n",
+        ),
+        (
+            "realpath",
+            "#!/bin/sh\nif [ \"$1\" = \"-m\" ]; then echo /dev/null; exit 0; fi\nexec /usr/bin/realpath \"$@\"\n",
+        ),
+        (
+            "sha256sum",
+            "#!/bin/sh\necho 0000000000000000000000000000000000000000000000000000000000000000  -\n",
+        ),
+        ("uname", "#!/bin/sh\necho Linux\n"),
+        ("python3", "#!/bin/sh\nexec /usr/bin/python3 \"$@\"\n"),
+    ] {
+        let p = ok.join(name);
+        std::fs::write(&p, body).unwrap();
+        make_executable(&p);
+    }
+    // Fixture-internal sanity: the premise must hold inside the sealed
+    // PATH — flock absent, every other capability present.
+    let sealed_path = ok.display().to_string();
+    let sealed = Command::new("/bin/sh")
+        .arg("-c")
+        .arg("command -v flock; echo ---; stat -c '%s' /dev/null && realpath -m /dev/null && sha256sum /dev/null && python3 -X utf8 -c 'import sys'")
+        .env("PATH", &sealed_path)
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&sealed.stdout).starts_with('/'),
+        "flock must be absent in the sealed PATH"
+    );
+    assert!(
+        sealed.status.success(),
+        "all non-flock capabilities must work in the sealed PATH: {}",
+        String::from_utf8_lossy(&sealed.stderr)
+    );
+    // flock deliberately NOT provided; the uname=Linux stub means no
+    // Darwin discovery can rescue the run. Launch via absolute /bin/bash
+    // so the script itself needs no PATH lookup.
+    let out = Command::new("/bin/bash")
+        .arg(script())
+        .arg(&sb.repo)
+        .env("PATH", &sealed_path)
+        .env("OLP_EVO_STATE", &sb.state_root)
+        .env("OLP_EVO_EVENTS", "")
+        .env("OLP_EVO_MCP_BOARD", "/nonexistent")
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "missing flock must exit 2 before writes: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("flock"), "guidance names flock: {err}");
+    assert!(
+        find_files(&sb.state_root).is_empty(),
+        "zero side effects also on missing-flock path"
+    );
+    assert_eq!(
+        std::fs::read_dir(&sb.state_root)
+            .map(|d| d.count())
+            .unwrap_or(0),
+        0,
+        "missing-flock path must create no entries at all (incl. empty dirs)"
+    );
+
+    // --- positive: direct launch auto-discovers GNU capability ---
+    let gnu_available = cfg!(target_os = "linux")
+        || Path::new("/opt/homebrew/opt/coreutils/libexec/gnubin").is_dir()
+        || Path::new("/usr/local/opt/coreutils/libexec/gnubin").is_dir();
+    if !gnu_available {
+        eprintln!("SKIP (explicit): no GNU coreutils installed; discovery half not runnable");
+        return;
+    }
+    let out = Command::new("bash")
+        .arg(script())
+        .arg(&sb.repo)
+        // No scripts/verify.sh PATH fixup: BSD stat/realpath resolve first
+        // and the script must discover gnubin via brew itself.
+        .env("PATH", "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin")
+        .env("OLP_EVO_STATE", &sb.state_root)
+        .env("OLP_EVO_EVENTS", "")
+        .env("OLP_EVO_MCP_BOARD", "/nonexistent")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "direct launch must auto-discover GNU tools: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(sb.evo_count(), 1, "the trigger still lands a card");
+}
+
+/// #12c: /bin/bash on Darwin is Bash 3.2, which does not support the
+/// `$'\uff08'` escape the old reconcile used. A fullwidth EVO heading
+/// must still reconcile NEXT_ID (state lost after a crash) with no
+/// non-numeric warning and no duplicate cards.
+#[test]
+fn olp_evo_harvest_bash32_parses_fullwidth_evo_heading_and_reconciles() {
+    if !ensure_gnu_tooling_or_skip() {
+        panic!("host lacks required tooling; see stderr");
+    }
+    let sb = Sandbox::new("bash32");
+    let review = sb.repo.join(".octos/OUTER_LOOP_REVIEW.md");
+    std::fs::write(&review, "### 12. A\n\nACK(blocked): fresh trigger\n").unwrap();
+    // Crash aftermath: the board holds EVO-0007 (fullwidth heading) but
+    // the state file was never committed — reconcile must recover 8.
+    std::fs::write(
+        sb.evo_board(),
+        "### EVO-0007（2026-09-25T00:00:00Z，harvest）\n\
+         trigger: ack_blocked\n\
+         source: review old\n\
+         identity: board:old#12#blocked#seed\n\
+         envelope: line=3 offset=0 ts=2026-09-25T00:00:00Z\n\
+         symptom: seeded\n\n",
+    )
+    .unwrap();
+    let run = || {
+        Command::new("/bin/bash")
+            .arg(script())
+            .arg(&sb.repo)
+            .env("OLP_EVO_STATE", &sb.state_root)
+            .env("OLP_EVO_EVENTS", "")
+            .env("OLP_EVO_MCP_BOARD", "/nonexistent")
+            .output()
+            .unwrap()
+    };
+    let out1 = run();
+    assert!(
+        out1.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
+    let err = String::from_utf8_lossy(&out1.stderr);
+    assert!(!err.contains("non-numeric"), "fullwidth id parsed: {err}");
+    let lines = read_lines(sb.evo_board());
+    assert!(
+        lines.iter().any(|l| l.starts_with("### EVO-0008")),
+        "new card must take reconciled next_id 8, headings: {:?}",
+        lines
+            .iter()
+            .filter(|l| l.starts_with("### EVO-"))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|l| l.starts_with("### EVO-0007"))
+            .count(),
+        1,
+        "seeded card not duplicated"
+    );
+    let out2 = run();
+    assert!(out2.status.success());
+    assert_eq!(sb.evo_count(), 2, "rerun adds zero cards");
+}
+
+/// #12c: under LC_ALL=C the old ${s:0:200} truncation counted BYTES and
+/// split a UTF-8 character mid-sequence, emitting an EVOLUTION.md that does
+/// not decode as UTF-8. The symptom must be cut by Unicode characters
+/// regardless of locale, and a rerun must add zero cards.
+#[test]
+fn olp_evo_harvest_lc_all_c_long_chinese_symptom_truncates_by_characters() {
+    let sb = Sandbox::new("lc-c");
+    let long_zh = "中文采集边界测试".repeat(80);
+    std::fs::write(
+        sb.repo.join(".octos/OUTER_LOOP_REVIEW.md"),
+        format!("### 1. UTF-8 cut probe\n\nACK(blocked): x{long_zh}\n"),
+    )
+    .unwrap();
+    let hostile_env: &[(&str, &str)] = &[
+        ("LC_ALL", "C"),
+        // #12c: hostile Python env must not restore locale-dependent
+        // argv/stdout encoding — the script pins PYTHONUTF8=1 (and -X utf8
+        // in char_prefix) against these.
+        ("PYTHONUTF8", "0"),
+        ("PYTHONCOERCE_C_LOCALE", "0"),
+    ];
+    let out1 = sb.run_env(hostile_env);
+    assert!(
+        out1.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out1.stderr)
+    );
+    assert_eq!(sb.evo_count(), 1, "long Chinese ACK must harvest one card");
+    let board_bytes = std::fs::read(sb.evo_board()).unwrap();
+    let board_text =
+        String::from_utf8(board_bytes).expect("EVOLUTION.md must decode as UTF-8 under LC_ALL=C");
+    let symptom = board_text
+        .lines()
+        .find(|l| l.starts_with("symptom: "))
+        .expect("symptom line");
+    let body = &symptom["symptom: ".len()..];
+    assert!(
+        body.chars().count() <= 200,
+        "symptom must be at most 200 characters, got {}",
+        body.chars().count()
+    );
+    assert!(
+        body.contains('中'),
+        "symptom keeps whole characters: {body}"
+    );
+    let out2 = sb.run_env(hostile_env);
+    assert!(out2.status.success());
+    assert_eq!(sb.evo_count(), 1, "second run must add zero cards");
 }
 
 /// #41-r5a ④: a non-numeric EVO heading (### EVO-draft) on the board must
@@ -1002,6 +1316,39 @@ fn olp_evo_harvest_mcp_partial_line_no_fire_until_newline() {
     assert_eq!(sb.evo_count(), 2);
 }
 
+/// A timeout line carries no `reason=` field ("id=<id> no answer in 90s").
+/// The reason is the text after the id — not the line with its first six
+/// characters cut off, which left half of the id in the retro title.
+#[test]
+fn olp_evo_harvest_mcp_timeout_reason_is_the_text_after_the_id() {
+    let sb = Sandbox::new("timeout-reason");
+    std::fs::write(
+        sb.repo.join(".octos/OUTER_LOOP_REVIEW.md"),
+        "### 1. base\n\nnothing\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &sb.mcp_path,
+        "- 2026-11-13 11:08:36 MCP(ask_outer) timeout: id=0a06174e2d90 no answer in 90s\n",
+    )
+    .unwrap();
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = std::fs::read_to_string(sb.evo_board()).unwrap_or_default();
+    let symptom = text
+        .lines()
+        .find(|l| l.starts_with("symptom: "))
+        .expect("card");
+    assert_eq!(
+        symptom,
+        "symptom: kind=timeout id=0a06174e2d90 reason=no answer in 90s"
+    );
+}
+
 /// #41-r5b ⑧: the MCP symptom carries reason= up to the NEXT key token
 /// (not just the first word).
 #[test]
@@ -1364,4 +1711,124 @@ fn find_files(dir: &Path) -> Vec<PathBuf> {
     }
     out.sort();
     out
+}
+
+/// Scenario: 多机部署的行首定式落卡并按 #N 归属
+#[test]
+fn olp_evo_harvest_cluster_forms_attach_by_entry_number() {
+    let sb = Sandbox::new("cluster-forms");
+    // In a multi-machine deployment these lines are appended at the END of
+    // the board, physically under the last entry (#213 here).
+    std::fs::write(
+        sb.repo.join(".octos/OUTER_LOOP_REVIEW.md"),
+        "### 212. 一张卡(2026-11-13,外环(hub))\nunit: m07\n\n\
+         ### 213. 另一张卡(2026-11-13,外环(hub))\nunit: m08\n\n\
+         > 内环(m07)·#212 ACK(blocked): 等上游修复\n\
+         > 内环(m08)·ACK(wontdo): #213(2026-11-13): 与 #212 重复\n\
+         > 内环(m07)·#212 ACK(done): 完成不触发\n\
+         > 内环(m07)·#212 checkpoint: 不是 ACK\n\
+         > 外环(hub)·打回(#212): 缺测试\n\
+         > 外环(hub)·采认(#213): 通过不触发\n\
+         > 外环(hub)·搁置(#212) 至 2026-12-01: 不触发\n\
+         > 单元(m07)·负哨(#212): turn_error turn=t1 seq=9\n\
+         > 单元(m07)·本地复验通过(#212): task/212 @ abc 复验 m07-ver\n\
+         正文里提到 外环(hub)·打回(#212) 与 单元(m07)·负哨(#212) 不触发\n",
+    )
+    .unwrap();
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines = read_lines(sb.evo_board());
+    let field = |name: &str| -> Vec<String> {
+        lines
+            .iter()
+            .filter(|l| l.starts_with(name))
+            .map(|l| l[name.len()..].to_string())
+            .collect()
+    };
+    assert_eq!(
+        field("trigger: "),
+        vec!["ack_blocked", "ack_wontdo", "returned", "unit_alert"]
+    );
+    // Each card names the entry its line refers to — not #213, the heading
+    // the lines physically sit under.
+    let identities = field("identity: ");
+    for (identity, want) in identities.iter().zip([
+        "#212#blocked#",
+        "#213#wontdo#",
+        "#212#returned#",
+        "#212#alert#",
+    ]) {
+        assert!(identity.contains(want), "{identity} should contain {want}");
+    }
+    let symptoms = field("symptom: ");
+    assert!(symptoms[0].contains("等上游修复"), "{symptoms:?}");
+    assert!(
+        symptoms[3].contains("turn_error turn=t1 seq=9"),
+        "{symptoms:?}"
+    );
+
+    // A rerun adds nothing.
+    assert!(sb.run(false).status.success());
+    assert_eq!(sb.evo_count(), 4);
+}
+
+/// Scenario: 单元转发来的 MCP 审计行落成既有的 MCP 类卡
+#[test]
+fn olp_evo_harvest_unit_mcp_lines_become_mcp_cards() {
+    let sb = Sandbox::new("unit-mcp");
+    std::fs::write(
+        sb.repo.join(".octos/OUTER_LOOP_REVIEW.md"),
+        "### 212. 一张卡\nunit: m07\n\n\
+         > 单元(m07)·- 2026-11-13 03:00:00 MCP(ask_outer) ask: id=ab12cd34ef56 question=换设备还是等\n\
+         > 单元(m07)·- 2026-11-13 03:01:30 MCP(ask_outer) timeout: id=ab12cd34ef56 no answer in 90s\n\
+         > 单元(m07)·- 2026-11-13 03:02:00 MCP(ask_outer) blocked: reason=hdc 连不上设备 needs=换设备\n\
+         > 单元(m09)·- 2026-11-13 03:05:00 MCP(ask_outer) blocked: reason=hdc 连不上设备 needs=重启 hub\n\
+         > 单元(m07)·- 2026-11-13 03:06:00 MCP(ask_outer) answer: id=ffff00001111 answered (12 chars)\n\
+         - 2026-11-13 03:07:00 MCP(ask_outer) blocked: reason=未署名的行不在活板上采集\n",
+    )
+    .unwrap();
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lines = read_lines(sb.evo_board());
+    let field = |name: &str| -> Vec<String> {
+        lines
+            .iter()
+            .filter(|l| l.starts_with(name))
+            .map(|l| l[name.len()..].to_string())
+            .collect()
+    };
+    assert_eq!(
+        field("trigger: "),
+        vec!["ask_outer_timeout", "report_blocked", "report_blocked"],
+        "ask and answer lines are not friction"
+    );
+    let symptoms = field("symptom: ");
+    assert_eq!(
+        symptoms[1],
+        "kind=blocked id=- unit=m07 reason=hdc 连不上设备"
+    );
+    assert_eq!(
+        symptoms[2],
+        "kind=blocked id=- unit=m09 reason=hdc 连不上设备"
+    );
+    assert_eq!(
+        symptoms[0], "kind=timeout id=ab12cd34ef56 unit=m07 reason=no answer in 90s",
+        "a timeout line has no reason= field; the id must not leak into the reason"
+    );
+    let identities = field("identity: ");
+    assert!(
+        identities[1].contains("#unit:m07#mcp_blocked#"),
+        "{identities:?}"
+    );
+
+    assert!(sb.run(false).status.success());
+    assert_eq!(sb.evo_count(), 3, "a rerun adds nothing");
 }

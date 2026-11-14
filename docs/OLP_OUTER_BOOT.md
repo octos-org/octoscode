@@ -39,10 +39,14 @@
   ```bash
   scripts/olp-board-append.sh <板路径>       # 正文从 stdin 喂(仓库发行版;本机自建版亦可)
   ```
-- 编号:先 `grep -oE '^### [0-9]+' <板> | tail -1` 取当前最大号,+1 使用。
+- 编号:由助手在锁内分配——标题写 `### {N}. <标题>`,助手取板上最大号 +1
+  填入并打印到 stdout(正文里的 `{N}` 一并替换)。可能重发的写入加
+  `--key <自然键>`,同一个键不会追加第二次。不要自己 grep 最大号再 +1:
+  取号与写入之间没有锁,多个写入方会撞号。
 - 条目自包含:背景、精确文件/行号、修法方向、验收标准、分支名(基于
   main)、预算档(修订 5-10M / 切片 10-20M / 战役 30-50M),并写明
-  "只 commit 不 push,主审复验后代推"。
+  "只 commit 不 push,主审复验后代推"。多机部署下这句读作"只推到 hub 的
+  本地仓库,不推 GitHub"(协议附录 C)。
 
 ## 2. 唤醒与纠偏(下行)
 
@@ -75,12 +79,14 @@ octos goal status --goal <id> / octos peer list           # 结构面(项目目�
 
 上岗即以 `octoscode outer-duty hold --project <项目> --signature <署名>
 --duties <职责> -- <agent 启动命令>` 包裹启动:锁即 authority,**守护式
-死亡耦合**——wrapper 是唯一锁 fd 持有者,agent 经 PR_SET_PDEATHSIG
-(SIGKILL) 与 wrapper 同死(wrapper 亡⇒agent 必亡⇒锁 VACANT);
+死亡耦合**——wrapper 亡⇒agent 必亡⇒锁 VACANT(Linux:wrapper 是唯一
+锁 fd 持有者,agent 经 PR_SET_PDEATHSIG(SIGKILL) 与 wrapper 同死;
+macOS:wrapper 与 agent 之间的守护进程持锁并在 wrapper 亡时杀掉 agent
+进程组后才放锁);
 `outer-duty check --project <项目>` 仅观察(stdout 恰一态
 VACANT|HELD|ERROR);非 holder 只读批注;活锁接管只归 operator(终止
 旧 holder 后再 acquire),无 agent 自助强夺;metadata sidecar 与 TTL 仅
-诊断绝不参与裁定。Linux-only(flock+PDEATHSIG;非 Linux unsupported;Windows LockFileEx 另立条目),
+诊断绝不参与裁定。Linux 与 macOS(单机 flock;其他平台 unsupported;Windows LockFileEx 另立条目),
 NFS 不适用。本切片 fencing 为文档层纪律;硬 gate(写入面校验 lease)
 为后续条目。
 
@@ -161,6 +167,31 @@ R2 记档(声称与复验不符的诚实记录)行示例:
 两式均为**行首定式**,正文提及不算;本行形同时供采集哨识别(进化环
 阶段 1 起收入 `override`/`r2_record` 触发)。
 
+多机部署时采集哨另外识别三种追加在板尾、按 `#N` 归属的行(只在 hub 上采集):
+
+```
+> 内环(m07)·#212 ACK(blocked): <原因>          → ack_blocked(wontdo 同理)
+> 外环(claude)·打回(#212): <原因>               → returned
+> 单元(m07)·负哨(#212): turn_error turn=… seq=9  → unit_alert
+```
+
+这些卡是集群的实测证据:哪类阻塞反复出现、哪些活被打回、哪些单元在报错或
+空转。retro 按症状分组,不按单元和卡号分组。
+
+**收件箱定式**(`scripts/olp-inbox.py` 识别;按 `#N` 归属,写在板上任何
+位置都算;其中打回会被采集哨收成 `returned` 卡,采认与搁置不触发):
+
+```
+> 外环(claude)·采认(#41):<复验证据>
+> 外环(claude)·打回(#41):<原因;整改内容另立新条目>
+> 外环(claude)·搁置(#41) 至 2026-12-01:<等什么>
+```
+
+`olp-inbox.py <板>` 把条目分成收件箱(等外环决定)、进行中(等内环 ACK)、
+搁置、已了结。上岗与每轮开始时先看收件箱,不必从头扫板。复验通过必须落
+采认行——没有它,这张卡会一直留在收件箱。搁置只在它是该条目最新的一件事
+时有效:内环之后又 ACK 或单元又推送,条目自动回到收件箱。
+
 **进化环工具面(阶段 2/3)**
 - 采集挂节拍:`scripts/olp-watch-board.sh <板> <token> --harvest <repo>`——命中
   即 `olp-evo-harvest.sh`,打 `BOARD-SIGNAL` 后推进基线继续监视;与手跑
@@ -211,3 +242,16 @@ R2 记档(声称与复验不符的诚实记录)行示例:
 - master-sentry(自动续拍):旗标开+空闲即注入续拍令,3 次无板面进展
   升级外环并自停;哨兵管节拍,外环管焦点(升级时给定向任务,勿泛令)。
 - 引擎 turn 结束钩子落地后,哨兵降级为兜底。
+
+**黑板归档**
+- 板只追加,条目多了内环每轮读全板的成本上升。持锁外环用
+  `scripts/olp-board-archive.py <板> [--keep N] [--dry-run]` 把已闭环条目
+  (外环已采认、打回或改判作废;没有判词行的板则看最后一条 ACK 是 done
+  或 wontdo)的正文移到 `<板名>.archive.md`,板上留**编号桩**:标题 +
+  给机器读的行(ACK、`unit:`、判词与登记、去重标记)+ 归档标记。编号不断档,`#N` 的引用仍能
+  在板上找到。最近 N 个条目(默认 10)原样保留。
+- 归档前先跑一次进化环采集:正文里的改判/R2 记档行归档后不在板上。
+- 在内环空闲时运行:内环的原地 ACK 不走 flock,归档期间板被改动时工具
+  以退出码 4 放弃替换,重跑即可。
+- 归档后板的行数变少:常驻观测哨自己重取基线,一击哨重新挂。
+- 归档文件只供审计,不可执行(与历史区同)。

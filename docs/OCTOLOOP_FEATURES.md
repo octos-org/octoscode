@@ -36,6 +36,19 @@
   索骥。缺省:master 复验必查。体感:R2 复验命令可直接对着回执跑。
 - **写策略三档 + 逃生口**:workspace 只读/受写/host 三档 + 显式逃生
   口,越权写被拒。缺省:workspace。体感:误写仓库外文件直接报错。
+- **黑板收件箱**:`scripts/olp-inbox.py <板>` 从黑板算出每张卡等谁——
+  收件箱(等外环决定)、进行中(等内环 ACK)、搁置、已了结;状态不存进
+  黑板。配套三个判词定式:采认、打回、搁置。缺省状态:手动运行。用户
+  怎么看到:外环每轮先看收件箱,不必从头扫板;没有采认行的卡留在收件箱。
+- **写板分配编号与归档**:`olp-board-append.sh` 在锁内给 `### {N}.` 分配
+  编号,`--key` 让重发不重复;`olp-board-archive.py` 把已闭环条目移到
+  归档文件并留编号桩。缺省状态:旧写法(自己写编号)仍然接受。用户怎么
+  看到:多个写入方不再撞号;长板变短而 `#N` 引用仍可查。
+- **多机部署(hub + 单元)**:一台 hub 放黑板与本地 git 仓库、跑持锁的
+  大外环,多台单元各跑一个内环。单元登记与心跳、一步派卡、单元只能推
+  带复验记录的任务分支、远程写板与离线队列、提问往返、运行时守护与
+  负哨、推 GitHub 前的采认闸门。缺省状态:不配置就不生效,单机行为
+  不变。用户怎么看到:见 `docs/OLP_CLUSTER.md`;协议附录 C 是规则。
 - **进化环(阶段 0–3)**:三源采集哨(`olp-evo-harvest.sh` 从活板
   ACK、events.jsonl、MCP 审计板增量识别内环摩擦,identity 去重、
   字节游标、崩溃一致)落症状卡,retro 脚本(`olp-evo-retro.sh`)按
@@ -47,13 +60,16 @@
   伪 verified 行,非 KPI)、监视器 `--harvest` 常驻采集、FLAW 直出契约骨架
   `olp-evo-spec-skeleton.sh`、索引 `olp-evo-index.sh`;octos 侧新增
   `fallback_switch`/`malformed_exhausted` 事件(PR #2257)。
+  多机部署:采集与 retro 只在 hub 上运行——配置了 hub 主机名
+  (`OLP_HUB_HOST`,或 `~/.octos/outer/hub-host` 文件)后,其他机器上
+  的非 dry-run 调用在任何写入前以退出码 3 拒绝;未配置时为单机,行为不变。
 
 ## 通信与信道
 
 - **纯 Rust MCP 第五信道**(#31):`octoscode olp-mcp-serve` 子命令,
-  turn 内同步问外环(ask_outer/report_blocked 两工具、90s 超时降级、
+  turn 内同步问外环(ask_outer/report_blocked 两工具、50s 超时降级、
   每进程限 3 次 + tried 必填、board 审计、取答归档)。缺省:profile
-  mcp_servers 挂载即开。体感:内环遇分歧 90s 内拿到外环人工作答,
+  mcp_servers 挂载即开。体感:内环遇分歧 50s 内拿到外环人工作答,
   超时得降级指引不卡 turn。
 - **startup --prompt**(#30):Omarchy 默认 Agent 唤起即用;引导完成
   后恰好一次自动 turn/start(派发前重连补发/派发后不重发)。

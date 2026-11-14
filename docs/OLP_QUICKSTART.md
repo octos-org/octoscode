@@ -23,8 +23,9 @@
 外环,每个 commit 都过两双眼睛。
 
 **命名落地**:OLP = 协议名(Outer-Loop Protocol,文档/ACK 定式沿用);
-**OctoLoop** = 产品名——用户视角的一键化封装(`.claude/skills/octoloop`
-三模式入口:init/outer/inner;能力全景见 `docs/OCTOLOOP_FEATURES.md`)。
+**OctoLoop** = 产品名——用户视角的一键化封装(`skills/octoloop/AGENTS.md`
+三模式入口:init/outer/inner,对所有 agent 通用;别的项目里用
+`scripts/olp-install-skill.sh` 安装;能力全景见 `docs/OCTOLOOP_FEATURES.md`)。
 
 ## 1. 环境依赖清单
 

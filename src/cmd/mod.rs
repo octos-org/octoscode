@@ -13,7 +13,12 @@ pub mod doctor;
 pub mod github;
 pub mod install_method;
 pub mod olp_mcp;
-#[cfg(target_os = "linux")]
+// File identity uses dev/ino (`std::os::unix`); the OctoLoop runtime guard is
+// Unix-only, so the module is not built elsewhere.
+pub mod olp_runtime_watch;
+#[cfg(unix)]
+pub mod olp_runtime_watch_ledger;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod outer_duty;
 pub mod update;
 
@@ -22,10 +27,18 @@ use eyre::Result;
 
 use config::{ConfigArgs, ConfigCli};
 use doctor::DoctorArgs;
+use olp_runtime_watch::{OlpRuntimeWatchArgs, OlpRuntimeWatchCli};
 use update::UpdateArgs;
 
 /// Recognized subcommand names. Kept tiny so we never shadow a flag.
-const SUBCOMMANDS: &[&str] = &["update", "doctor", "config", "olp-mcp-serve", "outer-duty"];
+const SUBCOMMANDS: &[&str] = &[
+    "update",
+    "doctor",
+    "config",
+    "olp-mcp-serve",
+    "olp-runtime-watch",
+    "outer-duty",
+];
 
 /// Inspect `argv` (excluding the program name) for a leading subcommand. If the
 /// first non-flag positional is `update`/`doctor`, run it and return its exit
@@ -45,7 +58,8 @@ where
         Some(Route::Doctor(args)) => Ok(Some(doctor::run(args)?)),
         Some(Route::Config(args)) => Ok(Some(config::run(args)?)),
         Some(Route::OlpMcpServe) => Ok(Some(olp_mcp::run())),
-        #[cfg(target_os = "linux")]
+        Some(Route::OlpRuntimeWatch(args)) => Ok(Some(olp_runtime_watch::run(args)?)),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Some(Route::OuterDuty(args)) => Ok(Some(outer_duty::run(args))),
         Some(Route::UsageError) => Ok(Some(2)),
         None => Ok(None),
@@ -62,10 +76,13 @@ enum Route {
     /// `octoscode olp-mcp-serve` — OUTER_LOOP_REVIEW #31: the Rust OLP-MCP
     /// outer-loop server (newline-delimited JSON-RPC over stdio).
     OlpMcpServe,
+    /// `octoscode olp-runtime-watch` — runtime/process/ledger observer;
+    /// observation only: never accepts tasks, never writes boards.
+    OlpRuntimeWatch(OlpRuntimeWatchArgs),
     /// `octoscode outer-duty` — OUTER_LOOP_REVIEW #38: the per-project
-    /// session-lifetime OS-exclusive duty lock (hold/check). Linux-only
-    /// (PDEATHSIG + /proc); see OUTER_LOOP_PROTOCOL R7.
-    #[cfg(target_os = "linux")]
+    /// session-lifetime OS-exclusive duty lock (hold/check). Linux
+    /// (PDEATHSIG) and macOS (guardian process); see OUTER_LOOP_PROTOCOL R7.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     OuterDuty(OuterDutyArgs),
     /// Argument parse failure already reported; exit 2 without running.
     UsageError,
@@ -80,7 +97,7 @@ enum Route {
 /// Strict: unknown flags / missing values / unknown actions are rejected
 /// with exit 2 (route negative golden).
 #[derive(Debug)]
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub struct OuterDutyArgs {
     pub action: String, // "hold" | "check"
     pub project: String,
@@ -89,7 +106,7 @@ pub struct OuterDutyArgs {
     pub command: Vec<String>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn parse_outer_duty_args(rest: &[String]) -> Result<OuterDutyArgs, String> {
     let mut action = String::new();
     let mut project = String::new();
@@ -157,7 +174,14 @@ fn route(argv: &[String]) -> Option<Route> {
         "doctor" => Some(Route::Doctor(DoctorCli::parse_from(&sub_argv).into_args())),
         "config" => Some(Route::Config(ConfigCli::parse_from(&sub_argv).into_args())),
         "olp-mcp-serve" => Some(Route::OlpMcpServe),
-        #[cfg(target_os = "linux")]
+        "olp-runtime-watch" => match OlpRuntimeWatchCli::parse_from(&sub_argv).into_args() {
+            Ok(args) => Some(Route::OlpRuntimeWatch(args)),
+            Err(report) => {
+                eprintln!("{report}");
+                Some(Route::UsageError)
+            }
+        },
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         "outer-duty" => match parse_outer_duty_args(&sub_argv[1..]) {
             Ok(args) => Some(Route::OuterDuty(args)),
             Err(message) => {
@@ -165,10 +189,10 @@ fn route(argv: &[String]) -> Option<Route> {
                 Some(Route::UsageError)
             }
         },
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         "outer-duty" => {
             eprintln!(
-                "outer-duty: unsupported on this platform (Linux-only; see OUTER_LOOP_PROTOCOL R7)"
+                "outer-duty: unsupported on this platform (Linux and macOS only; see OUTER_LOOP_PROTOCOL R7)"
             );
             Some(Route::UsageError)
         }
@@ -275,7 +299,7 @@ mod tests {
 
     /// #38-r1 E: outer-duty route golden — recognized, args parsed, unknown
     /// action rejected, `--` splitting, exit codes.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn route_outer_duty_golden() {
         let argv = |a: &[&str]| -> Vec<String> {
