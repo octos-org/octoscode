@@ -278,3 +278,36 @@ fn alert_forward_only_emits_whitelisted_fields() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
 }
+
+/// Scenario: 没有 ledger 的内环(Claude Code、Codex)的告警也转得出去
+#[test]
+fn alert_forward_handles_an_inner_loop_without_a_ledger() {
+    if !has_flock() {
+        eprintln!("SKIP (explicit): host has no flock on PATH; the board append needs it");
+        return;
+    }
+    let n = Net::new();
+    // What the watch prints without --backend-pid and --ledger.
+    let mut stalled = record(
+        "alive",
+        "not_observed",
+        serde_json::json!([{"kind": "stalled_no_progress", "advisory": true,
+                            "progress_age_seconds": 120, "activity": "events_continuing"}]),
+    );
+    stalled["identity"]["backend_pid"] = serde_json::Value::Null;
+    stalled["identity"]["session"] = serde_json::Value::Null;
+    stalled["identity"]["turn_id"] = serde_json::Value::Null;
+    let mut gone = stalled.clone();
+    gone["agent"] = serde_json::json!({"state": "process_missing"});
+    gone["alerts"] = serde_json::json!([]);
+    let out = n.forward(&[], &[stalled, gone]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(
+        n.negative_lines(),
+        [
+            "> 单元(m07)·负哨(#212): stalled_no_progress turn=- age=120s activity=events_continuing",
+            "> 单元(m07)·负哨(#212): agent_missing turn=- pid=4101 state=process_missing",
+        ],
+        "no backend line, and no `turn=None`"
+    );
+}

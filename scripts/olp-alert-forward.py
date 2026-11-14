@@ -144,7 +144,8 @@ def main():
         tasks = identity.get("task") or []
         task = clean(tasks[0] if tasks else "unknown", 40)
         task_label = f"#{task}" if task.isdigit() else task
-        turn = clean(identity.get("turn_id", "unknown"), 60)
+        # An inner loop without an octos ledger (Claude Code, Codex) has no turn.
+        turn = clean(identity.get("turn_id") or "-", 60)
 
         present = set()
         for kind, disc, detail in events_of(record):

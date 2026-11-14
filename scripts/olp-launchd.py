@@ -11,6 +11,7 @@ launchd 任务:开机登录后自动启动,退出后自动重启。
           olp-unit.py heartbeat --unit <单元号> | ssh <hub> receive
       hub 上这把密钥应配了强制命令(见 docs/OLP_CLUSTER.md),所以远端
       实际执行的是 `olp-unit.py receive --unit <单元号>`。
+      单机部署写 --hub local:心跳直接交给本机的 `olp-unit.py receive`,不经 ssh。
   install <名字> (--interval 秒 | --keepalive) [--env K=V]... -- <命令> [参数…]
       注册任意命令。--interval 定时执行;--keepalive 常驻,退出即重启。
   uninstall <名字>
@@ -49,9 +50,11 @@ import platform
 import plistlib
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 
+PROG = "olp-launchd"
 PREFIX = "org.octos.olp."
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
 UNIT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
@@ -175,11 +178,35 @@ def cmd_heartbeat(args):
     tool = os.path.join(scripts, "olp-unit.py")
     if not os.path.isfile(tool):
         print(f"olp-launchd: 提醒:{tool} 现在不存在,任务运行时需要它", file=sys.stderr)
+    require = args.require
+    if require is not None and not re.match(r"^[a-z]+(,[a-z]+)*$", require):
+        raise Fail(2, f"--require 须写成逗号分隔的巡检项,如 agent,disk: {require}")
+    env_pairs = list(args.env or [])
+    # The heartbeat asks herdr which inner loops run. The job's PATH is short,
+    # so record where herdr is now unless the caller already said.
+    if not any(p.startswith("OLP_HERDR=") for p in env_pairs):
+        herdr = shutil.which("herdr")
+        if herdr:
+            env_pairs.append(f"OLP_HERDR={os.path.realpath(herdr)}")
+        else:
+            print(
+                f"{PROG}: 提醒:现在的 PATH 上找不到 herdr;心跳的 agent 巡检会失败。"
+                "装好后重跑,或用 --env OLP_HERDR=<路径>",
+                file=sys.stderr,
+            )
     pipeline = (
         f"python3 -B {shlex.quote(tool)} heartbeat --unit {shlex.quote(args.unit)}"
-        f" | ssh -o BatchMode=yes -o ConnectTimeout=10 {shlex.quote(args.hub)} receive"
+        + (f" --require {shlex.quote(require)}" if require else "")
+        + f" | ssh -o BatchMode=yes -o ConnectTimeout=10 {shlex.quote(args.hub)} receive"
     )
-    plist = build_plist("heartbeat", ["/bin/sh", "-c", pipeline], args.interval, False, args.env)
+    if args.hub == "local":
+        # Single machine: hand the heartbeat to the hub side directly.
+        pipeline = (
+            f"python3 -B {shlex.quote(tool)} heartbeat --unit {shlex.quote(args.unit)}"
+            + (f" --require {shlex.quote(require)}" if require else "")
+            + f" | python3 -B {shlex.quote(tool)} receive --unit {shlex.quote(args.unit)}"
+        )
+    plist = build_plist("heartbeat", ["/bin/sh", "-c", pipeline], args.interval, False, env_pairs)
     return write_and_load(args, "heartbeat", plist)
 
 
@@ -305,6 +332,7 @@ def main():
     p.add_argument("--hub", required=True)
     p.add_argument("--interval", type=int, default=60)
     p.add_argument("--scripts")
+    p.add_argument("--require", help="心跳必须通过的巡检项,传给 olp-unit.py heartbeat(默认用它的默认值 agent,disk)")
     p.add_argument("--env", action="append")
     add_dir_flags(p)
     p.set_defaults(fn=cmd_heartbeat)

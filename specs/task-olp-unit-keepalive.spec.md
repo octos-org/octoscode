@@ -87,7 +87,7 @@ Scenario: 心跳任务把巡检结果经 ssh 送到 hub(critical)
   Test: launchd_heartbeat_job_pipes_the_unit_heartbeat_to_the_hub
   Given 脚本目录的路径含空格
   When 注册心跳任务;以不存在的脚本目录再注册;以非法单元号、含命令注入的 hub、以 `-` 开头的 hub 注册
-  Then 任务每 60 秒运行一条管道,脚本路径被正确引用,ssh 带 BatchMode 与超时;脚本不存在时成功但给出提醒;三种非法输入都以退出码 2 拒绝
+  Then 任务每 60 秒运行一条管道;`--require` 原样传给心跳命令,非法值以退出码 2 拒绝;herdr 在 PATH 上时任务记下它的真实路径(`OLP_HERDR`),不在时成功但给出提醒;脚本路径被正确引用,ssh 带 BatchMode 与超时;脚本不存在时成功但给出提醒;三种非法输入都以退出码 2 拒绝
 
 ### Rule: doctor — 电源设置检查
 Scenario: 电源设置检查只报告不修改

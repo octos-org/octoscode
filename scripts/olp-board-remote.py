@@ -21,6 +21,12 @@ hub 上的子命令
       这一行决定。在 hub 的 authorized_keys 里给每个单元的密钥配:
         command="/path/scripts/olp-board-remote.py serve --unit m07 --board /path/OUTER_LOOP_REVIEW.md",no-pty,no-port-forwarding ssh-ed25519 AAAA…
 
+单机(hub 与单元在同一台机器)
+  hub 写成 `local`:hub 一侧的 `serve`(规则与 ssh 强制命令完全相同)在本机
+  直接运行,不经 ssh。此时要给黑板的绝对路径:unit.conf 里的 `board=`,或
+  环境变量 OLP_BOARD。镜像路径恰好就是这块黑板时,`mirror` 什么也不做。
+  同一个用户下没有 ssh 那样的身份隔离:单元号来自配置,规则照样执行。
+
 单元的配置(命令行 > 环境变量 > 配置文件)
   hub 的 ssh 目标   --hub    OLP_HUB       hub=…
   本单元号          --unit   OLP_UNIT_ID   unit=…
@@ -111,6 +117,13 @@ def load_conf():
     return conf
 
 
+# Single machine: the hub is this machine. `hub = local` runs the hub side
+# (the same `serve` the ssh forced command would run, with the same rules) as
+# a local process instead of over ssh. It needs to know the board's path.
+LOCAL = "local"
+_local = {}
+
+
 def resolve(args):
     conf = load_conf()
     hub = getattr(args, "hub", None) or os.environ.get("OLP_HUB") or conf.get("hub") or ""
@@ -119,6 +132,11 @@ def resolve(args):
         raise Fail(2, "没有配置 hub 的 ssh 目标(--hub、OLP_HUB 或 unit.conf 里的 hub=)")
     if not UNIT_RE.match(unit):
         raise Fail(2, "没有配置本单元号(--unit、OLP_UNIT_ID 或 unit.conf 里的 unit=)")
+    if hub == LOCAL:
+        board = os.environ.get("OLP_BOARD") or conf.get("board") or ""
+        if not board or not os.path.isabs(board):
+            raise Fail(2, "hub = local 时要给黑板的绝对路径(OLP_BOARD 或 unit.conf 里的 board=)")
+        _local.update(unit=unit, board=board)
     return hub, unit
 
 
@@ -130,6 +148,17 @@ def queue_dir():
 
 def ssh_run(hub, remote_args, stdin_bytes=None):
     """Run the hub side. Returns (returncode, stdout bytes, stderr text)."""
+    if hub == LOCAL:
+        # The forced command, run here: same handler, same rules.
+        env = dict(os.environ)
+        env["SSH_ORIGINAL_COMMAND"] = " ".join(shlex.quote(a) for a in remote_args)
+        cmd = [sys.executable, "-B", os.path.abspath(__file__), "serve",
+               "--unit", _local["unit"], "--board", _local["board"]]
+        try:
+            r = subprocess.run(cmd, input=stdin_bytes, capture_output=True, timeout=60, env=env)
+        except (OSError, subprocess.SubprocessError) as e:
+            return SSH_UNREACHABLE, b"", f"无法在本机运行 hub 一侧: {e}"
+        return r.returncode, r.stdout, r.stderr.decode("utf-8", "replace")
     ssh = os.environ.get("OLP_SSH") or "ssh"
     cmd = [ssh, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", hub] + remote_args
     try:
@@ -298,6 +327,12 @@ def mirror_target(args):
 def cmd_mirror(args):
     target = mirror_target(args)
     hub, _ = resolve(args)
+    if hub == LOCAL and os.path.realpath(target) == os.path.realpath(_local["board"]):
+        # Single machine with one project: the board the inner loop reads is
+        # the authoritative board itself. Copying it onto itself would make
+        # the hub's board read-only.
+        print("hub 就是本机,镜像路径就是权威黑板,不需要同步")
+        return 0
     code, out, err = ssh_run(hub, ["read"])
     if code == SSH_UNREACHABLE:
         print("olp-board-remote: hub 不可达,镜像保持不变", file=sys.stderr)

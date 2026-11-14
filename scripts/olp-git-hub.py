@@ -16,6 +16,15 @@
   hook pre-receive | post-receive
       由钩子调用,不手工执行。
 
+单机(hub 与单元在同一台机器)
+  connect-local --unit <单元号> --repo <裸仓库路径> [--remote hub]
+      在单元的工作仓库里执行一次。把 hub 远程指向本机的裸仓库,并让 git
+      的推送与拉取经 `serve` 进行——与 ssh 强制命令同一条路径、同样的
+      规则,单元号由这里给出。同一个用户下没有 ssh 那样的身份隔离:直接
+      `git push <裸仓库路径>` 能绕开它,所以这只防误操作,不防有意绕开。
+  local-pack …
+      由 git 调用,不手工执行。
+
 推送规则(对带单元号的推送,即经 serve 进来的)
   1. 只能推 `refs/heads/task/<N>`,N 是数字。不能推其他分支与标签,不能
      删分支。
@@ -130,6 +139,42 @@ def cmd_serve(args):
     env["OLP_UNIT"] = args.unit
     os.execvpe("git", ["git", words[0][4:], repo], env)
     return 3  # unreachable
+
+
+def cmd_connect_local(args):
+    """Single machine: point this repository's hub remote at the bare repo on
+    the same disk so that pushes still go through `serve` with the unit id."""
+    if not UNIT_RE.match(args.unit):
+        die(2, f"单元号不合法: {args.unit}")
+    repo = os.path.realpath(args.repo)
+    if not os.path.isdir(repo):
+        die(2, f"hub 仓库不存在: {repo}")
+    me = os.path.abspath(__file__)
+    # git runs remote.<name>.receivepack through the shell with the repository
+    # path appended. `serve` then sees the same command an ssh push would send.
+    pack = f"{shlex.quote(sys.executable)} -B {shlex.quote(me)} local-pack --unit {args.unit} --repo {shlex.quote(repo)} git-receive-pack"
+    upload = pack[: -len("git-receive-pack")] + "git-upload-pack"
+    remote = args.remote
+    have = subprocess.run(["git", "remote", "get-url", remote], capture_output=True, text=True)
+    verb = "set-url" if have.returncode == 0 else "add"
+    for cmd in (
+        ["git", "remote", verb, remote, repo],
+        ["git", "config", f"remote.{remote}.receivepack", pack],
+        ["git", "config", f"remote.{remote}.uploadpack", upload],
+    ):
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            die(2, f"{' '.join(cmd[:3])} 失败: {r.stderr.strip()}")
+    print(f"remote {remote} -> {repo}(本机;推送经 serve,单元号 {args.unit})")
+    return 0
+
+
+def cmd_local_pack(args):
+    """What git runs for a local push or fetch on a connected remote."""
+    os.environ["SSH_ORIGINAL_COMMAND"] = " ".join(
+        shlex.quote(w) for w in [args.pack] + list(args.path)
+    )
+    return cmd_serve(args)
 
 
 # --- hooks --------------------------------------------------------------
@@ -295,6 +340,17 @@ def main():
     p.add_argument("--unit", required=True)
     p.add_argument("--repo", required=True)
     p.set_defaults(fn=cmd_serve)
+    p = sub.add_parser("connect-local", help="(单机)把当前仓库的 hub 远程接到本机的 hub 仓库")
+    p.add_argument("--unit", required=True)
+    p.add_argument("--repo", required=True)
+    p.add_argument("--remote", default="hub")
+    p.set_defaults(fn=cmd_connect_local)
+    p = sub.add_parser("local-pack", help="由 git 调用(connect-local 配置的 receivepack/uploadpack)")
+    p.add_argument("--unit", required=True)
+    p.add_argument("--repo", required=True)
+    p.add_argument("pack", choices=["git-receive-pack", "git-upload-pack"])
+    p.add_argument("path", nargs="*")
+    p.set_defaults(fn=cmd_local_pack)
     p = sub.add_parser("hook", help="由钩子调用")
     p.add_argument("name", choices=HOOKS)
     p.set_defaults(fn=cmd_hook)

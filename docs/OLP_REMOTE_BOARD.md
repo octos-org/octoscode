@@ -34,7 +34,8 @@ mirror = /path/to/repo/.octos/OUTER_LOOP_REVIEW.md
 ```
 
 也可以用环境变量 `OLP_HUB`、`OLP_UNIT_ID`、`OLP_MIRROR`,或每条命令带 `--hub`、
-`--unit`(镜像是 `mirror --to`)。`mirror` 是只读镜像的位置,必须是绝对路径,
+`--unit`(镜像是 `mirror --to`)。单机部署(hub 就是本机)写 `hub = local`,另加
+`board = <黑板绝对路径>`,见 `docs/OLP_CLUSTER.md` §8。`mirror` 是只读镜像的位置,必须是绝对路径,
 见 §5。
 
 ## 3. 单元上:写

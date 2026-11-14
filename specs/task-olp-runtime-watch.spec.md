@@ -55,6 +55,13 @@ monitor 进程、真实 UI ledger、任务自有源文件做有界探测，及�
 - 完成/Herdr Done/idle/exit 只产生 awaiting_review/completion_unverified，即使有
   ACK 也不自接受。默认 stdout-only，不落盘（显式 own-state 目录除外）。
 
+- 不依赖内环的种类(2026-11-14):`--backend-pid` 与 `--ledger/--session/--turn-id` 是
+  octos 专有的输入,改为可选;后三者必须一起给或都不给。Claude Code、Codex 内环没有 octos
+  后端与 UI ledger:不给时后端记为 `{"state":"not_observed"}`,账本层记为
+  `{"not_observed":"no_ledger"}`,identity 里这几项为 null;停滞提示的 activity 改由 herdr
+  的 `working` 状态提供(有 ledger 时行为不变)。询问 herdr 时先认环境变量 `OLP_HERDR`。
+  `olp-alert-forward.py` 对没有 turn 的记录写 `turn=-`。
+
 ## Boundaries
 
 ### Allowed Changes
@@ -136,3 +143,16 @@ Scenario: 只转发白名单字段,坏行与未知种类不影响运行
   Given 混有非 JSON 行、非对象行、未知种类,以及在任务名、turn、序号里夹带换行与伪造判词的记录
   When 交给转发器
   Then 板上只多一行 turn_error,没有夹带的内容、没有新的编号条目、没有外环署名的行;未知的 `--only` 种类与缺配置都以退出码 2 结束
+
+Scenario: 没有 octos ledger 与后端的内环也能被守护(critical)
+  Tags: critical
+  Test: watch_without_ledger_or_backend_uses_herdr_status_for_activity
+  Given 一个活着的 agent 进程、一个经 `OLP_HERDR` 指定的 herdr 替身,不给 `--backend-pid` 与 ledger 三项
+  When herdr 报 working 时守护三个周期;改报 idle 再守护;agent 进程退出后守护一次;只给 ledger 三项中的一部分
+  Then identity 里后端、ledger、turn 为 null,后端为 not_observed,账本层为 no_ledger;working 期间文件不变时停滞提示的 activity 为 events_continuing,idle 时为 no_events 且观察状态为 awaiting_review;进程退出报 process_missing;部分 ledger 参数被拒绝并说明要一起给;task_accepted 恒为 false
+
+Scenario: 没有 ledger 的内环的告警也转得出去
+  Test: alert_forward_handles_an_inner_loop_without_a_ledger
+  Given 守护在没有后端与 ledger 时输出的停滞记录与进程消失记录
+  When 交给转发器
+  Then 板上两行都写 `turn=-`,没有后端一行,也没有 `turn=None`
