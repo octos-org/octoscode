@@ -29,6 +29,16 @@
 //! grandchild running yields VACANT. These invariants are contract-pinned
 //! with real processes on both platforms.
 //!
+//! Terminal (preflight 2026-11-14: an interactive agent under `hold` was
+//! stopped by SIGTTIN): the agent's own process group is not the
+//! terminal's foreground, so a TUI reading the terminal stops. When the
+//! wrapper starts as the foreground of its terminal, the agent makes its
+//! group the foreground before exec, and the wrapper takes the terminal
+//! back once the agent is gone. A ^Z that stops the agent stops the
+//! wrapper too (the shell sees an ordinary stopped job); on `fg` the
+//! terminal goes back to the agent and the agent is continued. A wrapper
+//! started in the background, or without a terminal, changes nothing.
+//!
 //! Lock naming is a STABLE protocol: SHA-256 over the domain-prefixed
 //! canonical project path (DefaultHasher is not stable across Rust versions
 //! — protocol-documented limitation). HOME missing ⇒ fail-closed error.
@@ -350,6 +360,9 @@ pub struct HolderChild {
     guardian: libc::pid_t,
     #[cfg(target_os = "macos")]
     agent: libc::pid_t,
+    /// The terminal handed to the agent (None: wrapper not in the
+    /// foreground of a terminal).
+    terminal: Option<terminal::Foreground>,
 }
 
 impl HolderChild {
@@ -372,12 +385,106 @@ impl HolderChild {
     /// still holds the lock while that happens).
     pub fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         #[cfg(target_os = "linux")]
-        {
-            self.child.wait()
-        }
+        let status = match self.terminal {
+            // Interactive: also see the agent stop, to relay ^Z.
+            Some(term) => terminal::wait_relaying_stops(self.child.id() as libc::pid_t, term),
+            None => self.child.wait(),
+        };
         #[cfg(target_os = "macos")]
-        {
-            macos::wait_guardian(self.guardian, self.agent)
+        let status = macos::wait_guardian(self.guardian, self.agent);
+        if let Some(term) = self.terminal {
+            terminal::reclaim(term);
+        }
+        status
+    }
+}
+
+/// Foreground hand-over between the wrapper and an interactive agent.
+#[allow(unsafe_code)]
+mod terminal {
+    /// A terminal and the wrapper's process group, which was its
+    /// foreground when `hold` started.
+    #[derive(Clone, Copy)]
+    pub(super) struct Foreground {
+        pub(super) fd: libc::c_int,
+        pub(super) pgrp: libc::pid_t,
+    }
+
+    /// The first of stdin/stdout/stderr that is a terminal whose
+    /// foreground is the wrapper's own process group.
+    pub(super) fn capture() -> Option<Foreground> {
+        unsafe {
+            let pgrp = libc::getpgrp();
+            (0..3)
+                .find(|&fd| libc::isatty(fd) == 1 && libc::tcgetpgrp(fd) == pgrp)
+                .map(|fd| Foreground { fd, pgrp })
+        }
+    }
+
+    /// Make `pgrp` the terminal's foreground. Async-signal-safe (it runs
+    /// between fork and exec): SIGTTOU is ignored around the call, since
+    /// a caller outside the foreground would otherwise be stopped by it.
+    pub(super) unsafe fn give(fd: libc::c_int, pgrp: libc::pid_t) {
+        unsafe {
+            let mut ignore: libc::sigaction = std::mem::zeroed();
+            ignore.sa_sigaction = libc::SIG_IGN;
+            let mut previous: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(libc::SIGTTOU, &ignore, &mut previous);
+            libc::tcsetpgrp(fd, pgrp);
+            libc::sigaction(libc::SIGTTOU, &previous, std::ptr::null_mut());
+        }
+    }
+
+    /// The agent is gone: give the terminal back to the wrapper's group.
+    pub(super) fn reclaim(term: Foreground) {
+        unsafe {
+            if libc::tcgetpgrp(term.fd) != term.pgrp {
+                give(term.fd, term.pgrp);
+            }
+        }
+    }
+
+    /// Relay a stopped agent to the wrapper's own job: take the terminal
+    /// back, stop the wrapper's group like the shell expects of a ^Z,
+    /// and once continued (`fg` gives the terminal to the wrapper's
+    /// group) hand the terminal to the agent again and continue it.
+    pub(super) unsafe fn relay_stop(term: Foreground, agent: libc::pid_t, stop: impl FnOnce()) {
+        unsafe {
+            give(term.fd, term.pgrp);
+            stop();
+            if libc::tcgetpgrp(term.fd) == term.pgrp {
+                give(term.fd, agent);
+            }
+            libc::killpg(agent, libc::SIGCONT);
+        }
+    }
+
+    /// Linux: the wrapper is the agent's parent. Wait for it to exit,
+    /// relaying every stop.
+    #[cfg(target_os = "linux")]
+    pub(super) fn wait_relaying_stops(
+        agent: libc::pid_t,
+        term: Foreground,
+    ) -> std::io::Result<std::process::ExitStatus> {
+        use std::os::unix::process::ExitStatusExt as _;
+        loop {
+            let mut status = 0;
+            if unsafe { libc::waitpid(agent, &mut status, libc::WUNTRACED) } == -1 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            if !libc::WIFSTOPPED(status) {
+                return Ok(std::process::ExitStatus::from_raw(status));
+            }
+            // SIGSTOP to ourselves returns only once we are continued.
+            unsafe {
+                relay_stop(term, agent, || {
+                    libc::kill(libc::getpid(), libc::SIGSTOP);
+                });
+            }
         }
     }
 }
@@ -399,6 +506,7 @@ pub fn spawn_holder_child(command: &[String]) -> Result<HolderChild> {
     use std::os::unix::process::CommandExt as _;
     let mut cmd = std::process::Command::new(&command[0]);
     cmd.args(&command[1..]);
+    let terminal = terminal::capture();
     #[allow(unsafe_code)]
     unsafe {
         // The child's parent must be THIS wrapper: capture our own pid,
@@ -409,6 +517,11 @@ pub fn spawn_holder_child(command: &[String]) -> Result<HolderChild> {
             // interactive ^C) do not reach the duty child directly.
             if libc::setpgid(0, 0) == -1 {
                 return Err(std::io::Error::last_os_error());
+            }
+            // Interactive: the agent's group becomes the foreground, so a
+            // TUI reading the terminal is not stopped by SIGTTIN.
+            if let Some(term) = terminal {
+                terminal::give(term.fd, libc::getpgrp());
             }
             // Death coupling: wrapper dies ⇒ agent gets SIGKILL.
             if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
@@ -430,7 +543,7 @@ pub fn spawn_holder_child(command: &[String]) -> Result<HolderChild> {
     let child = cmd
         .spawn()
         .wrap_err_with(|| format!("failed to spawn duty child: {}", command[0]))?;
-    Ok(HolderChild { child })
+    Ok(HolderChild { child, terminal })
 }
 
 /// macOS spawn: `wrapper → guardian → agent` (see the module docs). The
@@ -440,8 +553,13 @@ pub fn spawn_holder_child(command: &[String]) -> Result<HolderChild> {
 /// started (the `outer-duty` subcommand dispatches first thing in `main`).
 #[cfg(target_os = "macos")]
 pub fn spawn_holder_child(command: &[String]) -> Result<HolderChild> {
-    let (guardian, agent) = macos::spawn_guarded(command)?;
-    Ok(HolderChild { guardian, agent })
+    let terminal = terminal::capture();
+    let (guardian, agent) = macos::spawn_guarded(command, terminal)?;
+    Ok(HolderChild {
+        guardian,
+        agent,
+        terminal,
+    })
 }
 
 /// /proc/<pid>/stat field 22 (starttime in clock ticks since boot) — a
@@ -490,6 +608,7 @@ pub fn process_starttime(pid: u32) -> u64 {
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 mod macos {
+    use super::terminal::{self, Foreground};
     use eyre::{Result, WrapErr, eyre};
     use std::ffi::CString;
 
@@ -503,10 +622,15 @@ mod macos {
     /// wrapper cannot take both supervisors down at once.
     const GUARDED_SIGNALS: [libc::c_int; 4] =
         [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT];
+    /// Upper bound on waiting for a SIGSTOP sent to the wrapper to land.
+    const STOP_LAND_CAP_MS: u32 = 1_000;
 
     /// Fork the guardian (which forks + execs the agent). Returns
     /// `(guardian_pid, agent_pid)`.
-    pub(super) fn spawn_guarded(command: &[String]) -> Result<(libc::pid_t, libc::pid_t)> {
+    pub(super) fn spawn_guarded(
+        command: &[String],
+        terminal: Option<Foreground>,
+    ) -> Result<(libc::pid_t, libc::pid_t)> {
         // Everything the post-fork code needs is prepared up front.
         let args: Vec<CString> = command
             .iter()
@@ -536,7 +660,7 @@ mod macos {
             }
             if guardian == 0 {
                 libc::close(fds[0]);
-                guardian_main(wrapper, fds[1], argv.as_ptr());
+                guardian_main(wrapper, fds[1], argv.as_ptr(), terminal);
             }
             libc::close(fds[1]);
             let agent = read_pid(fds[0]);
@@ -585,6 +709,7 @@ mod macos {
         wrapper: libc::pid_t,
         report_fd: libc::c_int,
         argv: *const *const libc::c_char,
+        terminal: Option<Foreground>,
     ) -> ! {
         unsafe {
             // Own process group: signals aimed at the wrapper's group do
@@ -614,6 +739,11 @@ mod macos {
                 // signal dispositions, then exec. CLOEXEC drops the lock
                 // fd and the report pipe.
                 libc::setpgid(0, 0);
+                // Interactive: the agent's group becomes the foreground,
+                // so a TUI reading the terminal is not stopped by SIGTTIN.
+                if let Some(term) = terminal {
+                    terminal::give(term.fd, libc::getpgrp());
+                }
                 for (index, signal) in GUARDED_SIGNALS.iter().enumerate() {
                     libc::sigaction(*signal, &previous[index], std::ptr::null_mut());
                 }
@@ -630,9 +760,20 @@ mod macos {
             libc::close(report_fd);
             watch_exit(kq, agent);
 
+            // Interactive: also see the agent stop, to relay ^Z.
+            let flags = match terminal {
+                Some(_) => libc::WNOHANG | libc::WUNTRACED,
+                None => libc::WNOHANG,
+            };
             loop {
                 let mut status = 0;
-                let reaped = libc::waitpid(agent, &mut status, libc::WNOHANG);
+                let reaped = libc::waitpid(agent, &mut status, flags);
+                if reaped == agent && libc::WIFSTOPPED(status) {
+                    if let Some(term) = terminal {
+                        terminal::relay_stop(term, agent, || stop_wrapper(kq, wrapper));
+                    }
+                    continue;
+                }
                 if reaped == agent {
                     // Agent finished on its own: relay its code. Lingering
                     // grandchildren hold no fd and are left alone.
@@ -648,6 +789,40 @@ mod macos {
                 }
                 wait_event(kq);
             }
+        }
+    }
+
+    /// Stop the wrapper (the shell sees its job stopped) and return once
+    /// it runs again or is gone. The guardian is not the wrapper's
+    /// parent, so it watches the wrapper's state.
+    unsafe fn stop_wrapper(kq: libc::c_int, wrapper: libc::pid_t) {
+        unsafe {
+            libc::kill(wrapper, libc::SIGSTOP);
+            // First see the stop land (bounded), then wait for SIGCONT.
+            let mut waited_ms = 0u32;
+            while !is_stopped(wrapper) && waited_ms < STOP_LAND_CAP_MS {
+                libc::usleep(10_000);
+                waited_ms += 10;
+            }
+            while libc::getppid() == wrapper && is_stopped(wrapper) {
+                wait_event(kq);
+            }
+        }
+    }
+
+    /// Whether `pid` is stopped (false when it cannot be read).
+    unsafe fn is_stopped(pid: libc::pid_t) -> bool {
+        unsafe {
+            let mut info: libc::proc_bsdinfo = std::mem::zeroed();
+            let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&mut info as *mut libc::proc_bsdinfo).cast(),
+                size,
+            ) == size
+                && info.pbi_status == libc::SSTOP
         }
     }
 

@@ -117,6 +117,10 @@
   并监视 wrapper——wrapper 亡则 SIGKILL agent 整个进程组,确认组内无
   存活进程后才退出放锁(等待上限 30 秒);guardian 异常死亡则 wrapper
   杀掉 agent 进程组并以失败退出,其间锁仍由 wrapper 持有);
+  终端:wrapper 在终端前台启动时,agent 在 exec 前把自己的进程组设为终端
+  前台(交互式 agent 读终端不会被 SIGTTIN 挂起),agent 结束后 wrapper
+  收回前台;agent 被 ^Z 挂起时 wrapper 随之挂起、锁仍持有,`fg` 后终端
+  交回 agent 并继续它;wrapper 在后台或无终端时不做任何交接;
   `check` 仅观察、绝不夺取;活锁接管只归 operator(终止旧 holder 后
   再 acquire),无 agent 自助强夺。metadata sidecar 与一切 TTL 仅诊断、绝不参与裁定。范围:**Linux 与 macOS**(单机 flock;其他
   平台命令显式 unsupported 退出 2;Windows LockFileEx 另立条目),
