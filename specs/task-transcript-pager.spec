@@ -31,17 +31,22 @@ pager 内完整会话在上方独立滚动，composer 始终钉在终端最底�
 - 鼠标捕获只在 pager 内启用：进入时 `EnableMouseCapture`、退出时关闭，
   让滚轮在 pager 内可用；inline 模式永不捕获鼠标。
 - 退出 pager 时 `transcript_scroll` 归零，inline 视口回到底部跟随最新输出。
+- 全屏 transcript 先按现有词边界和 styled grapheme 规则得到视觉行，再以
+  `usize` 选择可见窗口；交给 Paragraph 的内容不携带全局滚动偏移。
 
 ## 边界
 
 ### Allowed Changes
 - src/app.rs
+- src/app/**
 - src/event_loop.rs
 - src/model.rs
 - src/store.rs
 - locales/en.yml
 - locales/zh.yml
 - tests/transcript_pager_contract.rs
+- licenses/ratatui-word-wrapper-MIT.txt
+- dist-workspace.toml
 - specs/**
 - **/.gitignore
 
@@ -119,3 +124,36 @@ pager 内完整会话在上方独立滚动，composer 始终钉在终端最底�
   当 用户按下 Ctrl+T
   那么 pager 渲染空 transcript 而不 panic
   但是 composer 仍可正常输入与提交
+
+场景: 超过 65535 行的历史仍可到达首尾并调整大小
+  测试: pager_large_history_reaches_tail_top_and_resizes_without_overflow
+  假设 pager 中存在七万行历史且末行有独立标记
+  当 用户回看历史、返回最新内容并改变终端大小
+  那么 首尾内容均可到达、PageUp 确实移动画面
+  并且 渲染不把全局视觉行偏移截断为 u16 或触发溢出
+
+场景: Sticky 大历史保留最新问题和可达的回答尾部
+  测试: sticky_large_history_reaches_tail_top_and_resizes_without_overflow
+  假设 Sticky 模式中存在七万行历史
+  当 用户回看、返回最新内容并改变终端大小
+  那么 回答首尾均可到达且 composer 保持可见
+  并且 全局滚动指标与实际可见窗口使用相同的视觉行
+
+场景: 视觉行窗口保留正常历史的词边界与宽字符样式
+  测试: transcript_physical_rows_preserve_word_wrap_and_styled_wide_text
+  假设 文本包含跨样式单词、中文、组合 emoji、连续空白及对齐方式
+  当 在不同宽度下渲染完整 Paragraph 与视觉行窗口
+  那么 行数、字符和样式完全相同
+
+场景: 宽字符词不能越过窗口或丢失组合字符
+  测试: transcript_physical_rows_keep_wide_words_inside_viewport
+  假设 文本包含中文与组合 emoji，且可用列数跨过词宽边界
+  当 渲染物理行窗口
+  那么 所有视觉行均在宽度预算内且保留全部非空白字符
+
+场景: 宽空白不能填充剩余单列时保留到下一行
+  测试: transcript_physical_rows_preserve_wide_whitespace_at_wrap_boundaries
+  假设 文本在换行边界包含双列全角空格且只剩一列
+  当 使用 trim false 的物理行窗口渲染
+  那么 不能容纳的全角空格进入下一行而不是丢失
+  并且 输出与 ratatui WordWrapper 一致
