@@ -30,9 +30,12 @@ hub 对单元的写入有四条限制,违反即拒收(退出码 3):
 ```
 hub = olp@hub-01
 unit = m07
+mirror = /path/to/repo/.octos/OUTER_LOOP_REVIEW.md
 ```
 
-也可以用环境变量 `OLP_HUB`、`OLP_UNIT_ID`,或每条命令带 `--hub`、`--unit`。
+也可以用环境变量 `OLP_HUB`、`OLP_UNIT_ID`、`OLP_MIRROR`,或每条命令带 `--hub`、
+`--unit`(镜像是 `mirror --to`)。`mirror` 是只读镜像的位置,必须是绝对路径,
+见 §5。
 
 ## 3. 单元上:写
 
@@ -88,7 +91,10 @@ hub 不可达时镜像保持上一次的内容(退出码 75)。镜像永不回�
 - 定时同步只作兜底,让人和别的工具看到的镜像不太旧:
 
   ```bash
+  # macOS
   scripts/olp-launchd.py install mirror --interval 60 -- /usr/bin/python3 /path/scripts/olp-board-remote.py mirror
+  # Linux
+  scripts/olp-systemd.py install mirror --interval 60 -- /usr/bin/python3 /path/scripts/olp-board-remote.py mirror
   ```
 
 ## 6. 内环的提问:送到 hub,回答送回来

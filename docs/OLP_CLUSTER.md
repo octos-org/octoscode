@@ -1,7 +1,8 @@
 # OctoLoop 多机部署:单元登记与健康识别
 
 > 适用于"一台 hub + 多台单元"的部署:hub 放黑板、跑大外环;每个单元是一台跑
-> 内环车道的机器(例如一台 Mac mini)。单机使用 OctoLoop 不需要读这一页。
+> 内环车道的机器(Mac mini 或 Linux 机器,hub 也可以是 Linux)。单机使用
+> OctoLoop 不需要读这一页。第一次把一台单元接进来,按 §7 的清单从头做。
 
 工具是 `scripts/olp-unit.py`(纯 Python 标准库)。它回答两个问题:这台机器是不是
 登记过的那个单元;它现在能不能接卡。
@@ -108,6 +109,11 @@ EOF
 写板(条目带 `unit: m07`,正文里的 `{N}` 换成编号)→ 用 herdr 唤醒那台单元的
 窗格。stdout 最后一行是编号,随后对 `本地复验通过(#N)` 挂正哨。
 
+唤醒走 `herdr --machine <单元号> agent prompt <窗格> …`,所以 hub 上要先把这台
+单元登记成 herdr 的机器,标签等于单元号(§7 第 9 步)。唤醒的那句话指向条目号,
+并带着一条可以原样执行的命令,让内环先把本机的黑板镜像同步到最新再读卡
+(原因见 `docs/OLP_REMOTE_BOARD.md` §5)。
+
 | 情况 | 结果 |
 |---|---|
 | 单元不是"正常" | 拒绝,不写板(`--skip-health` 跳过) |
@@ -178,3 +184,88 @@ octoscode olp-runtime-watch --agent <herdr 名字> --agent-pid <pid> --backend-p
 | `~/.octos/outer/units/heartbeat/<单元号>.json` | 该单元最近一次心跳,加 hub 写入的 `received_at` |
 
 `OLP_UNITS_DIR` 改变上面的目录,`OLP_UNIT_CHECKS_DIR` 改变扩展检查目录。
+
+## 7. 单元上线清单
+
+把一台新机器接成单元,从头到尾是下面这些步骤。每一步的细节在括号里的文档;
+这里只给顺序和最短的命令。`m07` 是单元号,`olp@hub-01` 是 hub。2026-11 的
+试点里这套顺序在 Linux(Ubuntu 24.04,真实 sshd 与 systemd)上完整走通过。
+
+**前提**
+
+| | macOS 单元 | Linux 单元 |
+|---|---|---|
+| octoscode | 从本仓库最新 `main` 构建 | 同左 |
+| octos | 2.1.0-rc.1 | 2.1.0-rc.1;官方发布包要求 glibc 2.39(Ubuntu 24.04 起),更旧的系统从源码构建(release 构建很吃内存:4 GB 的机器上与另一个构建并行时编译器被杀过) |
+| herdr | `hagency-org/herdr` 的默认分支;构建需要 Zig 0.16.0 | 同左 |
+| 其他 | `brew install coreutils flock` | 发行版自带 |
+| 主机名 | 等于单元号 | 等于单元号 |
+
+**在单元上**
+
+1. 生成三把 ssh 密钥(心跳、推送、写板),在 `~/.ssh/config` 里给它们各配一个
+   指向 hub 的 Host 别名。
+2. 记下 octoscode 仓库的位置——单元的项目目录里没有 `scripts/`,内环靠它找到
+   脚本:
+
+   ```bash
+   scripts/olp-install-skill.sh --home-only
+   ```
+3. 克隆项目并接上 hub 的本地仓库(`docs/OLP_LOCAL_GIT.md`):
+
+   ```bash
+   git remote add hub ssh://<推送别名>/srv/olp/hub.git && git fetch hub
+   ```
+4. 在项目目录里铺上岗卡(`OLP_INIT_LANG=zh` 取中文版)。它同时生成一块本地
+   黑板,下一步的镜像会替换它:
+
+   ```bash
+   bash scripts/olp-init.sh
+   ```
+5. 写单元配置,并同步一次镜像确认写板信道通了(`docs/OLP_REMOTE_BOARD.md`):
+
+   ```bash
+   printf 'hub = <写板别名>\nunit = m07\nmirror = <项目绝对路径>/.octos/OUTER_LOOP_REVIEW.md\n' > ~/.octos/outer/unit.conf
+   scripts/olp-board-remote.py mirror
+   ```
+6. 把 MCP 的审计钩子指向 hub,内环的提问才会出现在 hub 的黑板上:
+
+   ```bash
+   printf '#!/bin/sh\nexec python3 <仓库>/scripts/olp-board-remote.py append --sign\n' > ~/.octos/outer/board_append.sh
+   chmod +x ~/.octos/outer/board_append.sh
+   ```
+7. 保活(`docs/OLP_KEEPALIVE.md`)。macOS 用 `olp-launchd.py`,Linux 用
+   `olp-systemd.py`,子命令相同;Linux 要先开 linger:
+
+   ```bash
+   scripts/olp-systemd.py doctor                     # macOS:scripts/olp-launchd.py doctor
+   sudo loginctl enable-linger <用户>                 # 仅 Linux,doctor 报 FAIL 时
+   scripts/olp-systemd.py heartbeat --unit m07 --hub <心跳别名>
+   scripts/olp-systemd.py install herdr --keepalive -- /usr/local/bin/herdr server
+   ```
+8. 在 herdr 里开一个窗格启动内环(免沙箱是 operator 的决定,见 QUICKSTART 0b):
+
+   ```bash
+   herdr workspace create --cwd <项目>
+   herdr agent start inner --kind octoscode --pane <窗格> -- --stdio-command 'octos serve --stdio --solo --danger-full-access'
+   ```
+
+**在 hub 上**
+
+9. 把单元的三把公钥加进 `~/.ssh/authorized_keys`,每把带各自的强制命令
+   (§3、`docs/OLP_LOCAL_GIT.md`、`docs/OLP_REMOTE_BOARD.md`);把 hub 的回答
+   公钥加进单元的 `authorized_keys`,强制命令是 `olp-answer.py serve`。另给 hub
+   一把**不带**强制命令的密钥登录单元,herdr 用它:
+
+   ```bash
+   herdr machine add <单元的 ssh 目标> --label m07
+   ```
+10. 登记单元(§1),等第一条心跳,确认状态是"正常"、权限一列符合预期:
+
+    ```bash
+    scripts/olp-unit.py register m07 --hostname m07 --mac <内置网口的地址>
+    scripts/olp-unit.py status
+    ```
+
+之后就可以用 §4b 的一条命令派卡。重启单元后:心跳和 herdr 服务自己回来,内环
+不会(§5),这时 hub 把单元判为降级并拒绝派卡,直到有人在窗格里重新启动内环。

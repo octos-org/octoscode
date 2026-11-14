@@ -47,8 +47,11 @@
 - **多机部署(hub + 单元)**:一台 hub 放黑板与本地 git 仓库、跑持锁的
   大外环,多台单元各跑一个内环。单元登记与心跳、一步派卡、单元只能推
   带复验记录的任务分支、远程写板与离线队列、提问往返、运行时守护与
-  负哨、推 GitHub 前的采认闸门。缺省状态:不配置就不生效,单机行为
-  不变。用户怎么看到:见 `docs/OLP_CLUSTER.md`;协议附录 C 是规则。
+  负哨、推 GitHub 前的采认闸门。单元与 hub 可以是 macOS 或 Linux:
+  常驻任务的保活在 macOS 上用 `olp-launchd.py`,在 Linux 上用
+  `olp-systemd.py`(systemd 用户单元,需要 linger)。缺省状态:不配置就
+  不生效,单机行为不变。用户怎么看到:见 `docs/OLP_CLUSTER.md`(§7 是
+  单元上线清单);协议附录 C 是规则。
 - **进化环(阶段 0–3)**:三源采集哨(`olp-evo-harvest.sh` 从活板
   ACK、events.jsonl、MCP 审计板增量识别内环摩擦,identity 去重、
   字节游标、崩溃一致)落症状卡,retro 脚本(`olp-evo-retro.sh`)按
