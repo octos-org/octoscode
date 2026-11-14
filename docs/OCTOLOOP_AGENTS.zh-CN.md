@@ -1,6 +1,6 @@
 # OctoLoop — Agent 上岗卡
 
-> protocol: olp/v2 — 读本文件的 agent 即在 OLP v2 下作业(R6 版本协商)。
+> protocol: olp/v3 — 读本文件的 agent 即在 OLP v3 下作业(R6 版本协商)。
 >
 > **OctoLoop** 是产品名;**OLP**(Outer-Loop Protocol)是协议名。
 > English: [OCTOLOOP_AGENTS.md](https://github.com/octos-org/octoscode/blob/main/docs/OCTOLOOP_AGENTS.md)
@@ -46,7 +46,7 @@
 2. **执行**编号最小且尚无 `ACK(` 行的条目。已 ACK 的条目与
    `Historical record` 区只供审计——**绝不重放**。
 3. **只 commit,绝不 push。** 推送权在外环。(多机部署的单元例外只有一条:
-   本机复验通过后,由复验方用 `scripts/olp-task-push.sh` 把 `task/<N>` 推到
+   全部复验方通过后,由单元主持用 `scripts/olp-task-push.sh` 把 `task/<N>` 推到
    hub 的本地仓库。那是交出 commit,不是发布;推 GitHub 仍然只在外环。)
 4. **落 ACK**,在该条目下写一行 v1 定式:
 
@@ -61,7 +61,11 @@ ACK(done|wontdo|blocked): <说明>
    `python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py" mirror`。
    镜像不能原地写:改用
    `scripts/olp-board-remote.py ack <N> done|wontdo|blocked <说明>`,它把同样
-   内容的一行追加到 hub 的权威黑板。)
+   内容的一行追加到 hub 的权威黑板。olp/v3 起单元里分工:卡上的 `impl:` 行是
+   实现方、`review:` 行是复验方。**实现方做完不向 hub 回执 done**,而是在单元
+   复验板 `.octos/UNIT_BOARD.md` 写 `> 实现(<种类>)·提交(#N-rK): <提交号>` 并告诉
+   单元主持;复验方把结论写在同一块板上;全部通过后由单元主持推送并向 hub 回执。
+   单元上的内环一律免沙箱启动。)
 
 - `done` — 已执行。说明里附证据:commit hash、测试结果,以及你跑过的
   **逐字复验命令**(crate / 模块 / feature 全写明)。
@@ -239,8 +243,11 @@ git worktree remove --force ~/.octos/outer/verify/<名>    # 验后即清
 
 ### 3.6 红线
 
-1. 未经独立复验,绝不推送。
-2. 绝不代按 operator 的审批——免沙箱授权是人的动作。把命令写好,请人按。
+1. 未经独立复验,绝不推送。集群里(olp/v3)复验在单元完成:hub 凭单元的复验
+   记录推送,不另做复验。
+2. 绝不代按 operator 的审批。免沙箱授权是人的动作——**唯一例外**是集群单元上的
+   内环:协议 R8 要求它们免沙箱,agent 可以代为这样启动。其他场景(共享机、外环
+   自己的会话)把命令写好,请人按。
 3. 队列尊重:内环按板序吃单。要插队,在条目里写明主张,由 operator 定夺。
 4. 共享机限载:并发编译 ≤2,测试 `--test-threads=8`,确认 `TMPDIR` 指向
    home 盘。
@@ -249,7 +256,8 @@ git worktree remove --force ~/.octos/outer/verify/<名>    # 验后即清
 ## 4. 只属 operator 的动作
 
 这些永不委托给 agent:贴 API key、授予免沙箱权限
-(`--danger-full-access` / 权限第 5 档)、接管活的 `outer-duty` 锁、发布 issue。
+(`--danger-full-access` / 权限第 5 档;集群单元上的内环除外,见协议 R8)、
+接管活的 `outer-duty` 锁、发布 issue。
 
 内环标准启动命令:
 

@@ -227,8 +227,8 @@ fn olp_version_consistent_across_docs() {
             .find(|l| l.contains("protocol: olp/v"))
             .unwrap_or_else(|| panic!("{rel} has no protocol header"));
         assert!(
-            header.contains("olp/v2") && !header.contains("olp/v1"),
-            "{rel} current version must be exactly olp/v2 (header: {header})"
+            header.contains("olp/v3") && !header.contains("olp/v1") && !header.contains("olp/v2"),
+            "{rel} current version must be exactly olp/v3 (header: {header})"
         );
         assert!(
             !text.replace(header, "").contains("olp/v1\n"),
@@ -319,10 +319,10 @@ fn outer_duty_wiring_three_surfaces_consistent() {
     );
     // Version bump synchronized.
     assert!(
-        protocol.contains("protocol: olp/v2"),
-        "PROTOCOL bumped to v2"
+        protocol.contains("protocol: olp/v3"),
+        "PROTOCOL at v3 (R7 since v2)"
     );
-    assert!(agents.contains("protocol: olp/v2"), "AGENTS synced to v2");
+    assert!(agents.contains("protocol: olp/v3"), "AGENTS synced to v3");
 }
 
 #[test]
@@ -335,8 +335,8 @@ fn outer_duty_docs_pin_guardian_semantics_and_h1() {
     // title with a v2 body header is the drift the final review caught.
     let title = protocol.lines().next().unwrap_or_default().to_string();
     assert!(
-        title.contains("v2") && !title.contains("v1"),
-        "PROTOCOL H1 (title) must be v2 (got: {title})"
+        title.contains("v3") && !title.contains("v1") && !title.contains("v2"),
+        "PROTOCOL H1 (title) must be v3 (got: {title})"
     );
 
     // Guardian semantics must be present verbatim in all three surfaces.

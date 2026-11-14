@@ -52,6 +52,10 @@
   `olp-systemd.py`(systemd 用户单元,需要 linger)。缺省状态:不配置就
   不生效,单机行为不变。用户怎么看到:见 `docs/OLP_CLUSTER.md`(§7 是
   单元上线清单);协议附录 C 是规则。
+- **集群分工(olp/v3)**:大外环从用户指定的全景台读目标,规划成卡、派给单元并按卡
+  指定实现方与复验方(`olp-dispatch.py --impl --review`),用 `olp-summary.py` 汇总进展
+  回报全景台;大外环不复验,单元对抗复验通过才交回;单元内环一律免沙箱。缺省状态:卡上
+  不写角色时由单元主持自定。用户怎么看到:见协议附录 C 与 skill 的 unit 模式。
 - **内环用 Claude Code 或 Codex**:单元上的内环可以不是 octoscode。两者都读项目里的
   `AGENTS.md`,用 MCP 挂上 `ask_outer`;Codex 另要放行这个 MCP 服务的审批、让沙箱能写
   `.git`。缺省状态:按 octoscode 内环的方式启动不会自动生效,要按文档接。用户怎么看到:

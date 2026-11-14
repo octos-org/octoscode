@@ -31,6 +31,8 @@ stdout 最后一行是分配到的编号。大外环随后对 `本地复验通�
   --title T          条目标题(必填)
   --signature S      署名,默认 外环(hub)
   --verify-of M      这是 #M 的回测卡
+  --impl AGENT       单元里由哪种内环实现(herdr 的种类,如 octoscode、claude、codex)
+  --review A[,B…]    单元里由哪些内环对抗复验(至少一个;复验通过才交回 hub)
   --key K            幂等键,[A-Za-z0-9._:/@+=-]
   --wake PANE        写板后唤醒这台单元上的窗格
   --skip-health      不查单元健康(登记工具没部署时)
@@ -53,6 +55,7 @@ import subprocess
 import sys
 
 UNIT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+AGENT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 KEY_RE = re.compile(r"^[A-Za-z0-9._:/@+=-]{1,200}$")
 KEY_LINE = re.compile(r"^<!-- olp-key: (\S+)(?: n=(\d+))? -->$")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -104,7 +107,7 @@ def unit_is_local(unit):
     return r.returncode == 0 and r.stdout.strip() == "local"
 
 
-def wake(unit, pane, number):
+def wake(unit, pane, number, impl="", reviewers=()):
     herdr = os.environ.get("OLP_HERDR") or "herdr"
     # The unit reads a mirror of the board. It was last synced before this
     # card was written, so the wake names the sync as the first step — as a
@@ -116,6 +119,17 @@ def wake(unit, pane, number):
         'python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py" mirror'
         f" ,再读 #{number} 执行"
     )
+    if impl or reviewers:
+        # olp/v3: the pane woken for a card with roles is the unit host, who
+        # organises the work rather than doing it. Say so, and where the
+        # rules are, or it will start implementing.
+        message = (
+            f"黑板新条目 #{number} 派给本单元,指定实现方 {impl or '(由你定)'}、"
+            f"复验方 {'、'.join(reviewers) or '(由你定)'}。你是单元主持,不要自己实现:"
+            "按 $(cat ~/.octos/outer/octoscode-home)/skills/octoloop/AGENTS.md 的"
+            "「模式 unit」组织实现与对抗复验,全部复验通过才推送并向 hub 回执。第一步同步镜像:"
+            'python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py" mirror'
+        )
     try:
         r = subprocess.run(
             [herdr, *([] if unit_is_local(unit) else ["--machine", unit]), "agent", "prompt", pane, message],
@@ -135,6 +149,8 @@ def main():
     ap.add_argument("--title", required=True)
     ap.add_argument("--signature", default="外环(hub)")
     ap.add_argument("--verify-of", type=int)
+    ap.add_argument("--impl")
+    ap.add_argument("--review")
     ap.add_argument("--key")
     ap.add_argument("--wake")
     ap.add_argument("--skip-health", action="store_true")
@@ -156,6 +172,18 @@ def run(args):
     unit = args.unit
     if not UNIT_RE.match(unit):
         raise Fail(2, f"单元号不合法: {unit}")
+    # Roles in the unit, chosen per card by the outer loop: one implementer
+    # kind and the kinds that review it adversarially. Free names, so any
+    # inner loop herdr knows can take part.
+    impl = (args.impl or "").strip()
+    reviewers = [r.strip() for r in (args.review or "").split(",") if r.strip()]
+    for name in [impl] * bool(impl) + reviewers:
+        if not AGENT_RE.match(name):
+            raise Fail(2, f"内环种类不合法: {name}(小写字母、数字、连字符)")
+    if len(set(reviewers)) != len(reviewers):
+        raise Fail(2, "--review 里有重复的内环")
+    if impl and not reviewers:
+        raise Fail(2, "指定了 --impl 就要用 --review 指定至少一个复验方:单元复验通过才交回")
     if not os.path.isfile(args.board):
         raise Fail(2, f"黑板不存在: {args.board}")
     title = args.title.strip()
@@ -178,7 +206,11 @@ def run(args):
             raise Fail(2, "--key 只允许 [A-Za-z0-9._:/@+=-],最长 200")
         key = args.key
     else:
-        digest = hashlib.sha256(f"{unit}\n{title}\n{body}".encode("utf-8")).hexdigest()[:16]
+        # The roles are part of what is dispatched: the same card with other
+        # reviewers is a different dispatch. Cards without roles keep the
+        # key they always had.
+        roles = f"\nimpl={impl}\nreview={','.join(reviewers)}" if impl or reviewers else ""
+        digest = hashlib.sha256(f"{unit}\n{title}\n{body}{roles}".encode("utf-8")).hexdigest()[:16]
         key = f"dispatch:{unit}:{digest}"
 
     number = existing_number(args.board, key)
@@ -204,6 +236,10 @@ def run(args):
         lines = [f"### {{N}}. {title}({date.isoformat()},{args.signature.strip()})", f"unit: {unit}"]
         if args.verify_of is not None:
             lines.append(f"verify-of: #{args.verify_of}")
+        if impl:
+            lines.append(f"impl: {impl}")
+        if reviewers:
+            lines.append("review: " + ", ".join(reviewers))
         entry = "\n".join(lines) + "\n\n" + body.rstrip("\n") + "\n"
         r = subprocess.run(
             ["bash", os.path.join(HERE, "olp-board-append.sh"), "--key", key, args.board],
@@ -217,7 +253,7 @@ def run(args):
 
     woken, wake_error = None, ""
     if args.wake:
-        woken, wake_error = wake(unit, args.wake, number)
+        woken, wake_error = wake(unit, args.wake, number, impl, reviewers)
 
     result = {
         "number": number,

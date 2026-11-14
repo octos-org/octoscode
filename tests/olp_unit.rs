@@ -761,8 +761,39 @@ fn unit_heartbeat_recognises_any_kind_of_inner_loop() {
             .status
             .success()
     );
+    // olp/v3: the default checks include `full`. A Claude Code inner loop
+    // started without a full-access flag keeps the unit out of dispatch.
     let (state, why) = hub.state_of("m01", &[]);
-    assert_eq!(state, "healthy", "default checks are agent,disk: {why}");
+    assert_eq!(state, "degraded", "{why}");
+    assert!(why.contains("full") && why.contains("免沙箱"), "{why}");
+    // Started with --dangerously-skip-permissions it is healthy.
+    hub.set_agents(
+        &[("cc", "claude", "idle", "w1:p1")],
+        &[("w1:p1", &["claude", "--dangerously-skip-permissions"])],
+    );
+    let raw_full = {
+        let out = hub.run(&[
+            "heartbeat",
+            "--unit",
+            "m01",
+            "--disk-min-free",
+            "0",
+            "--ps-output",
+            ps.to_str().unwrap(),
+        ]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        stdout(&out)
+    };
+    assert!(
+        hub.run_stdin(&["receive", "--unit", "m01"], raw_full.as_bytes())
+            .status
+            .success()
+    );
+    let (state, why) = hub.state_of("m01", &[]);
+    assert_eq!(
+        state, "healthy",
+        "default checks are agent,disk,full: {why}"
+    );
     let out = hub.run(&["status"]);
     assert!(stdout(&out).contains("内环 claude"), "{}", stdout(&out));
 
