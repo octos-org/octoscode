@@ -303,12 +303,12 @@ fn live_classifier_input() -> PathClassifierInput {
 /// independent of these prefixes.
 fn brew_prefixes() -> Vec<PathBuf> {
     let mut prefixes = vec![PathBuf::from("/opt/homebrew")];
-    if let Ok(out) = std::process::Command::new("brew").arg("--prefix").output() {
-        if out.status.success() {
-            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !p.is_empty() {
-                prefixes.push(PathBuf::from(p));
-            }
+    if let Ok(out) = std::process::Command::new("brew").arg("--prefix").output()
+        && out.status.success()
+    {
+        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !p.is_empty() {
+            prefixes.push(PathBuf::from(p));
         }
     }
     prefixes
@@ -327,12 +327,11 @@ fn npm_global_roots() -> Vec<PathBuf> {
     if let Ok(out) = std::process::Command::new("npm")
         .args(["root", "-g"])
         .output()
+        && out.status.success()
     {
-        if out.status.success() {
-            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !p.is_empty() {
-                roots.push(PathBuf::from(p));
-            }
+        let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !p.is_empty() {
+            roots.push(PathBuf::from(p));
         }
     }
     roots
@@ -344,10 +343,10 @@ fn cargo_bin() -> Option<PathBuf> {
 }
 
 fn cargo_home() -> Option<PathBuf> {
-    if let Ok(home) = std::env::var("CARGO_HOME") {
-        if !home.is_empty() {
-            return Some(PathBuf::from(home));
-        }
+    if let Ok(home) = std::env::var("CARGO_HOME")
+        && !home.is_empty()
+    {
+        return Some(PathBuf::from(home));
     }
     home_dir().map(|h| h.join(".cargo"))
 }

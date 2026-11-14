@@ -122,7 +122,7 @@ installs are owned by their package manager, so it prints the matching
 upgrade command instead. `octoscode doctor` diagnoses the local environment
 and connection prerequisites.
 
-### 🔧 From source with Cargo (needs Rust 1.85+)
+### 🔧 From source with Cargo (needs Rust 1.88+)
 
 **From git** — no crates.io publish required
 
@@ -160,7 +160,7 @@ compatible version.)
 
 Building from source works too — `octos-core` (the shared protocol crate) is
 pulled automatically as a git dependency, so a plain clone builds with **no
-sibling checkout** required (needs Rust 1.85+):
+sibling checkout** required (needs Rust 1.88+):
 
 ```bash
 git clone https://github.com/octos-org/octoscode.git

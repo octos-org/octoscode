@@ -321,10 +321,10 @@ fn resolve_backend(program: &str) -> Result<Resolved> {
     if matches!(probe(Path::new(program)), Probe::Ready) {
         return Ok(Resolved::OnPath);
     }
-    if let Some(dir) = install_dir_octos() {
-        if matches!(probe(&dir), Probe::Ready) {
-            return Ok(Resolved::AtPath(dir));
-        }
+    if let Some(dir) = install_dir_octos()
+        && matches!(probe(&dir), Probe::Ready)
+    {
+        return Ok(Resolved::AtPath(dir));
     }
     Err(eyre!(
         "installed octos, but no working octos >= {MIN_OCTOS_VERSION} is on PATH or in {}. \
