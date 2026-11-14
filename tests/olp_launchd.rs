@@ -213,6 +213,8 @@ fn launchd_heartbeat_job_pipes_the_unit_heartbeat_to_the_hub() {
             "olp@hub-01",
             "--scripts",
             scripts.to_str().unwrap(),
+            "--env",
+            "OLP_HERDR=/opt/herdr/bin/herdr",
             "--dir",
             dir.to_str().unwrap(),
             "--no-load",
@@ -265,6 +267,58 @@ fn launchd_heartbeat_job_pipes_the_unit_heartbeat_to_the_hub() {
         let out = run(home.path(), &args);
         assert_eq!(out.status.code(), Some(2), "{bad:?}: {}", stderr(&out));
     }
+
+    // --require reaches the heartbeat command, and the job remembers where
+    // herdr is: its PATH is too short to find it.
+    let bin = home.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let fake = bin.join("herdr");
+    std::fs::write(&fake, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let with_path = |extra: &[&str], path: &str| {
+        let mut args = vec![
+            "heartbeat",
+            "--unit",
+            "m07",
+            "--hub",
+            "hub-01",
+            "--scripts",
+            scripts.to_str().unwrap(),
+            "--dir",
+            dir.to_str().unwrap(),
+            "--no-load",
+        ];
+        args.extend_from_slice(extra);
+        Command::new("python3")
+            .arg("-B")
+            .arg(tool())
+            .args(&args)
+            .env("HOME", home.path())
+            .env("PATH", path)
+            .output()
+            .unwrap()
+    };
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let out = with_path(&["--require", "agent,disk"], &path);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stderr(&out), "");
+    let job = std::fs::read_to_string(dir.join("org.octos.olp.heartbeat.plist")).unwrap();
+    assert!(
+        job.contains("heartbeat --unit m07 --require agent,disk |"),
+        "{job}"
+    );
+    let real = std::fs::canonicalize(&fake).unwrap();
+    assert!(
+        value_after(&job, "OLP_HERDR").contains(&format!("<string>{}</string>", real.display())),
+        "{job}"
+    );
+    // No herdr anywhere: the job is still written, with a reminder.
+    let out = with_path(&[], "/usr/bin:/bin");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).contains("herdr"), "{}", stderr(&out));
+    // A malformed --require is refused.
+    let out = with_path(&["--require", "agent;rm"], &path);
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
 }
 
 /// Scenario: 电源设置检查只报告不修改
