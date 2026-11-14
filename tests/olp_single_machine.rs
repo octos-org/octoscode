@@ -433,7 +433,9 @@ fn single_machine_answers_and_wakes_reach_the_local_unit() {
         assert!(out.status.success(), "{unit}: {}", stderr(&out));
     }
     let log = std::fs::read_to_string(b.p("herdr.log")).unwrap();
-    let lines: Vec<&str> = log.lines().collect();
+    // Only the wakes: other tools may ask herdr other things (the unit
+    // heartbeat lists agents).
+    let lines: Vec<&str> = log.lines().filter(|l| l.contains("agent prompt")).collect();
     assert!(lines[0].starts_with("agent prompt w1:p1 "), "{log}");
     assert!(
         lines[1].starts_with("--machine m02 agent prompt w2:p1 "),
