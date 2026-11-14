@@ -26,3 +26,17 @@ Scenario: Diff preview retains its shortcut
 Test: ctrl_x_stages_the_selected_hunk_from_composer_focus
 Given an active diff preview
 Then Ctrl+X stages selected diff context instead of interrupting
+
+Scenario: Esc releases queued input without waiting for a terminal
+Test: esc_interrupts_when_staged_messages_are_waiting
+Given an active turn and explicitly queued user input
+When Esc interrupts the active turn
+Then enqueue the queued input behind the interrupt as a fresh turn
+And keep later input FIFO behind the fresh submit gate
+
+Scenario: A late interrupt terminal reconciles without double-settling or draining
+Test: late_interrupt_terminal_after_fresh_turn_started_does_not_double_settle_or_drain
+Given Esc has released queued input and its fresh turn has started
+When the interrupted turn's real terminal arrives late or replays
+Then preserve the already-settled partial answer and the fresh live turn
+And do not drain another queued prompt

@@ -2095,11 +2095,11 @@ fn handle_plain_key(store: &mut Store, key: KeyEvent) -> KeyAction {
         }
         KeyCode::Esc => {
             if store.state.active_turn().is_some() {
-                let command = if store.state.has_pending_messages() {
-                    store.interrupt_staged_command()
-                } else {
-                    store.interrupt_command()
-                };
+                // Unlike Ctrl+X's send-pending flow, Esc owns the next-turn
+                // slot immediately: `interrupt_command` releases staged input
+                // behind the interrupt instead of waiting for a terminal that
+                // may never arrive.
+                let command = store.interrupt_command();
                 if let Some(command) = command {
                     return KeyAction::send(command);
                 }
@@ -7891,6 +7891,10 @@ done
         assert_eq!(store.state.composer, "unfinished draft");
         assert!(store.state.pending_interrupt_restores.is_empty());
         assert_eq!(store.state.pending_messages, vec!["next task"]);
+        assert!(
+            !store.drain_staged_backstop(),
+            "Ctrl+X still waits for the old turn's terminal"
+        );
         assert!(matches!(
             handle_key(
                 &mut store,
@@ -7946,6 +7950,14 @@ done
         assert_eq!(
             store.state.status,
             "Interrupt requested; staged message will submit when the turn stops"
+        );
+        assert!(
+            store
+                .state
+                .pending_autonomy_hydration
+                .iter()
+                .any(|command| matches!(command, AppUiCommand::SubmitPrompt(_))),
+            "Esc must enqueue the staged prompt even if no terminal arrives"
         );
     }
 
