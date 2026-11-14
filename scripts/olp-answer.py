@@ -20,7 +20,7 @@ hub 上的子命令
       ssh 强制命令。只接受 list、show <id>、answer <id> 三个动作,只读写
       信箱目录。--max-age 是内环等回答的时间(默认 50 秒,与 MCP 服务的
       超时一致);更早的提问不再接受回答。在单元的 authorized_keys 里给 hub 的密钥配:
-        command="/path/scripts/olp-answer.py serve",no-pty,no-port-forwarding ssh-ed25519 AAAA… hub-answer
+        command="/path/bin/octoscode olp ask serve",no-pty,no-port-forwarding ssh-ed25519 AAAA… hub-answer
 
 规则
   - 只能回答还在等的提问。提问不存在(已回答或写错 id)、或已经超过内环

@@ -13,8 +13,8 @@
 3. **参数、输出、退出码与现有脚本一致**。迁移只换入口,不换语义;现有契约测试改为调用新
    命令后断言不变。
 4. **组名和动作名是英文小写单词**,与黑板、协议里已有的词对应(board、unit、card…)。
-5. **不暴露库文件**:`olp-preflight.sh`、`olp-hub-guard.sh`、`olp-evo-lib.py` 是被别的
-   工具加载的,没有命令。`olp-cross-check-diagnostic.sh` 是 Windows 构建诊断,与 OLP
+5. **不暴露库文件**:`olp-preflight.sh`、`olp-hub-guard.sh`、`olp-evo-lib.py`、
+   `olp-cli-lib.py` 是被别的工具加载的,没有命令。`olp-cross-check-diagnostic.sh` 是 Windows 构建诊断,与 OLP
    无关,不纳入。`olp-mcp-server.py` 是已归档的原型(实现已在 `octoscode olp-mcp-serve`)。
 6. **旧入口保留一段时间**:`scripts/olp-*` 照常可用;`octoscode outer-duty`、
    `octoscode olp-mcp-serve`、`octoscode olp-runtime-watch` 作为新命令的别名保留。
@@ -27,6 +27,7 @@
 |---|---|---|
 | `olp init [目录]` | `scripts/olp-init.sh` | 任意 |
 | `olp skill install [--to F \| --print \| --home-only] [--force]` | `scripts/olp-install-skill.sh` | 任意 |
+| `olp doctor [--repo R]… [--work W]… [--remote hub] [--json]` | `scripts/olp-doctor.py` | 任意 |
 
 ### 2.2 黑板(board)——一块黑板文件上的操作
 
@@ -117,15 +118,25 @@
 | `olp review cargo …` | `olp-review-evidence-cargo.py` | 任意 |
 | `olp review monitor …` | `olp-review-monitor.py` | 任意 |
 
-## 3. 对现有约定的影响
+## 3. 写进系统里的命令
 
-- **ssh 强制命令**改写成不依赖路径的形式,例如
-  `command="octoscode olp unit receive --unit m07",no-pty,no-port-forwarding …`。
-- **派卡唤醒**里那串 `python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/…" mirror`
-  变成 `octoscode olp remote mirror`。
-- **skill 与文档**里的 `scripts/olp-*` 改为新命令;`~/.octos/outer/octoscode-home` 只在
-  需要读 skill 正文时才用。
-- **保活任务、git 钩子**里写的命令改为新命令,升级 octoscode 后不必重装。
+git 钩子、单元工作仓库的 receivepack/uploadpack、保活任务、ssh 强制命令里写着一条
+以后才执行的命令。它们一律写 `<octoscode 绝对路径> olp …`:升级 octoscode 后自动
+用新版本,不必重装。写绝对路径是因为这些地方的 PATH 很短(sshd、git 钩子、launchd)。
+
+- `olp repo init` 写钩子 `exec <octoscode> olp repo hook <名字>`;`olp repo
+  connect-local` 写 `<octoscode> olp repo local-pack …`;`olp keepalive heartbeat`
+  写 `<octoscode> olp unit heartbeat … | …`。PATH 上的 `octoscode` 与正在运行的是同一个
+  文件时写 PATH 上的名字(包管理器的链接比它背后带版本号的文件稳定)。
+- 直接运行 `scripts/olp-*` 时照旧写仓库里脚本的路径,它随 `git pull` 更新。
+  `olp keepalive heartbeat --scripts <目录>` 明确要求用该目录的脚本。
+- **ssh 强制命令**由人写进 `authorized_keys`,写成
+  `command="/path/bin/octoscode olp unit receive --unit m07",no-pty,no-port-forwarding …`
+  (`command -v octoscode` 查路径)。
+- **派卡唤醒**里写 `octoscode olp remote mirror`,备用仓库里的脚本。
+- **`olp doctor`** 检查以上各处:调用 octoscode 绝对路径或仓库脚本为 ok;固定在某一版本
+  的工具目录(旧版本这样写)或按 PATH 找 octoscode 为 warn;路径已不存在、钩子缺失为
+  fail(退出码 1)。warn 与 fail 都附修复命令。
 
 ## 4. 已定的选择
 
@@ -142,6 +153,9 @@
 之后复用;同一版本的二进制总是同一个目录,不同版本互不覆盖。脚本之间的相对关系(同目录
 的写板助手、hub 守卫、`../docs/` 上岗卡、`../skills/` 正文)和在仓库里一样。
 
+- 脚本拿到环境变量 `OCTOSCODE_BIN`(正在运行的 octoscode),据此写 §3 的命令。
+- `olp-bundle/current` 链接指向最近一次运行的版本的目录;`olp skill install` 把它记进
+  `~/.octos/outer/octoscode-home`,skill 读规程正文时总是读到最新版。
 - `.py` 用 `python3` 运行(`OCTOSCODE_PYTHON` 可改),`.sh` 用 `bash`(`OCTOSCODE_BASH`
   可改)。Unix 上直接替换为脚本进程,标准输入输出、信号、退出码原样传递。
 - `olp guard watch`、`olp ask mcp`、`olp duty …` 本来就是 Rust 实现,直接调用,不经

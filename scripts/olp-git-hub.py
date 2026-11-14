@@ -11,8 +11,9 @@
       黑板路径记进仓库配置。重跑是安全的。
   serve --unit <单元号> --repo <裸仓库路径>
       ssh 强制命令。只放行对这个仓库的 git 推送与拉取,并把单元号传给
-      钩子。在 hub 的 authorized_keys 里给每个单元的密钥配:
-        command="/path/scripts/olp-git-hub.py serve --unit m07 --repo /path/hub.git",no-pty,no-port-forwarding ssh-ed25519 AAAA…
+      钩子。在 hub 的 authorized_keys 里给每个单元的密钥配(octoscode 写
+      绝对路径,`command -v octoscode` 可查;sshd 的 PATH 很短):
+        command="/path/bin/octoscode olp repo serve --unit m07 --repo /path/hub.git",no-pty,no-port-forwarding ssh-ed25519 AAAA…
   hook pre-receive | post-receive
       由钩子调用,不手工执行。
 
@@ -39,6 +40,11 @@
   不带单元号的推送(hub 本机上大外环的操作)不受限制:集成分支、种子
   分支由大外环自己维护。所以单元账号**必须**走 serve 强制命令,不要给
   单元发不带强制命令的密钥。
+
+钩子与 connect-local 写下的命令
+  经 `octoscode olp repo …` 运行时,写 `<octoscode 绝对路径> olp repo hook …`
+  与 `… olp repo local-pack …`:升级 octoscode 后自动用新版本,不必重跑。
+  直接运行本脚本时,写本脚本的路径。`octoscode olp doctor` 检查写下的命令。
 
 推送成功后
   post-receive 在黑板末尾追加一行(经 olp-board-append.sh,flock 互斥):
@@ -70,6 +76,16 @@ HEADING = re.compile(r"^### (\d+)")
 UNIT_LINE = re.compile(r"^unit:\s*(\S+)\s*$")
 ZERO = re.compile(r"^0+$")
 HOOKS = ("pre-receive", "post-receive")
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def cli_lib():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("olp_cli_lib", os.path.join(HERE, "olp-cli-lib.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def die(code, msg):
@@ -97,9 +113,11 @@ def cmd_init(args):
             die(2, f"{repo} 已存在且不是裸仓库")
     else:
         git("init", "--bare", "--quiet", repo)
-    script = os.path.abspath(__file__)
+    cli = cli_lib()
     git("config", "olp.board", board, cwd=repo)
-    git("config", "olp.scripts", os.path.dirname(script), cwd=repo)
+    # Older versions recorded the scripts directory; the hook now finds its
+    # helpers next to itself.
+    git("config", "--unset", "olp.scripts", cwd=repo, check=False)
     # 本地复验记录经 push option 传入。
     git("config", "receive.advertisePushOptions", "true", cwd=repo)
     hooks_dir = os.path.join(repo, "hooks")
@@ -110,7 +128,7 @@ def cmd_init(args):
             f.write(
                 "#!/bin/sh\n"
                 "# Installed by olp-git-hub.py init; re-run init to refresh.\n"
-                f"exec python3 -B {shlex.quote(script)} hook {name}\n"
+                f"exec {cli.shell(cli.command(['repo', 'hook', name], __file__, ['hook', name]))}\n"
             )
         os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     print(f"hub repo ready: {repo} (board: {board})")
@@ -149,11 +167,13 @@ def cmd_connect_local(args):
     repo = os.path.realpath(args.repo)
     if not os.path.isdir(repo):
         die(2, f"hub 仓库不存在: {repo}")
-    me = os.path.abspath(__file__)
     # git runs remote.<name>.receivepack through the shell with the repository
     # path appended. `serve` then sees the same command an ssh push would send.
-    pack = f"{shlex.quote(sys.executable)} -B {shlex.quote(me)} local-pack --unit {args.unit} --repo {shlex.quote(repo)} git-receive-pack"
-    upload = pack[: -len("git-receive-pack")] + "git-upload-pack"
+    cli = cli_lib()
+    words = ["local-pack", "--unit", args.unit, "--repo", repo]
+    base = cli.command(["repo", *words], __file__, words, python=sys.executable)
+    pack = cli.shell([*base, "git-receive-pack"])
+    upload = cli.shell([*base, "git-upload-pack"])
     remote = args.remote
     have = subprocess.run(["git", "remote", "get-url", remote], capture_output=True, text=True)
     verb = "set-url" if have.returncode == 0 else "add"
@@ -299,8 +319,7 @@ def hook_post_receive():
     if not unit:
         return 0
     board = git("config", "olp.board", check=False)
-    scripts = git("config", "olp.scripts", check=False)
-    append = os.path.join(scripts, "olp-board-append.sh")
+    append = os.path.join(HERE, "olp-board-append.sh")
     for old, new, ref in updates:
         m = TASK_REF.match(ref)
         if not m or ZERO.match(new):

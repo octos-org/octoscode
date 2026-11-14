@@ -8,8 +8,11 @@
 ## 1. hub 上:给每个单元的密钥配强制命令
 
 ```
-command="/path/scripts/olp-board-remote.py serve --unit m07 --board /path/.octos/OUTER_LOOP_REVIEW.md",no-pty,no-port-forwarding,no-agent-forwarding ssh-ed25519 AAAA… m07-board
+command="/path/bin/octoscode olp remote serve --unit m07 --board /path/.octos/OUTER_LOOP_REVIEW.md",no-pty,no-port-forwarding,no-agent-forwarding ssh-ed25519 AAAA… m07-board
 ```
+
+`/path/bin/octoscode` 写 `command -v octoscode` 的结果(sshd 执行强制命令时 PATH
+很短)。
 
 这把密钥只能做两件事:`append <键>`(追加)和 `read`(读全板)。黑板路径和
 单元号由这一行决定,单元改不了。
@@ -94,9 +97,8 @@ hub 不可达时镜像保持上一次的内容(退出码 75)。镜像永不回�
 
   ```bash
   # macOS
-  scripts/olp-launchd.py install mirror --interval 60 -- /usr/bin/python3 /path/scripts/olp-board-remote.py mirror
-  # Linux
-  scripts/olp-systemd.py install mirror --interval 60 -- /usr/bin/python3 /path/scripts/olp-board-remote.py mirror
+  octoscode olp keepalive install mirror --interval 60 -- /path/bin/octoscode olp remote mirror
+  # Linux:同一条命令(keepalive 按平台选 launchd 或 systemd)
   ```
 
 ## 6. 内环的提问:送到 hub,回答送回来
@@ -106,8 +108,10 @@ hub 不可达时镜像保持上一次的内容(退出码 75)。镜像永不回�
 
 ```sh
 #!/bin/sh
-exec python3 /path/scripts/olp-board-remote.py append --sign
+exec /path/bin/octoscode olp remote append --sign
 ```
+
+(`/path/bin/octoscode` 写 `command -v octoscode` 的结果。)
 
 这些行就带着单元的署名出现在 hub 的黑板上:
 
@@ -132,7 +136,7 @@ EOF
 和回答信箱里的提问:
 
 ```
-command="/path/scripts/olp-answer.py serve",no-pty,no-port-forwarding ssh-ed25519 AAAA… hub-answer
+command="/path/bin/octoscode olp ask serve",no-pty,no-port-forwarding ssh-ed25519 AAAA… hub-answer
 ```
 
 **内环只等 50 秒。**(octos 对一次 MCP 工具调用的上限是 60 秒,等待时间必须比它

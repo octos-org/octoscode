@@ -61,10 +61,12 @@ scripts/olp-unit.py heartbeat --unit m07 | ssh hub scripts/olp-unit.py receive
 
 ## 3. 接收心跳(hub 上)
 
-给每个单元的 ssh 公钥在 hub 的 `~/.ssh/authorized_keys` 里配强制命令:
+给每个单元的 ssh 公钥在 hub 的 `~/.ssh/authorized_keys` 里配强制命令(`octoscode`
+写绝对路径,`command -v octoscode` 可查——sshd 执行强制命令时 PATH 很短;升级
+octoscode 后这一行不用改):
 
 ```
-command="/path/to/scripts/olp-unit.py receive --unit m07",no-pty,no-port-forwarding ssh-ed25519 AAAA… m07-heartbeat
+command="/path/bin/octoscode olp unit receive --unit m07",no-pty,no-port-forwarding ssh-ed25519 AAAA… m07-heartbeat
 ```
 
 这样 m07 的密钥只能报 m07 的心跳:自报单元号与 `--unit` 不一致时拒收(退出码 3)。
@@ -278,13 +280,13 @@ scripts/olp-summary.py --board <板> --repo <hub 仓库> --name <项目名> --js
 ### B. 在 hub 上:放行这台单元
 
 2. 把单元的三把公钥加进 hub 的 `~/.ssh/authorized_keys`,每把带各自的强制命令
-   (路径换成 hub 上 octoscode 仓库的位置;`<板>` 是 hub 上权威黑板的绝对
-   路径):
+   (`/path/bin/octoscode` 换成 hub 上 `command -v octoscode` 的结果;`<板>` 是
+   hub 上权威黑板的绝对路径):
 
    ```
-   command="/path/scripts/olp-unit.py receive --unit m07",no-pty,no-port-forwarding <olp-hb.pub>
-   command="/path/scripts/olp-git-hub.py serve --unit m07 --repo /srv/olp/hub.git",no-pty,no-port-forwarding <olp-push.pub>
-   command="/path/scripts/olp-board-remote.py serve --unit m07 --board <板>",no-pty,no-port-forwarding <olp-board.pub>
+   command="/path/bin/octoscode olp unit receive --unit m07",no-pty,no-port-forwarding <olp-hb.pub>
+   command="/path/bin/octoscode olp repo serve --unit m07 --repo /srv/olp/hub.git",no-pty,no-port-forwarding <olp-push.pub>
+   command="/path/bin/octoscode olp remote serve --unit m07 --board <板>",no-pty,no-port-forwarding <olp-board.pub>
    ```
 
    这三把都**必须**带强制命令;不要给单元发不带强制命令的密钥。
@@ -320,23 +322,24 @@ scripts/olp-summary.py --board <板> --repo <hub 仓库> --name <项目名> --js
 
    ```bash
    printf 'hub = hub-board\nunit = m07\nmirror = <项目绝对路径>/.octos/OUTER_LOOP_REVIEW.md\n' > ~/.octos/outer/unit.conf
-   scripts/olp-board-remote.py mirror
+   octoscode olp remote mirror
    ```
 8. 把 MCP 的审计钩子指向 hub,内环的提问才会出现在 hub 的黑板上:
 
    ```bash
-   printf '#!/bin/sh\nexec python3 <仓库>/scripts/olp-board-remote.py append --sign\n' > ~/.octos/outer/board_append.sh
+   printf '#!/bin/sh\nexec %s olp remote append --sign\n' "$(command -v octoscode)" > ~/.octos/outer/board_append.sh
    chmod +x ~/.octos/outer/board_append.sh
    ```
-9. 保活(`docs/OLP_KEEPALIVE.md`)。macOS 用 `olp-launchd.py`,Linux 用
-   `olp-systemd.py`,子命令相同;Linux 要先开 linger。herdr 的路径按实际安装
-   位置写(`command -v herdr`),systemd 要求绝对路径:
+9. 保活(`docs/OLP_KEEPALIVE.md`)。`octoscode olp keepalive` 在 macOS 上走
+   launchd,在 Linux 上走 systemd;Linux 要先开 linger。herdr 的路径按实际安装
+   位置写(`command -v herdr`),systemd 要求绝对路径。心跳任务里写的是
+   `<octoscode 绝对路径> olp unit heartbeat …`,升级 octoscode 后不用重装:
 
    ```bash
-   scripts/olp-systemd.py doctor                     # macOS:scripts/olp-launchd.py doctor
+   octoscode olp keepalive doctor
    sudo loginctl enable-linger <用户>                 # 仅 Linux,doctor 报 FAIL 时
-   scripts/olp-systemd.py heartbeat --unit m07 --hub hub-hb
-   scripts/olp-systemd.py install herdr --keepalive -- <herdr 的绝对路径> server
+   octoscode olp keepalive heartbeat --unit m07 --hub hub-hb
+   octoscode olp keepalive install herdr --keepalive -- <herdr 的绝对路径> server
    ```
 10. 在 herdr 里开一个窗格启动内环。`workspace create` 的输出里有窗格号(形如
     `w1:p1`),派卡时的 `--wake` 用的就是它。免沙箱是 operator 的决定(见
@@ -350,7 +353,7 @@ scripts/olp-summary.py --board <板> --repo <hub 仓库> --name <项目名> --js
 ### D. 再到 hub 上:回程信道与唤醒
 
 11. hub 到单元有两把密钥,公钥都加进**单元**的 `~/.ssh/authorized_keys`:
-    - 回答提问用的一把,带强制命令 `command="/path/scripts/olp-answer.py serve",no-pty,no-port-forwarding`;
+    - 回答提问用的一把,带强制命令 `command="/path/bin/octoscode olp ask serve",no-pty,no-port-forwarding`;
       约定 hub 上 `ssh m07` 用的就是这一把(`olp-answer.py` 默认连单元号)。
     - herdr 用的一把,**不带**强制命令(它要在单元上执行 herdr 的命令),在 hub
       的 `~/.ssh/config` 里另起一个别名。这是 hub 登录单元,和第 2 步"不给单元
@@ -360,10 +363,12 @@ scripts/olp-summary.py --board <板> --repo <hub 仓库> --name <项目名> --js
     herdr machine add <herdr 用的别名> --label m07
     herdr --machine m07 agent list          # 应看到单元上的 octoscode 窗格
     ```
-12. 确认单元是"正常",权限一列符合预期:
+12. 确认单元是"正常",权限一列符合预期;hub 与单元上各跑一次 `doctor`,写进钩子、
+    保活任务、强制命令里的命令都应为 ok:
 
     ```bash
-    scripts/olp-unit.py status
+    octoscode olp unit status
+    octoscode olp doctor          # hub 上加 --repo /srv/olp/hub.git
     ```
 
 之后就可以用 §4b 的一条命令派卡。
@@ -385,6 +390,13 @@ scripts/olp-summary.py --board <板> --repo <hub 仓库> --name <项目名> --js
   变化,所以不注册成常驻任务。
 
 可选:把镜像的定时同步注册成常驻任务,作为兜底(`docs/OLP_REMOTE_BOARD.md` §5)。
+
+### 升级 octoscode 之后
+
+`octoscode olp …` 写下的命令调用 octoscode 本身,升级后自动用新版本。旧版本写下的
+命令指向某一版本的工具目录(`~/.octos/outer/olp-bundle/<哈希>/`),升级后仍跑旧
+代码,目录被清掉后直接失败。在 hub 和每台单元上跑一次 `octoscode olp doctor`,按
+它给出的修复命令处理 warn 与 fail。
 
 ### 重启之后
 

@@ -169,14 +169,28 @@ def cmd_install(args):
     return write_and_load(args, name, plist)
 
 
+def cli_lib(here):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("olp_cli_lib", os.path.join(here, "olp-cli-lib.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def cmd_heartbeat(args):
     if not UNIT_RE.match(args.unit):
         raise Fail(2, f"单元号不合法: {args.unit}")
     if not HUB_RE.match(args.hub):
         raise Fail(2, f"--hub 不是合法的 ssh 目标: {args.hub}")
-    scripts = os.path.abspath(args.scripts or os.path.dirname(os.path.abspath(__file__)))
+    here = os.path.dirname(os.path.abspath(__file__))
+    scripts = os.path.abspath(args.scripts or here)
     tool = os.path.join(scripts, "olp-unit.py")
-    if not os.path.isfile(tool):
+    cli = cli_lib(here)
+    # Through `octoscode olp`, the job calls `<octoscode> olp unit …` and so
+    # follows upgrades; --scripts asks for that directory's script instead.
+    use_cli = not args.scripts and cli.octoscode_bin() is not None
+    if not use_cli and not os.path.isfile(tool):
         print(f"olp-launchd: 提醒:{tool} 现在不存在,任务运行时需要它", file=sys.stderr)
     require = args.require
     if require is not None and not re.match(r"^[a-z]+(,[a-z]+)*$", require):
@@ -194,18 +208,16 @@ def cmd_heartbeat(args):
                 "装好后重跑,或用 --env OLP_HERDR=<路径>",
                 file=sys.stderr,
             )
+    beat = ["heartbeat", "--unit", args.unit] + (["--require", require] if require else [])
+    send = cli.command(["unit", *beat], tool, beat, use_cli=use_cli)
     pipeline = (
-        f"python3 -B {shlex.quote(tool)} heartbeat --unit {shlex.quote(args.unit)}"
-        + (f" --require {shlex.quote(require)}" if require else "")
+        cli.shell(send)
         + f" | ssh -o BatchMode=yes -o ConnectTimeout=10 {shlex.quote(args.hub)} receive"
     )
     if args.hub == "local":
         # Single machine: hand the heartbeat to the hub side directly.
-        pipeline = (
-            f"python3 -B {shlex.quote(tool)} heartbeat --unit {shlex.quote(args.unit)}"
-            + (f" --require {shlex.quote(require)}" if require else "")
-            + f" | python3 -B {shlex.quote(tool)} receive --unit {shlex.quote(args.unit)}"
-        )
+        take = ["receive", "--unit", args.unit]
+        pipeline = cli.shell(send) + " | " + cli.shell(cli.command(["unit", *take], tool, take, use_cli=use_cli))
     plist = build_plist("heartbeat", ["/bin/sh", "-c", pipeline], args.interval, False, env_pairs)
     return write_and_load(args, "heartbeat", plist)
 
