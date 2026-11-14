@@ -143,6 +143,7 @@ it by hand.
 | `HydrateSession` | `session/hydrate` |
 | `ListSessions` | `session/list` |
 | `OpenSession` | `session/open` |
+| `OperatorTransitionSessionGoal` | `session/goal/operator_transition` |
 | `ReadSessionStatus` | `session/status/read` |
 | `SessionBtw` | `session/btw` |
 | `SessionRollback` | `session/rollback` |
