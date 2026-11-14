@@ -296,7 +296,7 @@ fn single_machine_pushes_go_through_serve_with_the_unit_id() {
     assert!(
         git(
             b.dir.path(),
-            &["clone", "-q", hub.to_str().unwrap(), "work"]
+            &["clone", "-q", "-b", "main", hub.to_str().unwrap(), "work"]
         )
         .status
         .success()
