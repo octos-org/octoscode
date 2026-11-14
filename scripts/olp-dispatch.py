@@ -18,6 +18,7 @@
      (回测卡另带 `verify-of: #M`)。正文里的 `{N}` 会被替换成编号。
   5. 唤醒:给了 --wake <窗格> 时执行
      `herdr --machine <单元号> agent prompt <窗格> '<一句话,指向条目号>'`。
+     单元就是本机时(单机部署,登记的主机名等于本机主机名)不带 --machine。
 
 stdout 最后一行是分配到的编号。大外环随后对 `本地复验通过(#N)` 挂正哨。
 
@@ -92,6 +93,17 @@ def check_health(unit):
     raise Fail(1, f"单元 {unit} 现在不能接卡:{detail[-1] if detail else '健康检查未通过'}")
 
 
+def unit_is_local(unit):
+    """Single machine: the unit is registered with this machine's hostname,
+    so its panes are in the local herdr, not on a saved herdr machine."""
+    r = subprocess.run(
+        [sys.executable, "-B", os.path.join(HERE, "olp-unit.py"), "where", unit],
+        capture_output=True,
+        text=True,
+    )
+    return r.returncode == 0 and r.stdout.strip() == "local"
+
+
 def wake(unit, pane, number):
     herdr = os.environ.get("OLP_HERDR") or "herdr"
     # The unit reads a mirror of the board. It was last synced before this
@@ -106,7 +118,7 @@ def wake(unit, pane, number):
     )
     try:
         r = subprocess.run(
-            [herdr, "--machine", unit, "agent", "prompt", pane, message],
+            [herdr, *([] if unit_is_local(unit) else ["--machine", unit]), "agent", "prompt", pane, message],
             capture_output=True,
             text=True,
             timeout=60,

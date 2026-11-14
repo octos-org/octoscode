@@ -70,6 +70,12 @@ Scenario: 规程正文只有一份,仓库内的入口是不含路径的薄卡
   Then 薄卡指向正文且不重复任何模式小节;两者的 description 相同;正文说明了路径解析规则;两者都不含固定路径
 
 ### Rule: install — 安装与路径解析
+Scenario: 文档地图覆盖每一份 OctoLoop 文档,指向的文件都存在
+  Test: skill_document_map_reaches_every_octoloop_document
+  Given 规程正文与 `docs/` 下的全部 OctoLoop 文档(`OLP_*`、`OCTOLOOP_*`、`OUTER_LOOP_PROTOCOL.md`)
+  When 读正文里的"文档地图"与 init 模式
+  Then 每一份文档都在地图里出现;正文反引号里的每个 `docs/….md` 与 `scripts/olp-…` 路径都存在;多机部署的工具(两个保活工具、本地仓库工具、负哨转发、行为证据互审、运行时守护)在地图里有名字;init 模式把多机接入引到 `docs/OLP_CLUSTER.md` §7,该小节存在
+
 Scenario: 安装的薄卡不含固定路径,仓库位置单独记录(critical)
   Tags: critical
   Test: install_writes_a_path_free_entry_and_records_the_home

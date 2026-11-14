@@ -78,6 +78,79 @@ fn skill_body_is_agent_neutral_and_the_claude_entry_is_thin() {
     }
 }
 
+/// Scenario: 文档地图覆盖每一份 OctoLoop 文档,指向的文件都存在
+#[test]
+fn skill_document_map_reaches_every_octoloop_document() {
+    let root = repo_root();
+    let body = std::fs::read_to_string(root.join("skills/octoloop/AGENTS.md")).unwrap();
+    let map_start = body
+        .find("## 文档地图")
+        .expect("the skill has a document map");
+    let map_end = map_start
+        + body[map_start..]
+            .find("\n## 模式 init")
+            .expect("map precedes init");
+    let map = &body[map_start..map_end];
+
+    // Every OctoLoop document in docs/ is reachable from the map. A document
+    // nobody links to is a document no agent will read.
+    let mut docs: Vec<String> = std::fs::read_dir(root.join("docs"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| {
+            n.ends_with(".md")
+                && (n.starts_with("OLP_")
+                    || n.starts_with("OCTOLOOP_")
+                    || n == "OUTER_LOOP_PROTOCOL.md")
+        })
+        .collect();
+    docs.sort();
+    assert!(docs.len() >= 10, "{docs:?}");
+    for doc in &docs {
+        assert!(
+            map.contains(&format!("`docs/{doc}`")),
+            "the document map does not mention docs/{doc}"
+        );
+    }
+
+    // Everything the skill points at exists: documents and scripts.
+    let mut checked = 0;
+    for span in body.split('`').skip(1).step_by(2) {
+        let path = span.split_whitespace().next().unwrap_or("");
+        if (path.starts_with("docs/") && path.ends_with(".md")) || path.starts_with("scripts/olp-")
+        {
+            assert!(
+                root.join(path).is_file(),
+                "the skill points at a missing file: {path}"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked >= 40, "only {checked} paths were checked");
+
+    // The user-facing tools of the multi-machine deployment are named.
+    for tool in [
+        "scripts/olp-systemd.py",
+        "scripts/olp-launchd.py",
+        "scripts/olp-git-hub.py",
+        "scripts/olp-alert-forward.py",
+        "scripts/olp-review-evidence.py",
+        "octoscode olp-runtime-watch",
+    ] {
+        assert!(map.contains(tool), "the document map does not name {tool}");
+    }
+
+    // The init mode routes a multi-machine setup to the bring-up checklist.
+    let init = &body[map_end..];
+    let init = &init[..init.find("\n## 模式 outer").unwrap()];
+    assert!(init.contains("docs/OLP_CLUSTER.md` §7"), "{init}");
+    let cluster = std::fs::read_to_string(root.join("docs/OLP_CLUSTER.md")).unwrap();
+    assert!(
+        cluster.contains("\n## 7. 单元上线清单"),
+        "the section the skill points at exists"
+    );
+}
+
 /// Scenario: 安装的薄卡不含固定路径,仓库位置单独记录
 #[test]
 fn install_writes_a_path_free_entry_and_records_the_home() {
