@@ -21,6 +21,31 @@ Markdown,没有哪个 agent 专有的指令。Claude Code 经
 `OCTOSCODE_HOME` → 文件 `~/.octos/outer/octoscode-home` 的内容 → 当前项目
 根。都找不到就停下告诉用户,不要猜路径。
 
+## 文档地图(遇到什么事,读哪一份)
+
+规程分散在十几份文档里,不用全读。按要做的事找到对应的那一份,**读完再
+动手**;表里的命令是那份文档讲的主要工具。
+
+| 要做的事 | 读 | 主要命令 |
+|---|---|---|
+| 单机第一次上手、装依赖、冒烟 | `docs/OLP_QUICKSTART.md`(英文 `docs/OLP_QUICKSTART.en.md`) | `scripts/olp-init.sh` |
+| 当外环:派单、观测、复验、代推 | `docs/OLP_OUTER_BOOT.md`,纪律与定式见 `docs/OUTER_LOOP_PROTOCOL.md` | `octoscode outer-duty`、`scripts/olp-watch-board.sh`、`scripts/olp-board-append.sh` |
+| 把一台机器接成 hub 或单元(多机部署) | `docs/OLP_CLUSTER.md` §7 上线清单,规则见协议附录 C | `scripts/olp-unit.py`、`scripts/olp-install-skill.sh --home-only` |
+| hub 上给单元派卡、看单元健康与占用 | `docs/OLP_CLUSTER.md` §4、§4b | `scripts/olp-dispatch.py`、`scripts/olp-unit.py status`、`scripts/olp-inbox.py --units` |
+| 单元上写板、同步镜像、断网排队;回答单元的提问 | `docs/OLP_REMOTE_BOARD.md` | `scripts/olp-board-remote.py`、`scripts/olp-answer.py` |
+| hub 建本地 git 仓库;单元推任务分支 | `docs/OLP_LOCAL_GIT.md` | `scripts/olp-git-hub.py`、`scripts/olp-task-push.sh` |
+| 看哪些本地 PR 在等审核、采认后推 GitHub | `docs/OLP_LOCAL_PR.md`;怎么采认见本文件 outer 模式第 4 步 | `scripts/olp-local-pr.py status`、`promote`;收件箱 `scripts/olp-inbox.py` |
+| 心跳等常驻任务开机自启、崩溃重启 | `docs/OLP_KEEPALIVE.md` | macOS `scripts/olp-launchd.py`,Linux `scripts/olp-systemd.py` |
+| 守着单元上的内环,异常报到 hub(负哨) | `docs/OLP_CLUSTER.md` §4c | `octoscode olp-runtime-watch`、`scripts/olp-alert-forward.py` |
+| 黑板太长、归档已了结的卡 | `docs/OLP_OUTER_BOOT.md` §7 | `scripts/olp-board-archive.py` |
+| 进化环:采集摩擦信号、出 retro 简报 | `docs/OLP_OUTER_BOOT.md` §7,本文件 outer 模式第 5 步 | `scripts/olp-evo-harvest.sh`、`scripts/olp-evo-retro.sh` |
+| 两个 octos peer 审查员的初审结论不一致,用实际执行的测试裁决(只适用于以 octos peer 方式跑的审查,不是通用的人工仲裁) | `docs/OLP_REVIEW_EVIDENCE.md` | `scripts/olp-review-evidence.py`;只读的进度视图 `scripts/olp-review-monitor.py` |
+| 给落地项目的 agent 一张自包含的上岗卡 | `docs/OCTOLOOP_AGENTS.zh-CN.md`(英文 `docs/OCTOLOOP_AGENTS.md`),由 `olp-init.sh` 铺成项目的 `AGENTS.md` | `scripts/olp-init.sh` |
+| 想通读原理,或查某项能力的缺省状态 | `docs/OCTOLOOP_GUIDE.md`、`docs/OCTOLOOP_FEATURES.md` | — |
+
+单元上的内环通常不加载本文件,它读的是项目里的 `AGENTS.md` 上岗卡;两处
+的单元规则要保持一致。
+
 ## 模式 init — 铺脚手架(首次/新机器)
 
 引导运行仓库的一键引导脚本,再核对依赖清单:
@@ -35,6 +60,12 @@ herdr 或 tmux、外环模型 CLI)。herdr 来源与分支钉在 §1 依赖表
 (hagency-org/herdr,octoscode 识别当前在 feat/octoscode-agent 分支)。任何缺口按 §6 故障速查处理,再跑
 §5 冒烟验证(两分钟)。**全部发现式:本卡零硬编码路径**,一切以
 QUICKSTART 的发现命令为准。
+
+**要接入多机部署时**(这台机器当 hub,或当一台单元):上面的单机脚手架
+只是其中一步。完整的顺序——密钥与强制命令、单元登记、单元配置、镜像、
+MCP 钩子、保活、herdr 登记——在 `docs/OLP_CLUSTER.md` §7 上线清单里,
+macOS 与 Linux 各自的前提也在那里。步骤在单元和 hub 之间来回,顺序不能
+换;按清单逐步做,不要凭本卡拼顺序。
 
 ## 模式 outer — 外环上岗(强模型审查员)
 
