@@ -52,6 +52,10 @@
   `olp-systemd.py`(systemd 用户单元,需要 linger)。缺省状态:不配置就
   不生效,单机行为不变。用户怎么看到:见 `docs/OLP_CLUSTER.md`(§7 是
   单元上线清单);协议附录 C 是规则。
+- **内环用 Claude Code 或 Codex**:单元上的内环可以不是 octoscode。两者都读项目里的
+  `AGENTS.md`,用 MCP 挂上 `ask_outer`;Codex 另要放行这个 MCP 服务的审批、让沙箱能写
+  `.git`。缺省状态:按 octoscode 内环的方式启动不会自动生效,要按文档接。用户怎么看到:
+  见 `docs/OLP_INNER_AGENTS.md`。
 - **进化环(阶段 0–3)**:三源采集哨(`olp-evo-harvest.sh` 从活板
   ACK、events.jsonl、MCP 审计板增量识别内环摩擦,identity 去重、
   字节游标、崩溃一致)落症状卡,retro 脚本(`olp-evo-retro.sh`)按
