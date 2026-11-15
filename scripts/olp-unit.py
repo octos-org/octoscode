@@ -64,6 +64,13 @@
     **自报**的,用来让大外环知道各台机器的实际情况,不是安全边界,也不
     参与健康判定。
 
+复验方
+    心跳还带上本机的复验方 CLI 装没装、登没登录(字段 reviewers):
+    claude 看 `claude auth status` 的 loggedIn,codex 看 `codex login status`
+    的退出码。只留是/否,账号信息不离开单元。找命令依次看 OLP_CLAUDE /
+    OLP_CODEX、PATH 与常见安装目录(常驻任务的 PATH 很短)。只是告知,不参与
+    健康判定:用哪些复验方由 operator 按卡决定。status 里显示为"复验方"一列。
+
 巡检项
     内置:agent(herdr 里至少有一个内环,任何一种)、serve(本机有
     `octos serve` 进程,只适用于 octos 内环)、disk(HOME 所在磁盘的空闲
@@ -295,6 +302,56 @@ def check_serve():
 
 def herdr_bin():
     return os.environ.get("OLP_HERDR") or shutil.which("herdr") or "herdr"
+
+
+# Where reviewer CLIs are usually installed: a keepalive job's PATH is short.
+TOOL_DIRS = ("~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "~/.npm-global/bin", "~/.claude/local")
+# kind -> (env override, status command). Only the yes/no answer is kept:
+# `claude auth status` also prints the account, which never leaves the unit.
+REVIEWERS = {
+    "claude": ("OLP_CLAUDE", ["auth", "status"]),
+    "codex": ("OLP_CODEX", ["login", "status"]),
+}
+
+
+def find_tool(kind, env):
+    if os.environ.get(env):
+        path = os.environ[env]
+        return path if os.access(path, os.X_OK) else None
+    found = shutil.which(kind)
+    if found:
+        return found
+    for d in TOOL_DIRS:
+        path = os.path.join(os.path.expanduser(d), kind)
+        if os.access(path, os.X_OK):
+            return path
+    return None
+
+
+def reviewer_status():
+    """Whether each reviewer CLI is installed and logged in (retrospective
+    #16: Claude was installed but not logged in, found only when a card
+    needed it). Reported, never a health check: which reviewers a card
+    uses is the operator's decision."""
+    out = []
+    for kind, (env, args) in REVIEWERS.items():
+        exe = find_tool(kind, env)
+        if not exe:
+            out.append({"kind": kind, "installed": False, "logged_in": None})
+            continue
+        try:
+            r = subprocess.run([exe, *args], capture_output=True, text=True, timeout=20)
+        except (OSError, subprocess.TimeoutExpired):
+            out.append({"kind": kind, "installed": True, "logged_in": None})
+            continue
+        logged_in = r.returncode == 0
+        if kind == "claude":
+            try:
+                logged_in = json.loads(r.stdout).get("loggedIn") is True
+            except (ValueError, AttributeError):
+                pass
+        out.append({"kind": kind, "installed": True, "logged_in": logged_in})
+    return out
 
 
 def herdr_json(args):
@@ -548,6 +605,7 @@ def cmd_heartbeat(args):
         {"kind": a["kind"], "status": a["status"], "pane": a["pane"]} for a in agents or []
     ]
     beat["agent_permissions"] = others
+    beat["reviewers"] = reviewer_status()
     json.dump(beat, sys.stdout, ensure_ascii=False)
     sys.stdout.write("\n")
     return 0
@@ -614,10 +672,22 @@ def cmd_receive(args):
                     "solo": b.get("solo") is True,
                 }
             )
+    reviewers = []
+    for r in beat.get("reviewers") if isinstance(beat.get("reviewers"), list) else []:
+        if isinstance(r, dict) and isinstance(r.get("kind"), str) and re.match(r"^[a-z0-9_-]{1,16}$", r["kind"]):
+            logged = r.get("logged_in")
+            reviewers.append(
+                {
+                    "kind": r["kind"],
+                    "installed": r.get("installed") is True,
+                    "logged_in": logged if isinstance(logged, bool) else None,
+                }
+            )
     stored = {
         "v": 1,
         "unit": unit,
         "permission": permission,
+        "reviewers": reviewers[:16],
         "backends": backends[:64],
         "agents": agents[:64],
         "hostname": norm_host(str(beat.get("hostname", ""))),
@@ -696,6 +766,8 @@ def cmd_status(args):
                 "permission": (beat or {}).get("permission", "unknown") if beat else None,
                 "backends": (beat or {}).get("backends", []) if beat else [],
                 "agents": (beat or {}).get("agents", []) if beat else [],
+                # 单元自报的复验方(装没装、登没登录);只是告知,派什么卡由 operator 定。
+                "reviewers": (beat or {}).get("reviewers", []) if beat else [],
             }
         )
     if args.json:
@@ -711,12 +783,30 @@ def cmd_status(args):
         kinds = ",".join(sorted({a.get("kind", "?") for a in r["agents"]})) or "-"
         line = (
             f"{r['unit']}\t{STATE_ZH[r['state']]}({r['state']})\t心跳 {age}"
-            f"\t内环 {kinds}\t权限 {permission}\t{r['hostname']}"
+            f"\t内环 {kinds}\t权限 {permission}\t复验方 {reviewers_text(r['reviewers'])}\t{r['hostname']}"
         )
         if r["reasons"]:
             line += "\t" + ";".join(r["reasons"])
         print(line)
     return 0
+
+
+def reviewers_text(reviewers):
+    """claude 已登录,codex 未登录,… — or "-" when the unit did not say."""
+    if not reviewers:
+        return "-"
+    words = []
+    for r in reviewers:
+        if not r.get("installed"):
+            state = "未安装"
+        elif r.get("logged_in") is True:
+            state = "已登录"
+        elif r.get("logged_in") is False:
+            state = "未登录"
+        else:
+            state = "登录状态未知"
+        words.append(f"{r.get('kind')} {state}")
+    return ",".join(words)
 
 
 def is_local_unit(unit):

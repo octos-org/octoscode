@@ -816,3 +816,67 @@ fn unit_heartbeat_recognises_any_kind_of_inner_loop() {
         "{stored}"
     );
 }
+
+/// Scenario: 心跳报告复验方装没装、登没登录,只是告知,不影响健康判定(复盘第 16 条)
+#[test]
+fn unit_heartbeat_reports_reviewer_logins_without_judging_health() {
+    let hub = Hub::new();
+    hub.register("m01", "mini-01", "aa:bb:cc:dd:ee:01");
+    let bin = hub.dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let tool = |name: &str, body: &str| {
+        let path = bin.join(name);
+        std::fs::write(&path, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    };
+    // Claude installed but not logged in; it prints the account too.
+    let claude = tool(
+        "claude",
+        "#!/bin/sh\necho '{\"loggedIn\": false, \"authMethod\": \"none\", \"email\": \"someone@example.com\"}'\nexit 1\n",
+    );
+    let codex = tool("codex", "#!/bin/sh\necho 'Logged in using ChatGPT'\n");
+    let beat_with = |claude: &Path, codex: &Path| {
+        let out = hub
+            .cmd()
+            .args(["heartbeat", "--unit", "m01", "--require", "disk"])
+            .env("OLP_CLAUDE", claude)
+            .env("OLP_CODEX", codex)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
+        stdout(&out)
+    };
+    let raw = beat_with(&claude, &codex);
+    assert!(
+        !raw.contains("someone@example.com"),
+        "the account never leaves the unit: {raw}"
+    );
+    let hb: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        hb["reviewers"],
+        serde_json::json!([
+            {"kind": "claude", "installed": true, "logged_in": false},
+            {"kind": "codex", "installed": true, "logged_in": true},
+        ])
+    );
+
+    // The hub keeps it and shows it; health is judged as before.
+    let mut stamped = hb.clone();
+    stamped["hostname"] = serde_json::json!("mini-01");
+    stamped["macs"] = serde_json::json!(["aa:bb:cc:dd:ee:01"]);
+    assert!(hub.receive(&stamped).status.success());
+    let status: serde_json::Value =
+        serde_json::from_str(&stdout(&hub.run(&["status", "--json"]))).unwrap();
+    let unit = &status["units"][0];
+    assert_eq!(unit["reviewers"], hb["reviewers"]);
+    assert_eq!(unit["state"], "healthy", "{status}");
+    let text = stdout(&hub.run(&["status"]));
+    assert!(text.contains("复验方 claude 未登录,codex 已登录"), "{text}");
+
+    // Not installed (or not where the job can find it).
+    let missing = hub.dir.path().join("nowhere");
+    let hb: serde_json::Value = serde_json::from_str(&beat_with(&missing, &missing)).unwrap();
+    assert_eq!(hb["reviewers"][0]["installed"], false, "{hb}");
+}

@@ -94,6 +94,7 @@ def collect(args):
                 "heartbeat_age_seconds": u.get("heartbeat_age_seconds"),
                 "agents": u.get("agents", []),
                 "permission": u.get("permission"),
+                "reviewers": u.get("reviewers", []),
                 "reasons": u.get("reasons", []),
             }
             for u in units.get("units", [])
