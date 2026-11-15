@@ -28,7 +28,9 @@ fn has_flock() -> bool {
 
 /// herdr as far as `olp outer` uses it. State lives in files next to it:
 /// `workspaces.json`, `busy` (foreground program names, one per line),
-/// `calls.log` (every call), `run.pids` (pids of commands `pane run` began).
+/// `agent_state` ("never": the agent never gets ready), `calls.log` (every
+/// call), `prompts.log` (prompts handed over), `run.pids` (pids of commands
+/// `pane run` began).
 const FAKE_HERDR: &str = r#"#!/usr/bin/env python3
 import json, os, subprocess, sys
 here = os.path.dirname(os.path.abspath(__file__))
@@ -56,6 +58,16 @@ elif args[:2] == ["pane", "process-info"]:
     names = open(busy).read().split() if os.path.exists(busy) else []
     procs = [{"name": "zsh", "pid": 1}] + [{"name": n, "pid": 2} for n in names]
     out({"process_info": {"foreground_processes": procs}})
+elif args[:2] == ["agent", "wait"]:
+    state = os.path.join(here, "agent_state")
+    if os.path.exists(state) and open(state).read().strip() == "never":
+        print(json.dumps({"error": {"message": "timeout"}}))
+        sys.exit(1)
+    out({"status": "idle"})
+elif args[:2] == ["agent", "prompt"]:
+    with open(os.path.join(here, "prompts.log"), "a") as f:
+        f.write(args[3] + "\n")
+    out({})
 elif args[:2] == ["pane", "run"]:
     p = subprocess.Popen(["/bin/sh", "-c", args[3]], start_new_session=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -302,4 +314,123 @@ fn outer_install_registers_supervise_as_a_keepalive_job() {
         job.contains(&Path::new(&sb.p("herdr/herdr")).display().to_string()),
         "{job}"
     );
+}
+
+/// Scenario: 重启后等 agent 就绪,把接班提示送进去;没送到在黑板上记一行;--no-prompt 不送
+#[test]
+fn outer_supervise_hands_the_restarted_outer_the_resume_prompt() {
+    let sb = Sb::new();
+    let agent = "while true; do sleep 0.1; done";
+    let out = sb.supervise(&[], agent);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("prompted pane w1:p1"),
+        "{}",
+        stdout(&out)
+    );
+    let log = std::fs::read_to_string(sb.p("herdr/calls.log")).unwrap();
+    let wait = log.find("agent wait").expect("waits for the agent");
+    let prompt = log.find("agent prompt").expect("hands over the prompt");
+    assert!(wait < prompt, "wait first, then prompt: {log}");
+    let prompts = std::fs::read_to_string(sb.p("herdr/prompts.log")).unwrap();
+    assert!(
+        prompts.contains("octoscode olp outer resume --board"),
+        "{prompts}"
+    );
+    assert!(prompts.contains("board.md"), "{prompts}");
+}
+
+#[test]
+fn outer_supervise_notes_a_prompt_that_was_not_delivered() {
+    let sb = Sb::new();
+    std::fs::write(sb.p("herdr/agent_state"), "never").unwrap();
+    let out = sb.supervise(&["--ready", "1"], "while true; do sleep 0.1; done");
+    assert_eq!(out.status.code(), Some(0), "the restart itself succeeded");
+    assert!(stderr(&out).contains("接班提示没送到"), "{}", stderr(&out));
+    if has_flock() {
+        assert!(sb.board().contains("接班提示未送达"), "{}", sb.board());
+    }
+    assert_eq!(sb.calls("agent prompt"), 0);
+}
+
+#[test]
+fn outer_supervise_sends_nothing_with_no_prompt() {
+    let sb = Sb::new();
+    let out = sb.supervise(&["--no-prompt"], "while true; do sleep 0.1; done");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(sb.calls("agent "), 0);
+}
+
+/// Scenario: 持锁的外环跑 resume 得到收件箱与检查单;不在 hold 里跑退出码 3
+#[test]
+fn outer_resume_briefs_the_holder_and_warns_anyone_else() {
+    let sb = Sb::new();
+    std::fs::write(
+        sb.p("board.md"),
+        "# board\n\n## Active\n\n### 7. 修登录页\nunit: m01\n\n> 内环(m01)·#7 ACK(done): 已改\n",
+    )
+    .unwrap();
+    let brief = sb.p("brief.json");
+    let resume = format!(
+        "{} olp outer resume --board {} --project {} --signature hub-outer --json > {}; echo $? > {}.code",
+        env!("CARGO_BIN_EXE_octoscode"),
+        sb.p("board.md").display(),
+        sb.p("project").display(),
+        brief.display(),
+        brief.display(),
+    );
+    // The outer runs resume from inside its hold.
+    let out = sb
+        .cmd()
+        .args(["outer-duty", "hold", "--project"])
+        .arg(sb.p("project"))
+        .args([
+            "--signature",
+            "hub-outer",
+            "--duties",
+            "d",
+            "--",
+            "/bin/sh",
+            "-c",
+            &resume,
+        ])
+        .env("OLP_UNITS_DIR", sb.p("units"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let code = std::fs::read_to_string(brief.with_extension("json.code")).unwrap();
+    assert_eq!(code.trim(), "0", "the holder may resume");
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&brief).unwrap()).unwrap();
+    assert_eq!(json["holder"], true, "{json}");
+    assert_eq!(json["lock"], "HELD", "{json}");
+    let inbox: Vec<&serde_json::Value> = json["summary"]["cards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["partition"] == "inbox")
+        .collect();
+    assert_eq!(inbox.len(), 1, "{json}");
+    assert_eq!(inbox[0]["number"], 7);
+    let checklist = json["checklist"].as_array().unwrap();
+    assert!(
+        checklist
+            .iter()
+            .any(|c| c.as_str().unwrap().contains("board watch")),
+        "{json}"
+    );
+
+    // Not the holder: the brief still prints, with a warning and exit 3.
+    let out = sb
+        .cmd()
+        .args(["olp", "outer", "resume", "--board"])
+        .arg(sb.p("board.md"))
+        .arg("--project")
+        .arg(sb.p("project"))
+        .env("OLP_UNITS_DIR", sb.p("units"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert!(stdout(&out).contains("不要接班"), "{}", stdout(&out));
+    assert!(stdout(&out).contains("#7"), "{}", stdout(&out));
 }

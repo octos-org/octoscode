@@ -86,6 +86,14 @@ octoscode olp outer supervise --project <项目> --signature <署名> --duties <
   `--max-restarts`)就暂停,在黑板上告警一次(退出码 4);人看过后
   `supervise --reset` 清掉记录。
 - 给了 `--board` 时,每次自动重启在黑板上记一行。
+- 重启成功后,等 herdr 认出 agent 已就绪(最多 `--ready` 秒,默认 90),把接班提示送进去
+  (`herdr agent prompt`):让它先跑 `octoscode olp outer resume`。`--prompt` 换成自己的
+  话,`--no-prompt` 不送。agent 卡在确认界面(例如第一次进某个目录时的"信任此目录")、
+  迟迟不就绪时,黑板上记一行"接班提示未送达",要人看一眼。
+- `octoscode olp outer resume --board <板> --project <项目> [--signature <署名>]`:接班
+  简报——本会话是否持锁、最近的自动重启、停机期间到的回执与待办(收件箱)、待回答的
+  提问、负哨、单元,以及逐项要做的检查单。挂哨以挂上那一刻为基线,停机期间写进黑板
+  的行只在收件箱里,所以先处理收件箱再挂哨。
 - herdr 服务本身由常驻任务(§3)或人启动;监督任务找不到它时什么都不做。
 
 ## 5. Linux:systemd 用户单元
