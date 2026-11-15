@@ -9,6 +9,9 @@
 //! answers with `olp-answer.py`. ssh in both directions is one stand-in
 //! script that runs the matching forced command locally.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;

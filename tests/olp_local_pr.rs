@@ -6,6 +6,9 @@
 //!
 //! The "GitHub" remote is a second local bare repository.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::path::PathBuf;
 use std::process::{Command, Output};
 

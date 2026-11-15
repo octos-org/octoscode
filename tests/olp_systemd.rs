@@ -7,6 +7,9 @@
 //! Every test passes `--no-load` and a temp `--dir`, so nothing touches a
 //! real systemd user manager and the tests also run on macOS.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 

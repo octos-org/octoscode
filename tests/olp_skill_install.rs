@@ -5,6 +5,9 @@
 //! `skills/octoloop/AGENTS.md`, thin entries that carry no fixed path, and
 //! `scripts/olp-install-skill.sh` to install one.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 

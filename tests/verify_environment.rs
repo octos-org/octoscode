@@ -17,6 +17,9 @@
 //! is owned by another lane. The repo root resolves via CARGO_MANIFEST_DIR
 //! under cargo, or VERIFY_REPO_ROOT set explicitly for standalone builds.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

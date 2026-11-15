@@ -7,6 +7,9 @@
 //! fall back to the server-saved values (draft-first, saved-fallback) — the
 //! TUI displays server truth, it never fakes it.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use octos_core::ui_protocol::UiProtocolCapabilities;
 use octoscode::client_event::{CapabilitiesClientEvent, ClientEvent, ProfileLlmListClientEvent};
