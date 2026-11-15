@@ -79,7 +79,7 @@ octoscode 仓库在哪,参数、输出、退出码与原脚本相同(全表见 `
 | `octoscode olp guard watch …`、`guard forward` | `octoscode olp-runtime-watch …`、`scripts/olp-alert-forward.py` |
 | `octoscode olp keepalive …` | macOS `scripts/olp-launchd.py …`,Linux `scripts/olp-systemd.py …` |
 | `octoscode olp duty hold\|check\|lease …` | `octoscode outer-duty hold\|check\|lease …` |
-| `octoscode olp outer supervise\|install …` | `scripts/olp-outer.py …` |
+| `octoscode olp outer supervise\|resume\|install …` | `scripts/olp-outer.py …` |
 | `octoscode olp evo harvest\|retro\|metrics\|index\|skeleton …` | `scripts/olp-evo-harvest.sh`、`scripts/olp-evo-retro.sh`、`scripts/olp-evo-metrics.sh`、`scripts/olp-evo-index.sh`、`scripts/olp-evo-spec-skeleton.sh` |
 | `octoscode olp review …` | `scripts/olp-review-evidence.py`、`scripts/olp-review-monitor.py`、`scripts/olp-review-evidence-cargo.py` |
 
@@ -158,6 +158,14 @@ macOS 与 Linux 各自的前提也在那里。步骤在单元和 hub 之间来�
    stdout(仓内只许写 `specs/drafts/`,主审补选择器后才入 `specs/`);
    `octoscode olp evo index <repo>` 生成 `knowledge/context/evolution/INDEX.md`;
    回放基线 `fixtures/evolution/replay/`(合成夹具,实现 commit 不得改)。
+
+**被自动重启后(接班)**:监督任务(`octoscode olp outer`,`docs/OLP_KEEPALIVE.md`
+§4a)在锁空出时把你拉起,并送来一句接班提示。先跑
+`octoscode olp outer resume --board <板> --project <项目> --signature <署名>`:它说本会话
+不是持锁者(退出码 3)就只批注、不接班;是持锁者就按它的检查单逐项做——处理收件箱
+(停机期间到的回执只在这里,重新挂的哨看不到它们)、回答积压的提问、重新挂哨、恢复
+`/loop`、在黑板上署名记一行接班——做完再干新活。没收到提示但发现自己是被重启的
+(黑板上有"外环已自动重启"),同样先接班。
 
 **黑板变长时**:`octoscode olp board archive <板> [--keep N] [--dry-run]`
 把已闭环条目的正文移到归档文件,板上留编号桩(归档前先跑一次采集)。
