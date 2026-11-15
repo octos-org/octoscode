@@ -38,7 +38,7 @@ hub 上的子命令
     `show <id>` 仍然能看任何一条。本工具不删信箱里的文件。
 
 退出码:0 成功;2 用法错误;3 单元拒绝(没有这个提问、动作不允许);
-75 单元不可达。
+6 主审权租约无效(外环会话已结束或已换人),未回答;75 单元不可达。
 """
 
 import argparse
@@ -51,6 +51,16 @@ import subprocess
 import sys
 import tempfile
 import time
+
+
+def cli_lib():
+    import importlib.util
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location("olp_cli_lib", os.path.join(here, "olp-cli-lib.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 UNIT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 TARGET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$")
@@ -142,6 +152,7 @@ def cmd_show(args):
 
 def cmd_answer(args):
     check_id(args.ask_id)
+    cli_lib().duty_gate("olp-answer")
     body = sys.stdin.buffer.read(MAX_ANSWER + 1)
     if len(body) > MAX_ANSWER:
         raise Fail(2, "回答超过 64 KiB")

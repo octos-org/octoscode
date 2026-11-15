@@ -38,7 +38,8 @@
 
 "已合并"需要查 GitHub,本工具不联网,不判断。
 
-退出码:0 成功;1 promote 被闸门拒绝或推送失败;2 用法错误、仓库或黑板不存在。
+退出码:0 成功;1 promote 被闸门拒绝或推送失败;2 用法错误、仓库或黑板不存在;
+6 主审权租约无效(外环会话已结束或已换人),未推送。
 """
 
 import argparse
@@ -47,6 +48,16 @@ import os
 import re
 import subprocess
 import sys
+
+
+def cli_lib():
+    import importlib.util
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location("olp_cli_lib", os.path.join(here, "olp-cli-lib.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 PUSHED = re.compile(r"^单元\(([^)]+)\)·本地复验通过\(#(\d+)\)[:：]?\s*task/\d+\s*@\s*([0-9a-f]{7,64})")
 VERDICT = re.compile(r"^外环\(([^)]+)\)·(采认|打回)\(#(\d+)\)")
@@ -222,6 +233,7 @@ def cmd_status(args):
 
 def cmd_promote(args):
     check_inputs(args)
+    cli_lib().duty_gate("olp-local-pr")
     head = task_branches(args.repo).get(args.number)
     if head is None:
         raise Fail(1, f"仓库里没有分支 task/{args.number},未推送")

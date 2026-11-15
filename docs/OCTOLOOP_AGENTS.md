@@ -137,6 +137,10 @@ octoscode outer-duty hold --project <project> --signature <sig> \
   --duties <duties> -- <your agent start command>
 ```
 
+The `OLP_DUTY_LEASE` that `hold` gives you is your write credential: once your
+session is over or replaced, commands you left behind are refused (exit 6) when
+they write the board, archive, promote or answer. Do not unset it.
+
 Codex must be started as `codex --no-daemon`: by default its session lives in a
 shared background server that keeps working after the terminal program exits,
 out of the lock's reach, and `hold` refuses it.
