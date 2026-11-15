@@ -144,6 +144,12 @@ Scenario: 心跳报告内环后端的启动权限
   When 分别生成心跳;把带额外字段与畸形条目的 `backends` 交给 hub;再交给 hub 一个未知的权限值和一条不带该字段的旧心跳
   Then 权限依次为 full、sandboxed、mixed、none;后端只含 pid 与两个开关,密钥不出现在心跳里;hub 的状态显示 full 且健康状态不受影响,额外字段与畸形条目被丢弃;未知值与缺失都显示为 unknown
 
+Scenario: 心跳报告复验方装没装、登没登录,只是告知(复盘第 16 条)
+  Test: unit_heartbeat_reports_reviewer_logins_without_judging_health
+  Given 本机的 claude 已安装未登录(它的输出里还有账号)、codex 已登录
+  When 生成心跳并交给 hub;再让两个命令都找不到时生成心跳
+  Then 心跳的 reviewers 依次为 claude 已安装未登录、codex 已安装已登录,账号不出现在心跳里;hub 的 status 原样显示且文本有"复验方 claude 未登录,codex 已登录",健康状态不受影响;找不到时为未安装
+
 Scenario: 心跳经 herdr 认出任何一种内环(critical)
   Tags: critical
   Test: unit_heartbeat_recognises_any_kind_of_inner_loop
