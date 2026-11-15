@@ -1400,6 +1400,7 @@ fn kill_group(child: &mut std::process::Child) {
 
 /// Scenario: 前端还在而后端换了新进程时,守护跟上新后端并报告一次(复盘第 39 条)
 #[test]
+#[ignore = "temporary CI bisect: runner lost communication on #754"]
 fn guard_follows_a_replaced_backend_and_reports_it() {
     let (mut frontend, dir) = spawn_frontend_with_replaceable_backend();
     let b1 = read_pid(&dir.path().join("b1"));
@@ -1429,6 +1430,7 @@ fn guard_follows_a_replaced_backend_and_reports_it() {
 
 /// Scenario: --no-follow-backend 照旧盯着消失的后端
 #[test]
+#[ignore = "temporary CI bisect: runner lost communication on #754"]
 fn guard_keeps_the_gone_backend_with_no_follow_backend() {
     let (mut frontend, dir) = spawn_frontend_with_replaceable_backend();
     let b1 = read_pid(&dir.path().join("b1"));
