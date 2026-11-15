@@ -7,6 +7,9 @@
 //! ssh is replaced by a script that runs the hub-side forced command of
 //! `olp-board-remote.py` locally; a flag file makes the hub unreachable.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;

@@ -2,6 +2,9 @@
 
 //! Evolution loop phase-3 index contract tests (#44b).
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

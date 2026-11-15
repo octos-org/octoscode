@@ -15,6 +15,9 @@
 //! `existing_profile_id_skips_creation_step` below pins. Only the menu row is
 //! gone, so only the discoverability assertion changed.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use octos_core::ui_protocol::UiProtocolCapabilities;
 use octoscode::client_event::{CapabilitiesClientEvent, ClientEvent};

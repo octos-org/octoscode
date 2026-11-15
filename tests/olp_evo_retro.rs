@@ -3,6 +3,9 @@
 //! Evolution loop phase-1 retro contract tests (#42, SDD spec:
 //! `specs/task-req-olp-evo-p1.spec.md`).
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};

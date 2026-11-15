@@ -7,6 +7,9 @@
 //! that captures the mouse so wheel-up auto-enters the pager (composer pinned)
 //! and wheel-down at the pager bottom drops back to the inline tail.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use octos_core::{Message, SessionKey};
 use octoscode::app;

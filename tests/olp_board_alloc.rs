@@ -9,6 +9,9 @@
 //! temp dirs. Scripts run under `/bin/bash` (Bash 3.2 on macOS) so the
 //! tests do not depend on which bash the caller's PATH resolves.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
