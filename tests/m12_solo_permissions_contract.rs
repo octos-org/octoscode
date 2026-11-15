@@ -1,3 +1,6 @@
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use octoscode::model::{SessionRuntimeStatus, SessionStatusReadResult};
 use serde_json::Value;
 

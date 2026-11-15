@@ -11,6 +11,9 @@
 //! variant cannot be constructed without its params, and walking the file is
 //! what keeps this test cheap enough to run everywhere.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 

@@ -11,6 +11,9 @@
 //!   3. monitor 改写 review-state.json 字节
 //!   4. 同一行 ACK 原地修改误判 added(行号索引而非内容键)
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};

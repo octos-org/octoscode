@@ -3,6 +3,9 @@
 //! (CARGO_BIN_EXE), temp HOME + project (locks never touch real state).
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;

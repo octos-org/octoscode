@@ -39,6 +39,8 @@
 - 改了公开签名(如构造函数加参数),同一个 commit 里更新所有调用点,
   包括 `tests/*.rs` 集成测试。
 - 新代码不要放在 `mod tests` 之后(clippy items-after-test-module)。
+- 新的集成测试文件开头加 `#[path = "support/olp_env.rs"] mod olp_env;`:它在测试开始前
+  清掉继承的 `OLP_*` 变量,测试只能写自己建的沙箱,碰不到正式黑板(契约测试会检查)。
 - 不在仓库根目录留验证/草稿文件(`FINAL_VERIFICATION.md` 之类);
   结论写进 commit message 或黑板的 ACK。
 

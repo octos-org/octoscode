@@ -9,6 +9,9 @@
 //! per-test state root. The 17 test function names match the contract's
 //! scenario filters verbatim.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 /// #41-r5b ⑪: the script depends on GNU flock and stat -c; on hosts
 /// without them (e.g. macOS local), say so explicitly and skip rather
 /// than fail opaquely. CI (ubuntu) runs the full set.

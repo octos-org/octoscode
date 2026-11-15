@@ -1,3 +1,6 @@
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::collections::BTreeSet;
 
 use serde::Deserialize;

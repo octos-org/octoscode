@@ -5,6 +5,9 @@
 //! When on: Esc → Normal, i → Insert; Normal interprets hjkl/w/b/e/0/$/gg/G/
 //! x/dd/dw/cc/i/a/A/I/o/O; Enter always submits.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use octos_core::SessionKey;
 use octoscode::event_loop::{KeyAction, handle_terminal_event};

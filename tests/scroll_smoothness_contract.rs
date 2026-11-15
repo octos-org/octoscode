@@ -6,6 +6,9 @@
 //! glides instead of jumping. Other surfaces keep the coarser 4-line step,
 //! and keyboard paging keeps its 8-line stride.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use octos_core::{Message, SessionKey};
 use octoscode::event_loop::handle_terminal_event;

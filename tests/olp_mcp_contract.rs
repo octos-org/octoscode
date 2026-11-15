@@ -4,6 +4,9 @@
 //! (newline-delimited JSON-RPC over stdio), with a temp outer root
 //! (`OLP_MCP_OUTER_ROOT`) and a compressed clock (`OLP_MCP_TIMEOUT_SECS`).
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};

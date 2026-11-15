@@ -4,6 +4,9 @@
 //! `specs/task-olp-board-archive.spec.md`): closed board entries move to an
 //! archive file and leave a numbered stub behind.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};

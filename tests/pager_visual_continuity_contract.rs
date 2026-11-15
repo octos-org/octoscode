@@ -6,6 +6,9 @@
 //! must signal the read position in the status row and right-side scrollbar
 //! lane, since the alt-screen has no native scrollbar.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };

@@ -4,6 +4,9 @@
 //! `specs/task-olp-unit-registry.spec.md`): unit registration, heartbeats and
 //! the health states the hub derives from them.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

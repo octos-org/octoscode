@@ -7,6 +7,9 @@
 //! move the cursor between logical lines, falling back to transcript scroll at
 //! the first/last line.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use octos_core::SessionKey;
 use octoscode::event_loop::{KeyAction, handle_terminal_event};
