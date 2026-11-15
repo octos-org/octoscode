@@ -135,6 +135,9 @@ git 钩子、单元工作仓库的 receivepack/uploadpack、保活任务、ssh �
   `command="/path/bin/octoscode olp unit receive --unit m07",no-pty,no-port-forwarding …`
   (`command -v octoscode` 查路径)。
 - **派卡唤醒**里写 `octoscode olp remote mirror`,备用仓库里的脚本。
+- **`olp doctor`** 还检查:单元工作仓库的 hub 远程是否照抄了 hub 上的本地路径(fail);
+  本机还在跑已被替换的 octoscode / octos / herdr 的进程(warn,升级后要重启);hub 上
+  旧格式的单元心跳(warn,到单元上重装心跳任务)。
 - **`olp doctor`** 检查以上各处:调用 octoscode 绝对路径或仓库脚本为 ok;固定在某一版本
   的工具目录(旧版本这样写)或按 PATH 找 octoscode 为 warn;路径已不存在、钩子缺失为
   fail(退出码 1)。warn 与 fail 都附修复命令。

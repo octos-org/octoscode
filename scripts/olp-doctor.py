@@ -17,7 +17,11 @@ git 钩子、单元工作仓库 hub 远程的 receivepack/uploadpack、保活任
     的仓库;没有这项设置(多机部署走 ssh)时跳过;
   - 本机的保活任务(launchd:~/Library/LaunchAgents/org.octos.olp.*.plist;
     systemd:~/.config/systemd/user/olp-*.service);
-  - ~/.octos/outer/octoscode-home(skill 读规程正文的位置)。
+  - ~/.octos/outer/octoscode-home(skill 读规程正文的位置);
+  - 工作仓库的 hub 远程写的是本机路径时,这台机器上有没有那个裸仓库(照抄了 hub
+    上的路径就没有;ssh 地址不联网检查);
+  - 本机还在跑已被替换的 octoscode / octos / herdr 的进程(升级后要重启才用上新版);
+  - hub 上各单元最近一次心跳是不是旧格式(缺 agent、full 巡检或 agents 字段)。
 
 每项给出 ok / warn / fail;warn 与 fail 附修复命令。
   ok    调用 octoscode 的绝对路径,或仓库里的脚本(随 git pull 更新)
@@ -36,6 +40,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT_RE = re.compile(r"^olp-[a-z-]+\.(py|sh)$")
@@ -263,6 +268,38 @@ def check_work_repo(report, work, remote, explicit):
         split(report, "本机推送", f"{top} remote.{remote}.{key}", line, fix)
     if explicit and not found:
         report.add("本机推送", top, "ok", f"remote {remote} 没有本机推送设置(多机部署走 ssh,不需要)")
+    check_remote_url(report, top, remote)
+
+
+def local_path_of(url):
+    """The local path a git remote URL names, or None for a network URL."""
+    if url.startswith("file://"):
+        return url[len("file://"):]
+    if url.startswith("/") or url.startswith("~") or url.startswith("."):
+        return url
+    return None
+
+
+def check_remote_url(report, top, remote):
+    """Retrospective #13: a unit's clone copied the hub's own local path as
+    the hub remote; on the unit that path is not the bare repository."""
+    url = git("remote", "get-url", remote, cwd=top)
+    if not url:
+        return
+    path = local_path_of(url)
+    if path is None:
+        return  # ssh/https: not checked offline
+    path = os.path.abspath(os.path.join(top, os.path.expanduser(path)))
+    bare = os.path.isdir(path) and git("rev-parse", "--is-bare-repository", cwd=path) == "true"
+    where = f"{top} remote.{remote}.url"
+    if bare:
+        report.add("hub 远程", where, "ok", f"本机的裸仓库 {path}")
+    else:
+        report.add(
+            "hub 远程", where, "fail",
+            f"指向本机路径 {path},但这台机器上没有这个裸仓库(多半是照抄了 hub 上的路径)",
+            f"cd {shlex.quote(top)} && git remote set-url {shlex.quote(remote)} <hub 的 ssh 地址,例如 olp-hub-git:/path/hub.git>",
+        )
 
 
 # --- keepalive jobs ------------------------------------------------------
@@ -328,6 +365,129 @@ def check_keepalive(report, home):
             split(report, "保活任务", f"systemd {name}", job_line(args), keepalive_fix(name))
 
 
+# --- running processes on a replaced binary -------------------------------
+
+COMPONENTS = ("octoscode", "octos", "herdr")
+
+
+def running_components():
+    """[(pid, executable, started_epoch or None, replaced)] for this user's
+    octoscode/octos/herdr processes. Linux: the executable's inode is no
+    longer the file at its path (or it was deleted). macOS: the file at the
+    path is newer than the process, or gone."""
+    out = []
+    me = os.getpid()
+    if sys.platform.startswith("linux"):
+        for name in os.listdir("/proc"):
+            if not name.isdigit() or int(name) == me:
+                continue
+            try:
+                exe = os.readlink(f"/proc/{name}/exe")
+                running = os.stat(f"/proc/{name}/exe")
+            except OSError:
+                continue
+            deleted = exe.endswith(" (deleted)")
+            path = exe[: -len(" (deleted)")] if deleted else exe
+            if os.path.basename(path) not in COMPONENTS:
+                continue
+            try:
+                current = os.stat(path)
+                replaced = deleted or (current.st_ino, current.st_dev) != (running.st_ino, running.st_dev)
+            except OSError:
+                replaced = True
+            out.append((int(name), path, None, replaced))
+    elif sys.platform == "darwin":
+        r = subprocess.run(
+            ["ps", "-U", str(os.getuid()), "-o", "pid=,lstart=,comm="], capture_output=True, text=True
+        )
+        for line in r.stdout.splitlines():
+            parts = line.split(None, 6)
+            if len(parts) < 7 or not parts[0].isdigit() or int(parts[0]) == me:
+                continue
+            # `comm` is the name it was started with (often bare "herdr");
+            # ask the kernel for the executable's real path.
+            if os.path.basename(parts[6].strip()) not in COMPONENTS:
+                continue
+            path = pid_path(int(parts[0]))
+            if not path or os.path.basename(path) not in COMPONENTS:
+                continue
+            try:
+                started = time.mktime(time.strptime(" ".join(parts[1:6]), "%a %b %d %H:%M:%S %Y"))
+            except ValueError:
+                continue
+            try:
+                replaced = os.stat(path).st_mtime > started + 1
+            except OSError:
+                replaced = True
+            out.append((int(parts[0]), path, started, replaced))
+    return out
+
+
+def pid_path(pid):
+    """macOS: the executable path of `pid` (proc_pidpath), or None."""
+    import ctypes
+    import ctypes.util
+
+    try:
+        lib = ctypes.CDLL(ctypes.util.find_library("proc") or "/usr/lib/libproc.dylib")
+    except OSError:
+        return None
+    buf = ctypes.create_string_buffer(4096)
+    n = lib.proc_pidpath(ctypes.c_int(pid), buf, ctypes.c_uint32(len(buf)))
+    return buf.value.decode(errors="replace") if n > 0 else None
+
+
+def check_running_versions(report):
+    """Retrospective #06: 41 sessions kept running the old code after an
+    upgrade; a version command shows only what a new call would run."""
+    stale = {}
+    for pid, path, _started, replaced in running_components():
+        if replaced:
+            stale.setdefault(path, []).append(pid)
+    for path, pids in sorted(stale.items()):
+        shown = ", ".join(str(p) for p in sorted(pids)[:12]) + (" …" if len(pids) > 12 else "")
+        report.add(
+            "运行中的旧版本", path, "warn",
+            f"{len(pids)} 个进程在 {os.path.basename(path)} 更新之前启动,还在跑旧代码(PID {shown})",
+            "逐个在合适的时候重启这些会话或服务;常驻任务用 octoscode olp keepalive 重新加载",
+        )
+
+
+# --- heartbeats on the hub ------------------------------------------------
+
+V3_CHECKS = ("agent", "full")
+
+
+def check_heartbeats(report):
+    """Retrospective #10: heartbeats written by a pre-v3 unit lack the
+    agent/full checks and the agents list, yet looked healthy."""
+    root = os.environ.get("OLP_UNITS_DIR") or os.path.join(os.path.expanduser("~"), ".octos", "outer", "units")
+    beats = os.path.join(root, "heartbeat")
+    if not os.path.isdir(beats):
+        return
+    for entry in sorted(os.listdir(beats)):
+        if not entry.endswith(".json"):
+            continue
+        unit = entry[: -len(".json")]
+        try:
+            with open(os.path.join(beats, entry), encoding="utf-8") as f:
+                beat = json.load(f)
+        except (OSError, ValueError):
+            report.add("单元心跳", unit, "warn", "最近一次心跳读不出", None)
+            continue
+        names = {c.get("name") for c in beat.get("checks") or [] if isinstance(c, dict)}
+        lacking = [c for c in V3_CHECKS if c not in names]
+        if lacking or "agents" not in beat:
+            what = "、".join(lacking + ([] if "agents" in beat else ["agents 字段"]))
+            report.add(
+                "单元心跳", unit, "warn",
+                f"心跳是旧版本写的,缺 {what}:看起来健康不代表内环在跑",
+                f"在单元 {unit} 上升级 octoscode 后重装心跳任务:octoscode olp keepalive heartbeat --unit {unit} --hub <hub>",
+            )
+        else:
+            report.add("单元心跳", unit, "ok", "心跳带 v3 巡检项(agent、full)")
+
+
 # --- skill ---------------------------------------------------------------
 
 
@@ -374,6 +534,8 @@ def main():
         check_work_repo(report, work, args.remote, explicit)
     check_keepalive(report, home)
     check_octoscode_home(report, home)
+    check_heartbeats(report)
+    check_running_versions(report)
 
     writes = CLI.octoscode_bin()
     counts = {s: sum(1 for i in report.items if i["status"] == s) for s in RANK}

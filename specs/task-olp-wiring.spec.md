@@ -41,7 +41,7 @@ skill 记下的规程位置——都用了自己的绝对路径,于是落在某�
 
 ### Allowed Changes
 - src/cmd/olp.rs
-- scripts/olp-cli-lib.py、scripts/olp-doctor.py
+- scripts/olp-cli-lib.py、scripts/olp-doctor.py(含复盘第 06、10、13 条的检查)
 - scripts/olp-git-hub.py、scripts/olp-launchd.py、scripts/olp-systemd.py、scripts/olp-install-skill.sh
 - scripts/olp-answer.py、scripts/olp-board-remote.py(仅帮助文字)
 - tests/olp_cli.rs
@@ -60,6 +60,24 @@ skill 记下的规程位置——都用了自己的绝对路径,于是落在某�
 - 把脚本换成 Rust。
 
 ## Completion Criteria
+
+Scenario: doctor 发现单元的 hub 远程照抄了另一台机器的本地路径(复盘第 13 条)
+  Test: olp_doctor_flags_a_hub_remote_that_is_not_here
+  Given 工作仓库的 hub 远程依次指向本机不存在的路径、本机的裸仓库、ssh 地址
+  When 每次运行 `olp doctor --work <仓库> --json`
+  Then 第一次"hub 远程"为 fail 且修复命令含 `git remote set-url`;第二次为 ok;第三次没有这一项
+
+Scenario: doctor 报告还在跑已被替换的二进制的进程(复盘第 06 条)
+  Test: olp_doctor_flags_a_process_running_a_replaced_binary
+  Given 一个名为 octos 的常驻进程,启动后它的二进制被换成新文件(新 inode、新修改时间)
+  When 运行 `olp doctor --json`
+  Then 有一项"运行中的旧版本"指向这个二进制,为 warn,详情里有这个进程的 PID
+
+Scenario: doctor 在 hub 上发现旧格式的单元心跳(复盘第 10 条)
+  Test: olp_doctor_flags_old_format_heartbeats
+  Given 单元 m07 的心跳只有 disk 巡检,m08 的心跳带 agent、full 与 agents 字段
+  When 运行 `olp doctor --json`
+  Then m07 为 warn,修复命令是到单元上重装心跳任务;m08 为 ok
 
 Scenario: 经 octoscode olp 写下的钩子、本机推送设置、心跳任务调用 octoscode,推送照常经钩子(critical)
   Tags: critical
