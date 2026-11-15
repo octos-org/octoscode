@@ -121,6 +121,8 @@
   前台(交互式 agent 读终端不会被 SIGTTIN 挂起),agent 结束后 wrapper
   收回前台;agent 被 ^Z 挂起时 wrapper 随之挂起、锁仍持有,`fg` 后终端
   交回 agent 并继续它;wrapper 在后台或无终端时不做任何交接;
+  锁 VACANT 时,指定的外环可由监督任务(`octoscode olp outer`)在它的 herdr
+  窗格里自动重新 hold;监督任务只在锁空着时动手,不会接管活锁;
   `check` 仅观察、绝不夺取;活锁接管只归 operator(终止旧 holder 后
   再 acquire),无 agent 自助强夺。metadata sidecar 与一切 TTL 仅诊断、绝不参与裁定。范围:**Linux 与 macOS**(单机 flock;其他
   平台命令显式 unsupported 退出 2;Windows LockFileEx 另立条目),

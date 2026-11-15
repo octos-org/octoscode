@@ -99,6 +99,7 @@
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
 | `olp duty hold\|check\|lease …` | `octoscode outer-duty` | hub |
+| `olp outer supervise\|install …` | `olp-outer.py` | hub(外环所在机器) |
 
 ### 2.11 进化环(evo)
 
