@@ -301,6 +301,35 @@ fn local_pr_promote_requires_acceptance_of_the_current_head() {
     assert_eq!(h.github_ref("refs/heads/task/1"), Some(sha1b));
 }
 
+/// Scenario: 分支头不是登记过的复验提交时,推 GitHub 的闸门拒绝(复盘第 14 条)
+#[test]
+fn local_pr_promote_refuses_a_head_nobody_verified() {
+    let h = Hub::new();
+    let verified = h.unit_push(1, "v1");
+    h.board_line("> 外环(hub)·采认(#1): 复验通过");
+    // Someone moves the branch on the hub to a commit no unit pushed or
+    // verified (hub-local pushes are unrestricted and leave no board line).
+    let unverified = h.hub_git(&["rev-parse", "refs/heads/main"]);
+    h.hub_git(&["update-ref", "refs/heads/task/1", &unverified]);
+    let out = h.run(&["promote", "1"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("不是登记过的复验提交"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(
+        h.github_ref("refs/heads/task/1"),
+        None,
+        "nothing reaches GitHub"
+    );
+    // Back on the verified commit, the gate opens again.
+    h.hub_git(&["update-ref", "refs/heads/task/1", &verified]);
+    let out = h.run(&["promote", "1"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(h.github_ref("refs/heads/task/1"), Some(verified));
+}
+
 /// Scenario: 对不上的地方作为警告报告
 #[test]
 fn local_pr_reports_mismatches_as_warnings() {

@@ -32,6 +32,10 @@ PR 看板用)和推 GitHub 前的采认闸门。
   `refs/remotes/<remote>/task/<N>` 记为分支头(裸仓库推送后不一定更新跟踪引用)。
   `pending`、`returned`、分支不存在 → 退出码 1,不推送;`submitted` → 提示无需再推,退出码
   0;`--dry-run` 只检查。不强推;开 PR(标题、正文)仍由大外环做。
+- `promote` 只推登记过的复验提交(复盘第 14 条,2026-11-15):分支头必须以黑板上最近一次
+  推送登记的提交号开头;对不上(有人在 hub 上直接挪了分支——hub 本机推送不受限、不登记)
+  或板上没有推送登记,退出码 1,不推送。`status` 的每项增加 `registered`(该登记的提交号,
+  没有为 null)。
 - 警告:分支头不以最近一次推送登记的提交号开头;已采认但跟踪引用是旧提交;板上没有该
   分支的任何记录。文本模式走 stderr,JSON 在 `warnings` 里。
 - "已合并"需要查 GitHub,不在本工具范围内。
@@ -79,6 +83,13 @@ Scenario: 推 GitHub 的闸门只放行已采认的分支头(critical)
   Given #1 已推送未审核,#2 被打回,没有 #9
   When 依次对三者 promote;给 #1 写采认后先 dry-run 再 promote,并重复 promote;单元再次推送 #1 后 promote;写第二次采认后 promote
   Then 未采认、被打回、不存在的都以退出码 1 拒绝且 GitHub 上没有对应分支;dry-run 不推;采认后推上去的是分支头且状态变为 submitted;重复 promote 是空操作;采认后的新推送使闸门重新关闭,GitHub 上保持先前采认的提交,并在第二次采认后报告"GitHub 上是旧提交";再 promote 后 GitHub 上是新提交
+
+Scenario: 分支头不是登记过的复验提交时拒绝推 GitHub(critical)
+  Tags: critical
+  Test: local_pr_promote_refuses_a_head_nobody_verified
+  Given #1 由单元推送并已采认,随后有人在 hub 上把 task/1 挪到一个没登记过的提交
+  When promote #1;再把分支挪回复验过的提交后 promote
+  Then 第一次退出码 1、stderr 含"不是登记过的复验提交"、GitHub 上没有 task/1;第二次成功,GitHub 上是复验过的提交
 
 ### Rule: usage — 输入检查
 Scenario: 用法错误
