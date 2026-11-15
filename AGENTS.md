@@ -52,6 +52,6 @@
 
 多外环并存时主审权以 `octoscode outer-duty hold` 的 OS 独占锁为
 authority(Linux 与 macOS:守护式死亡耦合——wrapper 亡则 agent 必亡;
-Linux 经 PR_SET_PDEATHSIG,macOS 经持锁的守护进程;`check` 仅观察;
+持锁的守护进程在放锁前杀掉 agent 的整棵后代树;`check` 仅观察;
 活锁接管归 operator;metadata/TTL 仅诊断;其他平台 unsupported)。
 详见协议 R7。

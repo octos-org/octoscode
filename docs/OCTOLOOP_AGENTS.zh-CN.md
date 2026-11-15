@@ -121,9 +121,9 @@ Codex 必须以 `codex --no-daemon` 启动:默认情况下它的会话在共享�
 终端程序退出后工作照常继续,锁约束不到它,`hold` 会拒绝。
 
 锁**即** authority:你的 agent 与 wrapper 死亡耦合——wrapper 亡 ⇒ agent
-必亡 ⇒ 锁 `VACANT`。Linux 上 wrapper 是唯一持锁 fd 者,内核经
-`PR_SET_PDEATHSIG` 杀掉 agent;macOS 上 wrapper 与 agent 之间有一个持锁的
-守护进程,先杀掉 agent 进程组再放锁。
+及其启动的一切必亡 ⇒ 锁 `VACANT`。wrapper 与 agent 之间有一个持锁的守护
+进程,先冻结并杀掉 agent 的整棵后代树(包括换到别的进程组的命令),全部消失
+后才放锁。
 `outer-duty check --project <p>` 仅观察(stdout 恰一态
 `VACANT|HELD|ERROR`)。非 holder **只可署名批注**。活锁接管只归 operator,
 无 agent 自助强夺。metadata sidecar 与一切 TTL 仅诊断,绝不参与裁定。

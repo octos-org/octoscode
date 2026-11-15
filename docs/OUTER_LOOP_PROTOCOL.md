@@ -108,15 +108,16 @@
 - **R7 — 主审权 OS 独占锁(outer-duty,olp/v2 起)**:多外环的主审权
   以 per-project 会话寿命 OS 锁为准——上岗外环必须经
   `octoscode outer-duty hold --project P --signature S --duties D -- <agent>`
-  启动(**守护式死亡耦合**:wrapper 亡则 agent 必亡,绝无 agent 活而锁
-  VACANT 的 split brain;agent 自身永不持有锁 fd,CLOEXEC 保持置位;
-  孙辈进程不持有 fd,agent 退出而孙辈长驻亦为 VACANT。Linux:wrapper
-  是唯一锁 fd 持有者,agent 经 setpgid+PR_SET_PDEATHSIG(SIGKILL) 由内核
-  与 wrapper 同死,锁即 VACANT。macOS:无 PDEATHSIG,wrapper 与 agent
-  之间多一个守护进程 `wrapper → guardian → agent`,guardian 继承锁 fd
-  并监视 wrapper——wrapper 亡则 SIGKILL agent 整个进程组,确认组内无
-  存活进程后才退出放锁(等待上限 30 秒);guardian 异常死亡则 wrapper
-  杀掉 agent 进程组并以失败退出,其间锁仍由 wrapper 持有);
+  启动(**守护式死亡耦合**:wrapper 亡则 agent 及其启动的一切必亡,绝无
+  它们活而锁 VACANT 的 split brain;agent 自身永不持有锁 fd,CLOEXEC 保持
+  置位。wrapper 与 agent 之间有一个守护进程 `wrapper → guardian → agent`,
+  guardian 继承锁 fd 并监视 wrapper——wrapper 亡则先冻结(SIGSTOP)再
+  SIGKILL agent 的整棵后代树,不论成员换到了哪个进程组或会话(如 Codex
+  执行的命令),确认全部消失后才退出放锁(等待上限 30 秒);guardian 异常
+  死亡则 wrapper 杀掉这棵树并以失败退出,其间锁仍由 wrapper 持有。Linux:
+  guardian 与 wrapper 是 child subreaper,孤儿后代过继给它们而不是 init,
+  始终在掌控之内;agent 另有对 guardian 的 PR_SET_PDEATHSIG(SIGKILL)。
+  agent 自己正常退出时,长驻的孙辈不杀,它们不持有 fd,锁为 VACANT);
   终端:wrapper 在终端前台启动时,agent 在 exec 前把自己的进程组设为终端
   前台(交互式 agent 读终端不会被 SIGTTIN 挂起),agent 结束后 wrapper
   收回前台;agent 被 ^Z 挂起时 wrapper 随之挂起、锁仍持有,`fg` 后终端
@@ -124,9 +125,9 @@
   `check` 仅观察、绝不夺取;活锁接管只归 operator(终止旧 holder 后
   再 acquire),无 agent 自助强夺。metadata sidecar 与一切 TTL 仅诊断、绝不参与裁定。范围:**Linux 与 macOS**(单机 flock;其他
   平台命令显式 unsupported 退出 2;Windows LockFileEx 另立条目),
-  NFS 不适用。macOS 边界:可承受 wrapper 或 guardian 任一被杀,二者在
-  同一瞬间均被 SIGKILL 时 agent 成为孤儿(Linux 由内核保证,无此边界);
-  wrapper 亡时 macOS 杀整个进程组(含孙辈),严于 Linux;本切片 fencing 为文档层纪律,硬 gate(board-append/push
+  NFS 不适用。边界:可承受 wrapper 或 guardian 任一被杀,二者在同一瞬间
+  均被 SIGKILL 时后代可能成为孤儿;macOS 没有 subreaper,已经离开这棵树
+  (父进程先退出、过继给 launchd)的后代看不到;本切片 fencing 为文档层纪律,硬 gate(board-append/push
   校验 lease)为后续条目。锁只约束 wrapper 的后代:Codex 默认把会话放在共享的
   后台服务(`codex app-server daemon`)里,终端程序只是客户端,它退出后"正在进行
   的工作会继续",不受锁约束——外环用 Codex 时必须以 `codex --no-daemon` 启动,

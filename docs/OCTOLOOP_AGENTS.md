@@ -142,10 +142,10 @@ shared background server that keeps working after the terminal program exits,
 out of the lock's reach, and `hold` refuses it.
 
 The lock **is** the authority, and your agent is death-coupled to the wrapper —
-wrapper dies ⇒ agent dies ⇒ lock `VACANT`. On Linux the wrapper is the only
-holder of the lock fd and the kernel kills the agent via `PR_SET_PDEATHSIG`; on
-macOS a small guardian process between wrapper and agent holds the lock and kills
-the agent's process group before releasing it. `outer-duty check --project <p>` only observes (exactly one
+wrapper dies ⇒ the agent and everything it started die ⇒ lock `VACANT`. A small
+guardian process between wrapper and agent holds the lock, freezes and kills the
+agent's whole tree (commands moved to other process groups included), and
+releases the lock only once all of it is gone. `outer-duty check --project <p>` only observes (exactly one
 of `VACANT|HELD|ERROR` on stdout). A non-holder may add **signed annotations
 only**. Taking over a live lock belongs to the operator alone; there is no agent
 self-seizure. Metadata sidecars and TTLs are diagnostics and never adjudicate.

@@ -323,11 +323,10 @@ fn duty_wrapper_death_kills_agent_and_releases() {
     assert!(vacant, "wrapper death must release the authority");
 }
 
-/// macOS 契约 2c(guardian 被杀): the guardian — the fork between wrapper
-/// and agent that stands in for PR_SET_PDEATHSIG — is SIGKILLed. The
-/// wrapper must notice, kill the REAL agent, exit non-zero, and only then
-/// does the lock go VACANT (supervision loss never leaves a live agent).
-#[cfg(target_os = "macos")]
+/// 契约 2c(guardian 被杀): the guardian — the fork between wrapper and
+/// agent that holds the lock past the wrapper — is SIGKILLed. The wrapper
+/// must notice, kill the REAL agent, exit non-zero, and only then does the
+/// lock go VACANT (supervision loss never leaves a live agent).
 #[test]
 fn duty_guardian_death_kills_agent_and_fails_wrapper() {
     let env = TempHome::new("guardian-killed");
@@ -342,7 +341,7 @@ fn duty_guardian_death_kills_agent_and_fails_wrapper() {
     assert!(proc_alive_with_start(pid, start), "agent alive before kill");
     let guardian = guardian_of(wrapper.id());
     assert_ne!(guardian, pid, "the guardian is not the agent itself");
-    assert!(signal_pid("-KILL", guardian), "SIGKILL the guardian");
+    assert!(signal_pid(libc::SIGKILL, guardian), "SIGKILL the guardian");
     let mut status = None;
     for _ in 0..600 {
         if let Some(found) = wrapper.try_wait().unwrap() {
@@ -374,11 +373,10 @@ fn duty_guardian_death_kills_agent_and_fails_wrapper() {
     );
 }
 
-/// macOS 契约 2d(无 split-brain 窗口): after the wrapper is SIGKILLed the
-/// lock may only be observed VACANT once the REAL agent is dead — the
-/// guardian keeps the fd until the agent's process group is gone. Polled
-/// without sleeping, over several rounds.
-#[cfg(target_os = "macos")]
+/// 契约 2d(无 split-brain 窗口): after the wrapper is SIGKILLed the lock
+/// may only be observed VACANT once the REAL agent is dead — the guardian
+/// keeps the fd until the agent's tree is gone. Polled without sleeping,
+/// over several rounds.
 #[test]
 fn duty_vacant_is_never_observed_while_agent_alive() {
     for round in 0..5 {
@@ -410,15 +408,25 @@ fn duty_vacant_is_never_observed_while_agent_alive() {
     }
 }
 
-/// The wrapper's only direct child on macOS is the guardian.
+/// The wrapper's children, as pid text separated by whitespace.
+#[cfg(target_os = "linux")]
+fn children_of(pid: u32) -> String {
+    std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")).unwrap_or_default()
+}
+
 #[cfg(target_os = "macos")]
+fn children_of(pid: u32) -> String {
+    let out = Command::new("/usr/bin/pgrep")
+        .args(["-P", &pid.to_string()])
+        .output()
+        .expect("pgrep");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// The wrapper's only direct child is the guardian.
 fn guardian_of(wrapper: u32) -> u32 {
     for _ in 0..200 {
-        let out = Command::new("/usr/bin/pgrep")
-            .args(["-P", &wrapper.to_string()])
-            .output()
-            .expect("pgrep");
-        let pids: Vec<u32> = String::from_utf8_lossy(&out.stdout)
+        let pids: Vec<u32> = children_of(wrapper)
             .split_whitespace()
             .filter_map(|p| p.parse().ok())
             .collect();
@@ -493,19 +501,155 @@ fn pid_exists(pid: u32) -> bool {
 
 #[cfg(target_os = "macos")]
 fn pid_exists(pid: u32) -> bool {
-    signal_pid("-0", pid)
+    signal_pid(0, pid)
 }
 
-/// `/bin/kill <signal> <pid>`; true when the signal was delivered.
+/// kill(2); true when the signal was delivered.
+#[allow(unsafe_code)]
+fn signal_pid(signal: libc::c_int, pid: u32) -> bool {
+    unsafe { libc::kill(pid as libc::pid_t, signal) == 0 }
+}
+
+/// The process has exited: no such pid, or a zombie waiting to be reaped.
+#[cfg(target_os = "linux")]
+fn gone(pid: u32) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Err(_) => true,
+        Ok(stat) => stat
+            .rsplit(')')
+            .next()
+            .and_then(|rest| rest.split_whitespace().next())
+            .is_none_or(|state| state == "Z" || state == "X"),
+    }
+}
+
 #[cfg(target_os = "macos")]
-fn signal_pid(signal: &str, pid: u32) -> bool {
-    Command::new("/bin/kill")
-        .args([signal, &pid.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+fn gone(pid: u32) -> bool {
+    let out = Command::new("/bin/ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .expect("ps");
+    let stat = String::from_utf8_lossy(&out.stdout);
+    stat.trim().is_empty() || stat.trim_start().starts_with('Z')
+}
+
+/// Hold with an agent that starts a command in a NEW SESSION (its own
+/// process group, as Codex does with the commands it runs): the command
+/// writes its pid, waits 3 s, then writes a marker. Returns (wrapper,
+/// command pid, marker path).
+#[allow(clippy::zombie_processes)]
+fn spawn_holder_with_escaped_command(env: &TempHome) -> (std::process::Child, u32, PathBuf) {
+    let pidfile = env.0.join("escaped.pid");
+    let marker = env.0.join("escaped.marker");
+    let script = env.0.join("escape.py");
+    std::fs::write(
+        &script,
+        format!(
+            "import os, time\nos.setsid()\nopen({pid:?}, 'w').write(str(os.getpid()))\n\
+             time.sleep(3)\nopen({marker:?}, 'w').write('late')\n",
+            pid = pidfile.display().to_string(),
+            marker = marker.display().to_string(),
+        ),
+    )
+    .unwrap();
+    let agent = format!(
+        "python3 -B {} & while true; do sleep 0.05; done",
+        script.display()
+    );
+    let mut cmd = duty(env.home().as_path());
+    cmd.args([
+        "hold",
+        "--project",
+        env.project().to_str().unwrap(),
+        "--signature",
+        "test-holder",
+        "--duties",
+        "primary-review",
+        "--",
+        "/bin/sh",
+        "-c",
+        &agent,
+    ])
+    .stdout(Stdio::null())
+    .stderr(std::process::Stdio::from(
+        std::fs::File::create(env.0.join("wrapper-err")).unwrap(),
+    ));
+    warmup();
+    let wrapper = cmd.spawn().expect("spawn holder");
+    for _ in 0..600 {
+        if let Some(pid) = std::fs::read_to_string(&pidfile)
+            .ok()
+            .and_then(|t| t.trim().parse::<u32>().ok())
+        {
+            return (wrapper, pid, marker);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("the escaped command never started");
+}
+
+/// 契约 2e(外层被杀后,agent 放进别的会话的命令也要死): the agent runs a
+/// command in a new session — outside the agent's process group — and the
+/// wrapper is SIGKILLed. The lock may only be observed VACANT once that
+/// command is dead too, and it never gets to write afterwards.
+#[test]
+fn duty_wrapper_death_kills_commands_in_other_sessions() {
+    let env = TempHome::new("escaped-wrapper");
+    let (mut wrapper, escaped, marker) = spawn_holder_with_escaped_command(&env);
+    assert!(!gone(escaped), "the command runs before the kill");
+    wrapper.kill().unwrap();
+    let _ = wrapper.wait();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut vacant = false;
+    while std::time::Instant::now() < deadline {
+        if check_state(env.home().as_path(), env.project().as_path()) == "VACANT" {
+            vacant = true;
+            assert!(
+                gone(escaped),
+                "lock VACANT while the command the agent started (pid {escaped}) is alive"
+            );
+            break;
+        }
+    }
+    assert!(vacant, "wrapper death must release the lock");
+    std::thread::sleep(Duration::from_secs(4));
+    assert!(
+        !marker.exists(),
+        "the command wrote after the authority was released"
+    );
+}
+
+/// 契约 2f: the same when the GUARDIAN is SIGKILLed — the wrapper, still
+/// holding the lock, kills the agent and the command before it exits.
+#[test]
+fn duty_guardian_death_kills_commands_in_other_sessions() {
+    let env = TempHome::new("escaped-guardian");
+    let (mut wrapper, escaped, marker) = spawn_holder_with_escaped_command(&env);
+    let guardian = guardian_of(wrapper.id());
+    assert!(signal_pid(libc::SIGKILL, guardian), "SIGKILL the guardian");
+    let mut status = None;
+    for _ in 0..600 {
+        if let Some(found) = wrapper.try_wait().unwrap() {
+            status = Some(found);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let status = status.expect("wrapper must exit after its guardian is killed");
+    assert!(!status.success());
+    assert!(
+        gone(escaped),
+        "the command the agent started (pid {escaped}) must be dead once the wrapper has exited"
+    );
+    assert_eq!(
+        check_state(env.home().as_path(), env.project().as_path()),
+        "VACANT"
+    );
+    std::thread::sleep(Duration::from_secs(4));
+    assert!(
+        !marker.exists(),
+        "the command wrote after the authority was released"
+    );
 }
 
 /// 契约 2b(#38-r3/r4:grandchild 活性观测): the agent exits while a

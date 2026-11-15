@@ -60,9 +60,9 @@ fn run_hold(args: &OuterDutyArgs, project: &std::path::Path) -> i32 {
         }
     };
     // #38-r2: spawn first (the sidecar wants the child pid), guardian
-    // death-coupled (Linux: setpgid + PDEATHSIG, wrapper sole fd holder;
-    // macOS: a guardian process between wrapper and agent) — the wrapper
-    // waits; child exit ends the wrapper and releases the lock.
+    // death-coupled (a guardian process between wrapper and agent holds
+    // the lock until the agent's whole tree is gone) — the wrapper waits;
+    // child exit ends the wrapper and releases the lock.
     let mut child = match outer_duty::spawn_holder_child(&args.command) {
         Ok(child) => child,
         Err(err) => {

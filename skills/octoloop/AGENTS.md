@@ -122,7 +122,7 @@ macOS 与 Linux 各自的前提也在那里。步骤在单元和 hub 之间来�
    --duties <职责> -- <你的 agent 启动命令>` 包裹启动(Codex 写
    `codex --no-daemon`,否则会话在共享后台服务里、不受锁约束,`hold` 拒绝)——锁即
    authority,**守护式死亡耦合**(wrapper 亡⇒agent 必亡⇒VACANT;
-   Linux 经 PR_SET_PDEATHSIG,macOS 经持锁的守护进程;Linux 与 macOS
+   持锁的守护进程在放锁前杀掉 agent 的整棵后代树;Linux 与 macOS
    可用,其他平台 unsupported,Windows LockFileEx 另立);
    `outer-duty check` 仅观察、绝不夺取;非 holder 只读批注,活锁接管
    只归 operator(终止旧 holder 后再 acquire)。持锁后:署名落板(经

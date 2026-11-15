@@ -86,8 +86,8 @@ enum Route {
     /// observation only: never accepts tasks, never writes boards.
     OlpRuntimeWatch(OlpRuntimeWatchArgs),
     /// `octoscode outer-duty` — OUTER_LOOP_REVIEW #38: the per-project
-    /// session-lifetime OS-exclusive duty lock (hold/check). Linux
-    /// (PDEATHSIG) and macOS (guardian process); see OUTER_LOOP_PROTOCOL R7.
+    /// session-lifetime OS-exclusive duty lock (hold/check). Linux and
+    /// macOS (guardian process); see OUTER_LOOP_PROTOCOL R7.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     OuterDuty(OuterDutyArgs),
     /// Argument parse failure already reported; exit 2 without running.
