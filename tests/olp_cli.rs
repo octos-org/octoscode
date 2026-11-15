@@ -5,6 +5,9 @@
 //! the same arguments, output and exit codes, from any directory, with the
 //! scripts' siblings (helpers, hub guard, onboarding cards) in place.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};

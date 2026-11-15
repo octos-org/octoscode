@@ -1,3 +1,6 @@
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use octos_core::SessionKey;
 use octoscode::model::{
     APPUI_FEATURE_CONTEXT_LIFECYCLE_V1, APPUI_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,

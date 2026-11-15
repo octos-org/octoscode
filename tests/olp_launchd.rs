@@ -7,6 +7,9 @@
 //! Every test passes `--no-load` and a temp `--dir`, so nothing touches the
 //! real launchd domain and the tests also run on Linux CI.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 

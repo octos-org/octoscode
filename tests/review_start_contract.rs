@@ -6,6 +6,9 @@
 //! result into visible local state while the existing supervised
 //! task/agent notifications render the launched specialists.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use octos_core::SessionKey;
 use octos_core::ui_protocol::TurnId;
 use octoscode::client_event::ClientEvent;

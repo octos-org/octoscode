@@ -1,6 +1,9 @@
 //! Contract tests for the /scrollmode runtime switch
 //! (`specs/task-scrollmode-command.spec`).
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use octos_core::{Message, SessionKey};
 use octoscode::app;

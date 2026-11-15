@@ -5,6 +5,9 @@
 //! RPC for the active turn, and fold the response into a rendered
 //! detail surface.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use octos_core::SessionKey;
 use octos_core::ui_protocol::{TurnId, TurnLifecycleState, TurnStateGetResult};
 use octoscode::client_event::{AutonomyClientEvent, AutonomyResult, ClientEvent};

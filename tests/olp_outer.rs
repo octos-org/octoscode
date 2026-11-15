@@ -6,6 +6,9 @@
 //! restarts pause after repeated failures. herdr is a fake (`OLP_HERDR`)
 //! whose `pane run` really runs the command, so the lock is really held.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;
