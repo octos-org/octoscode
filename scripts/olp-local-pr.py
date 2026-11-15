@@ -38,6 +38,9 @@
 
 "已合并"需要查 GitHub,本工具不联网,不判断。
 
+promote 只推登记过的复验提交:分支头必须是黑板上最近一次推送登记(单元带复验记录
+推上来时 hub 写下的那一行)里的提交,对不上(例如有人在 hub 上直接挪了分支)就拒绝。
+
 退出码:0 成功;1 promote 被闸门拒绝或推送失败;2 用法错误、仓库或黑板不存在;
 6 主审权租约无效(外环会话已结束或已换人),未推送。
 """
@@ -176,6 +179,8 @@ def evaluate(number, head, events, tracked):
         "number": number,
         "branch": f"task/{number}",
         "head": head,
+        # The commit the last verified push registered (prefix), or None.
+        "registered": pushes[-1][2]["sha"] if pushes else None,
         "unit": unit,
         "state": state,
         "waiting_on": WAITING_ON[state],
@@ -253,6 +258,15 @@ def cmd_promote(args):
     if item["state"] == "submitted":
         print(f"task/{args.number} @ {head[:12]} 已在 {args.remote} 上,无需再推")
         return 0
+    # Only the commit a unit pushed with a verification record may go out:
+    # the hub's own pushes are unrestricted and leave no board line.
+    registered = item["registered"]
+    if not registered or not head.startswith(registered):
+        raise Fail(
+            1,
+            f"#{args.number} 的分支头 {head[:12]} 不是登记过的复验提交"
+            f"(板上最近一次推送登记:{registered or '无'}),未推送",
+        )
     ref = f"refs/heads/task/{args.number}"
     if args.dry_run:
         print(f"dry-run:会把 task/{args.number} @ {head[:12]} 推到 {args.remote}")
