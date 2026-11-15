@@ -1,5 +1,8 @@
 //! One-off timing probe (ignored by default): how expensive is one pager
 //! frame on a long transcript with many highlighted code blocks?
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use octos_core::{Message, SessionKey};
 use octoscode::app;
 use octoscode::cli::ThemeName;

@@ -7,6 +7,9 @@
 //! herdr is replaced by a script that records its arguments and can be made
 //! to fail through a flag file.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;

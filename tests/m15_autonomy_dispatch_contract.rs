@@ -13,6 +13,9 @@
 //! * Reconnect hydration re-requests agent/goal/loop state from the
 //!   backend; local config must never be used to fill it in.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use octos_core::SessionKey;
 use octos_core::app_ui::AppUiEvent;
 use octos_core::ui_protocol::{SessionOpened, UiNotification};

@@ -11,6 +11,9 @@
 //! 2026-08-25 freeze announcement). Any NEW `ACK:` line fails the contract —
 //! the whitelist, not a prefix rule, is the boundary.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 

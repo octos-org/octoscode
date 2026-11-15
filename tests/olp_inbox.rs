@@ -4,6 +4,9 @@
 //! `specs/task-olp-board-inbox.spec.md`): the board's entries sorted into
 //! inbox / working / snoozed / settled, derived from line-start forms only.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::path::PathBuf;
 use std::process::{Command, Output};
 

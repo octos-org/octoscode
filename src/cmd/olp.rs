@@ -159,6 +159,59 @@ const BUNDLE: &[(&str, &[u8])] = &[
         include_bytes!("../../docs/OCTOLOOP_AGENTS.zh-CN.md"),
     ),
     (
+        "docs/OCTOLOOP_FEATURES.md",
+        include_bytes!("../../docs/OCTOLOOP_FEATURES.md"),
+    ),
+    (
+        "docs/OCTOLOOP_GUIDE.md",
+        include_bytes!("../../docs/OCTOLOOP_GUIDE.md"),
+    ),
+    ("docs/OLP_CLI.md", include_bytes!("../../docs/OLP_CLI.md")),
+    (
+        "docs/OLP_CLUSTER.md",
+        include_bytes!("../../docs/OLP_CLUSTER.md"),
+    ),
+    (
+        "docs/OLP_INNER_AGENTS.md",
+        include_bytes!("../../docs/OLP_INNER_AGENTS.md"),
+    ),
+    (
+        "docs/OLP_KEEPALIVE.md",
+        include_bytes!("../../docs/OLP_KEEPALIVE.md"),
+    ),
+    (
+        "docs/OLP_LOCAL_GIT.md",
+        include_bytes!("../../docs/OLP_LOCAL_GIT.md"),
+    ),
+    (
+        "docs/OLP_LOCAL_PR.md",
+        include_bytes!("../../docs/OLP_LOCAL_PR.md"),
+    ),
+    (
+        "docs/OLP_OUTER_BOOT.md",
+        include_bytes!("../../docs/OLP_OUTER_BOOT.md"),
+    ),
+    (
+        "docs/OLP_QUICKSTART.en.md",
+        include_bytes!("../../docs/OLP_QUICKSTART.en.md"),
+    ),
+    (
+        "docs/OLP_QUICKSTART.md",
+        include_bytes!("../../docs/OLP_QUICKSTART.md"),
+    ),
+    (
+        "docs/OLP_REMOTE_BOARD.md",
+        include_bytes!("../../docs/OLP_REMOTE_BOARD.md"),
+    ),
+    (
+        "docs/OLP_REVIEW_EVIDENCE.md",
+        include_bytes!("../../docs/OLP_REVIEW_EVIDENCE.md"),
+    ),
+    (
+        "docs/OUTER_LOOP_PROTOCOL.md",
+        include_bytes!("../../docs/OUTER_LOOP_PROTOCOL.md"),
+    ),
+    (
         "skills/octoloop/AGENTS.md",
         include_bytes!("../../skills/octoloop/AGENTS.md"),
     ),
@@ -712,6 +765,41 @@ mod tests {
                 "scripts/{name} is neither bundled nor listed in NOT_BUNDLED"
             );
         }
+    }
+
+    /// Retrospective #05: the skill read from the bundle (`olp skill install`
+    /// records `olp-bundle/current`) pointed at docs that were not there.
+    /// Every `docs/*.md` a bundled text names must be bundled too.
+    #[test]
+    fn every_doc_a_bundled_text_names_is_bundled() {
+        let bundled: Vec<&str> = BUNDLE.iter().map(|(path, _)| *path).collect();
+        let mut missing = Vec::new();
+        for (path, bytes) in BUNDLE {
+            if !(path.ends_with(".md")) {
+                continue;
+            }
+            let text = String::from_utf8_lossy(bytes);
+            let mut rest = text.as_ref();
+            while let Some(at) = rest.find("docs/") {
+                let tail = &rest[at..];
+                let end = tail
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || "/_.-".contains(c)))
+                    .unwrap_or(tail.len());
+                let name = tail[..end].trim_end_matches('.');
+                if name.ends_with(".md")
+                    && !name[5..].contains('/')
+                    && !bundled.contains(&name)
+                    && !missing.contains(&(name.to_string(), *path))
+                {
+                    missing.push((name.to_string(), *path));
+                }
+                rest = &tail[end.max(5)..];
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "named but not bundled (doc, named in): {missing:?}"
+        );
     }
 
     #[test]

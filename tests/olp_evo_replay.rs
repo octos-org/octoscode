@@ -3,6 +3,9 @@
 //! Evolution loop phase-2 replay + metrics contract tests (#43c, SDD
 //! spec: `specs/task-req-olp-evo-p2.spec.md`).
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};

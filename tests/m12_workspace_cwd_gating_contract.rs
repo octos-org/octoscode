@@ -1,3 +1,6 @@
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use octos_core::SessionKey;
 use octos_core::ui_protocol::SessionOpenParams;
 use octoscode::model::{

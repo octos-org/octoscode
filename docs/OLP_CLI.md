@@ -135,6 +135,9 @@ git 钩子、单元工作仓库的 receivepack/uploadpack、保活任务、ssh �
   `command="/path/bin/octoscode olp unit receive --unit m07",no-pty,no-port-forwarding …`
   (`command -v octoscode` 查路径)。
 - **派卡唤醒**里写 `octoscode olp remote mirror`,备用仓库里的脚本。
+- **`olp doctor`** 还检查:单元工作仓库的 hub 远程是否照抄了 hub 上的本地路径(fail);
+  本机还在跑已被替换的 octoscode / octos / herdr 的进程(warn,升级后要重启);hub 上
+  旧格式的单元心跳(warn,到单元上重装心跳任务)。
 - **`olp doctor`** 检查以上各处:调用 octoscode 绝对路径或仓库脚本为 ok;固定在某一版本
   的工具目录(旧版本这样写)或按 PATH 找 octoscode 为 warn;路径已不存在、钩子缺失为
   fail(退出码 1)。warn 与 fail 都附修复命令。
@@ -149,7 +152,9 @@ git 钩子、单元工作仓库的 receivepack/uploadpack、保活任务、ssh �
 
 ## 5. 怎么运行(第一步)
 
-二进制里打包了全部 `scripts/olp-*`、两张上岗卡和 skill 正文。第一次运行时把它们解到
+二进制里打包了全部 `scripts/olp-*`、skill 正文,以及 skill 与上岗卡引用到的全部文档
+(上岗卡、BOOT、协议、集群与单机文档等,`docs/` 下 16 份;某份文档提到的 `docs/*.md`
+没打包时单元测试失败)。第一次运行时把它们解到
 `~/.octos/outer/olp-bundle/<内容哈希>/`(环境变量 `OCTOSCODE_OLP_BUNDLE` 可改根目录),
 之后复用;同一版本的二进制总是同一个目录,不同版本互不覆盖。脚本之间的相对关系(同目录
 的写板助手、hub 守卫、`../docs/` 上岗卡、`../skills/` 正文)和在仓库里一样。
