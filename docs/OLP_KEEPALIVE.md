@@ -56,12 +56,37 @@ scripts/olp-launchd.py render demo --interval 60 -- /bin/echo hi   # 只看 plis
 
 - **会话。** 内环窗格里的对话在重启后不自动续跑。心跳的巡检会把"没有在跑"
   报给 hub,单元变为降级,由大外环或人决定怎么接。
-- **主审权锁。** hub 上的大外环会话死亡后,锁变为 VACANT,重新 hold 要
-  operator 确认(协议 R7:活锁接管归 operator)。不要把
-  `octoscode outer-duty hold` 注册成常驻任务——自动重启等于自动抢锁。
+- **主审权锁的接管。** 锁被占着(HELD)时,换掉正在工作的外环只归 operator
+  (协议 R7)。锁空着时的自动重启见 §4a。
 - **`octos serve`。** 标准用法里它是 TUI 的 stdio 子进程,随 TUI 启停,不单独
   注册。
 - **系统设置。** `doctor` 只报告。
+
+## 4a. 外环自动重启
+
+外环跑在 herdr 的一个窗格里。它死了锁就空出来;监督任务每分钟检查一次,锁空着
+就在那个窗格里重新 `hold`,锁被占着就什么都不做——不会造出第二个外环,也不会
+接管一把还活着的锁。不要直接把 `octoscode outer-duty hold` 注册成常驻任务:
+外环是交互式的,要有终端,所以在 herdr 窗格里跑,由监督任务负责拉起。
+
+```bash
+# 一次性:注册监督任务(macOS launchd / Linux systemd,每 60 秒检查一次)
+octoscode olp outer install --project <项目> --signature <署名> --duties <职责> \
+    --board <黑板> -- claude --continue
+# 手工检查一次(与任务做的事相同)
+octoscode olp outer supervise --project <项目> --signature <署名> --duties <职责> \
+    --board <黑板> -- claude --continue
+```
+
+- 外环命令要能接着上次的会话:Claude Code 用 `claude --continue`,Codex 用
+  `codex resume --last --no-daemon`(hold 拒绝不带 `--no-daemon` 的 codex)。
+- 外环所在的工作区按 label 找(`--label`,默认 `olp-outer`),没有就新建。窗格里
+  还有程序在跑而锁空着时不重启(退出码 3),要人看。
+- 拿到锁后要保持 2 秒(`--settle`)才算重启成功。30 分钟内重启 3 次(`--window`、
+  `--max-restarts`)就暂停,在黑板上告警一次(退出码 4);人看过后
+  `supervise --reset` 清掉记录。
+- 给了 `--board` 时,每次自动重启在黑板上记一行。
+- herdr 服务本身由常驻任务(§3)或人启动;监督任务找不到它时什么都不做。
 
 ## 5. Linux:systemd 用户单元
 

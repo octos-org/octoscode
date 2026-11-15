@@ -40,6 +40,7 @@ Markdown,没有哪个 agent 专有的指令。Claude Code 经
 | 看哪些本地 PR 在等审核、采认后推 GitHub | `docs/OLP_LOCAL_PR.md`;怎么采认见本文件 outer 模式第 4 步 | `octoscode olp repo status`、`promote`;收件箱 `octoscode olp inbox` |
 | 单元上的内环用 Claude Code 或 Codex(启动、挂 MCP、审批与沙箱) | `docs/OLP_INNER_AGENTS.md` | `herdr agent start --kind claude`、`--kind codex` |
 | 心跳等常驻任务开机自启、崩溃重启 | `docs/OLP_KEEPALIVE.md` | `octoscode olp keepalive`(macOS 走 launchd,Linux 走 systemd) |
+| 外环挂了自动拉起(锁空着时在它的 herdr 窗格里重新 hold) | `docs/OLP_KEEPALIVE.md` §4a | `octoscode olp outer install`、`octoscode olp outer supervise` |
 | 升级 octoscode 后,检查钩子、保活任务、ssh 强制命令里写的命令还能不能用 | `docs/OLP_CLI.md` §3 | `octoscode olp doctor` |
 | 守着单元上的内环,异常报到 hub(负哨) | `docs/OLP_CLUSTER.md` §4c | `octoscode olp guard watch`、`octoscode olp guard forward` |
 | 黑板太长、归档已了结的卡 | `docs/OLP_OUTER_BOOT.md` §7 | `octoscode olp board archive` |
@@ -78,6 +79,7 @@ octoscode 仓库在哪,参数、输出、退出码与原脚本相同(全表见 `
 | `octoscode olp guard watch …`、`guard forward` | `octoscode olp-runtime-watch …`、`scripts/olp-alert-forward.py` |
 | `octoscode olp keepalive …` | macOS `scripts/olp-launchd.py …`,Linux `scripts/olp-systemd.py …` |
 | `octoscode olp duty hold\|check …` | `octoscode outer-duty hold\|check …` |
+| `octoscode olp outer supervise\|install …` | `scripts/olp-outer.py …` |
 | `octoscode olp evo harvest\|retro\|metrics\|index\|skeleton …` | `scripts/olp-evo-harvest.sh`、`scripts/olp-evo-retro.sh`、`scripts/olp-evo-metrics.sh`、`scripts/olp-evo-index.sh`、`scripts/olp-evo-spec-skeleton.sh` |
 | `octoscode olp review …` | `scripts/olp-review-evidence.py`、`scripts/olp-review-monitor.py`、`scripts/olp-review-evidence-cargo.py` |
 

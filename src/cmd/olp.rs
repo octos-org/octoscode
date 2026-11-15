@@ -79,6 +79,10 @@ const BUNDLE: &[(&str, &[u8])] = &[
         include_bytes!("../../scripts/olp-evo-spec-skeleton.sh"),
     ),
     (
+        "scripts/olp-outer.py",
+        include_bytes!("../../scripts/olp-outer.py"),
+    ),
+    (
         "scripts/olp-git-hub.py",
         include_bytes!("../../scripts/olp-git-hub.py"),
     ),
@@ -372,6 +376,13 @@ const COMMANDS: &[Entry] = &[
         target: Target::Keepalive,
         help: "保活:doctor / heartbeat / install / uninstall / list / render(macOS launchd,Linux systemd)",
     },
+    script(
+        "outer",
+        None,
+        "olp-outer.py",
+        &[],
+        "外环挂了自动拉起:supervise(检查一次,锁空着就在外环窗格里重新 hold)/ install(注册成常驻任务)",
+    ),
     Entry {
         group: "duty",
         action: None,
