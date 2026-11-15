@@ -893,6 +893,77 @@ fn duty_refuses_codex_without_no_daemon() {
     );
 }
 
+/// 契约 12(R7 租约):`lease` is VALID only while the lock is HELD with
+/// that lease; once the session is over it is REFUSED, and a new holder's
+/// lease supersedes the old one. No lease in the environment = usage error.
+#[test]
+fn duty_lease_is_valid_only_for_the_live_holder() {
+    let env = TempHome::new("lease");
+    let project = env.project();
+    let lease = |value: Option<&str>| {
+        let mut cmd = duty(env.home().as_path());
+        cmd.args(["lease", "--project", project.to_str().unwrap()]);
+        match value {
+            Some(v) => cmd.env("OLP_DUTY_LEASE", v),
+            None => cmd.env_remove("OLP_DUTY_LEASE"),
+        };
+        let out = cmd.output().unwrap();
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        )
+    };
+    let read_lease = || {
+        for _ in 0..400 {
+            if let Ok(text) = std::fs::read_to_string(env.lock_path().with_extension("lease")) {
+                if !text.trim().is_empty() {
+                    return text.trim().to_string();
+                }
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        panic!("hold never wrote a lease");
+    };
+
+    let mut first = spawn_holder(
+        env.home().as_path(),
+        project.as_path(),
+        env.sentinel().as_path(),
+    );
+    let old = read_lease();
+    assert_eq!(old.len(), 32, "a 128-bit hex lease: {old}");
+    assert_eq!(lease(Some(&old)), (Some(0), "VALID".into()));
+    assert_eq!(lease(Some("0000")), (Some(3), "REFUSED".into()));
+    assert_eq!(lease(None).0, Some(2));
+
+    release_via_sentinel(&env);
+    let _ = first.wait();
+    assert_eq!(
+        lease(Some(&old)),
+        (Some(3), "REFUSED".into()),
+        "VACANT refuses"
+    );
+
+    let mut second = spawn_holder(
+        env.home().as_path(),
+        project.as_path(),
+        env.sentinel().as_path(),
+    );
+    let mut new = read_lease();
+    for _ in 0..100 {
+        if new != old {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+        new = read_lease();
+    }
+    assert_ne!(new, old, "every hold has its own lease");
+    assert_eq!(lease(Some(&old)), (Some(3), "REFUSED".into()), "superseded");
+    assert_eq!(lease(Some(&new)), (Some(0), "VALID".into()));
+    release_via_sentinel(&env);
+    let _ = second.wait();
+}
+
 /// End the real child by removing its sentinel and wait for VACANT.
 fn release_via_sentinel(env: &TempHome) {
     let _ = std::fs::remove_file(env.sentinel());

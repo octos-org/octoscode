@@ -376,7 +376,7 @@ const COMMANDS: &[Entry] = &[
         group: "duty",
         action: None,
         target: Target::Native("outer-duty", &[]),
-        help: "主审权锁:hold / check",
+        help: "主审权锁:hold / check / lease",
     },
     script(
         "evo",

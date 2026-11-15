@@ -126,8 +126,16 @@
   平台命令显式 unsupported 退出 2;Windows LockFileEx 另立条目),
   NFS 不适用。macOS 边界:可承受 wrapper 或 guardian 任一被杀,二者在
   同一瞬间均被 SIGKILL 时 agent 成为孤儿(Linux 由内核保证,无此边界);
-  wrapper 亡时 macOS 杀整个进程组(含孙辈),严于 Linux;本切片 fencing 为文档层纪律,硬 gate(board-append/push
-  校验 lease)为后续条目。锁只约束 wrapper 的后代:Codex 默认把会话放在共享的
+  wrapper 亡时 macOS 杀整个进程组(含孙辈),严于 Linux;写入面校验租约(fencing):
+  hold 取锁后生成随机租约号写到锁旁(`<锁>.lease`),并经环境变量
+  `OLP_DUTY_LEASE`/`OLP_DUTY_PROJECT`/`OLP_DUTY_BIN`/`OLP_DUTY_PANE` 交给外环
+  及其执行的一切命令;写板(board append)、归档、采认推送(promote)、回答提问
+  在环境带租约时先跑 `outer-duty lease`:锁 HELD 且租约仍是当前这一份才写,
+  否则拒绝(退出码 6)。外环会话结束或换人后,它留下的命令写不进来,不必杀
+  任何进程。不带租约的写入(内环、单元、人)不受影响;写入者在别的 herdr 窗格
+  (`HERDR_PANE_ID` 与 `OLP_DUTY_PANE` 不同)时视为不是外环,也不受影响。herdr
+  服务由人或常驻任务启动,不要由外环启动(否则窗格会继承外环的环境)。边界:新
+  持有者取锁到写下租约之间的微秒级窗口里,旧租约仍读作当前。锁只约束 wrapper 的后代:Codex 默认把会话放在共享的
   后台服务(`codex app-server daemon`)里,终端程序只是客户端,它退出后"正在进行
   的工作会继续",不受锁约束——外环用 Codex 时必须以 `codex --no-daemon` 启动,
   `hold` 拒绝不带它的交互式 codex(退出码 2,不取锁)。

@@ -87,8 +87,9 @@ macOS:wrapper 与 agent 之间的守护进程持锁并在 wrapper 亡时杀掉 a
 VACANT|HELD|ERROR);非 holder 只读批注;活锁接管只归 operator(终止
 旧 holder 后再 acquire),无 agent 自助强夺;metadata sidecar 与 TTL 仅
 诊断绝不参与裁定。Linux 与 macOS(单机 flock;其他平台 unsupported;Windows LockFileEx 另立条目),
-NFS 不适用。本切片 fencing 为文档层纪律;硬 gate(写入面校验 lease)
-为后续条目。
+NFS 不适用。写入面校验租约:hold 给外环 `OLP_DUTY_LEASE`,写板、归档、
+采认推送、回答提问在锁 HELD 且租约仍是当前这一份时才写,外环会话结束或
+换人后它留下的命令被拒(退出码 6);别的 herdr 窗格与不带租约的写入不受影响。
 
 ## 4. 复验与代推(主审义务)
 

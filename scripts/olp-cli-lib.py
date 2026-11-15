@@ -51,3 +51,38 @@ def command(olp_words, script, script_words, python="python3", use_cli=True):
 def shell(words):
     """The argument list as one shell command line."""
     return " ".join(shlex.quote(w) for w in words)
+
+
+def duty_gate(prog):
+    """Refuse a write from a dead or replaced outer session (R7 lease).
+
+    `octoscode outer-duty hold` gives the outer agent, and every command it
+    runs, OLP_DUTY_LEASE. A write carrying one goes through only while the
+    project's duty lock is HELD with that lease; otherwise this exits 6.
+    Without OLP_DUTY_LEASE (inner loops, units, a person), or from another
+    herdr pane than the outer's, it does nothing.
+    """
+    import subprocess
+    import sys
+
+    lease = os.environ.get("OLP_DUTY_LEASE", "")
+    if not lease:
+        return
+    # A writer in another herdr pane is not the outer, even if the lease
+    # leaked into its environment (a herdr server started from the outer).
+    if os.environ.get("HERDR_PANE_ID", "") != os.environ.get("OLP_DUTY_PANE", ""):
+        return
+    project = os.environ.get("OLP_DUTY_PROJECT", "")
+    exe = os.environ.get("OLP_DUTY_BIN") or shutil.which("octoscode")
+    reason = None
+    if not project or not exe:
+        reason = "环境里有 OLP_DUTY_LEASE,却没有 OLP_DUTY_PROJECT 或 octoscode"
+    else:
+        r = subprocess.run(
+            [exe, "outer-duty", "lease", "--project", project], capture_output=True, text=True
+        )
+        if r.returncode != 0:
+            reason = r.stderr.strip() or f"outer-duty lease 退出码 {r.returncode}"
+    if reason:
+        print(f"{prog}: 主审权租约无效,拒绝写入({reason})", file=sys.stderr)
+        sys.exit(6)
