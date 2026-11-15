@@ -187,11 +187,18 @@ octoscode olp-runtime-watch --agent <herdr 名字> --agent-pid <claude 或 codex
 守护每个周期输出一行 NDJSON:进程是否还在、目标 turn 有没有报错或结束、命名的文件有没有
 真实变化。它只观察——不杀进程、不重启、不写板,`task_accepted` 恒为 false。
 
+后端换了新进程而前端还在(octoscode 的 `octos serve` 被替换)时,守护在前端的子进程里
+找唯一一个 `octos … serve`,改盯它,并报一次 `backend_rebound`(旧 pid → 新 pid)。找不到
+或不止一个时不猜,照旧报 `backend_missing`。ledger 仍是启动时给的那一个:新后端换了会话
+时它会停止前进,停滞提示会报出来,这时用新的 ledger 重启守护。`--no-follow-backend` 关掉
+跟随。
+
 转发器把下面这些事各报一次(持续期间不重复),落到 hub 的黑板:
 
 | 种类 | 含义 |
 |---|---|
 | `agent_missing` / `backend_missing` | 内环或后端进程不在了 |
+| `backend_rebound` | 后端换了新进程,守护已跟上(写明旧、新 pid) |
 | `watcher_missing` | 观测哨进程不在了 |
 | `process_identity_changed` | pid 被别的进程复用 |
 | `turn_error` | 目标 turn 报错 |

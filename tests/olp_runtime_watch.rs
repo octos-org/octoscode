@@ -1289,3 +1289,181 @@ fn watch_without_ledger_or_backend_uses_herdr_status_for_activity() {
         assert!(stderr.contains("go together"), "{stderr}");
     }
 }
+
+/// The frontend's whole process group, SIGKILLed on drop (also when an
+/// assertion fails). kill(2) directly: procps `kill -9 -<pgid>` on Ubuntu
+/// 24.04 rejects the form, and its stray target took a CI runner down.
+struct Frontend(std::process::Child);
+
+impl std::ops::Deref for Frontend {
+    type Target = std::process::Child;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for Frontend {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        let pgid = self.0.id() as libc::pid_t;
+        if pgid > 1 {
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+        reap(&mut self.0);
+    }
+}
+
+/// A frontend that starts backend b1 (`octos serve`), and on `replace`
+/// kills it and starts b2 — retrospective #39. Returns (frontend, dir).
+fn spawn_frontend_with_replaceable_backend() -> (Frontend, tempfile::TempDir) {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::CommandExt;
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    std::fs::create_dir_all(d.join("r")).unwrap();
+    let octos = d.join("octos");
+    std::fs::write(&octos, "#!/bin/sh\nsleep 30\n").unwrap();
+    std::fs::set_permissions(&octos, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let script = format!(
+        "\"{d}/octos\" serve --stdio & echo $! > \"{d}/b1\"\n\
+         n=0; while [ ! -e \"{d}/replace\" ] && [ $n -lt 600 ]; do sleep 0.05; n=$((n+1)); done\n\
+         kill $(cat \"{d}/b1\")\n\
+         \"{d}/octos\" serve --stdio & echo $! > \"{d}/b2\"\n\
+         wait\n",
+        d = d.display()
+    );
+    let frontend = Command::new("/bin/sh")
+        .args(["-c", &script])
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    (Frontend(frontend), dir)
+}
+
+fn read_pid(path: &std::path::Path) -> u32 {
+    for _ in 0..200 {
+        if let Some(pid) = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| t.trim().parse().ok())
+        {
+            return pid;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("{} never written", path.display());
+}
+
+fn watch_frontend(frontend: u32, backend: u32, dir: &std::path::Path, extra: &[&str]) -> TestChild {
+    TestChild(
+        binary()
+            .args([
+                "olp-runtime-watch",
+                "--agent",
+                "inner_test",
+                "--agent-pid",
+                &frontend.to_string(),
+                "--backend-pid",
+                &backend.to_string(),
+                "--repo",
+                dir.join("r").to_str().unwrap(),
+                "--task",
+                "guard",
+                "--interval-ms",
+                "100",
+            ])
+            .args(extra)
+            .env("OLP_HERDR", "/nonexistent/herdr")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    )
+}
+
+/// Records from the guard until `done` holds for one (bounded).
+fn guard_records_until(
+    watcher: &mut TestChild,
+    done: impl Fn(&serde_json::Value) -> bool,
+) -> Vec<serde_json::Value> {
+    use std::io::BufRead;
+    let stdout = watcher.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut out = Vec::new();
+    while std::time::Instant::now() < deadline {
+        if let Ok(line) = rx.recv_timeout(std::time::Duration::from_millis(200)) {
+            let rec: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let stop = done(&rec);
+            out.push(rec);
+            if stop {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Scenario: 前端还在而后端换了新进程时,守护跟上新后端并报告一次(复盘第 39 条)
+#[test]
+fn guard_follows_a_replaced_backend_and_reports_it() {
+    let (frontend, dir) = spawn_frontend_with_replaceable_backend();
+    let b1 = read_pid(&dir.path().join("b1"));
+    let mut watcher = watch_frontend(frontend.id(), b1, dir.path(), &[]);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::fs::write(dir.path().join("replace"), "").unwrap();
+    let b2 = read_pid(&dir.path().join("b2"));
+    let records = guard_records_until(&mut watcher, |r| {
+        r["identity"]["backend_pid"] == b2
+            && r["backend"]["state"] == "alive"
+            && r["alerts"].as_array().unwrap().is_empty()
+    });
+    drop(frontend);
+    let rebound: Vec<&serde_json::Value> = records
+        .iter()
+        .flat_map(|r| r["alerts"].as_array().unwrap())
+        .filter(|a| a["kind"] == "backend_rebound")
+        .collect();
+    assert_eq!(rebound.len(), 1, "reported once: {records:?}");
+    assert_eq!(rebound[0]["from"], b1);
+    assert_eq!(rebound[0]["to"], b2);
+    assert_eq!(rebound[0]["ledger_rebound"], false);
+    let last = records.last().unwrap();
+    assert_eq!(last["identity"]["backend_pid"], b2, "{last}");
+    assert_eq!(last["backend"]["state"], "alive", "{last}");
+}
+
+/// Scenario: --no-follow-backend 照旧盯着消失的后端
+#[test]
+fn guard_keeps_the_gone_backend_with_no_follow_backend() {
+    let (frontend, dir) = spawn_frontend_with_replaceable_backend();
+    let b1 = read_pid(&dir.path().join("b1"));
+    let mut watcher = watch_frontend(frontend.id(), b1, dir.path(), &["--no-follow-backend"]);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::fs::write(dir.path().join("replace"), "").unwrap();
+    let _b2 = read_pid(&dir.path().join("b2"));
+    let records = guard_records_until(&mut watcher, |r| r["backend"]["state"] == "process_missing");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    drop(frontend);
+    let last = records.last().unwrap();
+    assert_eq!(last["identity"]["backend_pid"], b1, "{last}");
+    assert_eq!(last["backend"]["state"], "process_missing", "{last}");
+    assert!(
+        records
+            .iter()
+            .flat_map(|r| r["alerts"].as_array().unwrap())
+            .all(|a| a["kind"] != "backend_rebound"),
+        "{records:?}"
+    );
+}

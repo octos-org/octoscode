@@ -186,6 +186,33 @@ fn alert_forward_reports_each_event_once_per_episode() {
     );
 }
 
+/// Scenario: 后端换了新进程、守护已跟上时,在 hub 黑板上报一次(复盘第 39 条)
+#[test]
+fn alert_forward_reports_a_followed_backend_once() {
+    if !has_flock() {
+        eprintln!("SKIP (explicit): host has no flock on PATH; the board append needs it");
+        return;
+    }
+    let n = Net::new();
+    let rebound = serde_json::json!([{"kind": "backend_rebound", "from": 1073, "to": 63302,
+                                      "ledger_rebound": false}]);
+    let records = vec![
+        record("alive", "process_missing", serde_json::json!([])),
+        record("alive", "alive", rebound),
+        record("alive", "alive", serde_json::json!([])),
+        record("alive", "alive", serde_json::json!([])),
+    ];
+    let out = n.forward(&[], &records);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    assert_eq!(
+        n.negative_lines(),
+        [
+            "> 单元(m07)·负哨(#212): backend_missing turn=turn-abc pid=4102 state=process_missing",
+            "> 单元(m07)·负哨(#212): backend_rebound turn=turn-abc from=1073 to=63302 ledger=not_rebound",
+        ]
+    );
+}
+
 /// Scenario: hub 不可达时告警排队,恢复后补上且不重复
 #[test]
 fn alert_forward_queues_while_the_hub_is_unreachable() {

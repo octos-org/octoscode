@@ -117,6 +117,26 @@ Scenario: 重复读事件+哈希不变触发停滞；真实字节变更重置
   When 超过 stall_seconds 无字节/HEAD 变化
   Then stalled_no_progress（advisory 标注）；文件变更后重置
 
+### Rule: follow-backend — 后端被替换时跟上(复盘第 39 条)
+Scenario: 前端还在而后端换了新进程时,守护改盯新后端并报告一次(critical)
+  Tags: critical
+  Test: guard_follows_a_replaced_backend_and_reports_it
+  Given 一个前端进程启动后端 b1(`octos serve`),收到信号后杀掉 b1 再启动 b2
+  When 守护盯着前端与 b1,信号发出后继续观察
+  Then 恰有一条 `backend_rebound`(from b1、to b2、ledger_rebound 为 false),之后的记录盯的是 b2 且它存活
+
+Scenario: --no-follow-backend 照旧盯着消失的后端
+  Test: guard_keeps_the_gone_backend_with_no_follow_backend
+  Given 同样的前端与后端
+  When 带 `--no-follow-backend` 守护,信号发出后继续观察
+  Then 记录里的后端仍是 b1、状态 process_missing,没有 `backend_rebound`
+
+Scenario: 后端被跟上的事在 hub 黑板上报一次
+  Test: alert_forward_reports_a_followed_backend_once
+  Given 一串记录:后端消失,随后一条 backend_rebound,之后恢复安静
+  When 交给转发器
+  Then hub 黑板上依次是 backend_missing 与 backend_rebound(from、to、ledger=not_rebound)各一行
+
 ### Rule: never-accept — Done/ACK 也不自接受
 Scenario: Done 无证据、或存在有效 ACK
   Test: herdr_whitelist_done_idle_unknown_and_mismatch_fixtures
