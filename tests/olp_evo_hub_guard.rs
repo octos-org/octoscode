@@ -8,6 +8,9 @@
 //! the hub may run them. These tests drive the real scripts with a hub name
 //! configured through `OLP_HUB_HOST` or the hub-host file.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 

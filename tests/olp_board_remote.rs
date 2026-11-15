@@ -10,6 +10,9 @@
 //! (connection refused, exit 255) or `lost-reply` (the hub does the work but
 //! the client sees a dropped connection).
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

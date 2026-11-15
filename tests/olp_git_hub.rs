@@ -9,6 +9,9 @@
 //! forced command, which one test also exercises end to end through a fake
 //! ssh.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

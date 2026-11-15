@@ -5,6 +5,9 @@
 //! Test-owned children are spawned, terminated, and reaped here; the guard
 //! itself never kills anything.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::process::{Command, Stdio};
 
 /// Terminate + reap a test-owned child.

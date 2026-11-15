@@ -4,6 +4,9 @@
 //! (newline-delimited JSON-RPC over stdio), with a temp outer root
 //! (`OLP_MCP_OUTER_ROOT`) and a compressed clock (`OLP_MCP_TIMEOUT_SECS`).
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -233,8 +236,18 @@ fn self_test_ask_outer_timeout_degrades() {
 fn self_test_ask_outer_quota_refusal() {
     let root = temp_outer_root("quota");
     let mut server = ServerProc::spawn(&root, 0.1);
+    let questions = |root: &std::path::Path| {
+        std::fs::read_dir(root.join("mcp/questions"))
+            .unwrap()
+            .count()
+    };
+    // All three asks of the quota really reach the mailbox (retrospective
+    // #11: generating an id used to consume quota too, so the third was
+    // already refused).
     for i in 0..3 {
-        ask_outer(&mut server, &format!("q{i}"), "c", "t");
+        let reply = ask_outer(&mut server, &format!("q{i}"), "c", "t");
+        assert!(!reply.contains("上限"), "ask {i} must be accepted: {reply}");
+        assert_eq!(questions(&root), i + 1, "ask {i} reaches the mailbox");
     }
     let before = std::fs::read_dir(root.join("mcp/questions"))
         .unwrap()
@@ -245,6 +258,42 @@ fn self_test_ask_outer_quota_refusal() {
         .count();
     assert!(refusal.contains("已达 3 次上限"), "{refusal}");
     assert_eq!(before, after, "refused ask never enters the mailbox");
+}
+
+/// Scenario: 投递失败不计入配额,立刻报告而不是等到超时(复盘第 11 条)
+#[cfg(unix)]
+#[test]
+fn self_test_ask_outer_failed_delivery_costs_no_quota() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = temp_outer_root("delivery");
+    // Two seconds per unanswered ask: long enough to tell an immediate
+    // report from waiting out the timeout.
+    let mut server = ServerProc::spawn(&root, 2.0);
+    let mailbox = root.join("mcp/questions");
+    let set_mode =
+        |mode| std::fs::set_permissions(&mailbox, std::fs::Permissions::from_mode(mode)).unwrap();
+    set_mode(0o555);
+    let started = std::time::Instant::now();
+    let reply = ask_outer(&mut server, "q", "c", "t");
+    set_mode(0o755);
+    assert!(
+        reply.contains("投递失败") && reply.contains("不计入配额"),
+        "{reply}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(1500),
+        "a failed delivery is reported at once, not after the timeout"
+    );
+    // The same server still has its whole quota.
+    for i in 0..3 {
+        let reply = ask_outer(&mut server, &format!("q{i}"), "c", "t");
+        assert!(
+            !reply.contains("上限"),
+            "ask {i} after a failed delivery: {reply}"
+        );
+    }
+    let refusal = ask_outer(&mut server, "q4", "c", "t");
+    assert!(refusal.contains("已达 3 次上限"), "{refusal}");
 }
 
 /// Scenario: tried 必填 — empty tried is refused without a mailbox write.

@@ -1,6 +1,9 @@
 //! Contract tests for `/activity` navigator overlay
 //! (`specs/task-activity-navigator-overlay.spec`).
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use octos_core::ui_protocol::TaskRuntimeState;
 use octos_core::{Message, SessionKey, TaskId};

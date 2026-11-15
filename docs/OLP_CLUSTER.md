@@ -370,7 +370,8 @@ scripts/olp-summary.py --board <板> --repo <hub 仓库> --name <项目名> --js
     herdr machine add <herdr 用的别名> --label m07
     herdr --machine m07 agent list          # 应看到单元上的 octoscode 窗格
     ```
-12. 确认单元是"正常",权限一列符合预期;hub 与单元上各跑一次 `doctor`,写进钩子、
+12. 确认单元是"正常",权限一列符合预期,复验方一列显示要用的 CLI 已登录(只是告知,
+    不影响派卡,用哪些复验方由你按卡决定);hub 与单元上各跑一次 `doctor`,写进钩子、
     保活任务、强制命令里的命令都应为 ok:
 
     ```bash

@@ -207,7 +207,6 @@ impl<'a> OlpMcpServer<'a> {
             return "拒绝:question 为空。".into();
         }
 
-        ASK_STATE.with(|state| state.set(state.get() + 1));
         let ask_id = short_uuid();
         let ts = timestamp_compact();
         let payload = json!({
@@ -215,10 +214,25 @@ impl<'a> OlpMcpServer<'a> {
             "question": question, "context": context, "tried": tried,
         });
         let question_path = self.questions_dir.join(format!("{ts}-{ask_id}.json"));
-        let _ = std::fs::write(
+        // Only a question that reached the mailbox counts against the quota
+        // (retrospective #11): a failed delivery is reported at once instead
+        // of waiting out the timeout for an answer nobody can give.
+        if let Err(err) = std::fs::write(
             &question_path,
             serde_json::to_string_pretty(&payload).unwrap_or_default(),
-        );
+        ) {
+            self.audit(
+                "refusal",
+                &format!(
+                    "ask_outer delivery failed: {err} ({})",
+                    question_path.display()
+                ),
+            );
+            return format!(
+                "投递失败:提问没能写进信箱({err}),本次不计入配额。请按黑板既有指导推进,或以 report_blocked 直通落板请求外环介入。"
+            );
+        }
+        ASK_STATE.with(|state| state.set(state.get() + 1));
         let detail_head: String = question.chars().take(200).collect();
         self.audit("ask", &format!("id={ask_id} question={detail_head}"));
 
@@ -335,6 +349,7 @@ impl<'a> OlpMcpServer<'a> {
 
 thread_local! {
     static ASK_STATE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ID_SEQ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn tools_schema() -> Value {
@@ -375,7 +390,8 @@ fn short_uuid() -> String {
         .unwrap_or(0);
     let pid = std::process::id() as u64;
     let mixed = bytes.wrapping_mul(0x9E3779B97F4A7C15) ^ pid.rotate_left(32);
-    let counter = ASK_STATE.with(|s| {
+    // Its own sequence: ids must not consume the ask quota.
+    let counter = ID_SEQ.with(|s| {
         let v = s.get() + 1;
         s.set(v);
         v as u64

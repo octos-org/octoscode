@@ -5,6 +5,9 @@
 //! the same arguments, output and exit codes, from any directory, with the
 //! scripts' siblings (helpers, hub guard, onboarding cards) in place.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -507,6 +510,30 @@ fn olp_skill_install_records_the_current_link() {
         std::fs::canonicalize(sb.bundle()).unwrap()
     );
     assert!(current.join("skills/octoloop/AGENTS.md").is_file());
+    // Retrospective #05: every doc the skill body names is there too.
+    let body = std::fs::read_to_string(current.join("skills/octoloop/AGENTS.md")).unwrap();
+    let mut named: Vec<&str> = body
+        .match_indices("docs/")
+        .map(|(at, _)| {
+            let tail = &body[at..];
+            let end = tail
+                .find(|c: char| !(c.is_ascii_alphanumeric() || "/_.-".contains(c)))
+                .unwrap_or(tail.len());
+            tail[..end].trim_end_matches('.')
+        })
+        .filter(|name| name.ends_with(".md"))
+        .collect();
+    named.sort();
+    named.dedup();
+    assert!(named.len() >= 10, "the skill names its docs: {named:?}");
+    let absent: Vec<&&str> = named
+        .iter()
+        .filter(|d| !current.join(d).is_file())
+        .collect();
+    assert!(
+        absent.is_empty(),
+        "the installed skill cannot read {absent:?}"
+    );
 }
 
 /// Scenario: doctor 把固定在某一版本工具目录的命令报 warn,路径消失后报 fail 并给出修复命令
@@ -563,8 +590,20 @@ fn olp_doctor_flags_pinned_then_missing_wiring() {
 
     let doctor = |sb: &Sb| {
         let out = sb.olp(&["doctor", "--repo", hub.to_str().unwrap(), "--json"], "");
-        let report: serde_json::Value = serde_json::from_slice(&out.stdout)
+        let mut report: serde_json::Value = serde_json::from_slice(&out.stdout)
             .unwrap_or_else(|e| panic!("{e}: {}{}", stdout(&out), stderr(&out)));
+        // Running processes depend on the machine the test runs on.
+        let kept: Vec<serde_json::Value> = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["kind"] != "运行中的旧版本")
+            .cloned()
+            .collect();
+        let count = |s: &str| kept.iter().filter(|c| c["status"] == s).count();
+        report["counts"] =
+            serde_json::json!({"ok": count("ok"), "warn": count("warn"), "fail": count("fail")});
+        report["checks"] = serde_json::Value::Array(kept);
         (out.status.code(), report)
     };
     let (code, report) = doctor(&sb);
@@ -716,4 +755,163 @@ fn olp_board_append_refuses_a_dead_outer_lease() {
     // No lease at all: an inner loop, a unit or a person.
     let out = sb.olp(&["board", "append", board.to_str().unwrap()], "no lease\n");
     assert!(out.status.success(), "{}", stderr(&out));
+}
+
+fn doctor_json(sb: &Sb, args: &[&str]) -> serde_json::Value {
+    let mut full = vec!["doctor", "--json"];
+    full.extend_from_slice(args);
+    let out = sb.olp(&full, "");
+    serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}{}", stdout(&out), stderr(&out)))
+}
+
+fn items_of<'a>(report: &'a serde_json::Value, kind: &str) -> Vec<&'a serde_json::Value> {
+    report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["kind"] == kind)
+        .collect()
+}
+
+/// Scenario: doctor 发现单元的 hub 远程照抄了另一台机器的本地路径(复盘第 13 条)
+#[test]
+fn olp_doctor_flags_a_hub_remote_that_is_not_here() {
+    let sb = Sb::new();
+    let work = sb.p("work");
+    std::fs::create_dir_all(&work).unwrap();
+    assert!(git_in(&work, &["init", "-q"]).status.success());
+    let w = work.to_str().unwrap();
+    git_in(
+        &work,
+        &[
+            "remote",
+            "add",
+            "hub",
+            "/Users/team/team_workspace/git-hub/x.git",
+        ],
+    );
+    let report = doctor_json(&sb, &["--work", w]);
+    let hub = items_of(&report, "hub 远程");
+    assert_eq!(hub.len(), 1, "{report}");
+    assert_eq!(hub[0]["status"], "fail", "{report}");
+    assert!(
+        hub[0]["fix"]
+            .as_str()
+            .unwrap()
+            .contains("git remote set-url"),
+        "{report}"
+    );
+
+    let bare = sb.p("hub.git");
+    assert!(
+        git_in(
+            &sb.p("cwd"),
+            &["init", "-q", "--bare", bare.to_str().unwrap()]
+        )
+        .status
+        .success()
+    );
+    git_in(&work, &["remote", "set-url", "hub", bare.to_str().unwrap()]);
+    let report = doctor_json(&sb, &["--work", w]);
+    assert_eq!(items_of(&report, "hub 远程")[0]["status"], "ok", "{report}");
+
+    // A network URL is not checked offline.
+    git_in(
+        &work,
+        &["remote", "set-url", "hub", "olp-hub-git:/srv/olp/hub.git"],
+    );
+    let report = doctor_json(&sb, &["--work", w]);
+    assert!(items_of(&report, "hub 远程").is_empty(), "{report}");
+}
+
+/// Scenario: doctor 报告还在跑已被替换的二进制的进程(复盘第 06 条)
+#[test]
+fn olp_doctor_flags_a_process_running_a_replaced_binary() {
+    let sb = Sb::new();
+    let bin = sb.p("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    // A long-running process named `octos`: a copy of this build in MCP
+    // serve mode, which waits on its stdin (system binaries such as
+    // /bin/sleep refuse to run from another path on macOS).
+    let octos = bin.join("octos");
+    let me = env!("CARGO_BIN_EXE_octoscode");
+    std::fs::copy(me, &octos).unwrap();
+    let mut child = Command::new(&octos)
+        .arg("olp-mcp-serve")
+        .env("HOME", sb.p("home"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    // An upgrade replaces the file (new inode, newer mtime) under the
+    // running process.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let staged = bin.join("octos.new");
+    std::fs::copy(me, &staged).unwrap();
+    // A copy may keep the source's old mtime; an upgrade writes a new file.
+    std::fs::File::options()
+        .write(true)
+        .open(&staged)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now())
+        .unwrap();
+    std::fs::rename(&staged, &octos).unwrap();
+
+    let report = doctor_json(&sb, &[]);
+    let pid = child.id();
+    let _ = child.kill();
+    let _ = child.wait();
+    let canonical = std::fs::canonicalize(&octos).unwrap();
+    let stale: Vec<_> = items_of(&report, "运行中的旧版本")
+        .into_iter()
+        .filter(|c| {
+            let where_ = c["where"].as_str().unwrap();
+            where_ == octos.to_str().unwrap() || where_ == canonical.to_str().unwrap()
+        })
+        .collect();
+    assert_eq!(stale.len(), 1, "{report}");
+    assert_eq!(stale[0]["status"], "warn");
+    assert!(
+        stale[0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains(&pid.to_string()),
+        "{report}"
+    );
+}
+
+/// Scenario: doctor 在 hub 上发现旧格式的单元心跳(复盘第 10 条)
+#[test]
+fn olp_doctor_flags_old_format_heartbeats() {
+    let sb = Sb::new();
+    let beats = sb.p("units/heartbeat");
+    std::fs::create_dir_all(&beats).unwrap();
+    std::fs::write(
+        beats.join("m07.json"),
+        r#"{"v":1,"unit":"m07","checks":[{"name":"disk","ok":true}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        beats.join("m08.json"),
+        r#"{"v":1,"unit":"m08","agents":[],"checks":[{"name":"agent","ok":false},{"name":"full","ok":false}]}"#,
+    )
+    .unwrap();
+    let report = doctor_json(&sb, &[]);
+    let beats = items_of(&report, "单元心跳");
+    let of = |u: &str| {
+        beats
+            .iter()
+            .find(|c| c["where"] == u)
+            .unwrap_or_else(|| panic!("{report}"))
+    };
+    assert_eq!(of("m07")["status"], "warn", "{report}");
+    assert!(
+        of("m07")["fix"]
+            .as_str()
+            .unwrap()
+            .contains("keepalive heartbeat --unit m07")
+    );
+    assert_eq!(of("m08")["status"], "ok", "{report}");
 }

@@ -6,6 +6,9 @@
 //! the live tail, native scrollback, and the pager. Unknown/missing languages
 //! fall back to the previous single-color rendering.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use octos_core::ui_protocol::TurnId;
 use octos_core::{Message, SessionKey};
 use octoscode::app::{
