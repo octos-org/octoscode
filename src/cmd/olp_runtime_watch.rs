@@ -68,6 +68,10 @@ pub struct OlpRuntimeWatchCli {
     /// Emit one snapshot then exit (default: watch; later slice).
     #[arg(long)]
     once: bool,
+    /// Keep watching the given backend pid after it disappears instead of
+    /// following the agent's replacement `octos … serve` child.
+    #[arg(long)]
+    no_follow_backend: bool,
 }
 
 /// Frozen observation identity: what the guard observes, never judges.
@@ -84,6 +88,8 @@ pub struct IdentitySnapshot {
     pub stall_seconds: u64,
     pub interval_ms: u64,
     pub once: bool,
+    /// Follow a replaced backend (see `find_backend_child`).
+    pub follow_backend: bool,
 }
 
 /// The octos turn the ledger layer follows. Inner loops without a ledger
@@ -132,6 +138,8 @@ const PROBE_DEADLINE: Duration = Duration::from_secs(2);
 const PROBE_POLL: Duration = Duration::from_millis(10);
 /// Upper bound on accepted ps output; a listing this large is a parse failure.
 const PROBE_MAX_OUTPUT: usize = 8 * 1024;
+/// Cap for the whole-system listing used to find a replacement backend.
+const LISTING_MAX_OUTPUT: usize = 1024 * 1024;
 
 /// Bounded `ps -o pid=,lstart=,state=` probe. Birth identity hashes ONLY the
 /// `pid + lstart` fields, so a later STAT-column change (state transitions
@@ -163,7 +171,14 @@ impl Drop for ReapOnDrop {
     }
 }
 
-fn bounded_run(mut cmd: Command) -> Option<(std::process::ExitStatus, Vec<u8>, u64)> {
+fn bounded_run(cmd: Command) -> Option<(std::process::ExitStatus, Vec<u8>, u64)> {
+    bounded_run_capped(cmd, PROBE_MAX_OUTPUT)
+}
+
+fn bounded_run_capped(
+    mut cmd: Command,
+    cap: usize,
+) -> Option<(std::process::ExitStatus, Vec<u8>, u64)> {
     let out_file = tempfile::tempfile().ok()?;
     let err_file = tempfile::tempfile().ok()?;
     let out_fd = out_file.try_clone().ok()?;
@@ -183,11 +198,8 @@ fn bounded_run(mut cmd: Command) -> Option<(std::process::ExitStatus, Vec<u8>, u
             Ok(None) => {
                 // In-loop size bound: over-large output or an UNKNOWABLE size
                 // (metadata failure — never assumed empty) => Unknown now.
-                let over = |f: &std::fs::File| {
-                    f.metadata()
-                        .map(|m| m.len() > PROBE_MAX_OUTPUT as u64)
-                        .map_err(|_| ())
-                };
+                let over =
+                    |f: &std::fs::File| f.metadata().map(|m| m.len() > cap as u64).map_err(|_| ());
                 if matches!(over(&out_file), Ok(true))
                     || matches!(over(&err_file), Ok(true))
                     || over(&out_file).is_err()
@@ -202,23 +214,20 @@ fn bounded_run(mut cmd: Command) -> Option<(std::process::ExitStatus, Vec<u8>, u
         }
     };
     let status = status?;
-    if out_file.metadata().ok()?.len() as usize > PROBE_MAX_OUTPUT {
+    if out_file.metadata().ok()?.len() as usize > cap {
         return None;
     }
     let mut out_file = out_file;
     out_file.seek(std::io::SeekFrom::Start(0)).ok()?;
     let mut raw = Vec::new();
-    out_file
-        .take(PROBE_MAX_OUTPUT as u64 + 1)
-        .read_to_end(&mut raw)
-        .ok()?;
-    if raw.len() > PROBE_MAX_OUTPUT {
+    out_file.take(cap as u64 + 1).read_to_end(&mut raw).ok()?;
+    if raw.len() > cap {
         return None;
     }
     // stderr size must be KNOWABLE, not assumed: metadata failure is a
     // failed observation (Unknown), never "empty stderr".
     let err_len = err_file.metadata().ok()?.len();
-    if err_len > PROBE_MAX_OUTPUT as u64 {
+    if err_len > cap as u64 {
         return None;
     }
     child.0 = None; // exited normally; nothing left to reap
@@ -226,6 +235,43 @@ fn bounded_run(mut cmd: Command) -> Option<(std::process::ExitStatus, Vec<u8>, u
 }
 
 /// Bounded, strictly-parsed `ps -o pid=,lstart=,state= -p <pid>` probe.
+/// The agent's one `octos … serve` child, if exactly one exists: the
+/// backend that replaced a vanished one. None when there is none or more
+/// than one (no guessing).
+fn find_backend_child(agent_pid: u32) -> Option<u32> {
+    let mut cmd = Command::new("ps");
+    cmd.args(["-A", "-o", "pid=,ppid=,args="])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    // A full process listing is far larger than one pid's probe; this runs
+    // only after the backend has vanished.
+    let (status, out, _) = bounded_run_capped(cmd, LISTING_MAX_OUTPUT)?;
+    if !status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out);
+    let found: Vec<u32> = text
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let pid: u32 = words.next()?.parse().ok()?;
+            let ppid: u32 = words.next()?.parse().ok()?;
+            let args: Vec<&str> = words.collect();
+            let serves = args.contains(&"serve")
+                && args.iter().any(|w| {
+                    let name = w.rsplit('/').next().unwrap_or(w);
+                    name == "octos" || name.starts_with("octos-")
+                });
+            (ppid == agent_pid && serves).then_some(pid)
+        })
+        .collect();
+    match found[..] {
+        [one] => Some(one),
+        _ => None,
+    }
+}
+
 pub fn probe_pid(pid: u32) -> ProbeState {
     let mut cmd = Command::new("ps");
     cmd.args(["-o", "pid=,lstart=,state=", "-p", &pid.to_string()])
@@ -431,6 +477,10 @@ fn probe_json(p: &ProbeState) -> serde_json::Value {
 /// Everything one observation cycle contributes to the snapshot record.
 struct Cycle<'a> {
     agent: &'a ProbeState,
+    /// The backend pid watched this cycle (it changes when followed).
+    backend_pid: Option<u32>,
+    /// `(old, new)` when this cycle moved to a replacement backend.
+    rebound: Option<(u32, u32)>,
     backend: Option<&'a ProbeState>,
     monitors: &'a [(u32, ProbeState)],
     seq: u64,
@@ -449,7 +499,7 @@ fn observation_record(s: &IdentitySnapshot, c: &Cycle<'_>) -> serde_json::Value 
         "identity": {
             "agent": s.agent,
             "agent_pid": s.agent_pid,
-            "backend_pid": s.backend_pid,
+            "backend_pid": c.backend_pid,
             "repo": s.repo,
             "ledger": ledger,
             "session": session,
@@ -480,6 +530,16 @@ fn observation_record(s: &IdentitySnapshot, c: &Cycle<'_>) -> serde_json::Value 
                     "pid": pid,
                 })
             })
+            .chain(c.rebound.map(|(from, to)| {
+                json!({
+                    "kind": "backend_rebound",
+                    "from": from,
+                    "to": to,
+                    // The ledger is still the one given at start; a new
+                    // backend on a new session would leave it quiet.
+                    "ledger_rebound": false,
+                })
+            }))
             .chain(c.ledger.alerts.iter().cloned())
             .chain(c.progress.alert.iter().cloned())
             .collect::<Vec<_>>(),
@@ -798,6 +858,7 @@ impl OlpRuntimeWatchCli {
                 stall_seconds: self.stall_seconds,
                 interval_ms: self.interval_ms,
                 once: self.once,
+                follow_backend: !self.no_follow_backend,
             },
             task_accepted: false,
         })
@@ -839,10 +900,26 @@ pub fn run(args: OlpRuntimeWatchArgs) -> Result<i32> {
     let mut births: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
     let mut ledger_layer = s.ledger.as_ref().map(LedgerLayer::new);
     let mut progress_tracker = ProgressTracker::new();
+    // The backend being watched: the one given at start, or the agent's
+    // replacement backend once the original is gone (retrospective #39: an
+    // octoscode frontend kept running while its backend was replaced, and
+    // the guard watched the dead pid for an hour).
+    let mut backend_pid = s.backend_pid;
     loop {
         seq += 1;
         let agent = probe_pid(s.agent_pid);
-        let backend = s.backend_pid.map(probe_pid);
+        let mut backend = backend_pid.map(probe_pid);
+        let mut rebound = None;
+        if s.follow_backend
+            && matches!(agent, ProbeState::Alive(_))
+            && matches!(backend, Some(ProbeState::Missing | ProbeState::Zombie))
+            && let (Some(old), Some(new)) = (backend_pid, find_backend_child(s.agent_pid))
+            && new != old
+        {
+            rebound = Some((old, new));
+            backend_pid = Some(new);
+            backend = Some(probe_pid(new));
+        }
         let monitors: Vec<(u32, ProbeState)> =
             s.monitor_pid.iter().map(|p| (*p, probe_pid(*p))).collect();
         let agent_status = herdr_agent_status(&s.agent);
@@ -851,7 +928,7 @@ pub fn run(args: OlpRuntimeWatchArgs) -> Result<i32> {
         // touches its baseline.
         let mut identity_alerts: Vec<u32> = Vec::new();
         for (pid, state) in std::iter::once((s.agent_pid, &agent))
-            .chain(s.backend_pid.zip(backend.as_ref()))
+            .chain(backend_pid.zip(backend.as_ref()))
             .chain(monitors.iter().map(|(p, s)| (*p, s)))
         {
             if let ProbeState::Alive(birth) = state {
@@ -883,6 +960,8 @@ pub fn run(args: OlpRuntimeWatchArgs) -> Result<i32> {
         let iso_time = iso_now();
         let cycle = Cycle {
             agent: &agent,
+            backend_pid,
+            rebound,
             backend: backend.as_ref(),
             monitors: &monitors,
             seq,

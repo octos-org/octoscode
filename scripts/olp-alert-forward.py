@@ -13,6 +13,8 @@ turn 有没有报错、是不是在空转。它只把观察结果按行输出(ND
   默认转发:
     agent_missing              内环进程不在了或成了僵尸
     backend_missing            后端进程不在了或成了僵尸
+    backend_rebound            后端换了新进程,守护已跟上(写明旧 pid、新 pid;
+                               ledger 仍是启动时给的那一个)
     watcher_missing            观测哨进程不在了
     process_identity_changed   pid 被别的进程复用
     turn_error                 目标 turn 报错
@@ -50,6 +52,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_KINDS = [
     "agent_missing",
     "backend_missing",
+    "backend_rebound",
     "watcher_missing",
     "process_identity_changed",
     "turn_error",
@@ -89,7 +92,10 @@ def events_of(record):
             out.append(("watcher_missing", str(pid), f"pid={clean(pid)} state={state}"))
     for alert in record.get("alerts") or []:
         kind = alert.get("kind")
-        if kind == "process_identity_changed":
+        if kind == "backend_rebound":
+            old, new = clean(alert.get("from")), clean(alert.get("to"))
+            out.append((kind, f"{old}->{new}", f"from={old} to={new} ledger=not_rebound"))
+        elif kind == "process_identity_changed":
             out.append((kind, str(alert.get("pid")), f"pid={clean(alert.get('pid'))}"))
         elif kind == "turn_error":
             out.append((kind, str(alert.get("seq")), f"seq={clean(alert.get('seq'))}"))
