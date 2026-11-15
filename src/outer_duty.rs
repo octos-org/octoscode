@@ -350,6 +350,82 @@ pub fn held_diagnostics(lock: &Path) -> String {
     }
 }
 
+/// Fencing lease (R7 hard gate at the write entry points). `hold` writes a
+/// fresh random lease next to the lock right after acquiring it and hands
+/// it to the agent's environment (`OLP_DUTY_LEASE`); the write tools accept
+/// a write from that environment only while the lock is HELD and the lease
+/// is still the current one. A command the agent left running after it
+/// died (lock VACANT) or after a new holder took over (new lease) is
+/// refused — nothing is killed. Boundary: between a new holder's acquire
+/// and its lease write (microseconds) an old lease still reads as current.
+pub fn lease_path(lock: &Path) -> PathBuf {
+    lock.with_extension("lease")
+}
+
+/// A new random lease: 16 bytes from the OS, as hex.
+pub fn new_lease() -> Result<String> {
+    use std::io::Read as _;
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .wrap_err("outer-duty: cannot read /dev/urandom for the lease")?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Record `lease` as the current one (0600, replaced atomically).
+pub fn write_lease(lock: &Path, lease: &str) -> Result<()> {
+    let path = lease_path(lock);
+    let staged = path.with_extension(format!("lease.{}", std::process::id()));
+    {
+        let mut file = open_lock_file(&staged, 0o600)
+            .wrap_err_with(|| format!("failed to write the lease: {}", staged.display()))?;
+        file.set_len(0)?;
+        file.write_all(lease.as_bytes())?;
+        file.sync_all()?;
+    }
+    tighten(&staged, 0o600)?;
+    std::fs::rename(&staged, &path)
+        .wrap_err_with(|| format!("failed to write the lease: {}", path.display()))?;
+    Ok(())
+}
+
+/// Whether a write carrying `lease` may proceed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaseVerdict {
+    /// The lock is HELD and `lease` is the current holder's.
+    Valid,
+    /// The lock is VACANT: the session that issued the lease is gone.
+    Vacant,
+    /// The lock is HELD by a later holder.
+    Superseded,
+    /// The state could not be read (fail closed).
+    Error(String),
+}
+
+pub fn verify_lease(project: &Path, lease: &str) -> LeaseVerdict {
+    let lock = match lock_path(project) {
+        Ok(lock) => lock,
+        Err(err) => return LeaseVerdict::Error(format!("{err:#}")),
+    };
+    let read = || std::fs::read_to_string(lease_path(&lock)).map(|t| t.trim().to_string());
+    // Read, probe, read again: a holder change in between shows up as a
+    // different lease on one of the two reads.
+    let before = read();
+    let state = check(project);
+    let after = read();
+    match state {
+        DutyState::Vacant => LeaseVerdict::Vacant,
+        DutyState::Error => LeaseVerdict::Error("the duty lock cannot be read".into()),
+        DutyState::Held => match (before, after) {
+            (Ok(b), Ok(a)) if b == lease && a == lease => LeaseVerdict::Valid,
+            (Ok(_), Ok(_)) => LeaseVerdict::Superseded,
+            (Err(e), _) | (_, Err(e)) => {
+                LeaseVerdict::Error(format!("the lease cannot be read: {e}"))
+            }
+        },
+    }
+}
+
 /// The duty-wrapped agent as the wrapper sees it. `id()` is the REAL
 /// agent pid on every platform (what the diagnostic sidecar records);
 /// `wait()` blocks until the agent is gone and yields its exit status.

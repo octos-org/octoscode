@@ -117,6 +117,9 @@ octoscode outer-duty hold --project <项目> --signature <署名> \
   --duties <职责> -- <你的 agent 启动命令>
 ```
 
+hold 交给你的 `OLP_DUTY_LEASE` 是写入凭证:你的会话结束或换人后,你留下的
+命令再写黑板、归档、采认推送、回答提问都会被拒(退出码 6)。不要清掉它。
+
 Codex 必须以 `codex --no-daemon` 启动:默认情况下它的会话在共享的后台服务里,
 终端程序退出后工作照常继续,锁约束不到它,`hold` 会拒绝。
 

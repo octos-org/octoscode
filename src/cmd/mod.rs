@@ -105,7 +105,7 @@ enum Route {
 #[derive(Debug)]
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub struct OuterDutyArgs {
-    pub action: String, // "hold" | "check"
+    pub action: String, // "hold" | "check" | "lease"
     pub project: String,
     pub signature: String,
     pub duties: String,
@@ -123,7 +123,7 @@ fn parse_outer_duty_args(rest: &[String]) -> Result<OuterDutyArgs, String> {
     while i < rest.len() {
         let token = rest[i].as_str();
         match token {
-            "hold" | "check" if action.is_empty() => action = token.to_string(),
+            "hold" | "check" | "lease" if action.is_empty() => action = token.to_string(),
             "--" => {
                 command = rest[i + 1..].to_vec();
                 break;
@@ -142,14 +142,14 @@ fn parse_outer_duty_args(rest: &[String]) -> Result<OuterDutyArgs, String> {
             }
             other => {
                 return Err(format!(
-                    "outer-duty: unexpected argument {other:?} (expected hold|check)"
+                    "outer-duty: unexpected argument {other:?} (expected hold|check|lease)"
                 ));
             }
         }
         i += 1;
     }
     if action.is_empty() {
-        return Err("outer-duty: action required (hold|check)".into());
+        return Err("outer-duty: action required (hold|check|lease)".into());
     }
     if project.is_empty() {
         return Err("outer-duty: --project is required".into());

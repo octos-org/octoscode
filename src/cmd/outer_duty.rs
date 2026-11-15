@@ -13,8 +13,9 @@ pub fn run(args: OuterDutyArgs) -> i32 {
     match args.action.as_str() {
         "check" => run_check(&project),
         "hold" => run_hold(&args, &project),
+        "lease" => run_lease(&project),
         other => {
-            eprintln!("outer-duty: unknown action {other:?} (expected hold|check)");
+            eprintln!("outer-duty: unknown action {other:?} (expected hold|check|lease)");
             2
         }
     }
@@ -59,6 +60,33 @@ fn run_hold(args: &OuterDutyArgs, project: &std::path::Path) -> i32 {
             return 1;
         }
     };
+    // Fencing lease: written before the agent starts, handed to it (and to
+    // every command it runs) through the environment, with where to check
+    // it. The process is still single-threaded here.
+    let lease = match outer_duty::new_lease()
+        .and_then(|lease| outer_duty::write_lease(&hold.lock_path, &lease).map(|()| lease))
+    {
+        Ok(lease) => lease,
+        Err(err) => {
+            eprintln!("outer-duty hold: {err:#}");
+            return 1;
+        }
+    };
+    let canonical = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var("OLP_DUTY_LEASE", &lease);
+        std::env::set_var("OLP_DUTY_PROJECT", &canonical);
+        // The herdr pane the outer runs in ("" outside herdr): a writer in
+        // another pane is not this outer, whatever it inherited.
+        std::env::set_var(
+            "OLP_DUTY_PANE",
+            std::env::var("HERDR_PANE_ID").unwrap_or_default(),
+        );
+        if let Ok(exe) = std::env::current_exe() {
+            std::env::set_var("OLP_DUTY_BIN", exe);
+        }
+    }
     // #38-r2: spawn first (the sidecar wants the child pid), guardian
     // death-coupled (Linux: setpgid + PDEATHSIG, wrapper sole fd holder;
     // macOS: a guardian process between wrapper and agent) — the wrapper
@@ -88,6 +116,37 @@ fn run_hold(args: &OuterDutyArgs, project: &std::path::Path) -> i32 {
         }
     };
     code_of(status)
+}
+
+/// `lease`: may a write carrying `OLP_DUTY_LEASE` proceed? stdout is one
+/// token: VALID (exit 0) or REFUSED (exit 3, reason on stderr); no lease in
+/// the environment is a usage error (exit 2).
+fn run_lease(project: &std::path::Path) -> i32 {
+    let Some(lease) = std::env::var("OLP_DUTY_LEASE")
+        .ok()
+        .filter(|l| !l.is_empty())
+    else {
+        eprintln!(
+            "outer-duty lease: OLP_DUTY_LEASE is not set (only an agent started by `hold` has one)"
+        );
+        return 2;
+    };
+    let reason = match outer_duty::verify_lease(project, &lease) {
+        outer_duty::LeaseVerdict::Valid => {
+            println!("VALID");
+            return 0;
+        }
+        outer_duty::LeaseVerdict::Vacant => {
+            "the duty lock is VACANT: the session that issued this lease is gone".to_string()
+        }
+        outer_duty::LeaseVerdict::Superseded => {
+            "the duty lock is HELD by a later session: this lease is superseded".to_string()
+        }
+        outer_duty::LeaseVerdict::Error(error) => error,
+    };
+    println!("REFUSED");
+    eprintln!("outer-duty lease: {reason}");
+    3
 }
 
 /// Codex keeps an interactive session in its shared background server

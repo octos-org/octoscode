@@ -21,7 +21,9 @@
 #      (正文别处的 `{N}` 字样不替换)。调用方自己写编号——并发下会撞号,
 #      新代码不要用。
 #
-# 退出码:0 成功(含幂等命中);2 用法或预检失败(此时板与锁文件均未触碰)。
+# 退出码:0 成功(含幂等命中);2 用法或预检失败(此时板与锁文件均未触碰);
+# 6 主审权租约无效:环境里有 OLP_DUTY_LEASE(由 octoscode outer-duty hold
+#   给外环),而那个外环会话已结束或已换人,未写入。
 #
 # 本脚本自包含(olp-init.sh 会把它单文件装到 ~/.octos/outer/),不 source
 # 其他文件。macOS 的 flock 来自 Homebrew;非交互 ssh 的 PATH 不含
@@ -104,6 +106,15 @@ exec 9>"$LOCK"
 flock -x 9
 
 # --- 以下均在锁内 --------------------------------------------------------
+# 外环会话结束(锁已释放)或换人后,它留下的命令不能再写板(R7 租约)。
+# 在锁内、写入之前检查;环境里没有 OLP_DUTY_LEASE 时不检查;写入者在别的
+# herdr 窗格里(不是外环,只是继承了环境)时也不检查。
+if [ -n "${OLP_DUTY_LEASE:-}" ] && [ "${HERDR_PANE_ID:-}" = "${OLP_DUTY_PANE:-}" ]; then
+    if ! WHY=$("${OLP_DUTY_BIN:-octoscode}" outer-duty lease --project "${OLP_DUTY_PROJECT:-}" 2>&1 >/dev/null); then
+        echo "olp-board-append: 主审权租约无效,未写入(${WHY:-无法校验})" >&2
+        exit 6
+    fi
+fi
 if [ "$HAS_KEY" -eq 1 ] && [ -f "$BOARD" ]; then
     HIT=$(awk -v k="$KEY" '
         BEGIN { bare = "<!-- olp-key: " k " -->"; pre = "<!-- olp-key: " k " n=" }

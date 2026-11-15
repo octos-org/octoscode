@@ -51,9 +51,14 @@ impl Sb {
     }
 
     fn olp(&self, args: &[&str], stdin: &str) -> Output {
+        self.olp_env(args, stdin, &[])
+    }
+
+    fn olp_env(&self, args: &[&str], stdin: &str, envs: &[(String, String)]) -> Output {
         let mut child = Command::new(env!("CARGO_BIN_EXE_octoscode"))
             .arg("olp")
             .args(args)
+            .envs(envs.iter().map(|(k, v)| (k, v)))
             .current_dir(self.p("cwd"))
             .env("HOME", self.p("home"))
             .env("OCTOSCODE_OLP_BUNDLE", self.p("bundle"))
@@ -614,4 +619,101 @@ fn olp_doctor_flags_pinned_then_missing_wiring() {
     let (code, report) = doctor(&sb);
     assert_eq!(code, Some(0), "{report}");
     assert_eq!(report["counts"]["ok"], 3, "{report}");
+}
+
+/// Scenario: 外环会话结束后,带着它租约号的写板被拒(退出码 6);别的窗格、没有租约号的写入照常
+#[test]
+fn olp_board_append_refuses_a_dead_outer_lease() {
+    if !has_flock() {
+        eprintln!("SKIP (explicit): board append needs flock here");
+        return;
+    }
+    let sb = Sb::new();
+    let board = sb.p("board.md");
+    std::fs::write(&board, "# board\n\n## Active\n").unwrap();
+    std::fs::create_dir_all(sb.p("proj")).unwrap();
+    let envfile = sb.p("agent.env");
+    let sentinel = sb.p("run");
+    std::fs::write(&sentinel, "").unwrap();
+    // The outer: records the environment hold gave it, then waits.
+    let agent = format!(
+        "env | grep '^OLP_DUTY_' > {e}.tmp && mv {e}.tmp {e}; while [ -e {s} ]; do sleep 0.05; done",
+        e = envfile.display(),
+        s = sentinel.display()
+    );
+    let mut hold = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "duty", "hold", "--project"])
+        .arg(sb.p("proj"))
+        .args([
+            "--signature",
+            "s",
+            "--duties",
+            "d",
+            "--",
+            "/bin/sh",
+            "-c",
+            &agent,
+        ])
+        .env("HOME", sb.p("home"))
+        .env_remove("HERDR_PANE_ID")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut lease_env = Vec::new();
+    for _ in 0..400 {
+        if let Ok(text) = std::fs::read_to_string(&envfile) {
+            lease_env = text
+                .lines()
+                .filter_map(|l| l.split_once('='))
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let keys: Vec<&str> = lease_env.iter().map(|(k, _)| k.as_str()).collect();
+    for key in [
+        "OLP_DUTY_LEASE",
+        "OLP_DUTY_PROJECT",
+        "OLP_DUTY_BIN",
+        "OLP_DUTY_PANE",
+    ] {
+        assert!(
+            keys.contains(&key),
+            "hold must hand {key} to the agent: {keys:?}"
+        );
+    }
+    // `pane` is the writer's HERDR_PANE_ID ("" = the outer's own, outside herdr).
+    let with = |pane: &str, line: &str| {
+        let mut envs = lease_env.clone();
+        envs.push(("HERDR_PANE_ID".into(), pane.to_string()));
+        let out = sb.olp_env(&["board", "append", board.to_str().unwrap()], line, &envs);
+        (out.status.code(), std::fs::read_to_string(&board).unwrap())
+    };
+
+    let (code, text) = with("", "while held\n");
+    assert_eq!(code, Some(0));
+    assert!(text.contains("while held"), "{text}");
+
+    std::fs::remove_file(&sentinel).unwrap();
+    assert!(hold.wait().unwrap().success());
+    let (code, text) = with("", "after the outer is gone\n");
+    assert_eq!(code, Some(6), "a dead outer's lease is refused");
+    assert!(!text.contains("after the outer is gone"), "{text}");
+    // The Python write tools refuse the same way (archive stands in for them).
+    let mut envs = lease_env.clone();
+    envs.push(("HERDR_PANE_ID".into(), String::new()));
+    let out = sb.olp_env(&["board", "archive", board.to_str().unwrap()], "", &envs);
+    assert_eq!(out.status.code(), Some(6), "{}", stderr(&out));
+    assert!(stderr(&out).contains("主审权租约无效"), "{}", stderr(&out));
+
+    // Another herdr pane: not the outer, only an inherited environment.
+    let (code, text) = with("w9:p9", "from an inner pane\n");
+    assert_eq!(code, Some(0));
+    assert!(text.contains("from an inner pane"), "{text}");
+
+    // No lease at all: an inner loop, a unit or a person.
+    let out = sb.olp(&["board", "append", board.to_str().unwrap()], "no lease\n");
+    assert!(out.status.success(), "{}", stderr(&out));
 }

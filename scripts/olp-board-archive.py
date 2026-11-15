@@ -51,7 +51,8 @@
     影响。**归档前仍应先跑一次采集**:条目正文里未署名的改判/R2 记档行
     归档后不在板上,尚未采集的会被漏掉。
 
-退出码:0 成功(含无可归档);2 用法错误或板不存在;4 归档期间板被改动。
+退出码:0 成功(含无可归档);2 用法错误或板不存在;4 归档期间板被改动;
+6 主审权租约无效(外环会话已结束或已换人),未写入。
 """
 
 import argparse
@@ -61,6 +62,16 @@ import os
 import re
 import sys
 import tempfile
+
+
+def cli_lib():
+    import importlib.util
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location("olp_cli_lib", os.path.join(here, "olp-cli-lib.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 HEADING = re.compile(r"^### (\d+)")
 ARCHIVED_MARK = "<!-- olp-archived: "
@@ -277,6 +288,8 @@ def main():
         print("olp-board-archive: 归档文件不能是黑板本身", file=sys.stderr)
         return 2
     archive_name = os.path.basename(archive)
+    if not args.dry_run:
+        cli_lib().duty_gate("olp-board-archive")
 
     lock_fd = None
     if not args.dry_run:
