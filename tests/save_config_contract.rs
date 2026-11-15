@@ -5,6 +5,9 @@
 //! config, preserving transport/unknown keys, and the result round-trips back
 //! through the loader. per-session `thinking` is intentionally excluded.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use octos_core::{Message, SessionKey};
 use octoscode::cli::{Lang, ScrollMode, ThemeName, load_config_file, save_ui_settings};

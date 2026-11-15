@@ -22,6 +22,9 @@
 //! --allow-operator-refute 人工裁决;review_accepted 需全部冻结 claim 有
 //! 可核对证据 + 两原 reviewer 各自新 native completed cross。
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

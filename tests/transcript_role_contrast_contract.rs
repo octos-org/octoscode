@@ -6,6 +6,9 @@
 //! baseline (`• ` prefix, text color), and runtime/tool activity is uniformly
 //! muted so the log never outweighs the conversation.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use octos_core::{Message, SessionKey};
 use octoscode::app;

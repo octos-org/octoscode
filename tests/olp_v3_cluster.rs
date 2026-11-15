@@ -6,6 +6,9 @@
 //! name several reviewers, and the hub summarises progress for the
 //! user's panorama.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};

@@ -3,6 +3,9 @@
 //! Evolution loop phase-2 metrics + shared-lib contract tests (#43c-2,
 //! SDD spec v2: `specs/task-req-olp-evo-p2.spec.md`).
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
