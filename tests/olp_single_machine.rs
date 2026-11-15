@@ -6,6 +6,9 @@
 //! the transport changes. `OLP_SSH` points at a program that records any call
 //! and fails, so a test also proves that ssh was never used.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

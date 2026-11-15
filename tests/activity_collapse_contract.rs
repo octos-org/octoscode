@@ -1,6 +1,9 @@
 //! Contract tests for settled activity-group collapse
 //! (`specs/task-activity-group-collapse.spec`).
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use octos_core::ui_protocol::TurnId;
 use octos_core::{Message, SessionKey};

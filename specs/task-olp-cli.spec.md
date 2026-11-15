@@ -23,7 +23,9 @@ ssh 强制命令、git 钩子、保活任务都写死了脚本路径。目标是
 - 第一步:每个命令运行打包进二进制的原脚本,参数原样传入,输出与退出码不变(Unix 上 exec
   替换进程,标准输入、信号原样传递)。`guard watch`、`ask mcp`、`duty` 已是 Rust,直接调用。
 - 打包内容:全部 `scripts/olp-*`(除 Windows 构建诊断与已归档的 MCP 原型,列在
-  `NOT_BUNDLED`)、两张上岗卡、skill 正文,按仓库布局解到
+  `NOT_BUNDLED`)、skill 正文,以及打包文本里提到的全部 `docs/*.md`(上岗卡、BOOT、协议、
+  集群与单机文档等;单元测试 `every_doc_a_bundled_text_names_is_bundled` 守住,复盘第 05 条:
+  从打包目录安装的 skill 曾读不到这些文档),按仓库布局解到
   `~/.octos/outer/olp-bundle/<内容哈希前 16 位>/`(`OCTOSCODE_OLP_BUNDLE` 可改根目录)。先写到
   同目录的临时目录再改名;同一版本复用,不同版本互不覆盖。#634 每次拷到临时目录且只拷部分
   脚本,丢了同目录依赖(hub 守卫、`../docs/` 上岗卡),本设计不再有这个问题。

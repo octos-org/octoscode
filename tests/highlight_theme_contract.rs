@@ -1,6 +1,9 @@
 //! Contract tests for theme-following code highlighting
 //! (`specs/task-highlight-theme-follow.spec`).
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use octoscode::cli::ThemeName;
 use octoscode::highlight::highlight_block;
 use octoscode::theme::Palette;

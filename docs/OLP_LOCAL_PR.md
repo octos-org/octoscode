@@ -29,7 +29,9 @@ scripts/olp-local-pr.py status --repo /srv/olp/hub.git --board <板>          # 
 scripts/olp-local-pr.py promote 212 --repo /srv/olp/hub.git --board <板>     # --dry-run 只检查
 ```
 
-只有状态是"已采认"时才推;待审核、被退回都以退出码 1 拒绝,什么都不推。推完
+只有状态是"已采认",并且分支头就是黑板上最近一次推送登记的那个提交(单元带复验记录推上
+来的提交)时才推;待审核、被退回、分支头对不上(有人在 hub 上直接挪了分支)都以退出码 1
+拒绝,什么都不推。推完
 由大外环开 PR(标题与正文)。GitHub 远程默认叫 `github`,用 `--remote` 改。
 
 ## 警告

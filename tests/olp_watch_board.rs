@@ -7,6 +7,9 @@
 //! plain `grep -F` substring match with no prefix guessing; `--skip-signature`
 //! removes the outer loop's own signed annotations from the domain.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};

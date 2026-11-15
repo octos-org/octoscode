@@ -5,6 +5,9 @@
 //! the same arguments, output and exit codes, from any directory, with the
 //! scripts' siblings (helpers, hub guard, onboarding cards) in place.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -507,6 +510,30 @@ fn olp_skill_install_records_the_current_link() {
         std::fs::canonicalize(sb.bundle()).unwrap()
     );
     assert!(current.join("skills/octoloop/AGENTS.md").is_file());
+    // Retrospective #05: every doc the skill body names is there too.
+    let body = std::fs::read_to_string(current.join("skills/octoloop/AGENTS.md")).unwrap();
+    let mut named: Vec<&str> = body
+        .match_indices("docs/")
+        .map(|(at, _)| {
+            let tail = &body[at..];
+            let end = tail
+                .find(|c: char| !(c.is_ascii_alphanumeric() || "/_.-".contains(c)))
+                .unwrap_or(tail.len());
+            tail[..end].trim_end_matches('.')
+        })
+        .filter(|name| name.ends_with(".md"))
+        .collect();
+    named.sort();
+    named.dedup();
+    assert!(named.len() >= 10, "the skill names its docs: {named:?}");
+    let absent: Vec<&&str> = named
+        .iter()
+        .filter(|d| !current.join(d).is_file())
+        .collect();
+    assert!(
+        absent.is_empty(),
+        "the installed skill cannot read {absent:?}"
+    );
 }
 
 /// Scenario: doctor 把固定在某一版本工具目录的命令报 warn,路径消失后报 fail 并给出修复命令
