@@ -48,6 +48,13 @@ ssh 强制命令和单元侧的推送命令,并把三道关的规则写进协议
   措辞本任务不改(另一个未合并分支正在改同一段),附录 C 给出多机下的读法。
 - 局限(写入协议与 PR):本地复验记录不能证明复验独立;大外环不得因此省略 R2。
 
+- 复验方由 operator 在卡上 `review:` 行决定(2026-11-16,与生产补丁 71cacd8 同一需求):hub
+  只执行这个决定,署名(去掉 `<单元>-` 前缀后按 `+` 拆开)必须覆盖卡里最后一条 `review:`
+  的每一个名字,大小写不敏感、顺序不限;空的 `review:` 不要求;没有 `review:` 行的卡不检查。
+  工具不内置任何复验方。派单与复验方从同一次读取里取得;黑板读不了时拒收,不当成"没有
+  `review:` 行"放行。复验方个数不设上限(operator 决定);原来 64 字符的署名上限连两个长名字都签不下,
+  放宽到 4096 字符,只作防荒谬输入的长度界(按 32 字符的名字约 120 个复验方,评审意见,2026-11-16)。
+
 ## Boundaries
 
 ### Allowed Changes
@@ -100,6 +107,25 @@ Scenario: 违反推送规则的推送被拒收(critical)
   Given 单元 m07,黑板上 #1 派给 m07、#2 派给 m08、#3 只在代码围栏里出现 unit 行、#4 先派 m07 后改派 m08、没有 #9
   When 分别推送:集成分支、其他分支、非数字任务分支、标签、#9、#2、#3、#4、不带复验记录的 #1、记录指向别的提交的 #1、署名非法的 #1;一次推送里混入一个违规分支;删除已推送的 task/1
   Then 每次都被拒收并给出对应原因,hub 上没有出现任何违规的引用,黑板不变;混入违规分支的推送整体被拒;删除被拒且分支保留
+
+Scenario: 卡上指定了复验方时,复验署名必须覆盖每一个(critical)
+  Tags: critical
+  Test: hub_requires_every_reviewer_the_card_names
+  Given #5 派给 m07 且 `review: codex, claude`;#6 先写 `review: codex, claude`,后追加 `review: codex`;#1 没有 review 行
+  When m07 依次以 `m07-codex`、`m07-claude+codex` 推 #5,以 `m07-codex` 推 #6,以 `m07-ver` 推 #1
+  Then #5 的第一次被拒,提示缺少 claude 并给出 `m07-codex+claude` 的写法,hub 上没有 task/5;第二次接收;#6 按最后一条 review 接收;#1 不检查复验方、接收
+
+Scenario: 派卡能写出的复验方名单都签得出来
+  Test: hub_accepts_signers_for_the_longest_reviewer_lists
+  Given #7 的 review 是两个 32 字符的名字,#8 是八个
+  When 不带单元号前缀推 #7(65 字符),带前缀推 #8
+  Then 都被接收
+
+Scenario: 黑板读不了时拒收
+  Test: hub_refuses_when_the_board_cannot_be_read
+  Given 黑板不可读
+  When m07 推 #5
+  Then 拒收,提示读不了黑板,hub 上没有 task/5
 
 Scenario: ssh 强制命令只放行对 hub 仓库的 git 操作并固定单元号(critical)
   Tags: critical

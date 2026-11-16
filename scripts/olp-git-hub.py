@@ -36,6 +36,10 @@
      sha 必须等于这次推上来的分支头——复验的就是推送的那个提交。单元侧
      用 scripts/olp-task-push.sh 生成这条命令。
   4. 同一个单元可以强推自己的任务分支(返工、rebase 到新种子后)。
+  5. 卡上有 `review:` 行(operator 指定的复验方)时,复验署名必须覆盖其中
+     每一个:`m07-codex+claude` 覆盖 codex 与 claude。以卡里最后一条
+     `review:` 为准(改了复验方就在卡里追加一行;空的 `review:` 表示不要求);
+     没有 `review:` 行的卡不检查。工具里不内置任何复验方。
 
   不带单元号的推送(hub 本机上大外环的操作)不受限制:集成分支、种子
   分支由大外环自己维护。所以单元账号**必须**走 serve 强制命令,不要给
@@ -71,9 +75,13 @@ import sys
 UNIT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 TASK_REF = re.compile(r"^refs/heads/task/([0-9]{1,9})$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
-SIGNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}$")
+# A sanity bound on the signer's length, not a limit on how many reviewers
+# the operator names (about 120 names of 32 characters fit).
+SIGNER_MAX = 4096
+SIGNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@+-]{0,%d}$" % (SIGNER_MAX - 1))
 HEADING = re.compile(r"^### (\d+)")
 UNIT_LINE = re.compile(r"^unit:\s*(\S+)\s*$")
+REVIEW_LINE = re.compile(r"^review:(.*)$")
 ZERO = re.compile(r"^0+$")
 HOOKS = ("pre-receive", "post-receive")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -200,34 +208,45 @@ def cmd_local_pack(args):
 # --- hooks --------------------------------------------------------------
 
 
-def board_assignment(board, number):
-    """Return (found, unit) for entry `number` on the board: whether the
-    entry exists, and the unit named by its `unit:` line (None if absent)."""
-    found, unit, current, in_fence = False, None, None, False
-    try:
-        with open(board, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.rstrip("\r\n")
-                stripped = line.lstrip()
-                if stripped.startswith("```") or stripped.startswith("~~~"):
-                    in_fence = not in_fence
-                    continue
-                if in_fence:
-                    continue
-                if line.startswith("### ") or line.startswith("## "):
-                    m = HEADING.match(line)
-                    current = int(m.group(1)) if m else None
-                    if current == number:
-                        found = True
-                    continue
+def signed_reviewers(signer, unit):
+    """`m07-codex+claude` -> {"codex", "claude"} (the unit prefix is optional)."""
+    body = signer[len(unit) + 1 :] if signer.lower().startswith(unit.lower() + "-") else signer
+    return {part.strip().lower() for part in body.split("+") if part.strip()}
+
+
+def read_card(board, number):
+    """One read of the board for entry `number`: (found, unit, reviewers).
+
+    unit: its last `unit:` line (None if absent). reviewers: the last
+    `review:` line, the operator's choice (an empty one clears it; None when
+    the card has none - older cards are not checked). Assignment and
+    reviewers come from the same snapshot. Raises OSError when the board
+    cannot be read: the caller refuses rather than guess."""
+    found, unit, reviewers, current, in_fence = False, None, None, None, False
+    with open(board, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.rstrip("\r\n")
+            stripped = line.lstrip()
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            if line.startswith("### ") or line.startswith("## "):
+                m = HEADING.match(line)
+                current = int(m.group(1)) if m else None
                 if current == number:
-                    m = UNIT_LINE.match(line)
-                    if m:
-                        # 以最后一条为准:改派时在条目里追加新的 unit 行。
-                        unit = m.group(1)
-    except OSError:
-        return False, None
-    return found, unit
+                    found = True
+                continue
+            if current == number:
+                m = UNIT_LINE.match(line)
+                if m:
+                    # 以最后一条为准:改派时在条目里追加新的 unit 行。
+                    unit = m.group(1)
+                m = REVIEW_LINE.match(line)
+                if m:
+                    reviewers = [r for r in re.split(r"[,\s]+", m.group(1).strip()) if r]
+    return found, unit, reviewers
 
 
 def push_options():
@@ -292,7 +311,11 @@ def hook_pre_receive():
         if not SHA_RE.match(new):
             errors.append(f"{ref}:提交号不合法")
             continue
-        found, assigned = board_assignment(board, number)
+        try:
+            found, assigned, required = read_card(board, number)
+        except OSError as exc:
+            errors.append(f"{ref}:读不了黑板 {board}({exc}),无法核对派单与复验方")
+            continue
         if not found:
             errors.append(f"{ref}:黑板上没有条目 #{number}")
             continue
@@ -300,12 +323,25 @@ def hook_pre_receive():
             who = assigned or "未指定单元(条目里没有 unit: 行)"
             errors.append(f"{ref}:#{number} 派给的是 {who},不是 {unit}")
             continue
-        if not verified_option(new):
+        signer = verified_option(new)
+        if not signer:
             errors.append(
                 f"{ref}:缺少本地复验记录。本地复验通过后用 "
                 f"scripts/olp-task-push.sh {number} --verified-by <复验署名> 推送"
                 "(push option olp-verified 的 sha 必须等于分支头)"
             )
+            continue
+        # The operator named the reviewers on the card; every one of them
+        # must have signed (the card decides, nothing here is built in).
+        if required:
+            signed = signed_reviewers(signer, unit)
+            missing = [r for r in required if r.lower() not in signed]
+            if missing:
+                errors.append(
+                    f"{ref}:#{number} 卡上指定的复验方是 {'、'.join(required)},"
+                    f"复验署名 {signer} 缺少 {'、'.join(missing)}"
+                    f"(署名写成 {unit}-{'+'.join(required)};改了复验方就在卡里追加新的 review: 行)"
+                )
     if errors:
         for e in errors:
             print(f"olp-hub: 拒收 {e}", file=sys.stderr)
