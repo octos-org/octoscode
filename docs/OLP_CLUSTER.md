@@ -349,8 +349,10 @@ scripts/olp-summary.py --board <板> --repo <hub 仓库> --name <项目名> --js
    octoscode olp keepalive install herdr --keepalive -- <herdr 的绝对路径> server
    ```
 10. 在 herdr 里开一个窗格启动内环。`workspace create` 的输出里有窗格号(形如
-    `w1:p1`),派卡时的 `--wake` 用的就是它。免沙箱是 operator 的决定(见
-    `docs/OLP_QUICKSTART.md` 的"0b. 权限档语义"):
+    `w1:p1`),派卡时的 `--wake` 用的就是它。**这一步先由 operator 给出常设授权**
+    (协议 R8):免沙箱启动这台单元的内环。前面的登记、密钥只是让单元连得上 hub,
+    不等于授权;授权一次给出,之后单元主持可以代为免沙箱启动本单元的内环,不必
+    每次再问。没有授权就停在这里(权限档见 `docs/OLP_QUICKSTART.md` 的"0b. 权限档语义"):
 
     ```bash
     herdr workspace create --cwd <项目>
@@ -390,7 +392,7 @@ scripts/olp-summary.py --board <板> --repo <hub 仓库> --name <项目名> --js
   卡上的 `impl:`、`review:` 行组织实现方与复验方,全部复验通过后执行
   `scripts/olp-task-push.sh <N> --verified-by m07-<复验方>+<复验方>` 推送,再向 hub
   回执 `ACK(done)`。规程在 skill 的「模式 unit」。实现方自己 push 会被 hub 拒收。
-- **实现方与复验方**。由单元主持按卡启动,一律免沙箱,各用独立的克隆;要推送的
+- **实现方与复验方**。由单元主持按卡启动,一律免沙箱(在第 10 步的常设授权之内),各用独立的克隆;要推送的
   克隆必须接好 hub 远程(单机部署用 `connect-local`)。
 - **负哨守护**(§4c)。每张卡开工后,在内环旁边跑
   `octoscode olp-runtime-watch … | scripts/olp-alert-forward.py`,内环挂掉、报错

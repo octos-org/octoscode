@@ -333,7 +333,8 @@ octoscode --stdio-command 'octos serve --stdio --solo --danger-full-access'
   "there is no cargo on this machine".
 
 After a (re)start, the outer loop walks a four-item checklist: serve is up
-(operator); `/loop resume <id>` (get the id from `/loop list` — bare `resume` is
+(unsandboxed launch is authorized by the operator; once authorized an agent may
+start it, protocol R8); `/loop resume <id>` (get the id from `/loop list` — bare `resume` is
 refused); both sentries mounted; `llm.fallbacks` configured **and snapshotted by
 a new session** (the tool/config snapshot is taken at session creation, so
 editing config without a new session is paper insurance).
