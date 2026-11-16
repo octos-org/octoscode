@@ -67,6 +67,26 @@ unit: m07
 
 > 外环(hub)·改派:m07 失联
 unit: m08
+
+### 5. 指定了两个复验方的卡
+unit: m07
+impl: octoscode
+review: codex, claude
+
+### 6. 改了复验方的卡
+unit: m07
+review: codex, claude
+
+> 外环(hub)·改复验方:claude 未登录,只用 codex
+review: codex
+
+### 7. 两个最长名字的复验方
+unit: m07
+review: raaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, rbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+### 8. 八个最长名字的复验方
+unit: m07
+review: rccccccccccccccccccccccccccccccc, rddddddddddddddddddddddddddddddd, reeeeeeeeeeeeeeeeeeeeeeeeeeeeeee, rfffffffffffffffffffffffffffffff, rggggggggggggggggggggggggggggggg, rhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh, riiiiiiiiiiiiiiiiiiiiiiiiiiiiiii, rjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj
 ";
 
 struct Cluster {
@@ -298,6 +318,92 @@ fn hub_rejects_pushes_that_break_the_rules() {
 }
 
 /// Scenario: 返工后同一单元可以强推自己的任务分支
+/// Scenario: 卡上指定了复验方时,复验署名必须覆盖每一个;以卡里最后一条 review: 为准
+#[test]
+fn hub_requires_every_reviewer_the_card_names() {
+    let c = Cluster::new();
+    let sha5 = c.task_branch(5);
+    // Only one of the two reviewers the card names signed.
+    let out = c.task_push("5", &["--verified-by", "m07-codex"], Some("m07"));
+    assert!(!out.status.success(), "a missing reviewer is refused");
+    let err = stderr(&out);
+    assert!(err.contains("缺少 claude"), "{err}");
+    assert!(
+        err.contains("m07-codex+claude"),
+        "the refusal says how to sign: {err}"
+    );
+    assert_eq!(c.hub_ref("refs/heads/task/5"), None);
+    // Both signed (order does not matter).
+    let out = c.task_push("5", &["--verified-by", "m07-claude+codex"], Some("m07"));
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(c.hub_ref("refs/heads/task/5"), Some(sha5));
+
+    // The operator changed the card to Codex only: the last review: line wins.
+    let sha6 = c.task_branch(6);
+    let out = c.task_push("6", &["--verified-by", "m07-codex"], Some("m07"));
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(c.hub_ref("refs/heads/task/6"), Some(sha6));
+
+    // A card without a review: line is not checked.
+    let sha1 = c.task_branch(1);
+    let out = c.task_push("1", &["--verified-by", "m07-ver"], Some("m07"));
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(c.hub_ref("refs/heads/task/1"), Some(sha1));
+}
+
+/// Scenario: 派卡能写出的复验方名单都签得出来:两个、八个、一百二十个最长(32 字符)的名字(评审意见)
+#[test]
+fn hub_accepts_signers_for_the_longest_reviewer_lists() {
+    let c = Cluster::new();
+    let sha7 = c.task_branch(7);
+    // Without the unit prefix: 65 characters, over the old 64 limit.
+    let out = c.task_push(
+        "7",
+        &[
+            "--verified-by",
+            "raaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa+rbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ],
+        Some("m07"),
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(c.hub_ref("refs/heads/task/7"), Some(sha7));
+    let sha8 = c.task_branch(8);
+    let signer = "m07-rccccccccccccccccccccccccccccccc+rddddddddddddddddddddddddddddddd+reeeeeeeeeeeeeeeeeeeeeeeeeeeeeee+rfffffffffffffffffffffffffffffff+rggggggggggggggggggggggggggggggg+rhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh+riiiiiiiiiiiiiiiiiiiiiiiiiiiiiii+rjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj";
+    let out = c.task_push("8", &["--verified-by", signer], Some("m07"));
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(c.hub_ref("refs/heads/task/8"), Some(sha8));
+    // No cap on the number of reviewers: 120 of the longest names make a
+    // 3963-character signer, inside the hub's 4096 bound.
+    let names: Vec<String> = (0..120).map(|i| format!("r{i:031}")).collect();
+    let mut board = std::fs::read_to_string(c.board()).unwrap();
+    board.push_str(&format!(
+        "\n### 9. 一百二十个复验方\nunit: m07\nreview: {}\n",
+        names.join(", ")
+    ));
+    std::fs::write(c.board(), board).unwrap();
+    let sha9 = c.task_branch(9);
+    let signer = format!("m07-{}", names.join("+"));
+    assert_eq!(signer.len(), 3963);
+    let out = c.task_push("9", &["--verified-by", &signer], Some("m07"));
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(c.hub_ref("refs/heads/task/9"), Some(sha9));
+}
+
+/// Scenario: 黑板读不了时拒收,不当成"卡上没有 review: 行"放行(评审意见)
+#[cfg(unix)]
+#[test]
+fn hub_refuses_when_the_board_cannot_be_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let c = Cluster::new();
+    c.task_branch(5);
+    std::fs::set_permissions(c.board(), std::fs::Permissions::from_mode(0o000)).unwrap();
+    let out = c.task_push("5", &["--verified-by", "m07-codex"], Some("m07"));
+    std::fs::set_permissions(c.board(), std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(!out.status.success(), "an unreadable board refuses");
+    assert!(stderr(&out).contains("读不了黑板"), "{}", stderr(&out));
+    assert_eq!(c.hub_ref("refs/heads/task/5"), None);
+}
+
 #[test]
 fn hub_allows_rework_force_push_by_owner() {
     if !has_flock() {
