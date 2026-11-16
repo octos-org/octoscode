@@ -485,7 +485,10 @@ fn olp_evo_retro_skill_step5_and_protected_sections_golden() {
     // protected-section constants (sha256, baseline 18907aa)
     const DESC: &str = "a395bc353a405a643f8c8f60c2f2fed6bdeb9fa6adb2003b50129759d391cf06";
     const INIT: &str = "a38d0ab7e8d7162655c2bc774cf32397738fba0357546a9893dbd38e0bd5cff1";
-    const INNER: &str = "079d47838f4c3d48259260eea2aef60a7645c3a59ea9e5924d5cafe63171d8f3";
+    // Revised with the operator's approval (2026-11-16): the launch table
+    // states that unsandboxed launch needs the operator's standing grant for
+    // the unit first (protocol R8); registration alone is not the grant.
+    const INNER: &str = "3c1b85960e44aa28e8bec310ee398eb7550eeef7bfcd6af1d07890dd450e547e";
     // Revised with the operator's approval (2026-11-16): the restart
     // checklist's step 1 follows protocol R8 (authorized agents may launch
     // an inner loop without a sandbox) instead of "operator by hand".
