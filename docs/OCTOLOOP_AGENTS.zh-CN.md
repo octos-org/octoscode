@@ -253,9 +253,10 @@ git worktree remove --force ~/.octos/outer/verify/<名>    # 验后即清
 
 1. 未经独立复验,绝不推送。集群里(olp/v3)复验在单元完成:hub 凭单元的复验
    记录推送,不另做复验。
-2. 绝不代按 operator 的审批。免沙箱授权是人的动作——**唯一例外**是集群单元上的
-   内环:协议 R8 要求它们免沙箱,agent 可以代为这样启动。其他场景(共享机、外环
-   自己的会话)把命令写好,请人按。
+2. 绝不代按 operator 的审批。是否免沙箱由 operator 决定。集群单元是专用机器:
+   operator 在把机器作为单元接入时给出常设授权(协议 R8),此后 agent 可以代为
+   免沙箱启动该单元的内环,不必每次再问。外环所在的 harness 拦截代为启动时不要
+   绕过。其他场景(共享机、外环自己的会话)把命令写好,请人按。
 3. 队列尊重:内环按板序吃单。要插队,在条目里写明主张,由 operator 定夺。
 4. 共享机限载:并发编译 ≤2,测试 `--test-threads=8`,确认 `TMPDIR` 指向
    home 盘。
@@ -264,8 +265,8 @@ git worktree remove --force ~/.octos/outer/verify/<名>    # 验后即清
 ## 4. 只属 operator 的动作
 
 这些永不委托给 agent:贴 API key、授予免沙箱权限
-(`--danger-full-access` / 权限第 5 档;集群单元上的内环除外,见协议 R8)、
-接管活的 `outer-duty` 锁、发布 issue。
+(`--danger-full-access` / 权限第 5 档——集群单元上,operator 的常设授权覆盖该单元
+的内环,agent 在授权之后代为启动,见协议 R8)、接管活的 `outer-duty` 锁、发布 issue。
 
 内环标准启动命令:
 
@@ -280,7 +281,7 @@ octoscode --stdio-command 'octos serve --stdio --solo --danger-full-access'
   都是 "command not found"。要跑工具链必须第 5 档 Full Access 或
   `--danger-full-access`。历史上内环反复声明"本机没有 cargo",真相即此。
 
-(重)启动后,外环走四步硬清单:serve 已起(operator 亲手);
+(重)启动后,外环走四步硬清单:serve 已起(免沙箱由 operator 授权,授权后 agent 可代为启动,协议 R8);
 `/loop resume <id>`(先 `/loop list` 取 id,裸 `resume` 会拒);双哨已挂;
 `llm.fallbacks` 已配**且已被新会话快照**(工具与配置在会话建立时快照,
 改配置不新建会话等于纸面保险)。

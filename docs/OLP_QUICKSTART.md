@@ -86,8 +86,7 @@ octoscode --stdio-command 'octos serve --stdio --solo --danger-full-access'
 
 `--solo` 是单人本地盒子的安全门:宽松 permission profile 只在显式 solo
 opt-in 下允许(漏掉的症状是 "requested permission profile is not allowed
-outside local solo mode")。免沙箱属于安全决策,请操作者亲手做,不要让任何
-agent 代按。
+outside local solo mode")。免沙箱属于安全决策,由操作者授权;授权之后 agent 可以代为启动(协议 R8)。
 
 ## 3. 内环车道配置(可选,省钱关键)
 

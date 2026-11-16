@@ -321,8 +321,8 @@ operator 点破的教训。上岗即遵守,不要重蹈:
    goal 竞争修复两轮收官;实现先行的 duty 锁八轮会签、两次核心设计
    易稿——fd 继承与公开 seam 都是"实现了才被审出"的方向错误)。
 7. **重启硬清单——兜底瘫痪是隐形的,必须显式巡检**。内环(重)启动
-   后外环逐项核对,禁止"记一笔稍后补":①serve 起(operator 亲手,
-   免沙箱);②**`/loop resume` 外环必代**——先 `/loop list` 取 id 再
+   后外环逐项核对,禁止"记一笔稍后补":①serve 起(免沙箱由 operator
+   授权,授权后可代为启动,协议 R8;harness 拦截时不绕过,请 operator 执行);②**`/loop resume` 外环必代**——先 `/loop list` 取 id 再
    `/loop resume <id>`(裸 resume 要 id 会拒);③双哨挂载(正 ACK +
    负 goal_transition);④fallbacks 已配且**新会话已快照**(改配置
    不重启=纸面保险)。原则:主机制健康时,兜底层瘫痪完全不可见
