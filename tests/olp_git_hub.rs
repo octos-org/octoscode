@@ -351,7 +351,7 @@ fn hub_requires_every_reviewer_the_card_names() {
     assert_eq!(c.hub_ref("refs/heads/task/1"), Some(sha1));
 }
 
-/// Scenario: 派卡能写出的复验方名单都签得出来:两个、八个最长(32 字符)的名字(评审意见)
+/// Scenario: 派卡能写出的复验方名单都签得出来:两个、八个、一百二十个最长(32 字符)的名字(评审意见)
 #[test]
 fn hub_accepts_signers_for_the_longest_reviewer_lists() {
     let c = Cluster::new();
@@ -372,6 +372,21 @@ fn hub_accepts_signers_for_the_longest_reviewer_lists() {
     let out = c.task_push("8", &["--verified-by", signer], Some("m07"));
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(c.hub_ref("refs/heads/task/8"), Some(sha8));
+    // No cap on the number of reviewers: 120 of the longest names make a
+    // 3963-character signer, inside the hub's 4096 bound.
+    let names: Vec<String> = (0..120).map(|i| format!("r{i:031}")).collect();
+    let mut board = std::fs::read_to_string(c.board()).unwrap();
+    board.push_str(&format!(
+        "\n### 9. 一百二十个复验方\nunit: m07\nreview: {}\n",
+        names.join(", ")
+    ));
+    std::fs::write(c.board(), board).unwrap();
+    let sha9 = c.task_branch(9);
+    let signer = format!("m07-{}", names.join("+"));
+    assert_eq!(signer.len(), 3963);
+    let out = c.task_push("9", &["--verified-by", &signer], Some("m07"));
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(c.hub_ref("refs/heads/task/9"), Some(sha9));
 }
 
 /// Scenario: 黑板读不了时拒收,不当成"卡上没有 review: 行"放行(评审意见)

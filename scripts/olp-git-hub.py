@@ -75,10 +75,9 @@ import sys
 UNIT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 TASK_REF = re.compile(r"^refs/heads/task/([0-9]{1,9})$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
-# Long enough for every reviewer list a card can carry: a unit id (32), "-",
-# and up to MAX_REVIEWERS names of 32 joined by "+" (olp-dispatch.py limits).
-MAX_REVIEWERS = 8
-SIGNER_MAX = 32 + 1 + MAX_REVIEWERS * 32 + (MAX_REVIEWERS - 1)
+# A sanity bound on the signer's length, not a limit on how many reviewers
+# the operator names (about 120 names of 32 characters fit).
+SIGNER_MAX = 4096
 SIGNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@+-]{0,%d}$" % (SIGNER_MAX - 1))
 HEADING = re.compile(r"^### (\d+)")
 UNIT_LINE = re.compile(r"^unit:\s*(\S+)\s*$")

@@ -72,12 +72,6 @@ estimate: 1d
 
 ## Completion Criteria
 
-
-Scenario: 派卡最多 8 个复验方,与 hub 的复验署名上限一致
-  Test: dispatch_refuses_more_reviewers_than_the_hub_can_sign_for
-  Given 一个健康的单元
-  When 以 9 个复验方派卡
-  Then 退出码 2,提示最多 8 个复验方,黑板上没有写卡
 ### Rule: dispatch — 一步派卡
 Scenario: 一条命令查单元、写板并唤醒(critical)
   Tags: critical
