@@ -486,7 +486,10 @@ fn olp_evo_retro_skill_step5_and_protected_sections_golden() {
     const DESC: &str = "a395bc353a405a643f8c8f60c2f2fed6bdeb9fa6adb2003b50129759d391cf06";
     const INIT: &str = "a38d0ab7e8d7162655c2bc774cf32397738fba0357546a9893dbd38e0bd5cff1";
     const INNER: &str = "079d47838f4c3d48259260eea2aef60a7645c3a59ea9e5924d5cafe63171d8f3";
-    const DISC: &str = "d3758cb6f9585d7bb8857ce67e8f7b68875c833bb8a1461e44d9603bdecf4fcb";
+    // Revised with the operator's approval (2026-11-16): the restart
+    // checklist's step 1 follows protocol R8 (authorized agents may launch
+    // an inner loop without a sandbox) instead of "operator by hand".
+    const DISC: &str = "5e41e7013ccf68d7718a22737ea98a08570f89a34df341406623e6abcaaf133b";
 
     let desc_line = skill
         .lines()
@@ -534,9 +537,11 @@ fn sha256_str(s: &str) -> String {
 fn olp_evo_retro_boot_section7_and_golden() {
     let boot = std::fs::read_to_string(repo_root().join("docs/OLP_OUTER_BOOT.md")).unwrap();
 
-    // Revised with the operator's approval (2026-11-15): §3.5 now states the
-    // lease checked at the write entry points (task-outer-duty-lease).
-    const BOOT_0_TO_6: &str = "4d06c2fb6174a1e80fb50baa5296ff86057d2a3a4e5815732605662e830dcd60";
+    // Revised with the operator's approval: 2026-11-15 §3.5 states the lease
+    // checked at the write entry points (task-outer-duty-lease); 2026-11-16
+    // §0b step 1 and §6 say an authorized agent may launch an inner loop
+    // without a sandbox (protocol R8) instead of "operator only".
+    const BOOT_0_TO_6: &str = "3ced876330148011b059dfb3d9b01e95dc1817a9c6c081dbc5d843e01d2fd369";
     let slice = &boot[boot.find("## 0.").unwrap()..boot.find("## 7.").unwrap()];
     assert_eq!(sha256_str(slice), BOOT_0_TO_6);
 

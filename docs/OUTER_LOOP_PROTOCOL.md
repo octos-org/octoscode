@@ -145,9 +145,12 @@
   octoscode 的后端带 `--danger-full-access`,Claude Code 带
   `--dangerously-skip-permissions`,Codex 带
   `--dangerously-bypass-approvals-and-sandbox`。沙箱里的内环建不了分支、跑不了
-  工具链、连不到 hub,对抗复验也跑不了测试。agent 可以代为这样启动内环,不必等
-  operator 亲手。单元心跳的 `full` 巡检要求每个内环都以完全访问启动,不满足的
-  单元判为降级、不派卡。免沙箱只在单元上(专用机器);外环自己的会话不在此列。
+  工具链、连不到 hub,对抗复验也跑不了测试。**授权在先**:是否免沙箱由 operator
+  决定;operator 对专用单元给出常设授权(把机器作为单元接入集群时一次给出),此后
+  agent 可以代为这样启动该单元的内环,不必每次等 operator 亲手。外环所在的
+  harness 拦截代为启动时不要绕过,请 operator 执行。单元心跳的 `full` 巡检要求每个
+  内环都以完全访问启动,不满足的单元判为降级、不派卡。免沙箱只在单元上(专用
+  机器);共享机与外环自己的会话不在此列。
 - **R6 — 版本协商**:本文件头部 `protocol: olp/vN`;`AGENTS.md` 引用同版本。
   信道语义变更必须升版本。
 
@@ -166,10 +169,10 @@
    "本机无工具链" 的真相即此。要跑构建必须第 5 档 **Full Access**(免沙箱),
    或 serve 带 **`--danger-full-access`**(默认所有未显式选择的 session 为
    Full Access;solo 门控;`OCTOS_DANGER_FULL_ACCESS=1` 等价)。注意:
-   给 agent 授免沙箱权限属 operator 亲手动作——外环自己的 harness 也会
-   拦截代按,不要尝试绕过。标准启动命令:
+   是否免沙箱由 operator 授权;授权后 agent 可以代为启动(R8)。外环自己的
+   harness 若拦截代为启动,不要尝试绕过,请 operator 执行。标准启动命令:
    `octoscode --stdio-command 'octos serve --stdio --solo --danger-full-access'`。
-   重启 checklist:①上述命令启动(operator)②`/loop resume`(外环可代)。
+   重启 checklist:①上述命令启动(operator 授权后外环可代,R8)②`/loop resume`(外环可代)。
 
 1. 数据根:`~/.octos/instances/<cwd-hash>/profiles/<profile>/data`
    (cwd-hash = 项目目录的 DefaultHasher 十六进制;L1 将提供查询命令代替自算)。
