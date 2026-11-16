@@ -82,6 +82,8 @@ SIGNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@+-]{0,%d}$" % (SIGNER_MAX - 1)
 HEADING = re.compile(r"^### (\d+)")
 UNIT_LINE = re.compile(r"^unit:\s*(\S+)\s*$")
 REVIEW_LINE = re.compile(r"^review:(.*)$")
+# A Markdown code fence: up to three spaces, then three or more ` or ~.
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 ZERO = re.compile(r"^0+$")
 HOOKS = ("pre-receive", "post-receive")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -222,15 +224,21 @@ def read_card(board, number):
     the card has none - older cards are not checked). Assignment and
     reviewers come from the same snapshot. Raises OSError when the board
     cannot be read: the caller refuses rather than guess."""
-    found, unit, reviewers, current, in_fence = False, None, None, None, False
+    found, unit, reviewers, current, fence = False, None, None, None, None
     with open(board, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.rstrip("\r\n")
-            stripped = line.lstrip()
-            if stripped.startswith("```") or stripped.startswith("~~~"):
-                in_fence = not in_fence
+            m = FENCE.match(line)
+            if fence is not None:
+                # Only a fence of the same character, at least as long and
+                # with nothing after it, closes the open one: a ~~~ line in
+                # a ``` example is example text.
+                if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) \
+                        and not m.group(2).strip():
+                    fence = None
                 continue
-            if in_fence:
+            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):
+                fence = m.group(1)
                 continue
             if line.startswith("### ") or line.startswith("## "):
                 m = HEADING.match(line)
