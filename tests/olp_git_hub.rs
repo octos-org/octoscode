@@ -79,6 +79,14 @@ review: codex, claude
 
 > 外环(hub)·改复验方:claude 未登录,只用 codex
 review: codex
+
+### 7. 两个最长名字的复验方
+unit: m07
+review: raaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, rbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+### 8. 八个最长名字的复验方
+unit: m07
+review: rccccccccccccccccccccccccccccccc, rddddddddddddddddddddddddddddddd, reeeeeeeeeeeeeeeeeeeeeeeeeeeeeee, rfffffffffffffffffffffffffffffff, rggggggggggggggggggggggggggggggg, rhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh, riiiiiiiiiiiiiiiiiiiiiiiiiiiiiii, rjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj
 ";
 
 struct Cluster {
@@ -341,6 +349,44 @@ fn hub_requires_every_reviewer_the_card_names() {
     let out = c.task_push("1", &["--verified-by", "m07-ver"], Some("m07"));
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(c.hub_ref("refs/heads/task/1"), Some(sha1));
+}
+
+/// Scenario: 派卡能写出的复验方名单都签得出来:两个、八个最长(32 字符)的名字(评审意见)
+#[test]
+fn hub_accepts_signers_for_the_longest_reviewer_lists() {
+    let c = Cluster::new();
+    let sha7 = c.task_branch(7);
+    // Without the unit prefix: 65 characters, over the old 64 limit.
+    let out = c.task_push(
+        "7",
+        &[
+            "--verified-by",
+            "raaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa+rbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        ],
+        Some("m07"),
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(c.hub_ref("refs/heads/task/7"), Some(sha7));
+    let sha8 = c.task_branch(8);
+    let signer = "m07-rccccccccccccccccccccccccccccccc+rddddddddddddddddddddddddddddddd+reeeeeeeeeeeeeeeeeeeeeeeeeeeeeee+rfffffffffffffffffffffffffffffff+rggggggggggggggggggggggggggggggg+rhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh+riiiiiiiiiiiiiiiiiiiiiiiiiiiiiii+rjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj";
+    let out = c.task_push("8", &["--verified-by", signer], Some("m07"));
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(c.hub_ref("refs/heads/task/8"), Some(sha8));
+}
+
+/// Scenario: 黑板读不了时拒收,不当成"卡上没有 review: 行"放行(评审意见)
+#[cfg(unix)]
+#[test]
+fn hub_refuses_when_the_board_cannot_be_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let c = Cluster::new();
+    c.task_branch(5);
+    std::fs::set_permissions(c.board(), std::fs::Permissions::from_mode(0o000)).unwrap();
+    let out = c.task_push("5", &["--verified-by", "m07-codex"], Some("m07"));
+    std::fs::set_permissions(c.board(), std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(!out.status.success(), "an unreadable board refuses");
+    assert!(stderr(&out).contains("读不了黑板"), "{}", stderr(&out));
+    assert_eq!(c.hub_ref("refs/heads/task/5"), None);
 }
 
 #[test]

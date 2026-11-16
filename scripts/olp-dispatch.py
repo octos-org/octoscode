@@ -56,6 +56,8 @@ import sys
 
 UNIT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 AGENT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+# Matches the hub (olp-git-hub.py): its signer limit covers this many names.
+MAX_REVIEWERS = 8
 KEY_RE = re.compile(r"^[A-Za-z0-9._:/@+=-]{1,200}$")
 KEY_LINE = re.compile(r"^<!-- olp-key: (\S+)(?: n=(\d+))? -->$")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -181,6 +183,9 @@ def run(args):
             raise Fail(2, f"内环种类不合法: {name}(小写字母、数字、连字符)")
     if len(set(reviewers)) != len(reviewers):
         raise Fail(2, "--review 里有重复的内环")
+    # The hub's signer limit fits exactly this many 32-character names.
+    if len(reviewers) > MAX_REVIEWERS:
+        raise Fail(2, f"--review 最多 {MAX_REVIEWERS} 个复验方")
     if impl and not reviewers:
         raise Fail(2, "指定了 --impl 就要用 --review 指定至少一个复验方:单元复验通过才交回")
     if not os.path.isfile(args.board):

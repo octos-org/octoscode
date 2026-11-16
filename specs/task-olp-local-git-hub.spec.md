@@ -51,7 +51,9 @@ ssh 强制命令和单元侧的推送命令,并把三道关的规则写进协议
 - 复验方由 operator 在卡上 `review:` 行决定(2026-11-16,与生产补丁 71cacd8 同一需求):hub
   只执行这个决定,署名(去掉 `<单元>-` 前缀后按 `+` 拆开)必须覆盖卡里最后一条 `review:`
   的每一个名字,大小写不敏感、顺序不限;空的 `review:` 不要求;没有 `review:` 行的卡不检查。
-  工具不内置任何复验方。
+  工具不内置任何复验方。派单与复验方从同一次读取里取得;黑板读不了时拒收,不当成"没有
+  `review:` 行"放行。署名上限容得下派卡能写出的任何名单:派卡最多 8 个复验方、名字 ≤32 字符,
+  hub 署名上限 = 32(单元号)+ 1 + 8×32 + 7 = 296 字符(评审意见,2026-11-16)。
 
 ## Boundaries
 
@@ -112,6 +114,18 @@ Scenario: 卡上指定了复验方时,复验署名必须覆盖每一个(critical
   Given #5 派给 m07 且 `review: codex, claude`;#6 先写 `review: codex, claude`,后追加 `review: codex`;#1 没有 review 行
   When m07 依次以 `m07-codex`、`m07-claude+codex` 推 #5,以 `m07-codex` 推 #6,以 `m07-ver` 推 #1
   Then #5 的第一次被拒,提示缺少 claude 并给出 `m07-codex+claude` 的写法,hub 上没有 task/5;第二次接收;#6 按最后一条 review 接收;#1 不检查复验方、接收
+
+Scenario: 派卡能写出的复验方名单都签得出来
+  Test: hub_accepts_signers_for_the_longest_reviewer_lists
+  Given #7 的 review 是两个 32 字符的名字,#8 是八个
+  When 不带单元号前缀推 #7(65 字符),带前缀推 #8
+  Then 都被接收
+
+Scenario: 黑板读不了时拒收
+  Test: hub_refuses_when_the_board_cannot_be_read
+  Given 黑板不可读
+  When m07 推 #5
+  Then 拒收,提示读不了黑板,hub 上没有 task/5
 
 Scenario: ssh 强制命令只放行对 hub 仓库的 git 操作并固定单元号(critical)
   Tags: critical

@@ -364,3 +364,20 @@ fn dispatch_rejects_bad_usage() {
     // The occupancy view of a board with no dispatched cards.
     assert_eq!(h.units()["units"].as_array().unwrap().len(), 0);
 }
+
+/// Scenario: 派卡最多 8 个复验方,与 hub 的复验署名上限一致(评审意见)
+#[test]
+fn dispatch_refuses_more_reviewers_than_the_hub_can_sign_for() {
+    let h = Hub::new();
+    h.healthy_unit("m07", 7);
+    let nine: Vec<String> = (0..9).map(|i| format!("rev{i}")).collect();
+    let out = h.dispatch(
+        "m07",
+        "九个复验方",
+        &["--impl", "octoscode", "--review", &nine.join(",")],
+        "正文\n",
+    );
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stderr(&out).contains("最多 8 个复验方"), "{}", stderr(&out));
+    assert!(!h.board_text().contains("九个复验方"), "no card is written");
+}

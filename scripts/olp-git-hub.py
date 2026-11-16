@@ -75,7 +75,11 @@ import sys
 UNIT_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 TASK_REF = re.compile(r"^refs/heads/task/([0-9]{1,9})$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
-SIGNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}$")
+# Long enough for every reviewer list a card can carry: a unit id (32), "-",
+# and up to MAX_REVIEWERS names of 32 joined by "+" (olp-dispatch.py limits).
+MAX_REVIEWERS = 8
+SIGNER_MAX = 32 + 1 + MAX_REVIEWERS * 32 + (MAX_REVIEWERS - 1)
+SIGNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@+-]{0,%d}$" % (SIGNER_MAX - 1))
 HEADING = re.compile(r"^### (\d+)")
 UNIT_LINE = re.compile(r"^unit:\s*(\S+)\s*$")
 REVIEW_LINE = re.compile(r"^review:(.*)$")
@@ -205,68 +209,45 @@ def cmd_local_pack(args):
 # --- hooks --------------------------------------------------------------
 
 
-def card_reviewers(board, number):
-    """The reviewers the operator named for card #N: the last `review:` line
-    inside the entry (an empty one clears the list). None when the card has
-    no such line - older cards are not checked."""
-    reviewers, current, in_fence = None, None, False
-    try:
-        with open(board, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.rstrip("\r\n")
-                stripped = line.lstrip()
-                if stripped.startswith("```") or stripped.startswith("~~~"):
-                    in_fence = not in_fence
-                    continue
-                if in_fence:
-                    continue
-                if line.startswith("### ") or line.startswith("## "):
-                    m = HEADING.match(line)
-                    current = int(m.group(1)) if m else None
-                    continue
-                if current == number:
-                    m = REVIEW_LINE.match(line)
-                    if m:
-                        reviewers = [r for r in re.split(r"[,\s]+", m.group(1).strip()) if r]
-    except OSError:
-        return None
-    return reviewers
-
-
 def signed_reviewers(signer, unit):
     """`m07-codex+claude` -> {"codex", "claude"} (the unit prefix is optional)."""
     body = signer[len(unit) + 1 :] if signer.lower().startswith(unit.lower() + "-") else signer
     return {part.strip().lower() for part in body.split("+") if part.strip()}
 
 
-def board_assignment(board, number):
-    """Return (found, unit) for entry `number` on the board: whether the
-    entry exists, and the unit named by its `unit:` line (None if absent)."""
-    found, unit, current, in_fence = False, None, None, False
-    try:
-        with open(board, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                line = line.rstrip("\r\n")
-                stripped = line.lstrip()
-                if stripped.startswith("```") or stripped.startswith("~~~"):
-                    in_fence = not in_fence
-                    continue
-                if in_fence:
-                    continue
-                if line.startswith("### ") or line.startswith("## "):
-                    m = HEADING.match(line)
-                    current = int(m.group(1)) if m else None
-                    if current == number:
-                        found = True
-                    continue
+def read_card(board, number):
+    """One read of the board for entry `number`: (found, unit, reviewers).
+
+    unit: its last `unit:` line (None if absent). reviewers: the last
+    `review:` line, the operator's choice (an empty one clears it; None when
+    the card has none - older cards are not checked). Assignment and
+    reviewers come from the same snapshot. Raises OSError when the board
+    cannot be read: the caller refuses rather than guess."""
+    found, unit, reviewers, current, in_fence = False, None, None, None, False
+    with open(board, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.rstrip("\r\n")
+            stripped = line.lstrip()
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            if line.startswith("### ") or line.startswith("## "):
+                m = HEADING.match(line)
+                current = int(m.group(1)) if m else None
                 if current == number:
-                    m = UNIT_LINE.match(line)
-                    if m:
-                        # 以最后一条为准:改派时在条目里追加新的 unit 行。
-                        unit = m.group(1)
-    except OSError:
-        return False, None
-    return found, unit
+                    found = True
+                continue
+            if current == number:
+                m = UNIT_LINE.match(line)
+                if m:
+                    # 以最后一条为准:改派时在条目里追加新的 unit 行。
+                    unit = m.group(1)
+                m = REVIEW_LINE.match(line)
+                if m:
+                    reviewers = [r for r in re.split(r"[,\s]+", m.group(1).strip()) if r]
+    return found, unit, reviewers
 
 
 def push_options():
@@ -331,7 +312,11 @@ def hook_pre_receive():
         if not SHA_RE.match(new):
             errors.append(f"{ref}:提交号不合法")
             continue
-        found, assigned = board_assignment(board, number)
+        try:
+            found, assigned, required = read_card(board, number)
+        except OSError as exc:
+            errors.append(f"{ref}:读不了黑板 {board}({exc}),无法核对派单与复验方")
+            continue
         if not found:
             errors.append(f"{ref}:黑板上没有条目 #{number}")
             continue
@@ -349,7 +334,6 @@ def hook_pre_receive():
             continue
         # The operator named the reviewers on the card; every one of them
         # must have signed (the card decides, nothing here is built in).
-        required = card_reviewers(board, number)
         if required:
             signed = signed_reviewers(signer, unit)
             missing = [r for r in required if r.lower() not in signed]
