@@ -67,6 +67,18 @@ unit: m07
 
 > 外环(hub)·改派:m07 失联
 unit: m08
+
+### 5. 指定了两个复验方的卡
+unit: m07
+impl: octoscode
+review: codex, claude
+
+### 6. 改了复验方的卡
+unit: m07
+review: codex, claude
+
+> 外环(hub)·改复验方:claude 未登录,只用 codex
+review: codex
 ";
 
 struct Cluster {
@@ -298,6 +310,39 @@ fn hub_rejects_pushes_that_break_the_rules() {
 }
 
 /// Scenario: 返工后同一单元可以强推自己的任务分支
+/// Scenario: 卡上指定了复验方时,复验署名必须覆盖每一个;以卡里最后一条 review: 为准
+#[test]
+fn hub_requires_every_reviewer_the_card_names() {
+    let c = Cluster::new();
+    let sha5 = c.task_branch(5);
+    // Only one of the two reviewers the card names signed.
+    let out = c.task_push("5", &["--verified-by", "m07-codex"], Some("m07"));
+    assert!(!out.status.success(), "a missing reviewer is refused");
+    let err = stderr(&out);
+    assert!(err.contains("缺少 claude"), "{err}");
+    assert!(
+        err.contains("m07-codex+claude"),
+        "the refusal says how to sign: {err}"
+    );
+    assert_eq!(c.hub_ref("refs/heads/task/5"), None);
+    // Both signed (order does not matter).
+    let out = c.task_push("5", &["--verified-by", "m07-claude+codex"], Some("m07"));
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(c.hub_ref("refs/heads/task/5"), Some(sha5));
+
+    // The operator changed the card to Codex only: the last review: line wins.
+    let sha6 = c.task_branch(6);
+    let out = c.task_push("6", &["--verified-by", "m07-codex"], Some("m07"));
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(c.hub_ref("refs/heads/task/6"), Some(sha6));
+
+    // A card without a review: line is not checked.
+    let sha1 = c.task_branch(1);
+    let out = c.task_push("1", &["--verified-by", "m07-ver"], Some("m07"));
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(c.hub_ref("refs/heads/task/1"), Some(sha1));
+}
+
 #[test]
 fn hub_allows_rework_force_push_by_owner() {
     if !has_flock() {

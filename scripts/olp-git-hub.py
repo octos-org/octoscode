@@ -36,6 +36,10 @@
      sha 必须等于这次推上来的分支头——复验的就是推送的那个提交。单元侧
      用 scripts/olp-task-push.sh 生成这条命令。
   4. 同一个单元可以强推自己的任务分支(返工、rebase 到新种子后)。
+  5. 卡上有 `review:` 行(operator 指定的复验方)时,复验署名必须覆盖其中
+     每一个:`m07-codex+claude` 覆盖 codex 与 claude。以卡里最后一条
+     `review:` 为准(改了复验方就在卡里追加一行;空的 `review:` 表示不要求);
+     没有 `review:` 行的卡不检查。工具里不内置任何复验方。
 
   不带单元号的推送(hub 本机上大外环的操作)不受限制:集成分支、种子
   分支由大外环自己维护。所以单元账号**必须**走 serve 强制命令,不要给
@@ -74,6 +78,7 @@ SHA_RE = re.compile(r"^[0-9a-f]{40}([0-9a-f]{24})?$")
 SIGNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}$")
 HEADING = re.compile(r"^### (\d+)")
 UNIT_LINE = re.compile(r"^unit:\s*(\S+)\s*$")
+REVIEW_LINE = re.compile(r"^review:(.*)$")
 ZERO = re.compile(r"^0+$")
 HOOKS = ("pre-receive", "post-receive")
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -200,6 +205,40 @@ def cmd_local_pack(args):
 # --- hooks --------------------------------------------------------------
 
 
+def card_reviewers(board, number):
+    """The reviewers the operator named for card #N: the last `review:` line
+    inside the entry (an empty one clears the list). None when the card has
+    no such line - older cards are not checked."""
+    reviewers, current, in_fence = None, None, False
+    try:
+        with open(board, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.rstrip("\r\n")
+                stripped = line.lstrip()
+                if stripped.startswith("```") or stripped.startswith("~~~"):
+                    in_fence = not in_fence
+                    continue
+                if in_fence:
+                    continue
+                if line.startswith("### ") or line.startswith("## "):
+                    m = HEADING.match(line)
+                    current = int(m.group(1)) if m else None
+                    continue
+                if current == number:
+                    m = REVIEW_LINE.match(line)
+                    if m:
+                        reviewers = [r for r in re.split(r"[,\s]+", m.group(1).strip()) if r]
+    except OSError:
+        return None
+    return reviewers
+
+
+def signed_reviewers(signer, unit):
+    """`m07-codex+claude` -> {"codex", "claude"} (the unit prefix is optional)."""
+    body = signer[len(unit) + 1 :] if signer.lower().startswith(unit.lower() + "-") else signer
+    return {part.strip().lower() for part in body.split("+") if part.strip()}
+
+
 def board_assignment(board, number):
     """Return (found, unit) for entry `number` on the board: whether the
     entry exists, and the unit named by its `unit:` line (None if absent)."""
@@ -300,12 +339,26 @@ def hook_pre_receive():
             who = assigned or "未指定单元(条目里没有 unit: 行)"
             errors.append(f"{ref}:#{number} 派给的是 {who},不是 {unit}")
             continue
-        if not verified_option(new):
+        signer = verified_option(new)
+        if not signer:
             errors.append(
                 f"{ref}:缺少本地复验记录。本地复验通过后用 "
                 f"scripts/olp-task-push.sh {number} --verified-by <复验署名> 推送"
                 "(push option olp-verified 的 sha 必须等于分支头)"
             )
+            continue
+        # The operator named the reviewers on the card; every one of them
+        # must have signed (the card decides, nothing here is built in).
+        required = card_reviewers(board, number)
+        if required:
+            signed = signed_reviewers(signer, unit)
+            missing = [r for r in required if r.lower() not in signed]
+            if missing:
+                errors.append(
+                    f"{ref}:#{number} 卡上指定的复验方是 {'、'.join(required)},"
+                    f"复验署名 {signer} 缺少 {'、'.join(missing)}"
+                    f"(署名写成 {unit}-{'+'.join(required)};改了复验方就在卡里追加新的 review: 行)"
+                )
     if errors:
         for e in errors:
             print(f"olp-hub: 拒收 {e}", file=sys.stderr)
