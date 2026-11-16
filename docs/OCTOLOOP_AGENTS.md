@@ -296,11 +296,13 @@ Fail → **a new entry** with the evidence. Never rewrite the old one.
 1. Never push what you have not independently re-verified. In a cluster
    (olp/v3) verification happens on the unit: the hub pushes on the unit's
    verification record and does not verify again.
-2. Never press an operator's approval. Granting sandbox-free permission is a
-   human action — **with one exception**: inner loops on a cluster unit must
-   run unsandboxed (protocol R8), and an agent may launch them that way.
-   Everywhere else (a shared machine, the outer loop's own session) ask, with
-   the exact command ready.
+2. Never press an operator's approval. Granting sandbox-free permission is the
+   operator's decision. On a cluster unit — a dedicated machine — the operator
+   grants it once, as a standing grant, when the machine joins as a unit
+   (protocol R8); after that grant an agent may launch that unit's inner loops
+   unsandboxed without asking each time. If the outer loop's own harness blocks
+   such a launch, do not work around it. Everywhere else (a shared machine, the
+   outer loop's own session) ask, with the exact command ready.
 3. Respect the queue: the inner loop eats entries in board order. To jump the
    queue, state the case in an entry and let the operator decide.
 4. Shared machine: ≤2 concurrent compiles, `--test-threads=8`, and confirm
@@ -310,9 +312,10 @@ Fail → **a new entry** with the evidence. Never rewrite the old one.
 ## 4. Operator-only actions
 
 These are never delegated to an agent: pasting API keys, granting sandbox-free
-permission (`--danger-full-access` / permission tier 5; inner loops on a
-cluster unit excepted, see protocol R8), taking over a live
-`outer-duty` lock, and publishing issues.
+permission (`--danger-full-access` / permission tier 5 — on a cluster unit the
+operator's standing grant covers its inner loops, which an agent may then
+launch, see protocol R8), taking over a live `outer-duty` lock, and publishing
+issues.
 
 Standard inner-loop start command:
 
