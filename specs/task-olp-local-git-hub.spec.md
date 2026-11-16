@@ -127,6 +127,12 @@ Scenario: 黑板读不了时拒收
   When m07 推 #5
   Then 拒收,提示读不了黑板,hub 上没有 task/5
 
+Scenario: 代码示例里的 review: 不覆盖卡上的复验方
+  Test: hub_keeps_card_reviewers_when_an_example_mentions_review
+  Given 卡 #10 写着 `review: codex, claude`,正文里有 ``` 围栏示例,示例中有一行 `~~~` 和一行空的 `review:`,还有一个 ```` 围栏示例里含 ``` 和 `review: codex`
+  When m07 只以 codex 署名推 #10,再以 codex+claude 署名推
+  Then 第一次拒收并提示缺少 claude;第二次放行。围栏只由同种字符、长度不短于开头、后面没有其他内容的行关闭
+
 Scenario: ssh 强制命令只放行对 hub 仓库的 git 操作并固定单元号(critical)
   Tags: critical
   Test: hub_serve_pins_the_unit_and_only_allows_git_on_the_hub_repo

@@ -389,6 +389,30 @@ fn hub_accepts_signers_for_the_longest_reviewer_lists() {
     assert_eq!(c.hub_ref("refs/heads/task/9"), Some(sha9));
 }
 
+/// Scenario: 代码示例里的 review: 不覆盖卡上的复验方;只有同种、不短于开头的围栏才关闭示例(评审意见)
+#[test]
+fn hub_keeps_card_reviewers_when_an_example_mentions_review() {
+    let c = Cluster::new();
+    let mut board = std::fs::read_to_string(c.board()).unwrap();
+    board.push_str(
+        "\n### 10. 正文里有 Markdown 示例的卡\nunit: m07\nreview: codex, claude\n\n\
+         ```markdown\n~~~\nreview:\n```\n\n\
+         ````\n```\nreview: codex\n```\n````\n",
+    );
+    std::fs::write(c.board(), board).unwrap();
+    let sha = c.task_branch(10);
+    let out = c.task_push("10", &["--verified-by", "m07-codex"], Some("m07"));
+    assert!(
+        !out.status.success(),
+        "the examples do not clear the reviewers"
+    );
+    assert!(stderr(&out).contains("缺少 claude"), "{}", stderr(&out));
+    assert_eq!(c.hub_ref("refs/heads/task/10"), None);
+    let out = c.task_push("10", &["--verified-by", "m07-codex+claude"], Some("m07"));
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(c.hub_ref("refs/heads/task/10"), Some(sha));
+}
+
 /// Scenario: 黑板读不了时拒收,不当成"卡上没有 review: 行"放行(评审意见)
 #[cfg(unix)]
 #[test]
