@@ -534,9 +534,11 @@ fn sha256_str(s: &str) -> String {
 fn olp_evo_retro_boot_section7_and_golden() {
     let boot = std::fs::read_to_string(repo_root().join("docs/OLP_OUTER_BOOT.md")).unwrap();
 
-    // Revised with the operator's approval (2026-11-15): §3.5 now states the
-    // lease checked at the write entry points (task-outer-duty-lease).
-    const BOOT_0_TO_6: &str = "4d06c2fb6174a1e80fb50baa5296ff86057d2a3a4e5815732605662e830dcd60";
+    // Revised with the operator's approval: 2026-11-15 §3.5 states the lease
+    // checked at the write entry points (task-outer-duty-lease); 2026-11-16
+    // §0b step 1 and §6 say an authorized agent may launch an inner loop
+    // without a sandbox (protocol R8) instead of "operator only".
+    const BOOT_0_TO_6: &str = "3ced876330148011b059dfb3d9b01e95dc1817a9c6c081dbc5d843e01d2fd369";
     let slice = &boot[boot.find("## 0.").unwrap()..boot.find("## 7.").unwrap()];
     assert_eq!(sha256_str(slice), BOOT_0_TO_6);
 

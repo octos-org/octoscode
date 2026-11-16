@@ -17,8 +17,8 @@
 
 内环(重)启动后,外环逐项核对,禁止"记一笔稍后补":
 
-1. **serve 起**——operator 亲手执行(免沙箱启动属信任决策,永不由
-   agent 代劳)。
+1. **serve 起**——是否免沙箱由 operator 授权;授权后 agent 可以代为启动
+   (协议 R8)。外环所在的 harness 拦截代为启动时不要绕过,请 operator 执行。
 2. **`/loop resume` 外环必代**——先 `/loop list` 取 id,再
    `/loop resume <id>`(裸 resume 要 id 会拒)。实案注:**兜底瘫痪是
    隐形的**——maintenance 心跳 paused 一整天无人察觉,直至夜间主道
@@ -129,7 +129,7 @@ NFS 不适用。写入面校验租约:hold 给外环 `OLP_DUTY_LEASE`,写板、�
 ```bash
 # 标准形态(octoscode)
 herdr pane run <pane> 'cd <repo> && octoscode --stdio-command "octos serve --stdio --solo --danger-full-access"'
-# Claude Code 快轨内环(免审批启动属信任决策,建议 operator 亲手执行)
+# Claude Code 快轨内环(免审批由 operator 授权,授权后 agent 可代为启动,协议 R8)
 herdr pane run <pane> 'cd <repo> && claude --dangerously-skip-permissions'
 # codex 快轨内环(先在 ~/.codex/config.toml 设 approval_policy="never" + sandbox_mode)
 herdr pane run <pane> 'cd <repo> && codex'

@@ -280,7 +280,7 @@ octoscode --stdio-command 'octos serve --stdio --solo --danger-full-access'
   都是 "command not found"。要跑工具链必须第 5 档 Full Access 或
   `--danger-full-access`。历史上内环反复声明"本机没有 cargo",真相即此。
 
-(重)启动后,外环走四步硬清单:serve 已起(operator 亲手);
+(重)启动后,外环走四步硬清单:serve 已起(免沙箱由 operator 授权,授权后 agent 可代为启动,协议 R8);
 `/loop resume <id>`(先 `/loop list` 取 id,裸 `resume` 会拒);双哨已挂;
 `llm.fallbacks` 已配**且已被新会话快照**(工具与配置在会话建立时快照,
 改配置不新建会话等于纸面保险)。

@@ -97,7 +97,7 @@ octoscode --stdio-command 'octos serve --stdio --solo --danger-full-access'
 ```
 
 `--solo` 是单人本地安全门,漏掉会报 "not allowed outside local solo mode"。
-免沙箱是安全决策,请亲手做,不要让 agent 代按。
+免沙箱是安全决策,由你(operator)授权;授权之后 agent 可以代为启动(协议 R8)。
 
 ### 3.2 模式 outer — 外环上岗三步
 

@@ -166,10 +166,10 @@
    "本机无工具链" 的真相即此。要跑构建必须第 5 档 **Full Access**(免沙箱),
    或 serve 带 **`--danger-full-access`**(默认所有未显式选择的 session 为
    Full Access;solo 门控;`OCTOS_DANGER_FULL_ACCESS=1` 等价)。注意:
-   给 agent 授免沙箱权限属 operator 亲手动作——外环自己的 harness 也会
-   拦截代按,不要尝试绕过。标准启动命令:
+   是否免沙箱由 operator 授权;授权后 agent 可以代为启动(R8)。外环自己的
+   harness 若拦截代为启动,不要尝试绕过,请 operator 执行。标准启动命令:
    `octoscode --stdio-command 'octos serve --stdio --solo --danger-full-access'`。
-   重启 checklist:①上述命令启动(operator)②`/loop resume`(外环可代)。
+   重启 checklist:①上述命令启动(operator 授权后外环可代,R8)②`/loop resume`(外环可代)。
 
 1. 数据根:`~/.octos/instances/<cwd-hash>/profiles/<profile>/data`
    (cwd-hash = 项目目录的 DefaultHasher 十六进制;L1 将提供查询命令代替自算)。
