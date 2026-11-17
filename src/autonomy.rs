@@ -30,6 +30,11 @@
 
 use std::time::Duration;
 
+/// Maximum workers one `/agents spawn` command may request. This mirrors the
+/// backend's batch safety cap; the protocol currently has no limit-negotiation
+/// method, so rejecting above it here prevents a partially accepted batch.
+pub const MAX_AGENTS_PER_SPAWN: u32 = 200;
+
 /// Parsed `/agents` subcommand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentsCommand {
@@ -203,6 +208,8 @@ pub enum AutonomyParseError {
     InvalidInterval(String),
     /// `/agents spawn` where the count token is missing, non-numeric, or zero.
     InvalidSpawnCount(String),
+    /// `/agents spawn` where the count exceeds the per-command batch cap.
+    SpawnCountTooLarge { count: u32, max: u32 },
     /// `/agents spawn <N>` with no prompt text after the count.
     EmptySpawnPrompt,
 }
@@ -239,6 +246,12 @@ impl std::fmt::Display for AutonomyParseError {
             }
             Self::InvalidSpawnCount(raw) => {
                 write!(f, "spawn count must be a positive integer, got `{raw}`")
+            }
+            Self::SpawnCountTooLarge { count, max } => {
+                write!(
+                    f,
+                    "spawn count {count} exceeds the per-command limit of {max}"
+                )
             }
             Self::EmptySpawnPrompt => {
                 f.write_str("/agents spawn requires a prompt after the count")
@@ -345,6 +358,12 @@ fn parse_agents_spawn(args: &str) -> Result<AgentsCommand, AutonomyParseError> {
         return Err(AutonomyParseError::InvalidSpawnCount(
             count_token.to_string(),
         ));
+    }
+    if count > MAX_AGENTS_PER_SPAWN {
+        return Err(AutonomyParseError::SpawnCountTooLarge {
+            count,
+            max: MAX_AGENTS_PER_SPAWN,
+        });
     }
     let prompt = prompt_rest.to_string();
     if prompt.is_empty() {
@@ -1196,6 +1215,44 @@ mod tests {
                 prompt: "fix lint".into(),
             }))
         );
+    }
+
+    #[test]
+    fn agents_spawn_count_at_cap_is_valid() {
+        let input = format!("/agents spawn {MAX_AGENTS_PER_SPAWN} keep workers busy");
+        let command = parse_autonomy_slash(&input).unwrap();
+        assert!(matches!(
+            command,
+            Some(AutonomyCommand::Agents(AgentsCommand::Spawn {
+                count: MAX_AGENTS_PER_SPAWN,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn agents_spawn_count_above_cap_is_rejected() {
+        let input = format!(
+            "/agents spawn {} keep workers busy",
+            MAX_AGENTS_PER_SPAWN + 1
+        );
+        let error = parse_autonomy_slash(&input).unwrap_err();
+        assert_eq!(
+            error,
+            AutonomyParseError::SpawnCountTooLarge {
+                count: MAX_AGENTS_PER_SPAWN + 1,
+                max: MAX_AGENTS_PER_SPAWN,
+            }
+        );
+    }
+
+    #[test]
+    fn agents_spawn_above_cap_without_prompt_reports_the_cap() {
+        let input = format!("/agents spawn {}", MAX_AGENTS_PER_SPAWN + 1);
+        assert!(matches!(
+            parse_autonomy_slash(&input),
+            Err(AutonomyParseError::SpawnCountTooLarge { .. })
+        ));
     }
 
     #[test]

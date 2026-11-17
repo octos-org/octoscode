@@ -11638,15 +11638,16 @@ pub fn activity_status_is_running(status: &str) -> bool {
 /// [`TaskRuntimeState`] it represents, or `None` if the status is non-terminal.
 ///
 /// The server's `background_task_agent_status` emits `running` / `completed` /
-/// `failed` / `interrupted` (the last is the wire form of a cancelled task).
+/// `failed` / `interrupted`; `agent/close` emits `closed`. Matching is
+/// case-insensitive and `closed` maps to cancelled like an interrupted task.
 /// Used by the stuck-chip reconcile so a task whose terminal `task/updated`
 /// never arrived (per-turn channel torn down) still flips off "Orchestrating…"
 /// once the durable terminal agent record lands.
 pub fn terminal_task_state_from_agent_status(status: &str) -> Option<TaskRuntimeState> {
-    match status {
+    match status.to_ascii_lowercase().as_str() {
         "completed" => Some(TaskRuntimeState::Completed),
         "failed" => Some(TaskRuntimeState::Failed),
-        "interrupted" | "cancelled" => Some(TaskRuntimeState::Cancelled),
+        "interrupted" | "cancelled" | "closed" => Some(TaskRuntimeState::Cancelled),
         _ => None,
     }
 }
