@@ -6,6 +6,9 @@ name: Octos
 #
 # - `@octos <question>` in an issue, a pull request comment or a review
 #   comment gets an answer.
+# - `@octos review` at the start of a pull request comment gets a review with
+#   line comments. Text after it says what to look at. The review never
+#   approves and never requests changes.
 # - `@octos watch` on a pull request, or the `octos-watch` label, makes Octos
 #   look at failed CI runs and at maintainers' reviews of that pull request.
 #   `@octos unwatch` stops it.
@@ -60,7 +63,7 @@ jobs:
 
       # The action from octos-org/octos#3300, pinned to its commit. Move the
       # pin to a commit on octos `main` once that pull request is merged.
-      - uses: octos-org/octos/action@97b31637f567de8110f0f45707dff4072cad8682
+      - uses: octos-org/octos/action@442b8984846168bdcaadbc9762bf61524701fa2a
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
         with:
