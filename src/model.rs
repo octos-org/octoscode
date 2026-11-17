@@ -3365,10 +3365,10 @@ impl OnboardingWizardState {
 /// JSON-RPC wire format.
 fn strip_method_prefix(message: &str, method: &str) -> String {
     let prefix = format!("{method} request");
-    if let Some(rest) = message.strip_prefix(&prefix) {
-        if let Some((_, reason)) = rest.split_once(": ") {
-            return reason.trim().to_owned();
-        }
+    if let Some(rest) = message.strip_prefix(&prefix)
+        && let Some((_, reason)) = rest.split_once(": ")
+    {
+        return reason.trim().to_owned();
     }
     message.to_owned()
 }
@@ -7684,11 +7684,10 @@ impl AppState {
             .session_autonomy
             .iter_mut()
             .find(|s| &s.session_id == session_id)
+            && entry.plan_turn_id.as_ref() == Some(turn_id)
         {
-            if entry.plan_turn_id.as_ref() == Some(turn_id) {
-                entry.plan = None;
-                entry.plan_turn_id = None;
-            }
+            entry.plan = None;
+            entry.plan_turn_id = None;
         }
     }
 
@@ -10020,19 +10019,18 @@ impl AppState {
     /// Progress row that reused the label (codex review). Replace the row with
     /// the matching key in place; append only when none exists.
     pub fn push_or_replace_goal_activity(&mut self, item: ActivityItem) {
-        if let Some(key) = item.tool_call_id.as_deref() {
-            if let Some(existing) = self
+        if let Some(key) = item.tool_call_id.as_deref()
+            && let Some(existing) = self
                 .activity
                 .iter_mut()
                 .rev()
                 .find(|a| a.tool_call_id.as_deref() == Some(key))
-            {
-                existing.status = item.status;
-                existing.detail = item.detail;
-                existing.success = item.success;
-                existing.title = item.title;
-                return;
-            }
+        {
+            existing.status = item.status;
+            existing.detail = item.detail;
+            existing.success = item.success;
+            existing.title = item.title;
+            return;
         }
         self.push_activity(item);
     }
@@ -10400,10 +10398,10 @@ impl AppState {
             .sessions
             .iter()
             .find(|session| &session.id == session_id)?;
-        if let Some(live) = session.live_reply.as_ref() {
-            if let Some(tail) = last_line_tail(&live.text, ACTIVITY_CHARS) {
-                return Some(tail);
-            }
+        if let Some(live) = session.live_reply.as_ref()
+            && let Some(tail) = last_line_tail(&live.text, ACTIVITY_CHARS)
+        {
+            return Some(tail);
         }
         session
             .messages
