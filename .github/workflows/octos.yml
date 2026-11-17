@@ -13,8 +13,9 @@ name: Octos
 #   look at failed CI runs and at maintainers' reviews of that pull request.
 #   `@octos unwatch` stops it.
 #
-# Only users with write access can start a run. Needs the repository secret
-# `DEEPSEEK_API_KEY`. Docs: https://github.com/octos-org/octos/tree/feat/github-action/action
+# Octos acts only for users with write access. A comment from anyone else
+# starts the job, and the action ends it before any model run. Needs the
+# repository secret `DEEPSEEK_API_KEY`. Docs: https://github.com/octos-org/octos/tree/feat/github-action/action
 
 on:
   issues:
@@ -36,7 +37,7 @@ permissions:
   pull-requests: write
 
 concurrency:
-  group: octos-${{ github.event.issue.number || github.event.pull_request.number || github.event.workflow_run.head_branch }}
+  group: octos-${{ github.event.issue.number || github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || github.event.workflow_run.head_branch }}
   cancel-in-progress: false
 
 jobs:
