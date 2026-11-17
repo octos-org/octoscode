@@ -263,6 +263,7 @@ it by hand.
 | AppUI command | Wire method |
 |---|---|
 | `GetDiffPreview` | `diff/preview/get` |
+| `GetWorkspaceDiff` | `diff/workspace/get` (read-only, server-bound workspace; request identity is local) |
 
 ### `launch/`
 
