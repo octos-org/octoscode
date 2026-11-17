@@ -4,7 +4,8 @@
 //! There is no interactive wizard. Configuration is covered by the top-level
 //! CLI flags, the in-TUI onboarding, and the runtime toggles (`/theme`,
 //! `/lang`, `/vimmode`, `/saveconfig`) — so this command only *inspects*:
-//! `show` prints the saved config (and points at the file to edit by hand), and
+//! `show` prints the saved config with authentication tokens redacted (and
+//! points at the file to edit by hand), and
 //! `path` prints the resolved config file path. Bare `octoscode config` defaults
 //! to `show`.
 
@@ -21,6 +22,7 @@ use crate::cli;
 pub struct ConfigArgs {
     pub action: ConfigAction,
     pub config: Option<PathBuf>,
+    pub show_secrets: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -43,11 +45,15 @@ pub struct ConfigCli {
     /// Config file to read (default: ~/.config/octoscode/config.json).
     #[arg(long = "config", value_name = "FILE", global = true)]
     config: Option<PathBuf>,
+    /// Print authentication tokens verbatim (default: redact them).
+    #[arg(long, global = true, help = t!("config_privacy.show_secrets_help").to_string())]
+    show_secrets: bool,
 }
 
 #[derive(Debug, Subcommand)]
 enum ConfigActionCli {
-    /// Print the current saved config (this is the default).
+    /// Print the saved config with authentication tokens redacted (the default).
+    #[command(about = t!("config_privacy.show_help").to_string())]
     Show,
     /// Print the resolved config file path.
     Path,
@@ -62,6 +68,7 @@ impl ConfigCli {
         ConfigArgs {
             action,
             config: self.config,
+            show_secrets: self.show_secrets,
         }
     }
 }
@@ -78,12 +85,12 @@ pub fn run(args: ConfigArgs) -> Result<i32> {
             println!("{}", path.display());
             Ok(0)
         }
-        ConfigAction::Show => show(&path),
+        ConfigAction::Show => show(&path, args.show_secrets),
     }
 }
 
 /// Print the saved config, then point the user at the file to change it.
-fn show(path: &Path) -> Result<i32> {
+fn show(path: &Path, show_secrets: bool) -> Result<i32> {
     match std::fs::read_to_string(path) {
         Ok(contents) if contents.trim().is_empty() => {
             println!("{} is empty.", path.display());
@@ -91,8 +98,11 @@ fn show(path: &Path) -> Result<i32> {
             Ok(0)
         }
         Ok(contents) => {
+            let display = config_for_display(&contents, show_secrets).wrap_err_with(|| {
+                t!("config_privacy.display_parse_failed", path = path.display())
+            })?;
             println!("# {}", path.display());
-            println!("{}", contents.trim_end());
+            println!("{}", display.trim_end());
             print_edit_hint(path);
             Ok(0)
         }
@@ -102,6 +112,35 @@ fn show(path: &Path) -> Result<i32> {
             Ok(0)
         }
         Err(error) => Err(error).wrap_err_with(|| format!("failed to read {}", path.display())),
+    }
+}
+
+fn config_for_display(contents: &str, show_secrets: bool) -> Result<String> {
+    if show_secrets {
+        return Ok(contents.to_owned());
+    }
+    let mut config: serde_json::Value = serde_json::from_str(contents)?;
+    redact_auth_tokens(&mut config);
+    Ok(serde_json::to_string_pretty(&config)?)
+}
+
+fn redact_auth_tokens(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, value) in object {
+                if matches!(key.as_str(), "auth-token" | "auth_token") {
+                    *value = serde_json::Value::String(t!("config_privacy.redacted").into_owned());
+                } else {
+                    redact_auth_tokens(value);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_auth_tokens(item);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -123,6 +162,30 @@ mod tests {
     fn should_default_to_show_when_no_subcommand() {
         let args = ConfigCli::parse_from(["octoscode config"]).into_args();
         assert!(matches!(args.action, ConfigAction::Show));
+    }
+
+    #[test]
+    fn config_privacy_messages_resolve_in_both_locales() {
+        for key in [
+            "config_privacy.redacted",
+            "config_privacy.show_help",
+            "config_privacy.show_secrets_help",
+            "config_privacy.resolve_failed",
+            "config_privacy.inspect_failed",
+            "config_privacy.read_only",
+            "config_privacy.create_failed",
+            "config_privacy.restrict_failed",
+            "config_privacy.write_failed",
+            "config_privacy.sync_failed",
+            "config_privacy.replace_failed",
+            "config_privacy.display_parse_failed",
+        ] {
+            for locale in ["en", "zh"] {
+                let value = t!(key, locale = locale, path = "config.json");
+                assert_ne!(value.as_ref(), key);
+                assert!(!value.trim().is_empty());
+            }
+        }
     }
 
     #[test]
