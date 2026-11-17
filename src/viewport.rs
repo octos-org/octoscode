@@ -15,6 +15,7 @@
 //! mechanism lives in [`crate::insert_history`].
 
 use ratatui::text::Line;
+use std::sync::Arc;
 
 use crate::app::{self, CommittedFingerprint, LiveTurnFinalization};
 use crate::model::AppState;
@@ -25,7 +26,11 @@ use crate::theme::Palette;
 #[derive(Debug, Default)]
 pub struct ScrollbackTracker {
     /// Fingerprint of the committed history we last flushed.
-    last: CommittedFingerprint,
+    last: Arc<CommittedFingerprint>,
+    /// Only enabled by the production loop, whose Store/model mutations
+    /// maintain revisions. Public `new`/`sync` callers can mutate raw Vecs
+    /// and keep the original fresh-fingerprint semantics.
+    committed_cache: Option<CommittedFingerprintCache>,
     /// Number of committed messages already flushed for `last.session_id`.
     flushed_messages: usize,
     /// Active-turn content already streamed to scrollback while still live.
@@ -55,6 +60,26 @@ pub struct ScrollbackTracker {
     tail_activity_turn: Option<String>,
 }
 
+#[derive(Debug, Default)]
+struct CommittedFingerprintCache {
+    revision: Option<u64>,
+    fingerprint: Arc<CommittedFingerprint>,
+}
+
+impl CommittedFingerprintCache {
+    fn get(&mut self, app: &AppState) -> Arc<CommittedFingerprint> {
+        let session_id = app
+            .active_session()
+            .map_or("", |session| session.id.0.as_str());
+        let revision = app.committed_history_revision();
+        if self.revision != Some(revision) || self.fingerprint.session_id != session_id {
+            self.fingerprint = Arc::new(app::committed_messages_fingerprint(app));
+            self.revision = Some(revision);
+        }
+        Arc::clone(&self.fingerprint)
+    }
+}
+
 /// What the event loop should do with scrollback before drawing the viewport.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ScrollbackUpdate {
@@ -74,6 +99,13 @@ impl ScrollbackTracker {
         Self::default()
     }
 
+    pub(crate) fn with_committed_revision_cache() -> Self {
+        Self {
+            committed_cache: Some(CommittedFingerprintCache::default()),
+            ..Self::default()
+        }
+    }
+
     /// Forget the COMMITTED flush watermark only, so the next [`Self::sync`]
     /// re-emits the entire committed history — while PRESERVING the live-turn
     /// watermarks (`active_live` / `completed_live`). Used when a `/btw`
@@ -85,7 +117,7 @@ impl ScrollbackTracker {
     /// `completed_live` also keeps the committed re-flush deduped against
     /// content that already streamed live.
     pub fn mark_committed_flush_stale(&mut self) {
-        self.last = CommittedFingerprint::default();
+        self.last = Arc::default();
         self.flushed_messages = 0;
         self.archived_activity.clear();
         self.last_flushed_ends_blank = false;
@@ -106,7 +138,11 @@ impl ScrollbackTracker {
     /// empty screen — with the pre-resize copy reachable only by scrolling
     /// real scrollback, wrapped at the old width.
     pub fn mark_flushed_stale(&mut self) {
+        // Reflow changes rendered rows, not the width-independent message
+        // fingerprint. Keep the cache while forgetting all flush watermarks.
+        let committed_cache = self.committed_cache.take();
         *self = Self::new();
+        self.committed_cache = committed_cache;
     }
 
     /// Reconcile the tracker against the current app state and return the lines
@@ -117,7 +153,10 @@ impl ScrollbackTracker {
         palette: Palette,
         wrap_width: usize,
     ) -> ScrollbackUpdate {
-        let fingerprint = app::committed_messages_fingerprint(app);
+        let fingerprint = match self.committed_cache.as_mut() {
+            Some(cache) => cache.get(app),
+            None => Arc::new(app::committed_messages_fingerprint(app)),
+        };
         let previous_live_tail_had_guarded_sections = self.live_tail_had_guarded_sections;
         let (previous_live, next_live) = self.reconcile_active_live(app);
         let mut lines_to_insert = Vec::new();
@@ -1225,5 +1264,305 @@ mod tests {
         let update = tracker.sync(&app, palette(), 60);
         assert!(update.lines_to_insert.is_empty());
         assert!(!update.reset);
+    }
+
+    fn cached_revision(
+        tracker: &mut ScrollbackTracker,
+        store: &crate::store::Store,
+    ) -> Arc<CommittedFingerprint> {
+        tracker.sync(&store.state, palette(), 80);
+        Arc::clone(&tracker.last)
+    }
+
+    #[test]
+    fn committed_fingerprint_cache_hits_during_input_animation_and_live_deltas() {
+        use octos_core::{
+            app_ui::AppUiEvent,
+            ui_protocol::{MessageDeltaEvent, TurnStartedEvent, UiNotification},
+        };
+        let mut store = crate::store::Store {
+            state: state(vec![
+                Message::user("committed question"),
+                Message::assistant("committed answer"),
+            ]),
+        };
+        let mut tracker = ScrollbackTracker::with_committed_revision_cache();
+        let first = cached_revision(&mut tracker, &store);
+        let session_id = store.state.sessions[0].id.clone();
+        let turn_id = TurnId::new();
+        store.apply_event(AppUiEvent::Protocol(UiNotification::TurnStarted(
+            TurnStartedEvent {
+                session_id: session_id.clone(),
+                turn_id: turn_id.clone(),
+                timestamp: chrono::Utc::now(),
+                topic: None,
+            },
+        )));
+        for index in 0..20 {
+            store
+                .state
+                .set_composer_text(format!("unfinished draft {index}"));
+            store.apply_event(AppUiEvent::Protocol(UiNotification::MessageDelta(
+                MessageDeltaEvent {
+                    session_id: session_id.clone(),
+                    turn_id: turn_id.clone(),
+                    topic: None,
+                    text: "streaming delta ".into(),
+                },
+            )));
+            let next = cached_revision(&mut tracker, &store);
+            assert!(
+                Arc::ptr_eq(&first, &next),
+                "input, animation and an existing turn's live deltas must not rehash committed text"
+            );
+            assert_eq!(
+                next.as_ref(),
+                &app::committed_messages_fingerprint(&store.state)
+            );
+        }
+    }
+
+    fn fingerprint_hydrate(session_id: SessionKey, text: &str) -> crate::client_event::ClientEvent {
+        use octos_core::ui_protocol::{HydratedMessage, SessionHydrateResult, UiCursor};
+        crate::client_event::ClientEvent::SessionHydrate(SessionHydrateResult {
+            replayed_projection_envelopes: None,
+            projection_thread_sequences: None,
+            session_id,
+            cursor: UiCursor {
+                stream: "session".into(),
+                seq: 2,
+            },
+            context: None,
+            context_state: None,
+            replayed_tool_envelopes: None,
+            messages: Some(vec![HydratedMessage {
+                tool_call_id: None,
+                tool_calls: vec![],
+                tool_name: None,
+                seq: 1,
+                role: "assistant".into(),
+                content: text.into(),
+                turn_id: None,
+                thread_id: None,
+                client_message_id: None,
+                persisted_at: chrono::Utc::now(),
+                message_id: Some("msg".into()),
+                source: Some("assistant".into()),
+                media: vec![],
+                reasoning_content: None,
+            }]),
+            threads: None,
+            turns: None,
+            pending_approvals: None,
+            pending_questions: None,
+            replayed_envelopes: None,
+        })
+    }
+
+    #[test]
+    fn committed_fingerprint_cache_invalidates_same_length_hydrate_and_snapshot_rewrites() {
+        use octos_core::app_ui::{AppUiEvent, AppUiSnapshot};
+        let mut store = crate::store::Store {
+            state: state(vec![Message::assistant("AAAA")]),
+        };
+        let mut tracker = ScrollbackTracker::with_committed_revision_cache();
+        let first = cached_revision(&mut tracker, &store);
+        let session_id = store.state.sessions[0].id.clone();
+        store.apply_client_event(fingerprint_hydrate(session_id, "BBBB"));
+        assert_eq!(store.state.sessions[0].messages.len(), 1);
+        assert_eq!(store.state.sessions[0].messages[0].content, "BBBB");
+        let hydrated = cached_revision(&mut tracker, &store);
+        assert!(!Arc::ptr_eq(&first, &hydrated));
+        assert_ne!(first.message_prefix_hashes, hydrated.message_prefix_hashes);
+        assert_eq!(
+            hydrated.as_ref(),
+            &app::committed_messages_fingerprint(&store.state)
+        );
+        let mut sessions = store.state.sessions.clone();
+        sessions[0].messages[0].content = "CCCC".into();
+        store.apply_event(AppUiEvent::Snapshot(AppUiSnapshot {
+            sessions,
+            selected_session: 0,
+            status: "snapshot".into(),
+            target: None,
+            readonly: false,
+        }));
+        let snapshot = cached_revision(&mut tracker, &store);
+        assert!(!Arc::ptr_eq(&hydrated, &snapshot));
+        assert_eq!(
+            snapshot.as_ref(),
+            &app::committed_messages_fingerprint(&store.state)
+        );
+    }
+
+    #[test]
+    fn committed_fingerprint_cache_tracks_optimistic_append_withdraw_and_canonical_echo() {
+        let mut store = crate::store::Store {
+            state: state(vec![Message::assistant("history")]),
+        };
+        let session_id = store.state.sessions[0].id.clone();
+        let turn_id = TurnId::new();
+        let mut tracker = ScrollbackTracker::with_committed_revision_cache();
+        let history = cached_revision(&mut tracker, &store);
+        store.state.record_submitted_user_prompt(
+            session_id.clone(),
+            turn_id.clone(),
+            "optimistic".into(),
+        );
+        let appended = cached_revision(&mut tracker, &store);
+        assert_eq!(appended.message_count, history.message_count + 1);
+        store
+            .state
+            .withdraw_optimistic_user_prompt(&session_id, &turn_id);
+        let removed = cached_revision(&mut tracker, &store);
+        assert!(!Arc::ptr_eq(&appended, &removed));
+        assert_eq!(removed.as_ref(), history.as_ref());
+        store.state.apply_user_row_echo(
+            &session_id,
+            "canonical-thread".into(),
+            "canonical row".into(),
+            vec![],
+        );
+        let echo = cached_revision(&mut tracker, &store);
+        assert_eq!(echo.message_count, history.message_count + 1);
+        assert_eq!(
+            echo.as_ref(),
+            &app::committed_messages_fingerprint(&store.state)
+        );
+    }
+
+    #[test]
+    fn committed_fingerprint_cache_invalidates_completed_failed_and_switched_turns() {
+        use octos_core::{
+            app_ui::AppUiEvent,
+            ui_protocol::{TurnCompletedEvent, TurnErrorEvent, TurnStartedEvent, UiNotification},
+        };
+        for terminal in ["completed", "failed", "switched"] {
+            let mut store = crate::store::Store {
+                state: state(vec![Message::user("question")]),
+            };
+            let session_id = store.state.sessions[0].id.clone();
+            let turn_id = TurnId::new();
+            store.state.sessions[0].live_reply = Some(LiveReply {
+                turn_id: turn_id.clone(),
+                text: "answer before terminal".into(),
+            });
+            let mut tracker = ScrollbackTracker::with_committed_revision_cache();
+            let before = cached_revision(&mut tracker, &store);
+            let notification = match terminal {
+                "completed" => UiNotification::TurnCompleted(TurnCompletedEvent {
+                    session_id,
+                    turn_id,
+                    topic: None,
+                    token_usage: None,
+                    cursor: None,
+                    tokens_in: None,
+                    tokens_out: None,
+                    session_result: None,
+                }),
+                "failed" => UiNotification::TurnError(TurnErrorEvent {
+                    session_id,
+                    turn_id,
+                    topic: None,
+                    token_usage: None,
+                    partial_result: None,
+                    code: "error".into(),
+                    message: "failed".into(),
+                }),
+                _ => UiNotification::TurnStarted(TurnStartedEvent {
+                    session_id,
+                    turn_id: TurnId::new(),
+                    topic: None,
+                    timestamp: chrono::Utc::now(),
+                }),
+            };
+            store.apply_event(AppUiEvent::Protocol(notification));
+            let after = cached_revision(&mut tracker, &store);
+            assert!(
+                !Arc::ptr_eq(&before, &after),
+                "{terminal} appends committed history"
+            );
+            assert_eq!(after.message_count, before.message_count + 1, "{terminal}");
+            assert_eq!(
+                after.as_ref(),
+                &app::committed_messages_fingerprint(&store.state),
+                "{terminal}"
+            );
+        }
+    }
+
+    #[test]
+    fn committed_fingerprint_cache_keys_sessions_and_survives_viewport_reset() {
+        let mut initial = state(vec![Message::assistant("AAAA")]);
+        let mut second = session_with(vec![Message::assistant("BBBB")]);
+        second.id = SessionKey("local:second".into());
+        initial.sessions.push(second);
+        let mut store = crate::store::Store { state: initial };
+        let mut tracker = ScrollbackTracker::with_committed_revision_cache();
+        let first = cached_revision(&mut tracker, &store);
+        store.state.selected_session = 1;
+        let second = cached_revision(&mut tracker, &store);
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(second.session_id, "local:second");
+        tracker.mark_flushed_stale();
+        let reset = cached_revision(&mut tracker, &store);
+        assert!(
+            Arc::ptr_eq(&second, &reset),
+            "reflow does not change committed content"
+        );
+        let next = cached_revision(&mut tracker, &store);
+        assert!(
+            Arc::ptr_eq(&reset, &next),
+            "reset must retain production cache mode"
+        );
+        let mut uncached = ScrollbackTracker::new();
+        uncached.sync(&store.state, palette(), 80);
+        store.state.sessions[1].messages[0].content = "CCCC".into();
+        let update = uncached.sync(&store.state, palette(), 80);
+        assert!(
+            update.reset,
+            "public raw-Vec callers retain fresh sync semantics"
+        );
+        assert_eq!(
+            uncached.last.as_ref(),
+            &app::committed_messages_fingerprint(&store.state)
+        );
+    }
+
+    #[test]
+    #[ignore = "manual hash-cost comparison; deterministic cache-hit coverage runs normally"]
+    fn benchmark_committed_fingerprint_revision_cache() {
+        for mebibytes in [1usize, 10] {
+            let messages = (0..mebibytes * 1024)
+                .map(|index| Message::assistant(format!("{index:08}{}", "x".repeat(1016))))
+                .collect();
+            let state = state(messages);
+            let bytes: usize = state.sessions[0]
+                .messages
+                .iter()
+                .map(|message| message.content.len())
+                .sum();
+            let mut cache = CommittedFingerprintCache::default();
+            let initial = cache.get(&state);
+            let frames = 40;
+            let raw_start = std::time::Instant::now();
+            for _ in 0..frames {
+                std::hint::black_box(app::committed_messages_fingerprint(&state));
+            }
+            let raw_elapsed = raw_start.elapsed();
+            let cached_start = std::time::Instant::now();
+            for _ in 0..frames {
+                assert!(Arc::ptr_eq(
+                    &initial,
+                    &std::hint::black_box(cache.get(&state))
+                ));
+            }
+            eprintln!(
+                "fingerprint history_bytes={bytes} frames={frames} raw_content_bytes_hashed={} cached_content_bytes_hashed=0 raw_ms={:.3} cached_ms={:.3}",
+                bytes * frames,
+                raw_elapsed.as_secs_f64() * 1000.,
+                cached_start.elapsed().as_secs_f64() * 1000.
+            );
+        }
     }
 }
