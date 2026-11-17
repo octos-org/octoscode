@@ -1155,7 +1155,11 @@ def agent_progress(runtime_dir: Path | None, session: str | None) -> dict:
                 continue
             try:
                 rec = json.loads(raw.decode("utf-8", errors="replace"))
-            except json.JSONDecodeError:
+            except (ValueError, RecursionError):
+                # Not only JSONDecodeError: an integer past the interpreter's
+                # digit limit raises a plain ValueError, and a line nested
+                # deeper than the parser goes raises RecursionError. Each is
+                # counted like any corrupt line, not fatal.
                 skipped += 1
                 continue
             ev = rec.get("event") if isinstance(rec, dict) else None
@@ -1175,10 +1179,13 @@ def agent_progress(runtime_dir: Path | None, session: str | None) -> dict:
                 origin = "main"
             else:
                 origin = f"peer {label or _one_line(ev.get('origin_id'), 64) or '?'}"
+            # `in` on a set hashes the value, and a list or an object from a
+            # ledger row is not hashable: check the type first.
+            reported = report.get("kind")
             if ev.get("suppressed") is True:
                 kind = "suppressed"
-            elif report.get("kind") in _REPORT_KINDS:
-                kind = report["kind"]
+            elif isinstance(reported, str) and reported in _REPORT_KINDS:
+                kind = reported
             else:
                 kind = "milestone"
             row = {

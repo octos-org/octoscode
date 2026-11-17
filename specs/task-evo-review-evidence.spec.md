@@ -489,6 +489,18 @@ Rule: review-monitor — Herdr 监控:区块分离与身份防混
     last-outcome/deliverables 任一裁决(octos UPCR-2026-R3DB2ECCA /
     UPCR-2026-R5992A477)
 
+场景: 畸形的 agent 报告行不拖垮监控(critical)
+  测试:
+    包: octoscode
+    过滤: olp_review_monitor_progress_survives_malformed_report_rows
+  假设 本 session 的 ledger 里有 report.kind 不是字符串的 agent 行(数组、
+    对象、数字)、一行嵌套深到 JSON 解析器放弃的行、一行带超长整数的行,
+    其后还有一条正常的 verification 行
+  当 渲染监控
+  那么 监控正常退出,其余区块照常输出;kind 不是字符串的行按未知 kind
+    处理,显示为 milestone;解析不了的行只计入被跳过的行数;其后的正常行
+    照常显示
+
 场景: 没有精确 ledger 时 progress 为 unavailable(critical)
   测试:
     包: octoscode

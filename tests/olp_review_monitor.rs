@@ -2501,6 +2501,86 @@ fn olp_review_monitor_progress_reports_exact_session_self_reported() {
     assert_eq!(v["deliverables"]["accepted"], false);
 }
 
+/// 场景: 畸形的 agent 报告行(report.kind 不是字符串、JSON 嵌套过深、整数
+/// 超长)不拖垮监控: kind 按未知处理显示为 milestone,解析不了的行计入
+/// skipped,其后的正常行和其余区块照常输出。
+#[test]
+fn olp_review_monitor_progress_survives_malformed_report_rows() {
+    let t = TmpDir::new("progress-malformed");
+    let d = t.path().to_path_buf();
+    let bare = "octosfix:local:tui#coding";
+    let wire = format!("{bare}\u{0}~cwd-abc");
+    std::fs::write(
+        d.join("review-state.json"),
+        r#"{"runtime":"/tmp/rt","session":"octosfix:local:tui#coding\u0000~cwd-abc","goal":"goal_01"}"#,
+    )
+    .unwrap();
+    let runtime = d.join("runtime");
+    let own = runtime
+        .join("ui-protocol")
+        .join(hex_encode(wire.as_bytes()));
+    std::fs::create_dir_all(&own).unwrap();
+
+    let mut ledger = String::new();
+    for (seq, kind, text) in [
+        (1, serde_json::json!(["blocker"]), "kind is a list"),
+        (
+            2,
+            serde_json::json!({"name": "blocker"}),
+            "kind is an object",
+        ),
+        (3, serde_json::json!(7), "kind is a number"),
+    ] {
+        let mut event = agent_report_event(bare, "main", None, "milestone", text);
+        event["report"]["kind"] = kind;
+        ledger += &ledger_line(seq, event);
+    }
+    // 嵌套深到 json 解析器放弃的一行: 抛的是 RecursionError,不是 JSONDecodeError。
+    ledger += &format!(
+        "{{\"v\":1,\"seq\":4,\"event\":{{\"kind\":\"background_activity\",\"x\":{}{}}}}}\n",
+        "[".repeat(100_000),
+        "]".repeat(100_000)
+    );
+    // 超长整数: 有位数上限的 Python(3.10.7 起)抛普通 ValueError,没有上限的
+    // 能解析。v 不是 1,所以两种情况下这一行都只算一次 skipped。
+    ledger += &format!(
+        "{{\"v\":2,\"seq\":6,\"big\":{},\"event\":{{\"kind\":\"background_activity\",\
+         \"origin_kind\":\"agent\",\"session_id\":\"{bare}\"}}}}\n",
+        "1".repeat(5_000)
+    );
+    ledger += &ledger_line(
+        5,
+        agent_report_event(bare, "main", None, "verification", "tests pass"),
+    );
+    std::fs::write(own.join("ledger-0001-1.log"), ledger).unwrap();
+
+    let (ok, out) = monitor(&d, Some(&runtime), None);
+    assert!(
+        ok,
+        "a malformed report row must not kill the monitor: {out}"
+    );
+    assert!(out.contains("[progress] 4 agent report(s)"), "{out}");
+    for line in [
+        "#1 main milestone: kind is a list",
+        "#2 main milestone: kind is an object",
+        "#3 main milestone: kind is a number",
+        "#5 main verification: tests pass",
+    ] {
+        assert!(out.contains(line), "`{line}` missing: {out}");
+    }
+
+    let (ok, v) = monitor_json_profile(&d, &runtime, "octosfix");
+    assert!(ok);
+    assert_eq!(v["progress"]["state"], "ok");
+    assert_eq!(v["progress"]["total"], 4);
+    assert_eq!(
+        v["progress"]["skipped"], 2,
+        "the over-nested line + the long-integer line"
+    );
+    // 其余区块照常给出裁决。
+    assert_eq!(v["current-turn"]["lifetime"]["state"], "unknown");
+}
+
 /// 场景: 没有与 wire session 精确对应的 ledger 时 progress 为 unavailable,
 /// 不猜测、不跟符号链接;有 ledger 但无报告时如实显示为空。
 #[test]

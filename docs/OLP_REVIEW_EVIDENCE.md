@@ -236,6 +236,8 @@ python3 scripts/olp-review-monitor.py <review_dir> \
 checkpoint),按 ledger `seq` 去重,显示最近 5 条。它是 agent 自述,不是
 验证、批准或完成声明,不参与任何状态裁决;ledger 目录名必须恰为 wire
 session 的字节 hex(带 NUL+~cwd 后缀),否则显示 unavailable,不猜测。
+解析不了的行只计入 skipped,形状不对的 `report.kind` 按未知 kind 显示为
+milestone,都不影响其余区块。
 `--watch` 下新报告到达即重新输出。旧 server 或未协商
 `event.agent_report.v1` 时没有这类行,其余区块照旧。
 
