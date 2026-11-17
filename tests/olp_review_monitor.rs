@@ -2360,3 +2360,290 @@ fn olp_review_monitor_closed_keeps_identity_on_trusted_lifetime() {
         "task-fail"
     );
 }
+
+/// 写一行 ui-protocol ledger 记录(真实形状: v/seq/event/recorded_at)。
+fn ledger_line(seq: u64, event: serde_json::Value) -> String {
+    serde_json::json!({"v": 1, "seq": seq, "event": event, "recorded_at": "2026-11-11T19:58:47Z"})
+        .to_string()
+        + "\n"
+}
+
+/// 一条 agent 进度报告的 background/activity 事件。
+fn agent_report_event(
+    session: &str,
+    origin_id: &str,
+    label: Option<&str>,
+    kind: &str,
+    text: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "record_kind": "notification",
+        "kind": "background_activity",
+        "session_id": session,
+        "origin_kind": "agent",
+        "origin_id": origin_id,
+        "origin_label": label,
+        "text": text,
+        "suppressed": false,
+        "report": {"kind": kind, "turn_id": "t-1", "next_step": "ask the user", "evidence": "logs/test.txt"}
+    })
+}
+
+/// 场景: progress 区块只读本 session ledger 的 agent 自述,按 seq 去重,
+/// 不吞并别的 session,也不改变任何状态裁决。
+#[test]
+fn olp_review_monitor_progress_reports_exact_session_self_reported() {
+    let t = TmpDir::new("progress");
+    let d = t.path().to_path_buf();
+    let bare = "octosfix:local:tui#coding";
+    let wire = format!("{bare}\u{0}~cwd-abc");
+    std::fs::write(
+        d.join("review-state.json"),
+        r#"{"runtime":"/tmp/rt","session":"octosfix:local:tui#coding\u0000~cwd-abc","goal":"goal_01"}"#,
+    )
+    .unwrap();
+    let runtime = d.join("runtime");
+    let ledger_dir = |session: &str| {
+        let dir = runtime
+            .join("ui-protocol")
+            .join(hex_encode(session.as_bytes()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    };
+    let own = ledger_dir(&wire);
+    let mut first = String::new();
+    first += &ledger_line(
+        5,
+        agent_report_event(bare, "main", None, "blocker", "tests need\u{1b}[31m a key"),
+    );
+    first += &ledger_line(
+        6,
+        serde_json::json!({"record_kind":"notification","kind":"background_activity",
+            "session_id": bare, "origin_kind":"monitor","origin_id":"ci","text":"MONITOR-LINE"}),
+    );
+    first += &ledger_line(
+        7,
+        agent_report_event(
+            bare,
+            "peer-reviewer",
+            Some("reviewer"),
+            "celebration",
+            "review/a.json ready",
+        ),
+    );
+    first += &ledger_line(
+        8,
+        agent_report_event(
+            "octosfix:local:tui#other",
+            "main",
+            None,
+            "milestone",
+            "WRONG-SESSION-ROW",
+        ),
+    );
+    first += "{\"v\":1,\"seq\":9,\"event\":{\"kind\":\"background_activity\" CORRUPT\n";
+    std::fs::write(own.join("ledger-0001-1.log"), first).unwrap();
+    // 重放: 同一 seq 再次出现在后一个 ledger 文件里,只算一条。
+    std::fs::write(
+        own.join("ledger-0002-1.log"),
+        ledger_line(
+            7,
+            agent_report_event(
+                bare,
+                "peer-reviewer",
+                Some("reviewer"),
+                "celebration",
+                "review/a.json ready",
+            ),
+        ),
+    )
+    .unwrap();
+    // 同 channel 不同 cwd 的另一个 session: 不得被吞并。
+    std::fs::write(
+        ledger_dir(&format!("{bare}\u{0}~cwd-zzz")).join("ledger-0001-1.log"),
+        ledger_line(
+            3,
+            agent_report_event(bare, "main", None, "milestone", "FOREIGN-CWD-ROW"),
+        ),
+    )
+    .unwrap();
+
+    let (ok, out) = monitor(&d, Some(&runtime), None);
+    assert!(ok, "{out}");
+    assert!(out.contains("[progress] 2 agent report(s)"), "{out}");
+    assert!(out.contains("self-reported"), "{out}");
+    assert!(
+        out.contains(
+            "#5 main blocker: tests need [31m a key | next: ask the user | see: logs/test.txt"
+        ),
+        "kind, next step and evidence shown; ESC stripped: {out}"
+    );
+    assert!(
+        out.contains("#7 peer reviewer milestone: review/a.json ready"),
+        "unknown kind drawn as milestone under the peer: {out}"
+    );
+    for leaked in [
+        "MONITOR-LINE",
+        "WRONG-SESSION-ROW",
+        "FOREIGN-CWD-ROW",
+        "\u{1b}",
+    ] {
+        assert!(!out.contains(leaked), "{leaked} must not render: {out}");
+    }
+
+    let (ok, v) = monitor_json_profile(&d, &runtime, "octosfix");
+    assert!(ok);
+    assert_eq!(v["progress"]["state"], "ok");
+    assert_eq!(v["progress"]["total"], 2);
+    assert_eq!(
+        v["progress"]["skipped"], 2,
+        "wrong-session row + corrupt line"
+    );
+    // 自述不参与裁决: 没有 lifetime/peer 证据时 current-turn 仍是 unknown。
+    assert_eq!(v["current-turn"]["lifetime"]["state"], "unknown");
+    assert_eq!(v["deliverables"]["accepted"], false);
+}
+
+/// 场景: 畸形的 agent 报告行(report.kind 不是字符串、JSON 嵌套过深、整数
+/// 超长)不拖垮监控: kind 按未知处理显示为 milestone,解析不了的行计入
+/// skipped,其后的正常行和其余区块照常输出。
+#[test]
+fn olp_review_monitor_progress_survives_malformed_report_rows() {
+    let t = TmpDir::new("progress-malformed");
+    let d = t.path().to_path_buf();
+    let bare = "octosfix:local:tui#coding";
+    let wire = format!("{bare}\u{0}~cwd-abc");
+    std::fs::write(
+        d.join("review-state.json"),
+        r#"{"runtime":"/tmp/rt","session":"octosfix:local:tui#coding\u0000~cwd-abc","goal":"goal_01"}"#,
+    )
+    .unwrap();
+    let runtime = d.join("runtime");
+    let own = runtime
+        .join("ui-protocol")
+        .join(hex_encode(wire.as_bytes()));
+    std::fs::create_dir_all(&own).unwrap();
+
+    let mut ledger = String::new();
+    for (seq, kind, text) in [
+        (1, serde_json::json!(["blocker"]), "kind is a list"),
+        (
+            2,
+            serde_json::json!({"name": "blocker"}),
+            "kind is an object",
+        ),
+        (3, serde_json::json!(7), "kind is a number"),
+    ] {
+        let mut event = agent_report_event(bare, "main", None, "milestone", text);
+        event["report"]["kind"] = kind;
+        ledger += &ledger_line(seq, event);
+    }
+    // 嵌套深到 json 解析器放弃的一行: 抛的是 RecursionError,不是 JSONDecodeError。
+    ledger += &format!(
+        "{{\"v\":1,\"seq\":4,\"event\":{{\"kind\":\"background_activity\",\"x\":{}{}}}}}\n",
+        "[".repeat(100_000),
+        "]".repeat(100_000)
+    );
+    // 超长整数: 有位数上限的 Python(3.10.7 起)抛普通 ValueError,没有上限的
+    // 能解析。v 不是 1,所以两种情况下这一行都只算一次 skipped。
+    ledger += &format!(
+        "{{\"v\":2,\"seq\":6,\"big\":{},\"event\":{{\"kind\":\"background_activity\",\
+         \"origin_kind\":\"agent\",\"session_id\":\"{bare}\"}}}}\n",
+        "1".repeat(5_000)
+    );
+    ledger += &ledger_line(
+        5,
+        agent_report_event(bare, "main", None, "verification", "tests pass"),
+    );
+    std::fs::write(own.join("ledger-0001-1.log"), ledger).unwrap();
+
+    let (ok, out) = monitor(&d, Some(&runtime), None);
+    assert!(
+        ok,
+        "a malformed report row must not kill the monitor: {out}"
+    );
+    assert!(out.contains("[progress] 4 agent report(s)"), "{out}");
+    for line in [
+        "#1 main milestone: kind is a list",
+        "#2 main milestone: kind is an object",
+        "#3 main milestone: kind is a number",
+        "#5 main verification: tests pass",
+    ] {
+        assert!(out.contains(line), "`{line}` missing: {out}");
+    }
+
+    let (ok, v) = monitor_json_profile(&d, &runtime, "octosfix");
+    assert!(ok);
+    assert_eq!(v["progress"]["state"], "ok");
+    assert_eq!(v["progress"]["total"], 4);
+    assert_eq!(
+        v["progress"]["skipped"], 2,
+        "the over-nested line + the long-integer line"
+    );
+    // 其余区块照常给出裁决。
+    assert_eq!(v["current-turn"]["lifetime"]["state"], "unknown");
+}
+
+/// 场景: 没有与 wire session 精确对应的 ledger 时 progress 为 unavailable,
+/// 不猜测、不跟符号链接;有 ledger 但无报告时如实显示为空。
+#[test]
+fn olp_review_monitor_progress_unavailable_without_exact_ledger() {
+    let t = TmpDir::new("progress-none");
+    let d = t.path().to_path_buf();
+    let bare = "octosfix:local:tui#coding";
+    let wire = format!("{bare}\u{0}~cwd-abc");
+    std::fs::write(
+        d.join("review-state.json"),
+        r#"{"runtime":"/tmp/rt","session":"octosfix:local:tui#coding\u0000~cwd-abc","goal":"goal_01"}"#,
+    )
+    .unwrap();
+    let runtime = d.join("runtime");
+    let base = runtime.join("ui-protocol");
+    std::fs::create_dir_all(&base).unwrap();
+
+    let (_, out) = monitor(&d, Some(&runtime), None);
+    assert!(
+        out.contains("[progress] unavailable (no ledger for this exact session)"),
+        "{out}"
+    );
+
+    // 真实 ledger 放在别处,本 session 的目录名只是指向它的符号链接。
+    let elsewhere = d.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(
+        elsewhere.join("ledger-0001-1.log"),
+        ledger_line(
+            1,
+            agent_report_event(bare, "main", None, "milestone", "VIA-SYMLINK"),
+        ),
+    )
+    .unwrap();
+    let own = base.join(hex_encode(wire.as_bytes()));
+    std::os::unix::fs::symlink(&elsewhere, &own).unwrap();
+    let (_, out) = monitor(&d, Some(&runtime), None);
+    assert!(out.contains("[progress] unavailable"), "{out}");
+    assert!(!out.contains("VIA-SYMLINK"), "{out}");
+    std::fs::remove_file(&own).unwrap();
+
+    // 无 cwd 后缀的 session 不去猜是哪个 ledger。
+    std::fs::rename(&elsewhere, &own).unwrap();
+    let (_, out) = monitor_with_session(&d, Some(&runtime), None, bare);
+    assert!(
+        out.contains("[progress] unavailable (session has no wire cwd suffix"),
+        "{out}"
+    );
+    assert!(!out.contains("VIA-SYMLINK"), "{out}");
+
+    // 精确 session + 只有被观察来源的行 → 如实为空。
+    std::fs::write(
+        own.join("ledger-0001-1.log"),
+        ledger_line(
+            1,
+            serde_json::json!({"record_kind":"notification","kind":"background_activity",
+                "session_id": bare, "origin_kind":"monitor","origin_id":"ci","text":"x"}),
+        ),
+    )
+    .unwrap();
+    let (_, out) = monitor(&d, Some(&runtime), None);
+    assert!(out.contains("[progress] (no agent reports)"), "{out}");
+}
