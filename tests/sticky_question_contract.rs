@@ -1,4 +1,7 @@
 //! Observable rendering/input contract for the default fixed-question layout.
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 use octos_core::app_ui::{AppUiEvent, AppUiSnapshot};
 use octos_core::{Message, SessionKey, ui_protocol::TurnId};

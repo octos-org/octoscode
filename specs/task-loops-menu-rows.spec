@@ -20,8 +20,10 @@ estimate: 0.25d
   `AppState.loop_actions_target`,压栈打开 `MENU_LOOP_ACTIONS`。Esc 沿既有
   菜单栈语义逐层返回。
 - 子菜单头部为**只读详情行**(完整状态·节奏 + 提示词摘要,`non_selectable`),
-  光标自动跳过;动作行沿用原 `RunSlashCommand("/loop <verb> <id>")` 派发路径,
-  保持能力门控与关栈语义不变。
+  光标自动跳过;非删除动作行沿用原 `RunSlashCommand("/loop <verb> <id>")`
+  派发路径,保持能力门控与关栈语义不变。delete 行捕获 session + loop id,
+  以 destructive 样式打开 Yes/No 确认;No 只返回,只有 Yes 才派发 DeleteLoop,
+  且确认期间切换 session 不会改变删除目标。
 - 动词按状态裁剪:active → pause/fire-now/delete;paused → resume/fire-now/
   delete;其他 → delete。paused 也可 fire-now(与服务端 control_loop 一致)。
 - 目标 loop 在子菜单打开期间消失(他处删除/过期)时,子菜单显示明确的
@@ -138,3 +140,12 @@ estimate: 0.25d
   当 激活该行
   那么 `loop_actions_target` 为该 loop id
   并且 活跃菜单为 `MENU_LOOP_ACTIONS`
+
+场景: 删除必须确认且保留原会话与 loop 目标
+  测试: loop_delete_requires_yes_and_preserves_captured_session_and_loop
+  假设 loops 动作子菜单中选中 delete 行
+  当 激活 delete 行
+  那么 不派发 DeleteLoop 且打开带 destructive Yes 行的 Yes/No 确认
+  当 选择 No 后再次进入确认并切换到另一个 session
+  那么 No 不派发 DeleteLoop
+  并且 Yes 仍只针对最初捕获的 session + loop id 派发一次 DeleteLoop

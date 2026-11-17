@@ -1,5 +1,8 @@
 //! Contract tests for specs/task-startup-splash.spec.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use octoscode::splash::{
     SPLASH_EFFECTS, SplashGate, effect_args_for, pick_effect_args, should_play, splash_text,
 };

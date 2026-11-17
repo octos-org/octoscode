@@ -11128,6 +11128,145 @@ mod tests {
     }
 
     #[test]
+    fn status_row_shows_judge_agree_marker_after_actions_chip() {
+        let mut app = autonomy_app_state();
+        app.run_state = SessionRunState::InProgress;
+        app.activity
+            .push(ActivityItem::new(ActivityKind::Tool, "shell", "complete"));
+        app.set_session_judge(crate::model::JudgeDecisionParams {
+            session_id: "local:test".into(),
+            turn_id: Some("turn_1".into()),
+            keyword_tier: "cheap".into(),
+            judge_tier: Some("strong".into()),
+            judge_confidence: Some(0.99),
+            judge_agrees: Some(true),
+            judge_error: None,
+            judge_model: None,
+            has_cjk: true,
+        });
+
+        let text: String =
+            harness_status_lines_static(&app, Palette::for_theme(ThemeName::Codex), true)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect();
+        assert!(
+            text.contains("judge ✓ 0.99"),
+            "agree marker carries the two-decimal confidence: {text:?}"
+        );
+        let actions = text.find("1 actions").expect("actions chip renders");
+        let marker = text.find("judge ✓").expect("judge marker renders");
+        assert!(
+            actions < marker,
+            "the judge chip follows the actions chip: {text:?}"
+        );
+    }
+
+    #[test]
+    fn status_row_shows_judge_disagree_marker_with_both_tiers() {
+        let mut app = autonomy_app_state();
+        app.run_state = SessionRunState::InProgress;
+        app.set_session_judge(crate::model::JudgeDecisionParams {
+            session_id: "local:test".into(),
+            turn_id: None,
+            keyword_tier: "cheap".into(),
+            judge_tier: Some("strong".into()),
+            judge_confidence: Some(0.87),
+            judge_agrees: Some(false),
+            judge_error: None,
+            judge_model: None,
+            has_cjk: true,
+        });
+
+        let text: String =
+            harness_status_lines_static(&app, Palette::for_theme(ThemeName::Codex), true)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect();
+        assert!(
+            text.contains("judge ✗ strong≠cheap 0.87"),
+            "disagree marker names both tiers and the confidence: {text:?}"
+        );
+    }
+
+    #[test]
+    fn status_row_shows_judge_error_marker() {
+        let mut app = autonomy_app_state();
+        app.run_state = SessionRunState::InProgress;
+        app.set_session_judge(crate::model::JudgeDecisionParams {
+            session_id: "local:test".into(),
+            turn_id: None,
+            keyword_tier: "cheap".into(),
+            judge_tier: None,
+            judge_confidence: None,
+            judge_agrees: None,
+            judge_error: Some("timeout".into()),
+            judge_model: None,
+            has_cjk: false,
+        });
+
+        let text: String =
+            harness_status_lines_static(&app, Palette::for_theme(ThemeName::Codex), true)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect();
+        assert!(
+            text.contains("judge ⚠ timeout"),
+            "error marker carries the error code: {text:?}"
+        );
+        assert!(
+            !text.contains('✓'),
+            "no agree glyph on an errored judge: {text:?}"
+        );
+        assert!(
+            !text.contains('✗'),
+            "no disagree glyph on an errored judge: {text:?}"
+        );
+    }
+
+    #[test]
+    fn status_row_unchanged_when_no_judge_decision() {
+        // An autonomy entry EXISTS (another mirror feature touched it) but no
+        // judge decision ever arrived — the row must stay verbatim identical.
+        let session_id = SessionKey("local:test".into());
+        let mut app = autonomy_app_state();
+        app.run_state = SessionRunState::InProgress;
+        app.activity
+            .push(ActivityItem::new(ActivityKind::Tool, "shell", "complete"));
+        let _ = app.session_autonomy_mut(&session_id);
+
+        let text_with_entry: String =
+            harness_status_lines_static(&app, Palette::for_theme(ThemeName::Codex), true)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect();
+        assert!(
+            !text_with_entry.contains("judge"),
+            "no judge content without a judge decision: {text_with_entry:?}"
+        );
+
+        let mut baseline = autonomy_app_state();
+        baseline.run_state = SessionRunState::InProgress;
+        baseline
+            .activity
+            .push(ActivityItem::new(ActivityKind::Tool, "shell", "complete"));
+        let text_baseline: String =
+            harness_status_lines_static(&baseline, Palette::for_theme(ThemeName::Codex), true)
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .map(|span| span.content.as_ref())
+                .collect();
+        assert_eq!(
+            text_with_entry, text_baseline,
+            "the row is verbatim unchanged when last_judge is None"
+        );
+    }
+
+    #[test]
     fn harness_status_word_decrypts_on_entrance_then_settles() {
         use octos_core::ui_protocol::SessionOrchestrationEvent;
         let session_id = SessionKey("local:test".into());

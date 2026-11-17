@@ -6,6 +6,9 @@
 //! end). Cutting mid-block rendered each batch as an independent half-document
 //! and froze the damage forever — the reported "markdown isn't rendered".
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use octos_core::ui_protocol::TurnId;
 use octos_core::{Message, SessionKey};
 use octoscode::app::{

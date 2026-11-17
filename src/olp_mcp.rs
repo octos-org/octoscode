@@ -22,12 +22,21 @@ pub const PROTOCOL_VERSION: &str = "2024-11-05";
 pub const SERVER_NAME: &str = "olp-mcp";
 pub const SERVER_VERSION: &str = "0.2.0";
 pub const SIGNATURE: &str = "MCP(ask_outer)";
-pub const ASK_TIMEOUT_SECS: f64 = 90.0;
+/// How long `ask_outer` waits for an answer before returning the degraded
+/// guidance. It must stay below the MCP client's own tool-call timeout: octos
+/// aborts any MCP tool call after 60 s (`TOOL_CALL_TIMEOUT` in
+/// octos-agent/src/mcp.rs), and a call it aborts reaches the inner loop as a
+/// tool failure — the guidance, and the timeout audit line, never arrive in
+/// time. 50 s leaves room for the poll interval and the audit hook.
+pub const ASK_TIMEOUT_SECS: f64 = 50.0;
+/// The longest wait a caller may configure (`OLP_MCP_TIMEOUT_SECS`); longer
+/// values are clamped. See [`ASK_TIMEOUT_SECS`] for the 60 s client limit.
+pub const ASK_TIMEOUT_CEILING_SECS: f64 = 55.0;
 pub const ASK_POLL_INTERVAL_SECS: f64 = 0.5;
 pub const ASK_QUOTA_PER_SLICE: usize = 3;
 const BOARD_RELATIVE: &str = "OUTER_LOOP_MCP.md";
 
-const DEGRADED_GUIDANCE: &str = "外环 90s 未应答(超时降级):按黑板既有指导继续推进;若确实无法推进,以 ACK(blocked) 收场并注明本次问询 id,外环会在线信箱补答。";
+const DEGRADED_GUIDANCE: &str = "外环未在等待时间内应答(超时降级):按黑板既有指导继续推进;若确实无法推进,以 ACK(blocked) 收场并注明本次问询 id,外环会在线信箱补答。";
 const QUOTA_REFUSAL: &str = "拒绝:本切片 ask_outer 问询已达 3 次上限(防思考外包)。请按黑板既有指导自行推进,或以 report_blocked 直通落板请求外环介入。";
 const TRIED_REFUSAL: &str =
     "拒绝:tried 字段为空。防思考外包纪律要求先自行尝试——把已试过的路径写进 tried 再问。";
@@ -198,7 +207,6 @@ impl<'a> OlpMcpServer<'a> {
             return "拒绝:question 为空。".into();
         }
 
-        ASK_STATE.with(|state| state.set(state.get() + 1));
         let ask_id = short_uuid();
         let ts = timestamp_compact();
         let payload = json!({
@@ -206,10 +214,25 @@ impl<'a> OlpMcpServer<'a> {
             "question": question, "context": context, "tried": tried,
         });
         let question_path = self.questions_dir.join(format!("{ts}-{ask_id}.json"));
-        let _ = std::fs::write(
+        // Only a question that reached the mailbox counts against the quota
+        // (retrospective #11): a failed delivery is reported at once instead
+        // of waiting out the timeout for an answer nobody can give.
+        if let Err(err) = std::fs::write(
             &question_path,
             serde_json::to_string_pretty(&payload).unwrap_or_default(),
-        );
+        ) {
+            self.audit(
+                "refusal",
+                &format!(
+                    "ask_outer delivery failed: {err} ({})",
+                    question_path.display()
+                ),
+            );
+            return format!(
+                "投递失败:提问没能写进信箱({err}),本次不计入配额。请按黑板既有指导推进,或以 report_blocked 直通落板请求外环介入。"
+            );
+        }
+        ASK_STATE.with(|state| state.set(state.get() + 1));
         let detail_head: String = question.chars().take(200).collect();
         self.audit("ask", &format!("id={ask_id} question={detail_head}"));
 
@@ -249,7 +272,10 @@ impl<'a> OlpMcpServer<'a> {
             "timeout",
             &format!("id={ask_id} no answer in {:.0}s", self.timeout_secs),
         );
-        format!("{DEGRADED_GUIDANCE}\n(问询 id: {ask_id})")
+        format!(
+            "{DEGRADED_GUIDANCE}\n(已等待 {:.0}s;问询 id: {ask_id})",
+            self.timeout_secs
+        )
     }
 
     pub fn report_blocked(&self, args: &Value) -> String {
@@ -323,13 +349,14 @@ impl<'a> OlpMcpServer<'a> {
 
 thread_local! {
     static ASK_STATE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ID_SEQ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn tools_schema() -> Value {
     json!([
         {
             "name": "ask_outer",
-            "description": "Ask the outer loop a question and wait (<=90s) for the answer via the mailbox. Quota: 3 per slice; `tried` is mandatory.",
+            "description": "Ask the outer loop a question and wait (<=50s) for the answer via the mailbox. Quota: 3 per slice; `tried` is mandatory.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -363,7 +390,8 @@ fn short_uuid() -> String {
         .unwrap_or(0);
     let pid = std::process::id() as u64;
     let mixed = bytes.wrapping_mul(0x9E3779B97F4A7C15) ^ pid.rotate_left(32);
-    let counter = ASK_STATE.with(|s| {
+    // Its own sequence: ids must not consume the ask quota.
+    let counter = ID_SEQ.with(|s| {
         let v = s.get() + 1;
         s.set(v);
         v as u64

@@ -208,6 +208,9 @@ app:
   statusbar:
     agents: "%{count} 个智能体"
     actions: "%{count} 个动作"
+    judge_agree: "判定 ✓ %{conf}"
+    judge_disagree: "判定 ✗ %{judge}≠%{keyword} %{conf}"
+    judge_error: "判定 ⚠ %{error}"
     re_entering: "重新进入中"
     retrying_attempt_max: "重试中（第 %{attempt}/%{max} 次）"
     retrying_attempt: "重试中（第 %{attempt} 次）"

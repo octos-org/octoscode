@@ -5408,6 +5408,45 @@ pub(crate) fn harness_status_lines_impl(
         ));
     }
 
+    // judge.decisions.v1 (#3): the latest round's verdict as a muted chip —
+    // agree (+confidence), disagree (both tiers + confidence), or error
+    // (code) — so the operator can see at a glance whether the two sides
+    // agreed and how sure the judge was. Renders ONLY when a verdict latched
+    // for THIS session (`last_judge`); an absent verdict keeps the row
+    // verbatim unchanged. Display only — nothing branches on the verdict.
+    if let Some(judge) = app
+        .session_autonomy_for(&session_id)
+        .and_then(|state| state.last_judge.as_ref())
+    {
+        let label = if let Some(error) = judge.error.as_deref() {
+            t!("app.statusbar.judge_error", error = error).to_string()
+        } else if let Some(confidence) = judge.confidence {
+            match judge.agrees {
+                Some(true) => t!(
+                    "app.statusbar.judge_agree",
+                    conf = format!("{confidence:.2}")
+                )
+                .to_string(),
+                Some(false) => t!(
+                    "app.statusbar.judge_disagree",
+                    judge = judge.judge_tier.as_deref().unwrap_or(""),
+                    keyword = judge.keyword_tier.as_str(),
+                    conf = format!("{confidence:.2}")
+                )
+                .to_string(),
+                None => String::new(),
+            }
+        } else {
+            String::new()
+        };
+        if !label.is_empty() {
+            spans.push(Span::styled(
+                format!(" · {label}"),
+                palette.muted().bg(palette.surface),
+            ));
+        }
+    }
+
     if let Some(status) = status {
         if status.running_agents > 0 {
             spans.push(Span::styled(

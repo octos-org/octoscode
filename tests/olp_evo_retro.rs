@@ -3,6 +3,9 @@
 //! Evolution loop phase-1 retro contract tests (#42, SDD spec:
 //! `specs/task-req-olp-evo-p1.spec.md`).
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -477,14 +480,19 @@ fn olp_evo_retro_no_cards_exit_zero() {
 /// to the phase-0 baseline (origin/main 18907aa).
 #[test]
 fn olp_evo_retro_skill_step5_and_protected_sections_golden() {
-    let skill =
-        std::fs::read_to_string(repo_root().join(".claude/skills/octoloop/SKILL.md")).unwrap();
+    let skill = std::fs::read_to_string(repo_root().join("skills/octoloop/AGENTS.md")).unwrap();
 
     // protected-section constants (sha256, baseline 18907aa)
-    const DESC: &str = "b2c32593cc6a5dacbc6e42ded9186c9ac94171c0d9d1883aa19f6ac760c5ccb4";
-    const INIT: &str = "71cd93889dcf5a437f0cd35e08ce069e1f8f589f2d0243553dd9017d6d73bcee";
-    const INNER: &str = "1e21d03921302a2125df06eb439bcc02edf14e1dc91bf77395238f8b78289597";
-    const DISC: &str = "adbb09472cc51deae4184c80c989e916ba9d1c03360487bfaa86a5c22a263f84";
+    const DESC: &str = "a395bc353a405a643f8c8f60c2f2fed6bdeb9fa6adb2003b50129759d391cf06";
+    const INIT: &str = "a38d0ab7e8d7162655c2bc774cf32397738fba0357546a9893dbd38e0bd5cff1";
+    // Revised with the operator's approval (2026-11-16): the launch table
+    // states that unsandboxed launch needs the operator's standing grant for
+    // the unit first (protocol R8); registration alone is not the grant.
+    const INNER: &str = "3c1b85960e44aa28e8bec310ee398eb7550eeef7bfcd6af1d07890dd450e547e";
+    // Revised with the operator's approval (2026-11-16): the restart
+    // checklist's step 1 follows protocol R8 (authorized agents may launch
+    // an inner loop without a sandbox) instead of "operator by hand".
+    const DISC: &str = "5e41e7013ccf68d7718a22737ea98a08570f89a34df341406623e6abcaaf133b";
 
     let desc_line = skill
         .lines()
@@ -532,7 +540,11 @@ fn sha256_str(s: &str) -> String {
 fn olp_evo_retro_boot_section7_and_golden() {
     let boot = std::fs::read_to_string(repo_root().join("docs/OLP_OUTER_BOOT.md")).unwrap();
 
-    const BOOT_0_TO_6: &str = "89a820c60e5758db9be3d8e6c8573f9b0b15101fa9234ef92dd008c00e464836";
+    // Revised with the operator's approval: 2026-11-15 §3.5 states the lease
+    // checked at the write entry points (task-outer-duty-lease); 2026-11-16
+    // §0b step 1 and §6 say an authorized agent may launch an inner loop
+    // without a sandbox (protocol R8) instead of "operator only".
+    const BOOT_0_TO_6: &str = "3ced876330148011b059dfb3d9b01e95dc1817a9c6c081dbc5d843e01d2fd369";
     let slice = &boot[boot.find("## 0.").unwrap()..boot.find("## 7.").unwrap()];
     assert_eq!(sha256_str(slice), BOOT_0_TO_6);
 
@@ -816,4 +828,68 @@ fn olp_evo_retro_writes_no_pycache() {
         !repo_root().join("scripts/__pycache__").exists(),
         "no __pycache__ may appear"
     );
+}
+
+/// Scenario: 多机部署的卡按症状分组,不按单元和卡号分组
+#[test]
+fn olp_evo_retro_groups_cluster_cards_across_units() {
+    let sb = Sandbox::new("cluster-cards");
+    sb.write_board(
+        "### EVO-0001（t，harvest）
+trigger: unit_alert
+source: review /r.md
+identity: board:/r.md#212#alert#aaaa
+symptom: > 单元(m07)·负哨(#212): stalled_no_progress turn=t1 age=900s activity=events_continuing
+### EVO-0002（t，harvest）
+trigger: unit_alert
+source: review /r.md
+identity: board:/r.md#305#alert#bbbb
+symptom: > 单元(m09)·负哨(#305): stalled_no_progress turn=t9 age=912s activity=events_continuing
+### EVO-0003（t，harvest）
+trigger: ack_blocked
+source: review /r.md
+identity: board:/r.md#212#blocked#cccc
+symptom: > 内环(m07)·#212 ACK(blocked): hdc 连不上设备
+### EVO-0004（t，harvest）
+trigger: ack_blocked
+source: review /r.md
+identity: board:/r.md#305#blocked#dddd
+symptom: > 内环(m09)·ACK(blocked): #305(2026-11-13): hdc 连不上设备
+### EVO-0005（t，harvest）
+trigger: returned
+source: review /r.md
+identity: board:/r.md#212#returned#eeee
+symptom: > 外环(hub)·打回(#212): 缺测试
+",
+    );
+    let out = sb.run(false);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let brief = sb.brief_text();
+    assert!(
+        brief.contains("layer=Execution"),
+        "unit_alert → Execution: {brief}"
+    );
+    assert!(
+        brief.contains("layer=Verification"),
+        "returned → Verification: {brief}"
+    );
+    // The same symptom from two units about two cards is ONE candidate.
+    assert_eq!(
+        brief.matches("recurrence_hint=2").count(),
+        2,
+        "the two stalls group, and the two blocked ACKs group: {brief}"
+    );
+    for signature in ["单元(m07)", "内环(m09)", "外环(hub)·打回"] {
+        assert!(
+            !brief
+                .lines()
+                .filter(|l| l.contains("recurrence_hint="))
+                .any(|l| l.contains(signature)),
+            "candidate keys carry the symptom, not the signature {signature}: {brief}"
+        );
+    }
 }

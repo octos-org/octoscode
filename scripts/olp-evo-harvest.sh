@@ -8,6 +8,13 @@
 # Exit codes: 2 board missing; 70 injected fault; 0 ok; 1 other errors.
 set -euo pipefail
 
+# #12c: pin EVERY python3 child to UTF-8 regardless of LC_ALL / PYTHONUTF8
+# inherited from the caller. Under LC_ALL=C + PYTHONUTF8=0, open() reads
+# and stdout default to ASCII and the state-commit pass dies decoding the
+# very cards this script wrote (EVOLUTION.md is UTF-8 by contract). This
+# export overrides a hostile PYTHONUTF8=0 and needs no installed locale.
+export PYTHONUTF8=1
+
 REPO_ROOT="${1:?usage: olp-evo-harvest.sh <repo-root> [--dry-run]}"
 DRY_RUN=0
 [ "${2:-}" = "--dry-run" ] && DRY_RUN=1
@@ -24,6 +31,60 @@ if [ ! -d "$REPO_ROOT" ] && [ ! -f "$REPO_ROOT" ]; then
     echo "error: repo-root not found: $REPO_ROOT" >&2
     exit 2
 fi
+
+# --- #12c capability preflight (all platforms) ---------------------------
+# Production launches must not depend on the caller remembering
+# scripts/verify.sh (or its PATH). EVERY required capability is validated
+# before ANY write: GNU `stat -c '%s'`, GNU `realpath -m`, `sha256sum`,
+# `flock`, and `python3` (utf8 mode). On Darwin only, a failed probe first
+# tries discovery consistent with verify.sh — brew prefix, then the stock
+# /opt/homebrew and /usr/local coreutils gnubin dirs (nothing installed,
+# no override knob); Linux/other platforms take the PATH as-is so a
+# missing tool (e.g. flock) still fails here. Unusable after discovery ⇒
+# exit 2 with actionable guidance BEFORE state mkdir, lock, or any board
+# write.
+gnu_probe_succeeds() {
+    command -v stat >/dev/null 2>&1 \
+        && stat -c '%s' /dev/null >/dev/null 2>&1 \
+        && command -v realpath >/dev/null 2>&1 \
+        && realpath -m /dev/null >/dev/null 2>&1 \
+        && sha256sum /dev/null >/dev/null 2>&1 \
+        && command -v flock >/dev/null 2>&1 \
+        && python3 -X utf8 -c 'import sys' >/dev/null 2>&1
+}
+
+if ! gnu_probe_succeeds; then
+    if [ "$(uname -s)" = "Darwin" ]; then
+        gnubin=""
+        # Prefer the active brew prefix (any arch / custom location). The
+        # assignment is guarded so a failing brew cannot trip set -e.
+        if command -v brew >/dev/null 2>&1; then
+            candidate="$(brew --prefix coreutils 2>/dev/null || true)"
+            candidate="$candidate/libexec/gnubin"
+            [ -d "$candidate" ] && gnubin="$candidate"
+        fi
+        if [ -z "$gnubin" ]; then
+            for prefix in /opt/homebrew /usr/local; do
+                candidate="$prefix/opt/coreutils/libexec/gnubin"
+                if [ -d "$candidate" ]; then
+                    gnubin="$candidate"
+                    break
+                fi
+            done
+        fi
+        if [ -n "$gnubin" ]; then
+            PATH="$gnubin:$PATH"
+            export PATH
+        fi
+    fi
+    # Re-probe AFTER discovery: only now is availability decided.
+    if ! gnu_probe_succeeds; then
+        echo "error: required tools not usable: GNU stat -c / realpath -m / sha256sum, flock, python3." >&2
+        echo "  Run via scripts/verify.sh, or install once: brew install coreutils" >&2
+        exit 2
+    fi
+fi
+
 REAL_REPO=$(realpath "$REPO_ROOT")
 PROJECT_KEY=$(printf '%s' "$REAL_REPO" | sha256sum | cut -c1-16)
 STATE_DIR="$STATE_ROOT/$PROJECT_KEY"
@@ -35,6 +96,23 @@ LOCK_FILE="$STATE_DIR/harvest.lock"
 if [ ! -f "$BOARD" ]; then
     echo "error: review board not found: $BOARD" >&2
     exit 2
+fi
+
+# Hub guard BEFORE any mkdir/flock/board write: on a multi-machine
+# deployment only the hub harvests (the EVO counter and the byte cursors
+# are per-machine state). Unconfigured = single machine = no-op. A dry
+# run writes nothing and stays available everywhere. Exit 3 off-hub.
+if [ "$DRY_RUN" -eq 0 ]; then
+    if [ -f "$(dirname "$0")/olp-hub-guard.sh" ]; then
+        . "$(dirname "$0")/olp-hub-guard.sh"
+        olp_hub_guard olp-evo-harvest || exit 3
+    elif [ -n "${OLP_HUB_HOST:-}" ] \
+        || [ -f "${OLP_HUB_HOST_FILE:-$HOME/.octos/outer/hub-host}" ]; then
+        # A lone copy of this script without the guard library: a hub is
+        # configured but cannot be checked, so refuse rather than guess.
+        echo "error: olp-evo-harvest: hub 已配置,但找不到 olp-hub-guard.sh,未写入任何内容。" >&2
+        exit 3
+    fi
 fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
@@ -54,6 +132,27 @@ HARVEST_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 now_rfc3339() { printf '%s' "$HARVEST_TS"; }
 
 hex_of() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
+
+# #12c: truncate by UNICODE CHARACTERS, independent of LC_ALL. Bash
+# ${s:0:N} counts locale "characters" — under LC_ALL=C those are BYTES and
+# the cut splits a UTF-8 sequence mid-character, producing an EVOLUTION.md
+# that does not decode. python3 (already a hard dependency of this script)
+# slices by code points in every locale; -X utf8 pins argv/stdout encoding
+# so PYTHONUTF8=0 / PYTHONCOERCE_C_LOCALE=0 cannot restore locale dependence.
+char_prefix() { # text limit
+    # Fast path: no truncation needed when the text already fits. ${#s}
+    # counts bytes under LC_ALL=C and characters under UTF-8 locales —
+    # byte count upper-bounds character count, so shell-length <= limit
+    # guarantees the text fits in BOTH regimes; returning it whole is
+    # exact and avoids a python spawn per short card (a 400-card burst
+    # would otherwise pay 400 interpreter startups inside the watcher's
+    # polling window).
+    if [ "${#1}" -le "$2" ]; then
+        printf '%s' "$1"
+        return 0
+    fi
+    python3 -X utf8 -c 'import sys; sys.stdout.write(sys.argv[1][:int(sys.argv[2])])' "$1" "$2"
+}
 
 file_stat() { stat -c '%d %i' "$1" 2>/dev/null || echo "0 0"; }
 
@@ -139,17 +238,90 @@ harvest_board() { # realpath
                 trigger=r2_record
             fi
         fi
+        # Cluster forms. In a multi-machine deployment a unit cannot write
+        # under an entry: its ACK, the outer loop's return and the unit's
+        # negative-sentinel lines are appended at the end of the board and
+        # name their entry as #N. They attach to THAT entry, not to the
+        # heading they happen to sit under.
+        local card_entry=$entry
+        if [ -z "$trigger" ]; then
+            local re_inner='^内环\([^)]+\)·(#([0-9]+)[[:space:]]*)?ACK\((blocked|wontdo)\)'
+            local re_inner_tail='ACK\((blocked|wontdo)\)(\([^)]*\))?(:|：)[[:space:]]*#([0-9]+)'
+            local re_returned='^外环\([^)]+\)·打回\(#([0-9]+)\)'
+            local re_alert='^单元\([^)]+\)·负哨\(#?([^)]*)\)'
+            if [[ $signed =~ $re_inner ]]; then
+                # Read the captures before another =~ overwrites them; an
+                # unmatched optional group is unset under `set -u`.
+                trigger=ack_${BASH_REMATCH[3]}
+                local inner_n=${BASH_REMATCH[2]:-}
+                if [ -n "$inner_n" ]; then
+                    card_entry=$inner_n
+                elif [[ $signed =~ $re_inner_tail ]]; then
+                    card_entry=${BASH_REMATCH[4]}
+                fi
+                rest=$trimmed
+            elif [[ $signed =~ $re_returned ]]; then
+                trigger=returned
+                card_entry=${BASH_REMATCH[1]}
+            elif [[ $signed =~ $re_alert ]]; then
+                trigger=unit_alert
+                local alert_task=${BASH_REMATCH[1]:-}
+                if [[ $alert_task =~ ^[0-9]+$ ]]; then
+                    card_entry=$alert_task
+                fi
+            fi
+        fi
+        # A unit's MCP audit lines (report_blocked, an ask_outer that timed
+        # out) reach the hub's board signed by the unit. They are the same
+        # signals the MCP-board source yields on a single machine, so they
+        # become the same triggers with the same symptom shape.
+        if [ -z "$trigger" ]; then
+            local re_unit_mcp='^单元\(([^)]+)\)·-[[:space:]]+([^[:space:]]+[[:space:]]+[^[:space:]]+)[[:space:]]+MCP\(ask_outer\)[[:space:]]+(blocked|timeout):[[:space:]]+(.*)$'
+            if [[ $signed =~ $re_unit_mcp ]]; then
+                local mcp_unit=${BASH_REMATCH[1]} mcp_kind=${BASH_REMATCH[3]} mcp_detail=${BASH_REMATCH[4]}
+                local mcp_id='-'
+                if [[ $mcp_detail =~ id=([0-9a-fA-F]+) ]]; then
+                    mcp_id=${BASH_REMATCH[1]}
+                fi
+                local mcp_reason
+                mcp_reason=$(python3 -c '
+import re, sys
+d = sys.argv[1]
+i = d.find("reason=")
+if i >= 0:
+    r = d[i + len("reason="):]
+    m = re.search(r"\s[a-z_]+=", r)
+    r = r[: m.start()] if m else r
+else:
+    # A timeout line has no reason= field ("id=<id> no answer in 90s"):
+    # the text after the id is the reason. The id is already its own field.
+    r = re.sub(r"^id=\S+\s*", "", d)
+print(r[:80])
+' "$mcp_detail")
+                local mcp_trigger=ask_outer_timeout
+                [ "$mcp_kind" = blocked ] && mcp_trigger=report_blocked
+                lsha=$(printf '%s' "$line" | sha256sum | cut -d' ' -f1)
+                add_candidate "$mcp_trigger" review "$rp" "board:$rp#unit:$mcp_unit#mcp_$mcp_kind#$lsha" \
+                    "$line_no" "$line_off" "$(now_rfc3339)" \
+                    "kind=$mcp_kind id=$mcp_id unit=$mcp_unit reason=$(char_prefix "$mcp_reason" 80)"
+            fi
+        fi
         if [ -n "$trigger" ]; then
             lsha=$(printf '%s' "$line" | sha256sum | cut -d' ' -f1)
             local kind=blocked
             [ "$trigger" = ack_wontdo ] && kind=wontdo
             [ "$trigger" = override ] && kind=override
             [ "$trigger" = r2_record ] && kind=r2
-            ident="board:$rp#$entry#$kind#$lsha"
+            [ "$trigger" = returned ] && kind=returned
+            [ "$trigger" = unit_alert ] && kind=alert
+            ident="board:$rp#$card_entry#$kind#$lsha"
             # signed forms report the ORIGINAL line (contract: symptom 取原行前 200 字符)
             local symptom_base=${rest:-$trimmed}
-            case $trigger in override|r2_record) symptom_base=$trimmed ;; esac
-            local symptom=${symptom_base:0:200}
+            case $trigger in override|r2_record|returned|unit_alert) symptom_base=$trimmed ;; esac
+            # #12c: cut by Unicode characters, not locale bytes (LC_ALL=C
+            # would otherwise split a UTF-8 sequence mid-character).
+            local symptom
+            symptom=$(char_prefix "$symptom_base" 200)
             add_candidate "$trigger" review "$rp" "$ident" "$line_no" "$line_off" "$(now_rfc3339)" "$symptom"
         fi
     done < "$BOARD"
@@ -245,14 +417,22 @@ harvest_mcp() { # realpath
             local reason
             reason=$(printf '%s' "$detail" | python3 -c '
 import re, sys
-r = sys.argv[1][sys.argv[1].find("reason=") + len("reason="):]
-m = re.search(r"\s[a-z_]+=", r)
-print((r[: m.start()] if m else r)[:80])
+d = sys.argv[1]
+i = d.find("reason=")
+if i >= 0:
+    r = d[i + len("reason="):]
+    m = re.search(r"\s[a-z_]+=", r)
+    r = r[: m.start()] if m else r
+else:
+    # A timeout line has no reason= field ("id=<id> no answer in 90s"):
+    # the text after the id is the reason. The id is already its own field.
+    r = re.sub(r"^id=\S+\s*", "", d)
+print(r[:80])
 ' "$detail")
             if [ "$kind" = blocked ]; then trigger=report_blocked; else trigger=ask_outer_timeout; fi
             lsha=$(printf '%s' "$line" | sha256sum | cut -d' ' -f1)
             ident="mcp:$rp#$ts#$kind#$ask_id#$lsha"
-            symptom="kind=$kind id=$ask_id reason=${reason:0:80}"
+            symptom="kind=$kind id=$ask_id reason=$(char_prefix "$reason" 80)"
             add_candidate "$trigger" mcp "$rp" "$ident" "$line_no" "$line_off" "$(now_rfc3339)" "$symptom"
         fi
     done < "$MCP_BOARD"
@@ -328,12 +508,18 @@ if [ -f "$EVO_BOARD" ]; then
     while IFS= read -r line; do
         case $line in
             '### EVO-'*)
-                # The id is followed directly by a fullwidth （, not a
-                # space — slice NUMERIC PREFIX ONLY (arithmetic on the
-                # raw remainder is a syntax error that would abort the
-                # whole reconcile loop under set -e).
+                # #12c: extract LEADING DIGITS portably. The previous
+                # ${local_id%%[$'\uff08' ]*} used a \uXXXX escape Bash 3.2
+                # (Darwin /bin/bash) does not support: it produced the
+                # literal 6-char string '\uff08', the fullwidth （ was
+                # never stripped, and reconcile broke. A regex capture of
+                # leading digits works on every bash this script runs under.
                 local_id=${line#\#\#\# EVO-}
-                local_id=${local_id%%[$'\uff08' ]*}
+                if [[ $local_id =~ ^([0-9]+) ]]; then
+                    local_id=${BASH_REMATCH[1]}
+                else
+                    local_id=""
+                fi
                 # 41-r5a ④: a non-numeric id (e.g. `### EVO-draft`) must be
                 # skipped with a warning, never abort the reconcile loop
                 # (`value too great for base` kills set -e scripts).

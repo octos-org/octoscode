@@ -25,7 +25,7 @@ server 脚本、本规格、以及 S2 的内环工具配置 diff。operator 已�
   复审走黑板既有信道,不容第二入口漂移。
 - **信箱协议**:server 将问题写
   `~/.octos/outer/mcp/questions/<ts>-<id>.json`,轮询
-  `~/.octos/outer/mcp/answers/<id>.json` 取答;**90s 超时**返回降级
+  `~/.octos/outer/mcp/answers/<id>.json` 取答;**50s 超时**(必须短于 MCP 客户端对一次工具调用的 60s 上限,见下)返回降级
   指引(按黑板既有指导继续,或 ACK(blocked)),**永不无限阻塞
   turn**。外环侧监视 questions 目录并作答的接线由外环自己实现,
   不在本任务范围。
@@ -35,6 +35,8 @@ server 脚本、本规格、以及 S2 的内环工具配置 diff。operator 已�
 - **防思考外包**:每片(每个 goal/任务切片,以调用方传入的切片标识
   或服务端会话窗口计)限 **3 次** `ask_outer` 问询;`tried` 字段必填
   (内环已尝试过的路径,空值即拒);超限返回拒绝语,不进入信箱。
+  只有写进信箱的问询才计数:生成问询 id 不消耗配额,投递失败立刻报告、不计数、不等待
+  (复盘第 11 条,2026-11-15)。
 - **协议**:MCP stdio JSON-RPC(`initialize` / `tools/list` /
   `tools/call`),消息帧与能力声明以 `octos mcp` 客户端实测握手为准;
   server 不持有任何 LLM 凭据,不做任何网络访问。
@@ -52,7 +54,7 @@ server 脚本、本规格、以及 S2 的内环工具配置 diff。operator 已�
 - 不得在 server 内引入第三方依赖(pip 包、vendored 库);纯 Python 3
   标准库。
 - 不得新增 `request_review` 或任何第三个工具。
-- 不得让 `ask_outer` 无限等待;90s 上限是硬约束。
+- 不得让 `ask_outer` 无限等待;50s 等待是默认值,`OLP_MCP_TIMEOUT_SECS` 可调但封顶 55s:octos 在 60s 时中止任何 MCP 工具调用,被中止的调用到内环手里是工具失败,降级指引送不到。
 - 信箱与落板路径不得写进仓库——一律用 `~/.octos/outer/mcp/` 与
   `~/.octos/outer/board_append.sh` 运行态路径。
 
@@ -89,22 +91,34 @@ Scenario: ask_outer 正常往返
   Given 外环已在 answers/ 预置对应答案(假答案回灌)
   When 调用 ask_outer(question, context, tried)
   Then questions/ 出现 <ts>-<id>.json 且字段齐全
-  And 90s 内取回答案并原样返回
+  And 等待时间内取回答案并原样返回
   And 该次 Q/A 经 board_append.sh 落板、署名 MCP(ask_outer)
 
-Scenario: 90s 超时降级
+Scenario: 超时降级
   测试: self_test_ask_outer_timeout_degrades
   Given answers/ 无对应答案
-  When 调用 ask_outer 且等待超过 90s(测试中以压缩时钟加速)
+  When 调用 ask_outer 且等待超过等待时间(测试中以压缩时钟加速)
   Then 返回降级指引文本(按黑板既有指导继续或 ACK(blocked))
   And 不发生无限阻塞
   And 超时事件同样落板
 
+Scenario: 等待时间短于 MCP 客户端的工具调用上限
+  测试: ask_outer_wait_stays_below_the_mcp_client_tool_call_timeout
+  Given octos 在 60s 时中止任何 MCP 工具调用
+  When 以默认值、压缩时钟、90、0、负数、非数字配置 OLP_MCP_TIMEOUT_SECS
+  Then 默认等待 50s;超过 55s 的配置被压到 55s;非正数与非数字回到默认值;压缩时钟的小数值原样保留
+
 Scenario: 限额拒绝
   测试: self_test_ask_outer_quota_refusal
-  Given 同一切片已问询 3 次
+  Given 同一切片已问询 3 次,且这 3 次都真的进了信箱(生成问询 id 不消耗配额)
   When 第 4 次调用 ask_outer
   Then 返回拒绝语且 questions/ 不新增文件
+
+Scenario: 投递失败不计入配额(复盘第 11 条)
+  测试: self_test_ask_outer_failed_delivery_costs_no_quota
+  Given 信箱目录不可写
+  When 调用 ask_outer,再恢复信箱后连续问询
+  Then 第一次立刻(不等超时)返回"投递失败……不计入配额";之后仍能问满 3 次,第 4 次才被拒
 
 Scenario: tried 必填
   测试: self_test_ask_outer_requires_tried

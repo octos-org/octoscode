@@ -109,6 +109,12 @@ pub enum ClientEvent {
     /// OWNS the emitter. Durable ⇒ replayed on reconnect, so a client that
     /// disconnected mid-loop sees the whole run rather than losing its middle.
     BackgroundActivity(crate::model::BackgroundActivityParams),
+    /// judge.decisions.v1 (#3): per-turn `judge/decision` notification —
+    /// the keyword-tier result plus the judge verdict (tier, confidence,
+    /// agrees, error code). Display-only: latched per session as
+    /// `last_judge` and rendered as a status-row marker; nothing in the
+    /// client may branch on the verdict. Cleared when the next turn starts.
+    JudgeDecision(crate::model::JudgeDecisionParams),
     /// octos#1801 v2: `peer/gather` result — the peer blackboard rows
     /// (brief + latest result per staged peer). The store composes the
     /// `/gather` synthesis prompt from these and submits it into the CURRENT

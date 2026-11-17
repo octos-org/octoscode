@@ -17,7 +17,16 @@ import json
 import re
 
 # --- trigger classes ----------------------------------------------------
-BOARD_TRIGGERS = ("ack_blocked", "ack_wontdo", "override", "r2_record")
+BOARD_TRIGGERS = (
+    "ack_blocked",
+    "ack_wontdo",
+    "override",
+    "r2_record",
+    # cluster forms: the outer loop returned a unit's work; a unit's
+    # runtime guard reported a lost process, a turn error or a stall
+    "returned",
+    "unit_alert",
+)
 EVENTS_TRIGGERS = (
     "escalation",
     "turn_error",
@@ -42,9 +51,18 @@ LAYER_TABLE = {
     "fallback_switch": "Execution",
     "override": "Governance",
     "r2_record": "Verification",
+    "returned": "Verification",
+    "unit_alert": "Execution",
 }
 
-_RE_SIGNED_PREFIX = re.compile(r"^外环\([^)]*\)·(?:改判|R2 记档)\([^)]*\)[:：]\s*")
+_RE_SIGNED_PREFIX = re.compile(r"^外环\([^)]*\)·(?:改判|R2 记档|打回)\([^)]*\)[:：]\s*")
+# `内环(<unit>)·#N ACK(blocked): …` / `内环(<unit>)·ACK(blocked): #N…` and
+# `单元(<unit>)·负哨(#N): …` — strip the signature so that the same
+# symptom from two units, or about two cards, groups together.
+_RE_INNER_ACK_PREFIX = re.compile(
+    r"^内环\([^)]*\)·(?:#\d+\s*)?ACK\((?:blocked|wontdo)\)(?:\([^)]*\))?[:：]\s*(?:#\d+(?:\([^)]*\))?[:：]?\s*)?"
+)
+_RE_UNIT_ALERT_PREFIX = re.compile(r"^单元\([^)]*\)·负哨\([^)]*\)[:：]\s*")
 _RE_PATH = re.compile(r"(?<![\w])/[^\s]+")
 _RE_HEX = re.compile(r"(?<![A-Za-z\d])[0-9a-f]{8,}(?![A-Za-z\d])")
 _RE_NUM = re.compile(r"(?<![A-Za-z_\d])\d+(?![A-Za-z\d])")
@@ -101,9 +119,15 @@ def group_text(card: dict) -> str:
             if t.startswith(p):
                 t = t[len(p) :]
                 break
-        m = _RE_SIGNED_PREFIX.match(t)
-        if m:
-            t = t[m.end() :]
+        for prefix in (_RE_SIGNED_PREFIX, _RE_INNER_ACK_PREFIX, _RE_UNIT_ALERT_PREFIX):
+            m = prefix.match(t)
+            if m:
+                t = t[m.end() :]
+                break
+        if trigger == "unit_alert":
+            # The alert kind and its state are the symptom; which turn, pid
+            # or sequence number it was, and how long it had lasted, are not.
+            t = re.sub(r"\b(?:turn|seq|pid|age)=\S+\s*", "", t).strip()
         return t
     if trigger in EVENTS_TRIGGERS:
         try:

@@ -11,6 +11,9 @@
 //! 2026-08-25 freeze announcement). Any NEW `ACK:` line fails the contract —
 //! the whitelist, not a prefix rule, is the boundary.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -227,8 +230,8 @@ fn olp_version_consistent_across_docs() {
             .find(|l| l.contains("protocol: olp/v"))
             .unwrap_or_else(|| panic!("{rel} has no protocol header"));
         assert!(
-            header.contains("olp/v2") && !header.contains("olp/v1"),
-            "{rel} current version must be exactly olp/v2 (header: {header})"
+            header.contains("olp/v3") && !header.contains("olp/v1") && !header.contains("olp/v2"),
+            "{rel} current version must be exactly olp/v3 (header: {header})"
         );
         assert!(
             !text.replace(header, "").contains("olp/v1\n"),
@@ -303,7 +306,7 @@ fn olp_result_schema_fields_documented() {
 fn outer_duty_wiring_three_surfaces_consistent() {
     let protocol = read("docs/OUTER_LOOP_PROTOCOL.md");
     let boot = read("docs/OLP_OUTER_BOOT.md");
-    let skill = read(".claude/skills/octoloop/SKILL.md");
+    let skill = read("skills/octoloop/AGENTS.md");
     let agents = read("AGENTS.md");
     for (name, text) in [("protocol", &protocol), ("boot", &boot), ("skill", &skill)] {
         assert!(
@@ -319,10 +322,10 @@ fn outer_duty_wiring_three_surfaces_consistent() {
     );
     // Version bump synchronized.
     assert!(
-        protocol.contains("protocol: olp/v2"),
-        "PROTOCOL bumped to v2"
+        protocol.contains("protocol: olp/v3"),
+        "PROTOCOL at v3 (R7 since v2)"
     );
-    assert!(agents.contains("protocol: olp/v2"), "AGENTS synced to v2");
+    assert!(agents.contains("protocol: olp/v3"), "AGENTS synced to v3");
 }
 
 #[test]
@@ -335,8 +338,8 @@ fn outer_duty_docs_pin_guardian_semantics_and_h1() {
     // title with a v2 body header is the drift the final review caught.
     let title = protocol.lines().next().unwrap_or_default().to_string();
     assert!(
-        title.contains("v2") && !title.contains("v1"),
-        "PROTOCOL H1 (title) must be v2 (got: {title})"
+        title.contains("v3") && !title.contains("v1") && !title.contains("v2"),
+        "PROTOCOL H1 (title) must be v3 (got: {title})"
     );
 
     // Guardian semantics must be present verbatim in all three surfaces.
@@ -358,10 +361,19 @@ fn outer_duty_docs_pin_guardian_semantics_and_h1() {
             !text.contains("wrapper 亡而 agent 在则锁仍 HELD"),
             "{rel} must not carry the retired 'wrapper dies, agent alive, still HELD' claim"
         );
-        // Platform claim must be Linux-only, not Unix.
+        // Platform claim must name the supported platforms (Linux and
+        // macOS), never a blanket Unix claim nor the retired Linux-only.
         assert!(
             !text.contains("Unix-only(flock") && !text.contains("Unix-only;锁与真实"),
-            "{rel} must claim Linux-only, not Unix-only"
+            "{rel} must not claim Unix-only"
+        );
+        assert!(
+            !text.contains("Linux-only"),
+            "{rel} must not carry the retired Linux-only scope (R7 covers Linux and macOS)"
+        );
+        assert!(
+            text.contains("Linux 与 macOS"),
+            "{rel} must state the R7 platform scope (Linux 与 macOS)"
         );
     }
 }
