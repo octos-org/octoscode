@@ -1,6 +1,6 @@
 # OctoLoop — Agent Onboarding Card
 
-> protocol: olp/v2 — any agent reading this file operates under OLP v2 (R6 version negotiation).
+> protocol: olp/v3 — any agent reading this file operates under OLP v3 (R6 version negotiation).
 >
 > **OctoLoop** is the product name; **OLP** (Outer-Loop Protocol) is the protocol name.
 > 中文版:[OCTOLOOP_AGENTS.zh-CN.md](https://github.com/octos-org/octoscode/blob/main/docs/OCTOLOOP_AGENTS.zh-CN.md)
@@ -49,12 +49,35 @@ rules:
 2. **Execute** the lowest-numbered entry that has no `ACK(` line yet. Entries
    already ACKed, and anything under `Historical record`, are audit-only —
    **never replay them**.
-3. **Commit, never push.** Push authority is the outer loop's.
+3. **Commit, never push.** Push authority is the outer loop's. (One
+   exception, for a unit in a multi-machine deployment: once every reviewer
+   has passed the work, the unit host pushes `task/<N>` to the hub's local
+   repository with `octoscode olp repo push` (fallback:
+   `scripts/olp-task-push.sh`). That hands the commit over; it
+   does not publish it. Pushing to GitHub stays with the outer loop.)
 4. **ACK** under that entry, as a single line in the v1 formula:
 
 ```
 ACK(done|wontdo|blocked): <explanation>
 ```
+
+   (On a unit in a multi-machine deployment the board is a read-only mirror:
+   **run `octoscode olp remote mirror` before every read**, or the card you
+   were just sent may not be in it yet. That command works from any
+   directory. If it is unavailable (an octoscode too old to have `olp`), use
+   the fallback: the script in the octoscode checkout on this machine, whose
+   location is recorded in `~/.octos/outer/octoscode-home` —
+   `python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py" mirror`. The mirror cannot be edited
+   in place: use
+   `octoscode olp remote ack <N> done|wontdo|blocked <explanation>`
+   (fallback: `scripts/olp-board-remote.py ack …`),
+   which appends the same line to the authoritative board on the hub. Since
+   olp/v3 the unit splits the work: the card's `impl:` line names the
+   implementer and its `review:` line the reviewers. **The implementer does not
+   ACK done to the hub**; it writes `> 实现(<kind>)·提交(#N-rK): <commit>` on the
+   unit board `.octos/UNIT_BOARD.md` and tells the unit host. Reviewers write
+   their verdicts on the same board; when all pass, the unit host pushes and
+   ACKs the hub. Inner loops on a unit always run unsandboxed.)
 
 - `done` — executed. Explanation carries evidence: commit hash, test results,
   and the verbatim verification commands you ran (crate / module / feature all
@@ -102,7 +125,7 @@ If you burn more than ~30 minutes retrying the same approach, that is a
 solution-space stall, not a effort problem — **ask for a blueprint** instead of
 grinding. If the MCP fifth channel is mounted, call
 `ask_outer(question, context, tried)` (`tried` is mandatory, 3 calls per slice,
-90s timeout then a documented degrade). Otherwise write
+50s timeout then a documented degrade). Otherwise write
 `ACK(blocked): <what you tried, what you need>` and stop.
 
 ## 3. OUTER loop duty
@@ -114,16 +137,25 @@ octoscode outer-duty hold --project <project> --signature <sig> \
   --duties <duties> -- <your agent start command>
 ```
 
-The lock **is** the authority: the wrapper is the only holder of the lock fd, and
-your agent is death-coupled to it via `PR_SET_PDEATHSIG` — wrapper dies ⇒ agent
-dies ⇒ lock `VACANT`. `outer-duty check --project <p>` only observes (exactly one
+The `OLP_DUTY_LEASE` that `hold` gives you is your write credential: once your
+session is over or replaced, commands you left behind are refused (exit 6) when
+they write the board, archive, promote or answer. Do not unset it.
+
+Codex must be started as `codex --no-daemon`: by default its session lives in a
+shared background server that keeps working after the terminal program exits,
+out of the lock's reach, and `hold` refuses it.
+
+The lock **is** the authority, and your agent is death-coupled to the wrapper —
+wrapper dies ⇒ agent dies ⇒ lock `VACANT`. On Linux the wrapper is the only
+holder of the lock fd and the kernel kills the agent via `PR_SET_PDEATHSIG`; on
+macOS a small guardian process between wrapper and agent holds the lock and kills
+the agent's process group before releasing it. `outer-duty check --project <p>` only observes (exactly one
 of `VACANT|HELD|ERROR` on stdout). A non-holder may add **signed annotations
 only**. Taking over a live lock belongs to the operator alone; there is no agent
 self-seizure. Metadata sidecars and TTLs are diagnostics and never adjudicate.
 
-**Linux-only** (flock + PDEATHSIG + /proc; exits 2 as unsupported elsewhere; not
-valid on NFS). On macOS the lock is unavailable — multi-outer coordination falls
-back to the duty roster as discipline plus operator arbitration. Pick a signature
+**Linux and macOS** (single-machine flock; exits 2 as unsupported elsewhere; not
+valid on NFS). Pick a signature
 like `外环(claude)` / `外环(codex)` and sign every board write.
 
 ### 3.1 Discover the scene
@@ -143,27 +175,35 @@ project of your start cwd.
 
 ### 3.2 Dispatch — append, never rewrite
 
-Take the current maximum number, then use +1:
-
-```bash
-grep -oE '^### [0-9]+' <board> | tail -1
-```
-
 Write through the atomic helper (flock-mutexed; body from stdin). It is at
 `scripts/olp-board-append.sh` inside the octoscode repo, and `olp-init.sh`
-installs a copy at `~/.octos/outer/board-append.sh` for every other project:
+installs a copy at `~/.octos/outer/board-append.sh` for every other project.
+**The helper allocates the number under the lock**: write `{N}` in the
+heading; the helper fills in the board's highest number + 1 and prints it on
+stdout, so concurrent writers never collide:
 
 ```bash
 ~/.octos/outer/board-append.sh <board> <<'EOF'
-### <n>. <title> (<date>, <signature>)
-...
+### {N}. <title> (<date>, <signature>)
+... body (use {N} to refer to the entry's own number, e.g. branch task/{N}) ...
 EOF
 ```
 
-If neither is present, an equivalent atomic append is
-`flock "<board>.lock" -c 'cat >> "<board>"' <<'EOF' … EOF` — note that
-`flock(1)` is util-linux and absent on stock macOS, where you must serialise
-board writes by convention instead.
+For writes that may be resent (network retry, offline-queue replay) add
+`--key <natural-key>`: when the key is already on the board nothing is
+appended and the original number is returned. Keys may only contain
+`[A-Za-z0-9._:/@+=-]`.
+
+The old style with a hand-written number (`### 12. …`) is still accepted, but
+nothing locks between reading the maximum and writing, so concurrent writers
+collide — do not use it for new entries. Update an older installed helper
+(one that does not know `{N}`) with
+`cp scripts/olp-board-append.sh ~/.octos/outer/board-append.sh`.
+
+The helper needs `flock(1)`: util-linux on Linux; `brew install flock` on
+macOS (a non-interactive ssh PATH has no Homebrew directories, so the helper
+also looks in `/opt/homebrew/bin` and `/usr/local/bin`). Without it the
+helper exits 2 and writes nothing.
 
 An entry must be **self-contained**: background, exact files and line numbers,
 direction of the fix, acceptance criteria, branch name (based on main), budget
@@ -181,6 +221,23 @@ translate**:
 > 外环(<sig>)·改判(作废 #N):<the instruction that now governs>
 > 外环(<sig>)·R2 记档(#N):<claim vs. re-verified fact>
 ```
+
+Three more line-initial formulas are read by the inbox
+(`scripts/olp-inbox.py`). They attach to an entry by `#N`, so they count
+wherever they are written on the board; **copy them verbatim** too:
+
+```
+> 外环(<sig>)·采认(#N):<verification evidence>            (accepted)
+> 外环(<sig>)·打回(#N):<reason; the rework goes in a new entry>   (returned)
+> 外环(<sig>)·搁置(#N) 至 YYYY-MM-DD:<what it waits for>   (snoozed until)
+```
+
+`olp-inbox.py <board>` derives from these lines and the ACK lines who each
+card is waiting on: **inbox** (the inner loop ACKed or a unit pushed; the
+outer loop must decide), **working** (waiting for the inner loop's ACK),
+**snoozed** (hidden until the date), **settled** (accepted, returned, voided
+or archived). Nothing is stored on the board; a card with no 采认 line stays
+in the inbox, so write one when verification passes.
 
 ### 3.3 Wake and steer the inner loop
 
@@ -236,9 +293,16 @@ Fail → **a new entry** with the evidence. Never rewrite the old one.
 
 ### 3.6 Red lines
 
-1. Never push what you have not independently re-verified.
-2. Never press an operator's approval — granting sandbox-free permission is a
-   human action. Ask, with the exact command ready.
+1. Never push what you have not independently re-verified. In a cluster
+   (olp/v3) verification happens on the unit: the hub pushes on the unit's
+   verification record and does not verify again.
+2. Never press an operator's approval. Granting sandbox-free permission is the
+   operator's decision. On a cluster unit — a dedicated machine — the operator
+   grants it once, as a standing grant, when the machine joins as a unit
+   (protocol R8); after that grant an agent may launch that unit's inner loops
+   unsandboxed without asking each time. If the outer loop's own harness blocks
+   such a launch, do not work around it. Everywhere else (a shared machine, the
+   outer loop's own session) ask, with the exact command ready.
 3. Respect the queue: the inner loop eats entries in board order. To jump the
    queue, state the case in an entry and let the operator decide.
 4. Shared machine: ≤2 concurrent compiles, `--test-threads=8`, and confirm
@@ -248,8 +312,10 @@ Fail → **a new entry** with the evidence. Never rewrite the old one.
 ## 4. Operator-only actions
 
 These are never delegated to an agent: pasting API keys, granting sandbox-free
-permission (`--danger-full-access` / permission tier 5), taking over a live
-`outer-duty` lock, and publishing issues.
+permission (`--danger-full-access` / permission tier 5 — on a cluster unit the
+operator's standing grant covers its inner loops, which an agent may then
+launch, see protocol R8), taking over a live `outer-duty` lock, and publishing
+issues.
 
 Standard inner-loop start command:
 
@@ -267,7 +333,8 @@ octoscode --stdio-command 'octos serve --stdio --solo --danger-full-access'
   "there is no cargo on this machine".
 
 After a (re)start, the outer loop walks a four-item checklist: serve is up
-(operator); `/loop resume <id>` (get the id from `/loop list` — bare `resume` is
+(unsandboxed launch is authorized by the operator; once authorized an agent may
+start it, protocol R8); `/loop resume <id>` (get the id from `/loop list` — bare `resume` is
 refused); both sentries mounted; `llm.fallbacks` configured **and snapshotted by
 a new session** (the tool/config snapshot is taken at session creation, so
 editing config without a new session is paper insurance).
@@ -291,7 +358,7 @@ editing config without a new session is paper insurance).
 |---|---|
 | Linux | full power, including the `outer-duty` kernel lock and bwrap tiers |
 | WSL2 | equivalent to Linux |
-| macOS | usable, two gaps: no `outer-duty` lock (Linux-only), and bwrap tiers do not apply |
+| macOS | usable, including the `outer-duty` lock; one gap: bwrap tiers do not apply |
 | Windows native | not recommended — use WSL2 |
 
 ## 7. Going deeper

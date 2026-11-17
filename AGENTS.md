@@ -1,6 +1,6 @@
 # octoscode 仓库 agent 守则
 
-> protocol: olp/v2 — 完整协议见 `docs/OUTER_LOOP_PROTOCOL.md`
+> protocol: olp/v3 — 完整协议见 `docs/OUTER_LOOP_PROTOCOL.md`
 >
 > 本文件是**本仓库**的提交纪律。想学 OctoLoop 双环本身(身份选择、派单、
 > 唤醒、观测、复验、红线)读自包含上岗卡:`docs/OCTOLOOP_AGENTS.md`
@@ -39,6 +39,8 @@
 - 改了公开签名(如构造函数加参数),同一个 commit 里更新所有调用点,
   包括 `tests/*.rs` 集成测试。
 - 新代码不要放在 `mod tests` 之后(clippy items-after-test-module)。
+- 新的集成测试文件开头加 `#[path = "support/olp_env.rs"] mod olp_env;`:它在测试开始前
+  清掉继承的 `OLP_*` 变量,测试只能写自己建的沙箱,碰不到正式黑板(契约测试会检查)。
 - 不在仓库根目录留验证/草稿文件(`FINAL_VERIFICATION.md` 之类);
   结论写进 commit message 或黑板的 ACK。
 
@@ -51,6 +53,7 @@
 ## 外环主审权锁(R7,olp/v2)
 
 多外环并存时主审权以 `octoscode outer-duty hold` 的 OS 独占锁为
-authority(Linux-only:守护式死亡耦合——wrapper 唯一持 fd,agent 经
-PR_SET_PDEATHSIG 与 wrapper 同死;`check` 仅观察;活锁接管归
-operator;metadata/TTL 仅诊断;非 Linux 平台 unsupported)。详见协议 R7。
+authority(Linux 与 macOS:守护式死亡耦合——wrapper 亡则 agent 必亡;
+Linux 经 PR_SET_PDEATHSIG,macOS 经持锁的守护进程;`check` 仅观察;
+活锁接管归 operator;metadata/TTL 仅诊断;其他平台 unsupported)。
+详见协议 R7。

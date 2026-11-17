@@ -1,10 +1,10 @@
-# Outer-Loop Protocol (OLP) — v2
+# Outer-Loop Protocol (OLP) — v3
 
 > 让任意外部模型(Claude Code / Codex / 脚本化 agent)以标准方式**计划、监控、
 > 审查、指导** octos 的长程 goal 执行。本协议规范化的是已在实战中验证过的信道,
 > 不发明新机制;L1/L2 是短期补齐路线。
 >
-> `protocol: olp/v2`
+> `protocol: olp/v3`
 >
 > v0 → v1 变更(2026-08-24 生效):R1 ACK 定式语法化(done/wontdo/blocked +
 > wontdo 分歧规则);result.md frontmatter v1 schema 固化(见附录 A);
@@ -13,8 +13,21 @@
 >
 > v1 → v2 变更(2026-08-30 生效,#38-r1):新增 R7 主审权 OS 独占锁
 > (outer-duty hold/check;锁即 authority、check 仅观察、活锁接管归
-> operator、metadata/TTL 仅诊断;Linux-only 单机 flock+PDEATHSIG,Windows
-> LockFileEx 另立条目,NFS 不适用)。AGENTS.md 引用同步 v2。
+> operator、metadata/TTL 仅诊断;单机 flock,Linux 经 PDEATHSIG、macOS 经
+> 守护进程实现死亡耦合,Windows LockFileEx 另立条目,NFS 不适用)。
+> AGENTS.md 引用同步 v2。
+>
+> v2 平台范围修订(2026-11-12):R7 的平台范围由仅 Linux 扩为 Linux 与 macOS。
+> 锁的语义(锁即 authority、check 仅观察、活锁接管归 operator)不变,
+> 仅新增 macOS 的死亡耦合实现,故不升版本。
+>
+> v2 → v3 变更(2026-11-14 生效,operator 定调):集群(附录 C)里的分工改变。
+> ①**大外环只做规划、派发、汇总**:从用户指定的项目全景台读目标,规划成卡派给
+> 单元,汇总集群进展回报全景台,循环到目标完成;**集群里大外环不复验**——单元是
+> 集群,外环逐卡复验会成为瓶颈。②**复验在单元内完成**:单元用多个并行内环做对抗
+> 复验,实现方与复验方用哪些 agent 由大外环按卡指定;复验通过才交回 hub。hub 凭
+> 单元的复验记录收单,人在 GitHub 上最后把关。③**内环一律免沙箱**(新增 R8),
+> agent 可以代为免沙箱启动。单机非集群的双环不变:外环照旧按 R2 复验。
 
 ## 角色
 
@@ -45,7 +58,7 @@
 | 权威账本 | `goal-ledgers/<goal_id>` | durable,重启幸存 |
 | 求助 | escalation(park 于 approval/question) | 分级升级,见 R3 |
 | 代码 | git log / diff | 审查对象 |
-| **主动问询(MCP 第五信道)** | `octoscode olp-mcp-serve` 子命令(#31 Rust 化,纯 stdlib)工具 `ask_outer`/`report_blocked`;信箱 `~/.octos/outer/mcp/questions|answers|consumed`,审计 `OUTER_LOOP_MCP.md` 署名 `MCP(ask_outer)` | 内环 turn 内同步发问,90s 超时降级,每片限 3 次+tried 必填(防思考外包);取答后归档 consumed/ |
+| **主动问询(MCP 第五信道)** | `octoscode olp-mcp-serve` 子命令(#31 Rust 化,纯 stdlib)工具 `ask_outer`/`report_blocked`;信箱 `~/.octos/outer/mcp/questions|answers|consumed`,审计 `OUTER_LOOP_MCP.md` 署名 `MCP(ask_outer)` | 内环 turn 内同步发问,50s 超时降级,每片限 3 次+tried 必填(防思考外包);取答后归档 consumed/ |
 
 ## 协议语义(核心规则)
 
@@ -69,6 +82,9 @@
   `verified`(跑过 `cargo test --all-targets` + clippy + fmt)/
   `partially-verified`(列出跑了什么)/ `unverified`(说明原因,如无工具链)。
   声称 verified 但复验不符,视为协议违例,outer 打回并记入黑板。
+  **集群里(附录 C,olp/v3 起)复验落在单元**:单元的复验方对抗复验,复验通过才
+  推送;大外环不复验,凭复验记录收单。单元复验方声称通过而事后被证伪(人在
+  GitHub 上退回、或回归被发现),视为该单元的协议违例,记入黑板。
 - **R3 — 升级分级**:escalation 三级——runtime 自决(重试/换法)→ outer 裁决
   (技术取舍、批不批一个方案)→ operator 裁决(权限审批、范围变更、对外动作)。
   outer 不得代替 operator 按下审批;operator 缺席时 escalation 保持 park。
@@ -92,15 +108,49 @@
 - **R7 — 主审权 OS 独占锁(outer-duty,olp/v2 起)**:多外环的主审权
   以 per-project 会话寿命 OS 锁为准——上岗外环必须经
   `octoscode outer-duty hold --project P --signature S --duties D -- <agent>`
-  启动(**守护式死亡耦合**:wrapper 是唯一锁 fd 持有者,CLOEXEC 保持
-  置位;agent 经 setpgid+PR_SET_PDEATHSIG(SIGKILL) 与 wrapper 同死——
-  wrapper 亡则 agent 必亡、锁即 VACANT,绝无 agent 活而锁 VACANT 的
-  split brain;孙辈进程不持有 fd,agent 退出而孙辈长驻亦为 VACANT);
+  启动(**守护式死亡耦合**:wrapper 亡则 agent 必亡,绝无 agent 活而锁
+  VACANT 的 split brain;agent 自身永不持有锁 fd,CLOEXEC 保持置位;
+  孙辈进程不持有 fd,agent 退出而孙辈长驻亦为 VACANT。Linux:wrapper
+  是唯一锁 fd 持有者,agent 经 setpgid+PR_SET_PDEATHSIG(SIGKILL) 由内核
+  与 wrapper 同死,锁即 VACANT。macOS:无 PDEATHSIG,wrapper 与 agent
+  之间多一个守护进程 `wrapper → guardian → agent`,guardian 继承锁 fd
+  并监视 wrapper——wrapper 亡则 SIGKILL agent 整个进程组,确认组内无
+  存活进程后才退出放锁(等待上限 30 秒);guardian 异常死亡则 wrapper
+  杀掉 agent 进程组并以失败退出,其间锁仍由 wrapper 持有);
+  终端:wrapper 在终端前台启动时,agent 在 exec 前把自己的进程组设为终端
+  前台(交互式 agent 读终端不会被 SIGTTIN 挂起),agent 结束后 wrapper
+  收回前台;agent 被 ^Z 挂起时 wrapper 随之挂起、锁仍持有,`fg` 后终端
+  交回 agent 并继续它;wrapper 在后台或无终端时不做任何交接;
+  锁 VACANT 时,指定的外环可由监督任务(`octoscode olp outer`)在它的 herdr
+  窗格里自动重新 hold;监督任务只在锁空着时动手,不会接管活锁;
   `check` 仅观察、绝不夺取;活锁接管只归 operator(终止旧 holder 后
-  再 acquire),无 agent 自助强夺。metadata sidecar 与一切 TTL 仅诊断、绝不参与裁定。范围:**Linux-only**(单机 flock+PDEATHSIG+/proc;非
-  Linux 平台命令显式 unsupported 退出 2;Windows LockFileEx 另立条目),
-  NFS 不适用;本切片 fencing 为文档层纪律,硬 gate(board-append/push
-  校验 lease)为后续条目。
+  再 acquire),无 agent 自助强夺。metadata sidecar 与一切 TTL 仅诊断、绝不参与裁定。范围:**Linux 与 macOS**(单机 flock;其他
+  平台命令显式 unsupported 退出 2;Windows LockFileEx 另立条目),
+  NFS 不适用。macOS 边界:可承受 wrapper 或 guardian 任一被杀,二者在
+  同一瞬间均被 SIGKILL 时 agent 成为孤儿(Linux 由内核保证,无此边界);
+  wrapper 亡时 macOS 杀整个进程组(含孙辈),严于 Linux;写入面校验租约(fencing):
+  hold 取锁后生成随机租约号写到锁旁(`<锁>.lease`),并经环境变量
+  `OLP_DUTY_LEASE`/`OLP_DUTY_PROJECT`/`OLP_DUTY_BIN`/`OLP_DUTY_PANE` 交给外环
+  及其执行的一切命令;写板(board append)、归档、采认推送(promote)、回答提问
+  在环境带租约时先跑 `outer-duty lease`:锁 HELD 且租约仍是当前这一份才写,
+  否则拒绝(退出码 6)。外环会话结束或换人后,它留下的命令写不进来,不必杀
+  任何进程。不带租约的写入(内环、单元、人)不受影响;写入者在别的 herdr 窗格
+  (`HERDR_PANE_ID` 与 `OLP_DUTY_PANE` 不同)时视为不是外环,也不受影响。herdr
+  服务由人或常驻任务启动,不要由外环启动(否则窗格会继承外环的环境)。边界:新
+  持有者取锁到写下租约之间的微秒级窗口里,旧租约仍读作当前。锁只约束 wrapper 的后代:Codex 默认把会话放在共享的
+  后台服务(`codex app-server daemon`)里,终端程序只是客户端,它退出后"正在进行
+  的工作会继续",不受锁约束——外环用 Codex 时必须以 `codex --no-daemon` 启动,
+  `hold` 拒绝不带它的交互式 codex(退出码 2,不取锁)。
+- **R8 — 内环免沙箱(olp/v3 起)**:单元上的内环一律以完全访问启动——
+  octoscode 的后端带 `--danger-full-access`,Claude Code 带
+  `--dangerously-skip-permissions`,Codex 带
+  `--dangerously-bypass-approvals-and-sandbox`。沙箱里的内环建不了分支、跑不了
+  工具链、连不到 hub,对抗复验也跑不了测试。**授权在先**:是否免沙箱由 operator
+  决定;operator 对专用单元给出常设授权(把机器作为单元接入集群时一次给出),此后
+  agent 可以代为这样启动该单元的内环,不必每次等 operator 亲手。外环所在的
+  harness 拦截代为启动时不要绕过,请 operator 执行。单元心跳的 `full` 巡检要求每个
+  内环都以完全访问启动,不满足的单元判为降级、不派卡。免沙箱只在单元上(专用
+  机器);共享机与外环自己的会话不在此列。
 - **R6 — 版本协商**:本文件头部 `protocol: olp/vN`;`AGENTS.md` 引用同版本。
   信道语义变更必须升版本。
 
@@ -119,10 +169,10 @@
    "本机无工具链" 的真相即此。要跑构建必须第 5 档 **Full Access**(免沙箱),
    或 serve 带 **`--danger-full-access`**(默认所有未显式选择的 session 为
    Full Access;solo 门控;`OCTOS_DANGER_FULL_ACCESS=1` 等价)。注意:
-   给 agent 授免沙箱权限属 operator 亲手动作——外环自己的 harness 也会
-   拦截代按,不要尝试绕过。标准启动命令:
+   是否免沙箱由 operator 授权;授权后 agent 可以代为启动(R8)。外环自己的
+   harness 若拦截代为启动,不要尝试绕过,请 operator 执行。标准启动命令:
    `octoscode --stdio-command 'octos serve --stdio --solo --danger-full-access'`。
-   重启 checklist:①上述命令启动(operator)②`/loop resume`(外环可代)。
+   重启 checklist:①上述命令启动(operator 授权后外环可代,R8)②`/loop resume`(外环可代)。
 
 1. 数据根:`~/.octos/instances/<cwd-hash>/profiles/<profile>/data`
    (cwd-hash = 项目目录的 DefaultHasher 十六进制;L1 将提供查询命令代替自算)。
@@ -150,7 +200,7 @@
    `["olp-mcp-serve"]`(契约测试 `cargo test --test olp_mcp_contract`
    七件自验;Python 原型已归档 scripts/reference/)后,内环模型 turn 内
    可原生调用 `ask_outer(question, context, tried)` — 信箱
-   `~/.octos/outer/mcp/` 传输,90s 超时降级,每片限 3 次、`tried` 必填
+   `~/.octos/outer/mcp/` 传输,50s 超时降级,每片限 3 次、`tried` 必填
    (防思考外包);取答后问题归档 `consumed/`,全程审计
    `OUTER_LOOP_MCP.md` 署名 `MCP(ask_outer)`。三个实测坑已入册:
    (a) 落点是 profiles/<id>.json 的 config 对象,**不是**
@@ -360,7 +410,7 @@ v1 起其 YAML frontmatter **必须包含**以下字段集合,恰为 6 个
 | `updated_unix` | integer | 最近更新的 Unix 时间戳(秒) |
 | `turn` | integer | 该 peer 已运行的 turn 数 |
 | `verified` | string | R2 验证级别:`verified` / `partially-verified` / `unverified` |
-| `protocol` | string | 写入时遵循的协议版本,当前 `olp/v2` |
+| `protocol` | string | 写入时遵循的协议版本,当前 `olp/v3`(历史文件里的旧版本号照常有效) |
 
 **消费侧约定**:未知字段必须忽略(forward compatibility)——消费方按上述
 6 字段清单取数,对 frontmatter 中出现的任何其他字段不做解释、不得报错。
@@ -397,3 +447,69 @@ description = "强档车道:需要长链推理或跨文件架构判断的任务�
 
 矩阵理由:分析/验证的产出被外层审查兜底,错了可重跑;实施与 keeper
 的产出直接进主线与账本,错误成本高,留在主档由 R2 与外层审查控制质量。
+
+## 附录 C:多机部署(hub + 单元,三道关)
+
+> 增补(2026-11-12):一台 hub 带多台单元时的部署规则,单机使用不受影响。
+> olp/v3(2026-11-14)改写了分工:复验落在单元,大外环只规划、派发、汇总。
+> 操作步骤见 `docs/OLP_CLUSTER.md`(§7 单元上线清单)与 `docs/OLP_LOCAL_GIT.md`。
+
+**角色**
+
+- **hub**:放权威黑板与本地 git 仓库,跑持锁的大外环(R7 的锁在 hub 上)。大外环
+  的工作是一个循环:从**用户指定的项目全景台**(不在 OctoLoop 里,工具由用户定)
+  读项目目标 → 规划成卡、派给单元(`scripts/olp-dispatch.py`,按卡指定实现方与
+  复验方)→ 用 `scripts/olp-summary.py` 汇总集群进展 → 回报给全景台 → 再规划,
+  直到目标完成。**大外环不复验。**
+- **单元**:一台跑内环的机器,同一时间只执行一张卡。单元内部自成双环,由
+  **单元主持**组织:按卡上的 `impl:` 行让实现方内环实现,按 `review:` 行让一个或
+  多个复验方内环**并行对抗复验**,有一个不通过就返工,全部通过才推送并向 hub
+  回执。卡上没有角色行时,单元主持自定(至少一个与实现方不同的复验方)。
+
+**三道关**
+
+| 关 | 谁 | 通过的含义 | 不通过 |
+|---|---|---|---|
+| 1 单元内对抗复验 | 卡上指定的复验方(单元主持组织) | 推到 hub 的本地仓库,向 hub 回执 `ACK(done)` | 在单元内返工(`#N-r1`、`#N-r2`…) |
+| 2 hub 收单 | hub 上的持锁外环 | 核对手续后采认;推 GitHub 开 PR | 手续不全时在权威黑板上退回 |
+| 3 人审核 | operator | 合并 | 在 GitHub 上退回 |
+
+第二关**只核对手续,不复验**:有本地复验记录、记录的提交号等于分支头、单元的
+`ACK(done)` 带着复验证据(各复验方跑了什么、结论)、改动范围与卡相符。不跑测试,
+不审代码。
+
+**权限划分**
+
+- 单元主持与复验方:打回本单元的活、放行推送。复验通过是第一道关的结论,不是
+  采认;不得立新卡、改判、推 GitHub。
+- 实现方:只在 `task/<N>` 上 commit,不 push,不向 hub 回执(完成后告诉单元
+  主持,写在单元复验板上)。
+- 立卡、收单(采认)、改判、推 GitHub 只在 hub 上的持锁外环。
+
+**两块板**
+
+- **权威黑板**只有 hub 上的一块,任务号在这里分配。派给单元的条目带一行
+  `unit: <单元号>`(行首,独占一行),可另带 `impl: <种类>` 与
+  `review: <种类>, <种类>`;改派时在同一条目里追加新的 `unit:` 行,以最后一条为准。
+- **单元复验板** `<项目>/.octos/UNIT_BOARD.md`(不入库)只记本卡在单元里的
+  轮次,编号写成 `#<任务号>-r<轮次>`(如 `#212-r1`),不产生新的任务号:
+  `> 实现(<种类>)·提交(#N-rK): <提交号>`、
+  `> 复验(<种类>)·通过(#N-rK): <跑了什么与结论>`、
+  `> 复验(<种类>)·打回(#N-rK): <问题>`。它是单元的工作纸,对 hub 不具权威;卡
+  结束后归档。
+
+**推送规则**(由 hub 仓库的服务端钩子强制)
+
+- 单元只能推 `task/<任务号>`,且该条目必须派给本单元。
+- 推送必须带本地复验记录,记录里的提交号必须等于推上来的分支头;复验署名写
+  出各复验方,如 `m07-codex+claude`。卡上有 `review:` 行时,署名必须覆盖其中每
+  一个复验方(以卡里最后一条为准;复验方由 operator 按卡决定,工具不内置)。
+- 推送成功后钩子在权威黑板追加一行
+  `> 单元(<单元号>)·本地复验通过(#N): task/N @ <提交号> 复验 <署名>`,
+  作为大外环收单的信号与留痕。
+- 任何人都不从单元推 GitHub;推 GitHub 只在 hub。
+
+**本地复验记录的效力**:它证明单元声明了复验并留痕。复验的独立性靠单元内的
+分工保证:复验方与实现方是不同的内环(不同种类或不同会话)、各自在隔离的克隆里
+跑、署名不同。hub 不再补做复验(v3);复验通过而事后被证伪,按 R2 记为该单元的
+违例。

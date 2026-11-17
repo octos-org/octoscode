@@ -1,6 +1,6 @@
 # OctoLoop — Agent 上岗卡
 
-> protocol: olp/v2 — 读本文件的 agent 即在 OLP v2 下作业(R6 版本协商)。
+> protocol: olp/v3 — 读本文件的 agent 即在 OLP v3 下作业(R6 版本协商)。
 >
 > **OctoLoop** 是产品名;**OLP**(Outer-Loop Protocol)是协议名。
 > English: [OCTOLOOP_AGENTS.md](https://github.com/octos-org/octoscode/blob/main/docs/OCTOLOOP_AGENTS.md)
@@ -45,12 +45,29 @@
 1. **读** `<repo>/.octos/OUTER_LOOP_REVIEW.md` 的 `Active` 区。
 2. **执行**编号最小且尚无 `ACK(` 行的条目。已 ACK 的条目与
    `Historical record` 区只供审计——**绝不重放**。
-3. **只 commit,绝不 push。** 推送权在外环。
+3. **只 commit,绝不 push。** 推送权在外环。(多机部署的单元例外只有一条:
+   全部复验方通过后,由单元主持用 `octoscode olp repo push`(备用
+   `scripts/olp-task-push.sh`)把 `task/<N>` 推到
+   hub 的本地仓库。那是交出 commit,不是发布;推 GitHub 仍然只在外环。)
 4. **落 ACK**,在该条目下写一行 v1 定式:
 
 ```
 ACK(done|wontdo|blocked): <说明>
 ```
+
+   (多机部署的单元上,黑板是只读镜像:**每次读板前先执行
+   `octoscode olp remote mirror` 同步它**,否则可能读不到刚派来的卡。这条命令在
+   任何目录都能用。它不可用时(octoscode 太旧、没有 `olp` 子命令)用备用写法:
+   脚本在本机的 octoscode 仓库里,仓库位置记在 `~/.octos/outer/octoscode-home`,即
+   `python3 "$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py" mirror`。
+   镜像不能原地写:改用
+   `octoscode olp remote ack <N> done|wontdo|blocked <说明>`(备用
+   `scripts/olp-board-remote.py ack …`),它把同样
+   内容的一行追加到 hub 的权威黑板。olp/v3 起单元里分工:卡上的 `impl:` 行是
+   实现方、`review:` 行是复验方。**实现方做完不向 hub 回执 done**,而是在单元
+   复验板 `.octos/UNIT_BOARD.md` 写 `> 实现(<种类>)·提交(#N-rK): <提交号>` 并告诉
+   单元主持;复验方把结论写在同一块板上;全部通过后由单元主持推送并向 hub 回执。
+   单元上的内环一律免沙箱启动。)
 
 - `done` — 已执行。说明里附证据:commit hash、测试结果,以及你跑过的
   **逐字复验命令**(crate / 模块 / feature 全写明)。
@@ -88,7 +105,7 @@ ACK(done|wontdo|blocked): <说明>
 
 同一目标反复试错超过约 30 分钟,那是方案空间塌不下来,不是力气不够——
 **主动要图纸**,不要硬磨。若挂了 MCP 第五信道,调用
-`ask_outer(question, context, tried)`(`tried` 必填,每片限 3 次,90s 超时
+`ask_outer(question, context, tried)`(`tried` 必填,每片限 3 次,50s 超时
 后按降级指引走)。否则写 `ACK(blocked): <试过什么、需要什么>` 并停下。
 
 ## 3. 外环职责
@@ -100,14 +117,22 @@ octoscode outer-duty hold --project <项目> --signature <署名> \
   --duties <职责> -- <你的 agent 启动命令>
 ```
 
-锁**即** authority:wrapper 是唯一持锁 fd 者,你的 agent 经
-`PR_SET_PDEATHSIG` 与之死亡耦合——wrapper 亡 ⇒ agent 必亡 ⇒ 锁 `VACANT`。
+hold 交给你的 `OLP_DUTY_LEASE` 是写入凭证:你的会话结束或换人后,你留下的
+命令再写黑板、归档、采认推送、回答提问都会被拒(退出码 6)。不要清掉它。
+
+Codex 必须以 `codex --no-daemon` 启动:默认情况下它的会话在共享的后台服务里,
+终端程序退出后工作照常继续,锁约束不到它,`hold` 会拒绝。
+
+锁**即** authority:你的 agent 与 wrapper 死亡耦合——wrapper 亡 ⇒ agent
+必亡 ⇒ 锁 `VACANT`。Linux 上 wrapper 是唯一持锁 fd 者,内核经
+`PR_SET_PDEATHSIG` 杀掉 agent;macOS 上 wrapper 与 agent 之间有一个持锁的
+守护进程,先杀掉 agent 进程组再放锁。
 `outer-duty check --project <p>` 仅观察(stdout 恰一态
 `VACANT|HELD|ERROR`)。非 holder **只可署名批注**。活锁接管只归 operator,
 无 agent 自助强夺。metadata sidecar 与一切 TTL 仅诊断,绝不参与裁定。
 
-**Linux-only**(flock + PDEATHSIG + /proc;其他平台显式 unsupported 退出 2;
-NFS 不适用)。macOS 上锁不可用——多外环退回值班簿纪律层 + operator 裁决。
+**Linux 与 macOS**(单机 flock;其他平台显式 unsupported 退出 2;
+NFS 不适用)。
 选定署名如 `外环(claude)` / `外环(codex)`,所有黑板写入必须署名。
 
 ### 3.1 发现现场
@@ -125,26 +150,29 @@ ls -t ~/.octos/instances/         # 按 mtime 对号(哈希 = 项目 cwd 的 Def
 
 ### 3.2 派单——只追加,不改写
 
-先取当前最大号,再 +1:
-
-```bash
-grep -oE '^### [0-9]+' <板> | tail -1
-```
-
 写入必须走原子追加助手(flock 互斥,正文从 stdin 喂)。助手在 octoscode
 仓库内是 `scripts/olp-board-append.sh`;`olp-init.sh` 会为其他项目在
-`~/.octos/outer/board-append.sh` 装一份:
+`~/.octos/outer/board-append.sh` 装一份。**编号由助手在锁内分配**:标题
+写 `{N}`,助手取板上最大号 +1 填入,并把编号打印到 stdout——多个写入方
+并发也不会撞号:
 
 ```bash
 ~/.octos/outer/board-append.sh <板> <<'EOF'
-### <编号>. <标题>(<日期>,<署名>)
-...正文...
+### {N}. <标题>(<日期>,<署名>)
+...正文(可以用 {N} 引用自己的编号,例如分支 task/{N})...
 EOF
 ```
 
-两处都没有时,等价的原子追加是
-`flock "<板>.lock" -c 'cat >> "<板>"' <<'EOF' … EOF`——注意 `flock(1)` 属
-util-linux,原生 macOS 没有,那里只能靠约定串行化黑板写入。
+可能重发的写入(断网重试、离线队列回放)加 `--key <自然键>`:同一个键
+已在板上时不再追加,返回原编号。键只允许 `[A-Za-z0-9._:/@+=-]`。
+
+自己写死编号的旧写法(`### 12. …`)仍然接受,但取号和写入之间没有锁,
+并发下会撞号,新条目不要用。旧版助手(不认 `{N}`)用
+`cp scripts/olp-board-append.sh ~/.octos/outer/board-append.sh` 更新。
+
+助手依赖 `flock(1)`:Linux 属 util-linux;macOS 用 `brew install flock`
+(非交互 ssh 的 PATH 不含 Homebrew 目录,助手会自己到 `/opt/homebrew/bin`
+与 `/usr/local/bin` 找)。找不到时助手退出码 2,不写入任何内容。
 
 条目必须**自包含**:背景、精确文件与行号、修法方向、验收标准、分支名
 (基于 main)、预算档,并写明"只 commit 不 push,主审复验后代推"。
@@ -158,6 +186,21 @@ util-linux,原生 macOS 没有,那里只能靠约定串行化黑板写入。
 > 外环(<署名>)·改判(作废 #N):<以本条为准的新指令>
 > 外环(<署名>)·R2 记档(#N):<声称 vs 复验事实>
 ```
+
+另有三条行首定式供收件箱(`scripts/olp-inbox.py`)机械识别。它们按 `#N`
+归属,写在板上任何位置都算,同样**逐字照抄**:
+
+```
+> 外环(<署名>)·采认(#N):<复验证据>
+> 外环(<署名>)·打回(#N):<原因;整改内容另立新条目>
+> 外环(<署名>)·搁置(#N) 至 YYYY-MM-DD:<等什么>
+```
+
+`olp-inbox.py <板>` 从这些行和 ACK 行算出每张卡现在等谁:**收件箱**
+(内环已 ACK 或单元已推送,等外环决定)、**进行中**(等内环 ACK)、**搁置**
+(到期前不打扰)、**已了结**(已采认、已打回、被改判作废、已归档;派给单元的
+卡被打回后是进行中,等它返工)。状态
+不存进黑板;没有采认行的卡会一直留在收件箱,所以复验通过后要落采认行。
 
 ### 3.3 唤醒与纠偏
 
@@ -208,8 +251,12 @@ git worktree remove --force ~/.octos/outer/verify/<名>    # 验后即清
 
 ### 3.6 红线
 
-1. 未经独立复验,绝不推送。
-2. 绝不代按 operator 的审批——免沙箱授权是人的动作。把命令写好,请人按。
+1. 未经独立复验,绝不推送。集群里(olp/v3)复验在单元完成:hub 凭单元的复验
+   记录推送,不另做复验。
+2. 绝不代按 operator 的审批。是否免沙箱由 operator 决定。集群单元是专用机器:
+   operator 在把机器作为单元接入时给出常设授权(协议 R8),此后 agent 可以代为
+   免沙箱启动该单元的内环,不必每次再问。外环所在的 harness 拦截代为启动时不要
+   绕过。其他场景(共享机、外环自己的会话)把命令写好,请人按。
 3. 队列尊重:内环按板序吃单。要插队,在条目里写明主张,由 operator 定夺。
 4. 共享机限载:并发编译 ≤2,测试 `--test-threads=8`,确认 `TMPDIR` 指向
    home 盘。
@@ -218,7 +265,8 @@ git worktree remove --force ~/.octos/outer/verify/<名>    # 验后即清
 ## 4. 只属 operator 的动作
 
 这些永不委托给 agent:贴 API key、授予免沙箱权限
-(`--danger-full-access` / 权限第 5 档)、接管活的 `outer-duty` 锁、发布 issue。
+(`--danger-full-access` / 权限第 5 档——集群单元上,operator 的常设授权覆盖该单元
+的内环,agent 在授权之后代为启动,见协议 R8)、接管活的 `outer-duty` 锁、发布 issue。
 
 内环标准启动命令:
 
@@ -233,7 +281,7 @@ octoscode --stdio-command 'octos serve --stdio --solo --danger-full-access'
   都是 "command not found"。要跑工具链必须第 5 档 Full Access 或
   `--danger-full-access`。历史上内环反复声明"本机没有 cargo",真相即此。
 
-(重)启动后,外环走四步硬清单:serve 已起(operator 亲手);
+(重)启动后,外环走四步硬清单:serve 已起(免沙箱由 operator 授权,授权后 agent 可代为启动,协议 R8);
 `/loop resume <id>`(先 `/loop list` 取 id,裸 `resume` 会拒);双哨已挂;
 `llm.fallbacks` 已配**且已被新会话快照**(工具与配置在会话建立时快照,
 改配置不新建会话等于纸面保险)。
@@ -257,7 +305,7 @@ octoscode --stdio-command 'octos serve --stdio --solo --danger-full-access'
 |---|---|
 | Linux | 全功率,含 `outer-duty` 内核锁与 bwrap 沙箱档 |
 | WSL2 | 等同 Linux |
-| macOS | 可用,两缺口:无 `outer-duty` 锁(Linux-only)、bwrap 档不成立 |
+| macOS | 可用,含 `outer-duty` 锁;一缺口:bwrap 档不成立 |
 | Windows 原生 | 不推荐——请用 WSL2 |
 
 ## 7. 深入阅读

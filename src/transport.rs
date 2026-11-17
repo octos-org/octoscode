@@ -3334,6 +3334,7 @@ fn appui_feature_tokens_for(old_server: bool) -> Vec<String> {
         UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2,
         crate::model::APPUI_FEATURE_TURN_STEER_DROPPED_V1,
         crate::model::APPUI_FEATURE_CONTEXT_SEMANTIC_CACHE_V1,
+        crate::model::APPUI_FEATURE_JUDGE_DECISIONS_V1,
     ]
     .into_iter()
     .map(str::to_owned)
@@ -3691,6 +3692,12 @@ fn rpc_value_to_app_event(
             return Ok(Some(background_activity_notification_to_client_event(
                 params,
             )));
+        }
+        // judge.decisions.v1 (#3): `judge/decision` is decoded tui-locally for
+        // the same reason — the pinned octos-core rev predates the variant, so
+        // the vendored decoder would degrade it to an `unknown_notification`.
+        if method == crate::model::APPUI_METHOD_JUDGE_DECISION {
+            return Ok(Some(judge_decision_notification_to_client_event(params)));
         }
         return Ok(Some(notification_to_client_event(method, params)));
     }
@@ -5258,6 +5265,27 @@ fn background_activity_notification_to_client_event(params: Value) -> ClientEven
             format!(
                 "failed to decode UI protocol params for {}: {err}",
                 crate::model::APPUI_METHOD_BACKGROUND_ACTIVITY
+            ),
+        )
+        .into(),
+    }
+}
+
+/// judge.decisions.v1 (#3): decodes the per-turn `judge/decision`
+/// notification into the typed [`ClientEvent::JudgeDecision`] via the
+/// tui-local [`crate::model::JudgeDecisionParams`] mirror (the vendored
+/// octos-core rev has no `UiNotification` variant for it yet). Malformed
+/// params surface as the standard `invalid_params` error event rather than
+/// wedging the stream. Mirror of
+/// [`background_activity_notification_to_client_event`].
+fn judge_decision_notification_to_client_event(params: Value) -> ClientEvent {
+    match serde_json::from_value::<crate::model::JudgeDecisionParams>(params) {
+        Ok(event) => ClientEvent::JudgeDecision(event),
+        Err(err) => app_error(
+            "invalid_params",
+            format!(
+                "failed to decode UI protocol params for {}: {err}",
+                crate::model::APPUI_METHOD_JUDGE_DECISION
             ),
         )
         .into(),
@@ -9198,6 +9226,98 @@ mod tests {
                 .contains(crate::model::APPUI_FEATURE_BACKGROUND_ACTIVITY_V1),
             "the old-server baseline must not request it"
         );
+    }
+
+    /// judge.decisions.v1 (#3): the modern feature list advertises the judge
+    /// feature; the old-server baseline stays item-for-item identical (the
+    /// contract pins it so a future edit can't silently grow it).
+    #[test]
+    fn appui_feature_tokens_include_judge_decisions_only_in_modern_mode() {
+        let modern = appui_feature_tokens_for(false);
+        assert!(
+            modern.contains(&crate::model::APPUI_FEATURE_JUDGE_DECISIONS_V1.to_string()),
+            "modern feature list must advertise judge.decisions.v1: {modern:?}"
+        );
+        let baseline = appui_feature_tokens_for(true);
+        assert!(
+            !baseline.contains(&crate::model::APPUI_FEATURE_JUDGE_DECISIONS_V1.to_string()),
+            "the old-server baseline must not advertise judge.decisions.v1: {baseline:?}"
+        );
+        // Item-for-item regression pin of the baseline list.
+        assert_eq!(
+            baseline,
+            vec![
+                UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1,
+                UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1,
+                UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1,
+                UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1,
+                UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1,
+                UI_PROTOCOL_FEATURE_USER_QUESTION_V1,
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn judge_decision_notification_decodes_locally() {
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "method": "judge/decision",
+            "params": {
+                "session_id": "coding:local:tui",
+                "turn_id": "turn_01",
+                "keyword_tier": "cheap",
+                "judge_tier": "strong",
+                "judge_confidence": 0.87,
+                "judge_agrees": false,
+                "judge_model": "kimi-k2",
+                "has_cjk": true
+            }
+        })
+        .to_string();
+        let event = rpc_text_to_app_event_with_pending(&frame, &mut HashMap::new())
+            .expect("frame decodes")
+            .expect("client event");
+        let ClientEvent::JudgeDecision(judge) = event else {
+            panic!("expected judge decision event, got {event:?}");
+        };
+        assert_eq!(judge.session_id, "coding:local:tui");
+        assert_eq!(judge.turn_id.as_deref(), Some("turn_01"));
+        assert_eq!(judge.keyword_tier, "cheap");
+        assert_eq!(judge.judge_tier.as_deref(), Some("strong"));
+        assert_eq!(judge.judge_confidence, Some(0.87));
+        assert_eq!(judge.judge_agrees, Some(false));
+        assert_eq!(judge.judge_error, None);
+        assert_eq!(judge.judge_model.as_deref(), Some("kimi-k2"));
+        assert!(judge.has_cjk);
+    }
+
+    #[test]
+    fn judge_decision_notification_decodes_with_absent_optional_fields() {
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "method": "judge/decision",
+            "params": {
+                "session_id": "coding:local:tui",
+                "keyword_tier": "cheap",
+                "has_cjk": false
+            }
+        })
+        .to_string();
+        let event = rpc_text_to_app_event_with_pending(&frame, &mut HashMap::new())
+            .expect("frame decodes")
+            .expect("client event");
+        let ClientEvent::JudgeDecision(judge) = event else {
+            panic!("expected judge decision event, got {event:?}");
+        };
+        assert_eq!(judge.turn_id, None);
+        assert_eq!(judge.judge_tier, None);
+        assert_eq!(judge.judge_confidence, None);
+        assert_eq!(judge.judge_agrees, None);
+        assert_eq!(judge.judge_error, None);
+        assert_eq!(judge.judge_model, None);
     }
 
     #[test]

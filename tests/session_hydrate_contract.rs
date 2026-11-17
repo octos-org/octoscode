@@ -5,6 +5,9 @@
 //! the feature and method, and the result must replace durable chat
 //! state instead of being treated as a generic status ack.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use chrono::Utc;
 use octos_core::SessionKey;
 use octos_core::ui_protocol::{HydratedMessage, SessionHydrateResult, TurnId, UiCursor};

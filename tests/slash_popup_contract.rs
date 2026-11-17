@@ -7,6 +7,9 @@
 //! zero rows — open state, reserved space, blank pixels. The popup must render
 //! at any viewport height.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use octos_core::ui_protocol::UiProtocolCapabilities;
 use octos_core::{Message, SessionKey};

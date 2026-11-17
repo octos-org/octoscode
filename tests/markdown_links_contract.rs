@@ -3,6 +3,9 @@
 //! render path (`finalized_history_lines`), which feeds the same
 //! `inline_markdown_spans` used by the live tail and the pager.
 
+#[path = "support/olp_env.rs"]
+mod olp_env;
+
 use octos_core::{Message, SessionKey};
 use octoscode::app::finalized_history_lines;
 use octoscode::cli::ThemeName;

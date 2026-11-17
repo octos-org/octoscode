@@ -1,7 +1,10 @@
 //! Contract tests for `octoscode outer-duty` (#38 / #38-r1) — the
 //! per-project session-lifetime OS-exclusive duty lock. Real subprocess
 //! (CARGO_BIN_EXE), temp HOME + project (locks never touch real state).
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
+
+#[path = "support/olp_env.rs"]
+mod olp_env;
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -282,7 +285,7 @@ fn duty_two_contenders_exactly_one_wins() {
 }
 
 /// 契约 2a(#38-r3/r4:真实 child 观测): wrapper SIGKILL → the REAL agent
-/// (sidecar-recorded PID + /proc starttime, reuse-proof) must DIE, then
+/// (sidecar-recorded PID + kernel starttime, reuse-proof) must DIE, then
 /// the lock goes VACANT — not the lock state alone.
 #[test]
 fn duty_wrapper_death_kills_agent_and_releases() {
@@ -323,6 +326,113 @@ fn duty_wrapper_death_kills_agent_and_releases() {
     assert!(vacant, "wrapper death must release the authority");
 }
 
+/// macOS 契约 2c(guardian 被杀): the guardian — the fork between wrapper
+/// and agent that stands in for PR_SET_PDEATHSIG — is SIGKILLed. The
+/// wrapper must notice, kill the REAL agent, exit non-zero, and only then
+/// does the lock go VACANT (supervision loss never leaves a live agent).
+#[cfg(target_os = "macos")]
+#[test]
+fn duty_guardian_death_kills_agent_and_fails_wrapper() {
+    let env = TempHome::new("guardian-killed");
+    let project = env.project();
+    let mut wrapper = spawn_holder(
+        env.home().as_path(),
+        project.as_path(),
+        env.sentinel().as_path(),
+    );
+    wait_started(&env);
+    let (pid, start) = read_sidecar_child(&env);
+    assert!(proc_alive_with_start(pid, start), "agent alive before kill");
+    let guardian = guardian_of(wrapper.id());
+    assert_ne!(guardian, pid, "the guardian is not the agent itself");
+    assert!(signal_pid("-KILL", guardian), "SIGKILL the guardian");
+    let mut status = None;
+    for _ in 0..600 {
+        if let Some(found) = wrapper.try_wait().unwrap() {
+            status = Some(found);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let status = status.expect("wrapper must exit after its guardian is killed");
+    assert!(
+        !status.success(),
+        "losing the guardian is a failure, never a clean exit"
+    );
+    // The wrapper held the lock until the agent group was gone: by the
+    // time it has exited, the agent is already dead.
+    assert!(
+        !proc_alive_with_start(pid, start),
+        "real agent (pid {pid}) must be dead once the wrapper has exited"
+    );
+    assert_eq!(
+        check_state(env.home().as_path(), project.as_path()),
+        "VACANT"
+    );
+    let wrapper_err =
+        std::fs::read_to_string(env.sentinel().with_extension("wrapper-err")).unwrap_or_default();
+    assert!(
+        wrapper_err.contains("guardian died abnormally"),
+        "the wrapper names the cause: {wrapper_err}"
+    );
+}
+
+/// macOS 契约 2d(无 split-brain 窗口): after the wrapper is SIGKILLed the
+/// lock may only be observed VACANT once the REAL agent is dead — the
+/// guardian keeps the fd until the agent's process group is gone. Polled
+/// without sleeping, over several rounds.
+#[cfg(target_os = "macos")]
+#[test]
+fn duty_vacant_is_never_observed_while_agent_alive() {
+    for round in 0..5 {
+        let env = TempHome::new("no-window");
+        let project = env.project();
+        let mut wrapper = spawn_holder(
+            env.home().as_path(),
+            project.as_path(),
+            env.sentinel().as_path(),
+        );
+        wait_started(&env);
+        let (pid, start) = read_sidecar_child(&env);
+        assert!(proc_alive_with_start(pid, start), "agent alive before kill");
+        wrapper.kill().unwrap();
+        let _ = wrapper.wait();
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let mut vacant = false;
+        while std::time::Instant::now() < deadline {
+            if check_state(env.home().as_path(), project.as_path()) == "VACANT" {
+                vacant = true;
+                assert!(
+                    !proc_alive_with_start(pid, start),
+                    "round {round}: lock VACANT while the real agent (pid {pid}) is alive"
+                );
+                break;
+            }
+        }
+        assert!(vacant, "round {round}: wrapper death must release the lock");
+    }
+}
+
+/// The wrapper's only direct child on macOS is the guardian.
+#[cfg(target_os = "macos")]
+fn guardian_of(wrapper: u32) -> u32 {
+    for _ in 0..200 {
+        let out = Command::new("/usr/bin/pgrep")
+            .args(["-P", &wrapper.to_string()])
+            .output()
+            .expect("pgrep");
+        let pids: Vec<u32> = String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .filter_map(|p| p.parse().ok())
+            .collect();
+        if let [only] = pids[..] {
+            return only;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("wrapper {wrapper} has no single guardian child");
+}
+
 /// child_pid/child_starttime from the diagnostic sidecar JSON.
 fn read_sidecar_child(env: &TempHome) -> (u32, u64) {
     for _ in 0..600 {
@@ -349,6 +459,7 @@ fn read_sidecar_child(env: &TempHome) -> (u32, u64) {
 }
 
 /// /proc/<pid>/stat field 22 must equal the recorded starttime (reuse-proof).
+#[cfg(target_os = "linux")]
 fn proc_alive_with_start(pid: u32, starttime: u64) -> bool {
     let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
         return false;
@@ -356,12 +467,48 @@ fn proc_alive_with_start(pid: u32, starttime: u64) -> bool {
     let Some(rest) = stat.rsplit(')').next() else {
         return false;
     };
+    // A zombie has exited; it lingers until its parent (in a container,
+    // often a shell as PID 1) reaps it.
+    if rest.split_whitespace().next() == Some("Z") {
+        return false;
+    }
     let start: u64 = rest
         .split_whitespace()
         .nth(19)
         .and_then(|f| f.parse().ok())
         .unwrap_or(0);
     start != 0 && start == starttime
+}
+
+/// macOS: the kernel-reported start time (`proc_pidinfo`) must equal the
+/// recorded starttime (reuse-proof). An exited/reaped pid reads 0.
+#[cfg(target_os = "macos")]
+fn proc_alive_with_start(pid: u32, starttime: u64) -> bool {
+    let start = octoscode::outer_duty::process_starttime(pid);
+    start != 0 && start == starttime
+}
+
+/// The pid exists as a process right now (any state).
+#[cfg(target_os = "linux")]
+fn pid_exists(pid: u32) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+#[cfg(target_os = "macos")]
+fn pid_exists(pid: u32) -> bool {
+    signal_pid("-0", pid)
+}
+
+/// `/bin/kill <signal> <pid>`; true when the signal was delivered.
+#[cfg(target_os = "macos")]
+fn signal_pid(signal: &str, pid: u32) -> bool {
+    Command::new("/bin/kill")
+        .args([signal, &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 /// 契约 2b(#38-r3/r4:grandchild 活性观测): the agent exits while a
@@ -423,10 +570,7 @@ fn duty_grandchild_lingering_yields_vacant() {
         heartbeat_fresh(&ginfo),
         "grandchild (pid {gpid}) provably alive at VACANT"
     );
-    assert!(
-        std::path::Path::new(&format!("/proc/{gpid}")).exists(),
-        "grandchild proc exists"
-    );
+    assert!(pid_exists(gpid), "grandchild proc exists");
     let _ = std::fs::remove_file(&gctl);
     let _ = wrapper;
 }
@@ -686,6 +830,143 @@ fn duty_lock_digest_golden_and_convergence() {
     }
 }
 
+/// 契约 11(preflight 2026-11-14:Codex 的共享后台服务): without
+/// `--no-daemon`, Codex runs the session in a shared server that keeps
+/// working after the wrapper dies, outside the lock's reach — `hold`
+/// refuses such a command before taking the lock (exit 2, the program
+/// never runs). With `--no-daemon`, and for `codex exec`, it runs.
+#[test]
+fn duty_refuses_codex_without_no_daemon() {
+    let env = TempHome::new("codex-daemon");
+    let project = env.project();
+    let bin_dir = env.0.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let ran = env.0.join("ran");
+    let codex = bin_dir.join("codex");
+    std::fs::write(
+        &codex,
+        format!("#!/bin/sh\necho \"$*\" >> '{}'\n", ran.display()),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let hold = |extra: &[&str]| {
+        let mut cmd = duty(env.home().as_path());
+        cmd.args([
+            "hold",
+            "--project",
+            project.to_str().unwrap(),
+            "--signature",
+            "s",
+            "--duties",
+            "d",
+            "--",
+            codex.to_str().unwrap(),
+        ])
+        .args(extra);
+        cmd.output().unwrap()
+    };
+
+    let out = hold(&["--dangerously-bypass-approvals-and-sandbox"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("--no-daemon"), "{stderr}");
+    assert!(!ran.exists(), "a refused command never runs");
+    assert!(
+        !env.lock_path().exists(),
+        "a refused command never takes the lock"
+    );
+
+    let out = hold(&["--no-daemon", "--dangerously-bypass-approvals-and-sandbox"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = hold(&["exec", "hi"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(
+        std::fs::read_to_string(&ran).unwrap(),
+        "--no-daemon --dangerously-bypass-approvals-and-sandbox\nexec hi\n"
+    );
+    assert_eq!(
+        check_state(env.home().as_path(), project.as_path()),
+        "VACANT"
+    );
+}
+
+/// 契约 12(R7 租约):`lease` is VALID only while the lock is HELD with
+/// that lease; once the session is over it is REFUSED, and a new holder's
+/// lease supersedes the old one. No lease in the environment = usage error.
+#[test]
+fn duty_lease_is_valid_only_for_the_live_holder() {
+    let env = TempHome::new("lease");
+    let project = env.project();
+    let lease = |value: Option<&str>| {
+        let mut cmd = duty(env.home().as_path());
+        cmd.args(["lease", "--project", project.to_str().unwrap()]);
+        match value {
+            Some(v) => cmd.env("OLP_DUTY_LEASE", v),
+            None => cmd.env_remove("OLP_DUTY_LEASE"),
+        };
+        let out = cmd.output().unwrap();
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        )
+    };
+    let read_lease = || {
+        for _ in 0..400 {
+            if let Ok(text) = std::fs::read_to_string(env.lock_path().with_extension("lease")) {
+                if !text.trim().is_empty() {
+                    return text.trim().to_string();
+                }
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        panic!("hold never wrote a lease");
+    };
+
+    let mut first = spawn_holder(
+        env.home().as_path(),
+        project.as_path(),
+        env.sentinel().as_path(),
+    );
+    let old = read_lease();
+    assert_eq!(old.len(), 32, "a 128-bit hex lease: {old}");
+    assert_eq!(lease(Some(&old)), (Some(0), "VALID".into()));
+    assert_eq!(lease(Some("0000")), (Some(3), "REFUSED".into()));
+    assert_eq!(lease(None).0, Some(2));
+
+    release_via_sentinel(&env);
+    let _ = first.wait();
+    assert_eq!(
+        lease(Some(&old)),
+        (Some(3), "REFUSED".into()),
+        "VACANT refuses"
+    );
+
+    let mut second = spawn_holder(
+        env.home().as_path(),
+        project.as_path(),
+        env.sentinel().as_path(),
+    );
+    let mut new = read_lease();
+    for _ in 0..100 {
+        if new != old {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+        new = read_lease();
+    }
+    assert_ne!(new, old, "every hold has its own lease");
+    assert_eq!(lease(Some(&old)), (Some(3), "REFUSED".into()), "superseded");
+    assert_eq!(lease(Some(&new)), (Some(0), "VALID".into()));
+    release_via_sentinel(&env);
+    let _ = second.wait();
+}
+
 /// End the real child by removing its sentinel and wait for VACANT.
 fn release_via_sentinel(env: &TempHome) {
     let _ = std::fs::remove_file(env.sentinel());
@@ -742,4 +1023,186 @@ fn duty_create_dir_failure_is_error() {
         "the create-dir failure is the reported cause: {stderr}"
     );
     std::fs::set_permissions(&ro_home, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// A `hold` wrapper running as the session leader and foreground of a
+/// fresh pseudo-terminal — what a terminal or a herdr pane gives it.
+struct PtyHold {
+    master: std::fs::File,
+    wrapper: std::process::Child,
+    output: String,
+}
+
+impl PtyHold {
+    #[allow(unsafe_code)]
+    fn spawn(env: &TempHome, agent: &str) -> Self {
+        use std::os::fd::FromRawFd as _;
+        use std::os::unix::process::CommandExt as _;
+        let (master, slave) = unsafe {
+            let fd = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+            assert!(fd >= 0, "posix_openpt");
+            assert_eq!(libc::grantpt(fd), 0, "grantpt");
+            assert_eq!(libc::unlockpt(fd), 0, "unlockpt");
+            let name = std::ffi::CStr::from_ptr(libc::ptsname(fd))
+                .to_str()
+                .unwrap()
+                .to_string();
+            (std::fs::File::from_raw_fd(fd), name)
+        };
+        let open_slave = || {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&slave)
+                .unwrap()
+        };
+        let mut cmd = duty(env.home().as_path());
+        cmd.args([
+            "hold",
+            "--project",
+            env.project().to_str().unwrap(),
+            "--signature",
+            "tty-holder",
+            "--duties",
+            "primary-review",
+            "--",
+            "/bin/sh",
+            "-c",
+            agent,
+        ])
+        .stdin(open_slave())
+        .stdout(open_slave())
+        .stderr(open_slave());
+        unsafe {
+            cmd.pre_exec(|| {
+                // New session whose controlling terminal is the pty: the
+                // wrapper's group becomes the terminal's foreground.
+                if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        warmup();
+        let wrapper = cmd.spawn().expect("spawn hold under a pty");
+        Self {
+            master,
+            wrapper,
+            output: String::new(),
+        }
+    }
+
+    fn type_bytes(&mut self, bytes: &[u8]) {
+        use std::io::Write as _;
+        self.master.write_all(bytes).unwrap();
+    }
+
+    /// Read terminal output until `needle` appears; false on timeout.
+    #[allow(unsafe_code)]
+    fn expect(&mut self, needle: &str) -> bool {
+        use std::io::Read as _;
+        use std::os::fd::AsRawFd as _;
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while !self.output.contains(needle) {
+            if std::time::Instant::now() > deadline {
+                return false;
+            }
+            let mut poll = libc::pollfd {
+                fd: self.master.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            if unsafe { libc::poll(&mut poll, 1, 100) } <= 0 {
+                continue;
+            }
+            let mut buf = [0u8; 4096];
+            match self.master.read(&mut buf) {
+                Ok(read) if read > 0 => {
+                    self.output.push_str(&String::from_utf8_lossy(&buf[..read]))
+                }
+                _ => std::thread::sleep(Duration::from_millis(50)),
+            }
+        }
+        true
+    }
+
+    /// Wait for the wrapper to stop (`stopped`) or exit; the raw status.
+    #[allow(unsafe_code)]
+    fn wait_status(&mut self, stopped: bool) -> Option<libc::c_int> {
+        let pid = self.wrapper.id() as libc::pid_t;
+        let flags = libc::WNOHANG | if stopped { libc::WUNTRACED } else { 0 };
+        for _ in 0..400 {
+            let mut status = 0;
+            if unsafe { libc::waitpid(pid, &mut status, flags) } == pid {
+                return Some(status);
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        None
+    }
+}
+
+impl Drop for PtyHold {
+    fn drop(&mut self) {
+        let _ = self.wrapper.kill();
+    }
+}
+
+/// 契约 11(preflight 2026-11-14:交互式 agent 被 SIGTTIN 停住): a wrapper
+/// that is the foreground of its terminal hands the terminal to the
+/// agent, so an agent reading the terminal gets the line typed into it
+/// and exits normally; the wrapper relays its exit code.
+#[test]
+fn duty_interactive_agent_reads_the_terminal() {
+    let env = TempHome::new("tty-read");
+    let mut hold = PtyHold::spawn(&env, "read line; echo \"agent-got:$line\"; exit 3");
+    hold.type_bytes(b"hello\n");
+    assert!(
+        hold.expect("agent-got:hello"),
+        "the agent must read the terminal (SIGTTIN would stop it); output: {:?}",
+        hold.output
+    );
+    let status = hold.wait_status(false).expect("wrapper must exit");
+    assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 3);
+    assert_eq!(
+        check_state(env.home().as_path(), env.project().as_path()),
+        "VACANT"
+    );
+}
+
+/// 契约 12: ^Z stops the agent ⇒ the wrapper stops too (its job shows as
+/// stopped and the lock stays HELD); continuing the wrapper gives the
+/// terminal back to the agent, which reads the next line.
+#[test]
+#[allow(unsafe_code)]
+fn duty_interactive_agent_stop_is_relayed() {
+    let env = TempHome::new("tty-stop");
+    let mut hold = PtyHold::spawn(
+        &env,
+        "read a; echo \"first:$a\"; read b; echo \"second:$b\"; exit 7",
+    );
+    hold.type_bytes(b"one\n");
+    assert!(hold.expect("first:one"), "output: {:?}", hold.output);
+    hold.type_bytes(b"\x1a"); // ^Z: SIGTSTP to the terminal's foreground
+    let stopped = hold.wait_status(true).expect("wrapper must stop on ^Z");
+    assert!(
+        libc::WIFSTOPPED(stopped),
+        "a stopped agent must stop the wrapper, status {stopped:#x}"
+    );
+    assert_eq!(
+        check_state(env.home().as_path(), env.project().as_path()),
+        "HELD",
+        "a stopped job keeps its authority"
+    );
+    unsafe {
+        libc::kill(hold.wrapper.id() as libc::pid_t, libc::SIGCONT);
+    }
+    hold.type_bytes(b"two\n");
+    assert!(
+        hold.expect("second:two"),
+        "after continue the agent must own the terminal again; output: {:?}",
+        hold.output
+    );
+    let status = hold.wait_status(false).expect("wrapper must exit");
+    assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 7);
 }

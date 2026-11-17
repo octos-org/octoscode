@@ -318,6 +318,12 @@ pub enum LocalAction {
     /// else is a no-op. The menu stays open; the row updates when the
     /// mutation result refreshes the mirror.
     QuickLoopToggle(String),
+    /// Stage the session and loop captured by a delete row and open Yes/No
+    /// confirmation. No mutation is dispatched by this action.
+    RequestDeleteLoop(crate::model::LoopIdParams),
+    /// Confirmed deletion of the exact session and loop staged by the delete
+    /// row; the active session is deliberately not consulted for targeting.
+    ConfirmDeleteLoop(crate::model::LoopIdParams),
     Onboarding(OnboardingAction),
     Skills,
     McpConfig,
@@ -784,6 +790,8 @@ pub struct MenuAppSnapshot<'a> {
     /// The loop the per-loop action submenu is currently targeting (set by
     /// `LocalAction::OpenLoopActions`, cleared when the submenu closes).
     pub loop_actions_target: Option<&'a str>,
+    /// Exact session and loop staged for destructive delete confirmation.
+    pub pending_loop_delete: Option<&'a crate::model::LoopIdParams>,
     /// Wall-clock "now" in epoch ms, injected at snapshot build so menu
     /// builders can render countdowns while staying DETERMINISTIC under test
     /// (fixed value) — builders must omit time-relative segments when absent,

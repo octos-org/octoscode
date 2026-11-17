@@ -18,6 +18,15 @@ while [ $# -gt 0 ]; do
 done
 [ -f "$SRC" ] || { echo "error: not a file: $SRC" >&2; exit 2; }
 
+# Capability preflight before ANY write. `realpath -m` (GNU) is only
+# needed to vet an --out target.
+. "$(dirname "${BASH_SOURCE[0]}")/olp-preflight.sh"
+if [ -n "$OUT" ]; then
+    olp_preflight olp-evo-spec-skeleton python3 realpath-m || exit 2
+else
+    olp_preflight olp-evo-spec-skeleton python3 || exit 2
+fi
+
 # 44-r1: --out protection must NOT depend on the caller's cwd — derive
 # the target's owning repo from the TARGET's directory, not from cwd.
 if [ -n "$OUT" ]; then
