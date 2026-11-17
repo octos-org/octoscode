@@ -23,6 +23,11 @@ use crate::model::{
 
 #[derive(Debug, Clone)]
 pub enum ClientEvent {
+    /// Client-local request correlation; never serialized onto the wire.
+    InputResponse {
+        request: crate::model::InputRequest,
+        event: Option<Box<ClientEvent>>,
+    },
     WorkspaceTeam(crate::workspace_team::Snapshot),
     WorkspaceTeamUpdated(crate::workspace_team::Snapshot),
     WorkspaceMessage(crate::workspace_team::MessageResult),
