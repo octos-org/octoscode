@@ -19,6 +19,36 @@
 6. **旧入口保留一段时间**:`scripts/olp-*` 照常可用;`octoscode outer-duty`、
    `octoscode olp-mcp-serve`、`octoscode olp-runtime-watch` 作为新命令的别名保留。
 
+## 1b. 给 agent 的四条约定
+
+命令清单由 CLI 自己提供,文档只维护这四条:
+
+- 不确定用哪条命令时,执行 `octoscode olp commands --json` 查当前版本的命令目录。按
+  `summary` 选命令,用 `route` 给出的正式写法。
+- 已经知道命令时,执行 `octoscode olp <组> <动作> --help` 看用法和示例;要用程序取字段
+  时执行 `octoscode olp <组> <动作> --help --json`。
+- 参数取值取决于当前环境时,先用对应的查询命令拿到可选值,例如
+  `octoscode olp unit status --json`。
+- 查帮助不会执行命令。要执行就写 `octoscode olp <组> <动作> [参数]`;单独传 `--json`
+  时该选项由命令自己处理,命令仍会执行。
+
+目录里每条命令的字段:
+
+| 字段 | 含义 |
+|---|---|
+| `route` | 正式写法,如 `octoscode olp card dispatch` |
+| `summary` | 一句话说明 |
+| `subcommands` | `true`:下一个词是工具自己的子命令,用它的 `--help` 查 |
+| `runs_on` | 在哪一侧运行:`hub`、`unit`、`any`;`internal` 是 git 或 ssh 强制命令调用的,不手工执行 |
+| `writes` | 是否改动数据;`false` 的命令可以放心试 |
+| `needs_lease` | 是否需要主审权租约(没有时退出码 6) |
+| `implementation` | `script`(打包的脚本)或 `rust` |
+| `help` | 查这条命令帮助的写法 |
+
+`writes`、`needs_lease` 为 `null` 表示这里没有记录(取决于子命令,或尚未核实),以该命令
+自己的 `--help` 为准,不要当成 `false`。参数的用法提示(`args`)和可选值的查询命令
+(`values_from`)随命令迁到 Rust 逐条补上,现在还没有。
+
 ## 2. 命令一览
 
 ### 2.1 起步

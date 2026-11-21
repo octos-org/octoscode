@@ -150,6 +150,90 @@ fn olp_lists_the_command_surface_and_rejects_unknown_words() {
     assert!(stdout(&out).contains("harvest / retro"), "{}", stdout(&out));
 }
 
+/// Scenario: 命令目录给程序读;查帮助不执行命令
+#[test]
+fn olp_commands_json_is_the_catalog_and_help_json_does_not_run() {
+    let sb = Sb::new();
+    let out = sb.olp(&["commands", "--json"], "");
+    assert!(out.status.success(), "{}", stderr(&out));
+    let catalog: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(catalog["version"], env!("CARGO_PKG_VERSION"));
+    let commands = catalog["commands"].as_array().unwrap();
+    let find = |route: &str| {
+        commands
+            .iter()
+            .find(|c| c["route"] == route)
+            .unwrap_or_else(|| panic!("no {route} in the catalog"))
+    };
+    // Every line of the human listing is in the catalog, and so are the
+    // commands the listing hides.
+    let listing = stdout(&sb.olp(&[], ""));
+    for line in listing.lines().filter(|l| l.starts_with("  ")) {
+        let words: Vec<&str> = line.split_whitespace().take(2).collect();
+        let route = match words[1] {
+            "…" => format!("octoscode olp {}", words[0]),
+            action => format!("octoscode olp {} {action}", words[0]),
+        };
+        find(&route);
+    }
+    let dispatch = find("octoscode olp card dispatch");
+    assert_eq!(dispatch["runs_on"], "hub");
+    assert_eq!(dispatch["writes"], true);
+    assert_eq!(dispatch["needs_lease"], true);
+    assert_eq!(dispatch["implementation"], "script");
+    assert_eq!(dispatch["help"], "octoscode olp card dispatch --help");
+    let inbox = find("octoscode olp board inbox");
+    assert_eq!(inbox["writes"], false);
+    assert_eq!(find("octoscode olp guard watch")["implementation"], "rust");
+    assert_eq!(find("octoscode olp repo hook")["runs_on"], "internal");
+    // A group whose next word is the tool's own subcommand says so, and
+    // does not claim to know what each subcommand does.
+    let remote = find("octoscode olp remote");
+    assert_eq!(remote["subcommands"], true);
+    assert!(remote["writes"].is_null());
+    assert_eq!(
+        catalog["aliases"][0],
+        serde_json::json!({"alias": "octoscode olp dispatch", "route": "octoscode olp card dispatch"})
+    );
+
+    // --help --json describes one command and runs nothing: the board
+    // does not exist, and nothing complains about it.
+    for args in [
+        ["card", "dispatch", "--help", "--json"],
+        ["card", "dispatch", "--json", "--help"],
+    ] {
+        let out = sb.olp(&args, "");
+        assert!(out.status.success(), "{}", stderr(&out));
+        let one: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+        assert_eq!(&one, dispatch);
+    }
+    let out = sb.olp(&["dispatch", "-h", "--json"], "");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&stdout(&out)).unwrap()["route"],
+        "octoscode olp card dispatch"
+    );
+    // --json on its own still belongs to the command.
+    let out = sb.olp(
+        &[
+            "inbox",
+            "--json",
+            "--board",
+            sb.p("nope.md").to_str().unwrap(),
+        ],
+        "",
+    );
+    assert_ne!(out.status.code(), Some(0), "the command itself ran");
+
+    assert_eq!(sb.olp(&["commands"], "").status.code(), Some(0));
+    let out = sb.olp(&["commands", "--yaml"], "");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        stderr(&out).contains("commands [--json]"),
+        "{}",
+        stderr(&out)
+    );
+}
+
 /// Scenario: 打包的工具与仓库里的逐字节相同,工具目录按内容复用
 #[test]
 fn olp_bundle_matches_the_repository_and_is_reused() {
