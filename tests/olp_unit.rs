@@ -843,7 +843,17 @@ fn unit_heartbeat_reports_reviewer_logins_without_judging_health() {
     let beat_with = |claude: &Path, codex: &Path| {
         let out = hub
             .cmd()
-            .args(["heartbeat", "--unit", "m01", "--require", "disk"])
+            // The check itself is not under test: a zero threshold passes on
+            // any host, however full its disk (it failed at 9.9% free).
+            .args([
+                "heartbeat",
+                "--unit",
+                "m01",
+                "--require",
+                "disk",
+                "--disk-min-free",
+                "0",
+            ])
             .env("OLP_CLAUDE", claude)
             .env("OLP_CODEX", codex)
             .output()

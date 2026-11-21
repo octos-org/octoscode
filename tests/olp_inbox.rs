@@ -1,6 +1,7 @@
 #![cfg(unix)]
 
-//! Contract tests for `scripts/olp-inbox.py` (SDD spec:
+//! Contract tests for `octoscode olp board inbox` and `scripts/olp-inbox.py`,
+//! which must agree (SDD spec:
 //! `specs/task-olp-board-inbox.spec.md`): the board's entries sorted into
 //! inbox / working / snoozed / settled, derived from line-start forms only.
 
@@ -35,14 +36,30 @@ fn board(text: &str) -> Board {
 }
 
 impl Board {
+    /// Runs the Rust command and the script it replaced on the same board
+    /// and requires the same exit code, stdout and stderr from both: the
+    /// script is still what `olp-dispatch.py` and the archiver load.
     fn run(&self, args: &[&str]) -> Output {
-        Command::new("python3")
+        let script = Command::new("python3")
             .arg("-B")
             .arg(tool())
             .arg(&self.path)
             .args(args)
             .output()
-            .unwrap()
+            .unwrap();
+        let rust = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+            .args(["olp", "board", "inbox"])
+            .arg(&self.path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(rust.status.code(), script.status.code(), "{args:?}");
+        assert_eq!(stdout(&rust), stdout(&script), "{args:?}");
+        // A usage error is worded by each side's argument parser.
+        if !stderr(&script).starts_with("usage:") {
+            assert_eq!(stderr(&rust), stderr(&script), "{args:?}");
+        }
+        rust
     }
 
     fn json(&self, args: &[&str]) -> serde_json::Value {
@@ -370,6 +387,13 @@ fn inbox_rejects_bad_usage() {
         .output()
         .unwrap();
     assert_eq!(missing.status.code(), Some(2));
+    let missing_rust = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "board", "inbox"])
+        .arg(b.path.with_file_name("absent.md"))
+        .output()
+        .unwrap();
+    assert_eq!(missing_rust.status.code(), Some(2));
+    assert_eq!(stderr(&missing_rust), stderr(&missing));
     // Reading the board never modifies it.
     assert_eq!(std::fs::read_to_string(&b.path).unwrap(), "### 1. x\n");
 }

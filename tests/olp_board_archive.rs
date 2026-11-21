@@ -64,6 +64,7 @@ const BOARD: &str = "\
 ACK(done): commit abc123,测试通过
 
 > 外环(claude)·R2 记档(#1): 复验通过
+> 外环(claude)·采认(#1): 通过
 
 ### 2. 第二条(2026-09-19,外环(claude))
 
@@ -76,6 +77,7 @@ ACK(blocked): 等上游
 正文三。
 
 ACK(wontdo): 与 #2 重复
+> 外环(gpt)·打回(#3): 重复,整改另立条目
 
 ## 小节标题
 
@@ -90,6 +92,7 @@ ACK(wontdo): 与 #2 重复
 正文五。
 
 ACK(done): commit def456
+> 外环(gpt)·采认(#5): 通过
 ";
 
 fn board_in(dir: &Path) -> PathBuf {
@@ -120,6 +123,7 @@ fn board_archive_moves_closed_entries_and_leaves_numbered_stubs() {
 
 ### 1. 第一条(2026-09-18,外环(claude))
 ACK(done): commit abc123,测试通过
+> 外环(claude)·采认(#1): 通过
 <!-- olp-archived: OUTER_LOOP_REVIEW.archive.md -->
 
 ### 2. 第二条(2026-09-19,外环(claude))
@@ -130,6 +134,7 @@ ACK(blocked): 等上游
 
 ### 3. 第三条(2026-09-20,外环(gpt))
 ACK(wontdo): 与 #2 重复
+> 外环(gpt)·打回(#3): 重复,整改另立条目
 <!-- olp-archived: OUTER_LOOP_REVIEW.archive.md -->
 
 ## 小节标题
@@ -142,6 +147,7 @@ ACK(wontdo): 与 #2 重复
 
 ### 5. 第五条(2026-09-22,外环(gpt))
 ACK(done): commit def456
+> 外环(gpt)·采认(#5): 通过
 <!-- olp-archived: OUTER_LOOP_REVIEW.archive.md -->
 
 ";
@@ -248,9 +254,9 @@ fn board_archive_dry_run_writes_nothing() {
     assert_eq!(names, vec!["OUTER_LOOP_REVIEW.md"], "no lock, no archive");
 }
 
-/// Scenario: 闭环判定只看围栏外的最后一条 ACK
+/// Scenario: 闭环判定只看围栏外本卡的最新有效事件
 #[test]
-fn board_archive_closure_uses_last_ack_outside_code_fences() {
+fn board_archive_follows_latest_event_outside_code_fences() {
     let dir = tempfile::tempdir().unwrap();
     let board = dir.path().join("board.md");
     let text = "\
@@ -259,11 +265,13 @@ fn board_archive_closure_uses_last_ack_outside_code_fences() {
 ```
 ### 99. 示例条目
 ACK(done): 这是示例
+> 外环(hub)·采认(#1): 示例
 ```
 
 ### 2. 先 done 后 blocked
 
 ACK(done): 初版
+> 外环(hub)·采认(#2): 初版通过
 ACK(blocked): 复验打回后卡住
 
 ### 3. 旧格式
@@ -276,6 +284,7 @@ ACK(blocked): 等依赖
 正文。
 ACK(done): 依赖到位,commit 123
 <!-- olp-key: m07:card-4 n=4 -->
+> 外环(hub)·采认(#4): 复验通过
 ";
     std::fs::write(&board, text).unwrap();
     let out = archive(&board, &["--keep", "0"], &[]);
@@ -289,14 +298,14 @@ ACK(done): 依赖到位,commit 123
 
     let after = read(&board);
     assert!(after.starts_with(
-        "### 1. 围栏里的标题和 ACK 不算\n\n```\n### 99. 示例条目\nACK(done): 这是示例\n```\n\n### 2. 先 done 后 blocked\n"
+        "### 1. 围栏里的标题和 ACK 不算\n\n```\n### 99. 示例条目\nACK(done): 这是示例\n> 外环(hub)·采认(#1): 示例\n```\n\n### 2. 先 done 后 blocked\n"
     ));
     assert!(after.contains("ACK: 旧格式不算闭环"));
     // The stub keeps every ACK line of the entry, in order, and the
     // idempotency marker a keyed append left behind.
     assert!(
         after.ends_with(
-            "### 4. 先 blocked 后 done\nACK(blocked): 等依赖\nACK(done): 依赖到位,commit 123\n<!-- olp-key: m07:card-4 n=4 -->\n<!-- olp-archived: board.archive.md -->\n\n"
+            "### 4. 先 blocked 后 done\nACK(blocked): 等依赖\nACK(done): 依赖到位,commit 123\n<!-- olp-key: m07:card-4 n=4 -->\n> 外环(hub)·采认(#4): 复验通过\n<!-- olp-archived: board.archive.md -->\n\n"
         ),
         "{after}"
     );
@@ -318,6 +327,7 @@ fn board_archive_follows_outer_verdicts_and_keeps_machine_lines() {
 > 单元(m08)·本地复验通过(#2): task/2 @ cccccccccccc 复验 m08-ver
 > 内环(m07)·#5 ACK(done): commit x
 > 外环(hub)·打回(#5): 缺测试
+> 外环(hub)·采认(#6): 通过
 ";
     let text = format!(
         "\
@@ -346,13 +356,17 @@ unit: m07
 
 正文五。
 
+### 6. 已采认的尾卡
+
+正文六。
+
 {verdicts}"
     );
     std::fs::write(&board, &text).unwrap();
     let out = archive(&board, &["--keep", "0"], &[]);
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     let listed = stdout(&out);
-    for n in ["#1 ", "#3 ", "#5 "] {
+    for n in ["#1 ", "#3 ", "#6 "] {
         assert!(listed.contains(&format!("archived {n}")), "{listed}");
     }
     assert_eq!(listed.matches("archived #").count(), 3, "{listed}");
@@ -380,15 +394,174 @@ unit: m08
 
 ### 5. 被打回
 unit: m07
+
+正文五。
+
+### 6. 已采认的尾卡
 {verdicts}<!-- olp-archived: board.archive.md -->
 
 "
     );
     assert_eq!(after, expected);
     let archived = read(&dir.path().join("board.archive.md"));
-    for body in ["正文一。", "正文三。", "正文五。"] {
+    for body in ["正文一。", "正文三。", "正文六。"] {
         assert!(archived.contains(body), "{archived}");
     }
+}
+
+fn inbox_json(board: &Path, args: &[&str]) -> serde_json::Value {
+    let out = Command::new("python3")
+        .arg("-B")
+        .arg(repo_root().join("scripts/olp-inbox.py"))
+        .arg(board)
+        .args(["--json", "--today", "2026-11-18"])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    serde_json::from_slice::<serde_json::Value>(&out.stdout).unwrap()
+}
+
+fn dispatch_to(board: &Path, unit: &str) -> Output {
+    let mut dispatch = Command::new("python3")
+        .arg("-B")
+        .arg(repo_root().join("scripts/olp-dispatch.py"))
+        .args([unit, "--title", "新任务", "--skip-health", "--board"])
+        .arg(board)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    dispatch
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"new work\n")
+        .unwrap();
+    dispatch.wait_with_output().unwrap()
+}
+
+/// Scenario: 归档保持收件箱、单元占用和派单结果一致
+#[test]
+fn board_archive_preserves_open_work_and_unit_occupancy() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = dir.path().join("board.md");
+    let history =
+        "## Historical record\n### 7. 历史卡\nunit: m07\n> 外环(hub)·采认(#1): 旧记录\n## Active\n";
+    std::fs::write(
+        &board,
+        format!(
+            "## Active\n\
+             ### 1. 等返工\nunit: m01\n\
+             ### 2. 裸 ACK\nunit: m02\nACK(done): 已提交\n\
+             ### 3. 具名 ACK\nunit: m03\n\
+             ### 4. 已采认\nunit: m04\n可归档正文\n\
+             > 外环(hub)·打回(#1): 缺证据\n\
+             > 内环(m03)·#3 ACK(done): 已提交\n\
+             > 外环(hub)·采认(#4): 已复验\n\
+             ### 5. 搁置\nunit: m05\n> 外环(hub)·搁置(#5) 至 2099-01-01: 等依赖\n\
+             ### 6. 旧版提前归档的返工卡\nunit: m06\n\
+             > 外环(hub)·打回(#6): 需返工\n<!-- olp-archived: previous.archive.md -->\n{history}"
+        ),
+    )
+    .unwrap();
+    let pending = inbox_json(&board, &[]);
+    let units = inbox_json(&board, &["--units"]);
+    let held = units["units"].as_array().unwrap();
+    assert_eq!(held.len(), 6);
+    for u in held {
+        assert_eq!(u["busy"], u["unit"] != "m04", "{u}");
+    }
+    assert_eq!(
+        pending["counts"],
+        serde_json::json!({
+            "inbox": 2, "working": 2, "settled": 1, "snoozed": 1
+        })
+    );
+    let out = archive(&board, &["--keep", "0"], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(stdout(&out).matches("archived #").count(), 1);
+    assert!(stdout(&out).contains("archived #4 "));
+    assert!(read(&board).ends_with(history));
+    assert_eq!(inbox_json(&board, &[]), pending);
+    assert_eq!(inbox_json(&board, &["--units"]), units);
+
+    let refused = dispatch_to(&board, "m01");
+    assert_eq!(refused.status.code(), Some(1), "{}", stderr(&refused));
+    assert!(stderr(&refused).contains("#1"), "{}", stderr(&refused));
+}
+
+/// Scenario: 旧板末尾继续接收派卡与回执
+#[test]
+fn board_inbox_reads_dispatches_appended_after_trailing_history_heading() {
+    if !Command::new("sh")
+        .args(["-c", "command -v flock >/dev/null 2>&1"])
+        .status()
+        .unwrap()
+        .success()
+    {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let board = dir.path().join("board.md");
+    std::fs::write(
+        &board,
+        "## Active\n## Historical record\n旧版没有在末尾追加 Active 标题。\n\
+         ### 1. 升级前追加的卡\nunit: m01\nACK(done): 待复验\n",
+    )
+    .unwrap();
+    let added = dispatch_to(&board, "m02");
+    assert!(added.status.success(), "{}", stderr(&added));
+    let view = inbox_json(&board, &[]);
+    assert_eq!(view["items"][0]["number"], 1);
+    assert_eq!(view["items"][0]["partition"], "inbox");
+    assert_eq!(view["items"][1]["number"], 2);
+    assert_eq!(view["items"][1]["partition"], "working");
+    let units = inbox_json(&board, &["--units"]);
+    for (i, unit) in ["m01", "m02"].iter().enumerate() {
+        assert_eq!(units["units"][i]["unit"], *unit);
+        assert_eq!(units["units"][i]["busy"], true);
+    }
+
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&board)
+        .unwrap()
+        .write_all("> 外环(hub)·采认(#1): 复验通过\n".as_bytes())
+        .unwrap();
+    let after = inbox_json(&board, &["--units"]);
+    assert_eq!(after["units"][0]["busy"], false);
+    assert_eq!(after["units"][1]["busy"], true);
+}
+
+/// Scenario: 归档桩保留紧邻编号键的原始投递绑定
+#[test]
+fn board_archive_keeps_only_complete_adjacent_dispatch_bindings() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = dir.path().join("board.md");
+    let hash = "a".repeat(64);
+    let marker = |pane: &str| format!("<!-- olp-dispatch: n=1 sha256={hash} pane={pane} -->");
+    let binding = format!("{}\n<!-- olp-key: original n=1 -->", marker("w1:p2"));
+    let examples = format!(
+        "```\n{}\n<!-- olp-key: code n=1 -->\n```\n> {}\n<!-- olp-key: quote n=1 -->\n{}\n<!-- olp-key: wrong n=8 -->\n{}\n",
+        marker("fenced"),
+        marker("quoted"),
+        marker("wrong-card"),
+        marker("detached")
+    );
+    std::fs::write(
+        &board,
+        format!(
+            "### 1. 示例\nunit: m01\n正文\n{binding}\n{examples}\n> 外环(hub)·采认(#1): 完成\n"
+        ),
+    )
+    .unwrap();
+    let out = archive(&board, &["--keep", "0"], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stub = read(&board);
+    assert!(stub.contains(&binding), "{stub}");
+    assert_eq!(stub.matches("<!-- olp-dispatch:").count(), 1, "{stub}");
 }
 
 /// Scenario: 采集要读的单元信号留在桩里,先归档后采集也不漏

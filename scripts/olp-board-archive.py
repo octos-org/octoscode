@@ -14,13 +14,9 @@
 规则:
   - 条目 = 一个 `### <数字>` 标题到下一个 `###`/`##` 标题之前的全部行。
     代码围栏(```)里的标题不算。
-  - 已闭环,满足其一即可:
-      a. 外环已经下了结论:板上关于 #N 最后出现的一行是采认或打回
-         (`> 外环(…)·采认(#N)` / `·打回(#N)`),或者 #N 被改判作废。结论
-         之后单元又推送、内环又 ACK 的,不算闭环。
-      b. 板上没有关于 #N 的任何判词或登记时,沿用旧规则:条目里最后一条
-         `ACK(` 行是 `ACK(done` 或 `ACK(wontdo`。
-    `ACK(blocked`、没有 ACK、旧格式 `ACK:` 的条目不动。
+  - 只归档收件箱判为已了结的卡:已采认、改判作废、无单元的卡被打回。
+    单元被打回仍要返工。裸 ACK 与具名 ACK 都等外环判词,保留正文。
+    明确以“## Active”结束的“## Historical record”区只供审计,按原样保留。
   - 最近的 --keep 个编号条目(默认 10)不论是否闭环都原样保留。
   - 桩保留标题和条目里所有"给机器读"的行:`ACK(` 行、`unit:` 行、写板
     助手 `--key` 留下的 `<!-- olp-key: … -->` 标记,以及署名的行首定式
@@ -64,58 +60,43 @@ import sys
 import tempfile
 
 
-def cli_lib():
+def load_sibling(name):
     import importlib.util
 
     here = os.path.dirname(os.path.abspath(__file__))
-    spec = importlib.util.spec_from_file_location("olp_cli_lib", os.path.join(here, "olp-cli-lib.py"))
+    spec = importlib.util.spec_from_file_location(name, os.path.join(here, name + ".py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
-HEADING = re.compile(r"^### (\d+)")
-ARCHIVED_MARK = "<!-- olp-archived: "
+
+# A direct --dry-run must not create a __pycache__ next to the installed tools.
+sys.dont_write_bytecode = True
+inbox = load_sibling("olp-inbox")
+ARCHIVED_MARK = inbox.ARCHIVED_MARK
 KEY_MARK = "<!-- olp-key: "
+DISPATCH_MARK = re.compile(
+    r"<!-- olp-dispatch: n=(\d+) sha256=[0-9a-f]{64} pane=(?:-|[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}) -->"
+)
+NUMBERED_KEY = re.compile(r"<!-- olp-key: [A-Za-z0-9._:/@+=-]{1,200} n=(\d+) -->")
 ENTRY_MARK = re.compile(r"^<!-- olp-archived-entry: (\d+) ")
 
 
 def split_blocks(lines):
-    """Split the board into blocks: ("entry", number, lines) for numbered
-    entries and ("other", None, lines) for everything else, in file order."""
-    blocks = []
-    kind, number, cur = "other", None, []
-    in_fence = False
-    for line in lines:
-        stripped = line.lstrip()
-        if stripped.startswith("```") or stripped.startswith("~~~"):
-            in_fence = not in_fence
-            cur.append(line)
-            continue
-        boundary = not in_fence and (line.startswith("### ") or line.startswith("## "))
-        if boundary:
-            if cur:
-                blocks.append((kind, number, cur))
-            m = HEADING.match(line)
-            if m:
-                kind, number = "entry", int(m.group(1))
-            else:
-                kind, number = "other", None
-            cur = [line]
-        else:
-            cur.append(line)
-    if cur:
-        blocks.append((kind, number, cur))
-    return blocks
+    """Split at unfenced headings; keep the physical start line of each block."""
+    boundaries = [
+        no - 1 for no, line in inbox.markdown_lines(lines)
+        if line.startswith(("### ", "## ")) and no > 1
+    ]
+    starts = [0, *boundaries, len(lines)]
+    return [
+        (start + 1, lines[start:end])
+        for start, end in zip(starts, starts[1:])
+        if start < end
+    ]
 
 
 UNIT_LINE = re.compile(r"^(unit|impl|review|verify-of):\s*\S.*$")
-# 判词与登记的行首定式(剥掉 `> `、`**` 之后判断)。
-SIGNED_OUTER = re.compile(r"^外环\([^)]+\)·(采认|打回|搁置)\(#(\d+)\)")
-SIGNED_VOID = re.compile(r"^外环\([^)]+\)·改判\(作废 #(\d+)\)")
-SIGNED_PUSH = re.compile(r"^单元\([^)]+\)·本地复验通过\(#(\d+)\)")
-SIGNED_INNER_ACK = re.compile(
-    r"^内环\([^)]+\)·(?:#(\d+)\s*)?ACK\((done|wontdo|blocked)\)(?:[^:：]*[:：]\s*#(\d+))?"
-)
 # 进化环采集(olp-evo-harvest.sh)在活板上读的单元信号:负哨,以及单元转发
 # 来的 MCP blocked / timeout 审计行。
 SIGNED_ALERT = re.compile(r"^单元\([^)]+\)·负哨\(")
@@ -124,28 +105,13 @@ SIGNED_UNIT_MCP = re.compile(
 )
 
 
-def strip_quote(line):
-    s = line.lstrip()
-    while True:
-        if s.startswith("> "):
-            s = s[2:]
-        elif s.startswith(">"):
-            s = s[1:]
-        elif s.startswith("**"):
-            s = s[2:]
-        else:
-            break
-        s = s.lstrip()
-    return s
-
-
 def is_signed_form(line):
-    signed = strip_quote(line)
+    signed = inbox.strip_quote(line)
     return bool(
-        SIGNED_OUTER.match(signed)
-        or SIGNED_VOID.match(signed)
-        or SIGNED_PUSH.match(signed)
-        or SIGNED_INNER_ACK.match(signed)
+        inbox.SIGNED.match(signed)
+        or inbox.VOID.match(signed)
+        or inbox.PUSHED.match(signed)
+        or inbox.INNER_ACK.match(signed)
         or SIGNED_ALERT.match(signed)
         or SIGNED_UNIT_MCP.match(signed)
     )
@@ -166,84 +132,20 @@ def ack_lines(entry_lines):
       Archiving before a harvest must not lose them.
     """
     out = []
-    in_fence = False
-    for line in entry_lines:
-        stripped = line.lstrip()
-        if stripped.startswith("```") or stripped.startswith("~~~"):
-            in_fence = not in_fence
-            continue
-        if in_fence:
-            continue
-        bare = line.rstrip("\r\n")
+    for no, bare in inbox.markdown_lines(entry_lines):
+        binding = DISPATCH_MARK.fullmatch(bare)
+        if binding and no < len(entry_lines):
+            key = NUMBERED_KEY.fullmatch(entry_lines[no].rstrip("\r\n"))
+            if key and key.group(1) == binding.group(1):
+                out.append(entry_lines[no - 1])
         if (
-            line.startswith("ACK(")
-            or line.startswith(KEY_MARK)
+            bare.startswith("ACK(")
+            or bare.startswith(KEY_MARK)
             or UNIT_LINE.match(bare)
             or is_signed_form(bare)
         ):
-            out.append(line)
+            out.append(entry_lines[no - 1])
     return out
-
-
-def board_verdicts(lines):
-    """Scan the whole board for signed forms. Returns (latest, voided):
-    latest[N] is the kind of the last event about #N among accepted /
-    returned / pushed / inner_ack; voided is the set of overridden entries."""
-    latest, voided = {}, set()
-    in_fence = False
-    current = None
-    for line in lines:
-        bare = line.rstrip("\r\n")
-        stripped = bare.lstrip()
-        if stripped.startswith("```") or stripped.startswith("~~~"):
-            in_fence = not in_fence
-            continue
-        if in_fence:
-            continue
-        if bare.startswith("### ") or bare.startswith("## "):
-            m = HEADING.match(bare)
-            current = int(m.group(1)) if m else None
-            continue
-        signed = strip_quote(bare)
-        m = SIGNED_OUTER.match(signed)
-        if m:
-            if m.group(1) != "搁置":
-                latest[int(m.group(2))] = "accepted" if m.group(1) == "采认" else "returned"
-            continue
-        m = SIGNED_VOID.match(signed)
-        if m:
-            voided.add(int(m.group(1)))
-            continue
-        m = SIGNED_PUSH.match(signed)
-        if m:
-            latest[int(m.group(1))] = "pushed"
-            continue
-        m = SIGNED_INNER_ACK.match(signed)
-        if m:
-            ref = m.group(1) or m.group(3)
-            target = int(ref) if ref else current
-            if target is not None:
-                latest[target] = "inner_ack"
-    return latest, voided
-
-
-def is_closed(number, entry_lines, latest, voided):
-    """Closed when the outer loop has ruled on it — accepted, returned or
-    overridden, with nothing newer — or, for boards without verdict lines,
-    when the entry's own last ACK is done or wontdo."""
-    if number in voided:
-        return True
-    if number in latest:
-        return latest[number] in ("accepted", "returned")
-    acks = [l for l in ack_lines(entry_lines) if l.startswith("ACK(")]
-    if not acks:
-        return False
-    last = acks[-1]
-    return last.startswith("ACK(done") or last.startswith("ACK(wontdo")
-
-
-def is_stub(entry_lines):
-    return any(line.startswith(ARCHIVED_MARK) for line in entry_lines)
 
 
 def with_newline(line):
@@ -289,7 +191,7 @@ def main():
         return 2
     archive_name = os.path.basename(archive)
     if not args.dry_run:
-        cli_lib().duty_gate("olp-board-archive")
+        load_sibling("olp-cli-lib").duty_gate("olp-board-archive")
 
     lock_fd = None
     if not args.dry_run:
@@ -301,23 +203,24 @@ def main():
             lines = f.readlines()
         blocks = split_blocks(lines)
 
-        entry_positions = [i for i, b in enumerate(blocks) if b[0] == "entry"]
-        protected = set(entry_positions[len(entry_positions) - args.keep:]) if args.keep else set()
-        latest, voided = board_verdicts(lines)
-        targets = [
-            i
-            for i in entry_positions
-            if i not in protected
-            and not is_stub(blocks[i][2])
-            and is_closed(blocks[i][1], blocks[i][2], latest, voided)
-        ]
+        entries, events, warnings = inbox.scan_lines(lines)
+        positions = {entry["line"]: number for number, entry in entries.items()}
+        cards = [(i, positions[line]) for i, (line, _) in enumerate(blocks) if line in positions]
+        eligible = cards[:-args.keep] if args.keep else cards
+        today = datetime.date.today()
+        targets = []
+        for i, number in eligible:
+            entry = entries[number]
+            partition, _, _ = inbox.classify(number, entry, events, today, warnings)
+            if partition == inbox.SETTLED and not entry["archived"]:
+                targets.append((i, number))
         if not targets:
             print("olp-board-archive: 没有可归档的条目")
             return 0
 
         if args.dry_run:
-            for i in targets:
-                print(f"would archive #{blocks[i][1]} {blocks[i][2][0].strip()[4:]}")
+            for i, number in targets:
+                print(f"would archive #{number} {blocks[i][1][0].strip()[4:]}")
             print(f"olp-board-archive: dry-run,{len(targets)} 个条目可归档,未写入任何文件")
             return 0
 
@@ -332,8 +235,8 @@ def main():
         now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         to_append = []
         new_blocks = list(blocks)
-        for i in targets:
-            _, number, entry = blocks[i]
+        for i, number in targets:
+            start_line, entry = blocks[i]
             if number not in already:
                 to_append.append(f"<!-- olp-archived-entry: {number} at {now} -->\n")
                 to_append.extend(with_newline(l) for l in entry)
@@ -343,7 +246,7 @@ def main():
             stub.extend(with_newline(l) for l in ack_lines(entry))
             stub.append(f"{ARCHIVED_MARK}{archive_name} -->\n")
             stub.append("\n")
-            new_blocks[i] = ("entry", number, stub)
+            new_blocks[i] = (start_line, stub)
 
         # Archive first: if anything fails after this point the entries exist
         # in both places, never in neither.
@@ -364,7 +267,7 @@ def main():
         fd, tmp = tempfile.mkstemp(prefix=".olp-archive-", dir=board_dir)
         try:
             with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
-                for _, _, blines in new_blocks:
+                for _, blines in new_blocks:
                     f.writelines(blines)
                 f.flush()
                 os.fsync(f.fileno())
@@ -388,8 +291,8 @@ def main():
             if tmp and os.path.exists(tmp):
                 os.unlink(tmp)
 
-        for i in targets:
-            print(f"archived #{blocks[i][1]} {blocks[i][2][0].strip()[4:]}")
+        for i, number in targets:
+            print(f"archived #{number} {blocks[i][1][0].strip()[4:]}")
         print(f"olp-board-archive: {len(targets)} 个条目已归档到 {archive}")
         print(
             "olp-board-archive: 板的行数已变少;一击观测哨请重新挂。",

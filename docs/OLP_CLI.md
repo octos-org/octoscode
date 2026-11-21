@@ -19,6 +19,54 @@
 6. **旧入口保留一段时间**:`scripts/olp-*` 照常可用;`octoscode outer-duty`、
    `octoscode olp-mcp-serve`、`octoscode olp-runtime-watch` 作为新命令的别名保留。
 
+## 1b. 给 agent 的四条约定
+
+命令清单由 CLI 自己提供,文档只维护这四条:
+
+- 不确定用哪条命令时,执行 `octoscode olp commands --json` 查当前版本的命令目录。按
+  `summary` 选命令,用 `route` 给出的正式写法。
+- 已经知道命令时,执行 `octoscode olp <组> <动作> --help` 看用法和示例;要用程序取字段
+  时执行 `octoscode olp <组> <动作> --help --json`。
+- 参数取值取决于当前环境时,先用对应的查询命令拿到可选值,例如
+  `octoscode olp unit status --json`。
+- 查帮助不会执行命令。要执行就写 `octoscode olp <组> <动作> [参数]`;单独传 `--json`
+  时该选项由命令自己处理,命令仍会执行。
+
+目录里每条命令的字段:
+
+| 字段 | 含义 |
+|---|---|
+| `route` | 正式写法,如 `octoscode olp card dispatch` |
+| `summary` | 一句话说明 |
+| `subcommands` | `true`:下一个词是工具自己的子命令,用它的 `--help` 查 |
+| `runs_on` | 在哪一侧运行:`hub`、`unit`、`any`;`internal` 是 git 或 ssh 强制命令调用的,不手工执行 |
+| `writes` | 是否改动数据;`false` 的命令可以放心试 |
+| `needs_lease` | 是否需要主审权租约(没有时退出码 6) |
+| `implementation` | `script`(打包的脚本)或 `rust` |
+| `help` | 查这条命令帮助的写法 |
+
+`writes`、`needs_lease` 为 `null` 表示这里没有记录(取决于子命令,或尚未核实),以该命令
+自己的 `--help` 为准,不要当成 `false`。参数的用法提示(`args`)和可选值的查询命令
+(`values_from`)随命令迁到 Rust 逐条补上,现在还没有。
+
+事件日志(JSON Lines,`specs/task-olp-event-log.spec.md`):`octoscode olp board import <板.md>
+--to <目录>` 把 Markdown 黑板一次性导入成事件日志;`board inbox <路径>` 的路径是目录时读
+事件日志,结论与原板相同。日志不手工编辑,写入走命令(`specs/task-olp-card-writes.spec.md`):
+`card open`(立卡,分配卡号)、`card ack`(内环回执)、`card accept` / `return` / `void` /
+`snooze`(外环判词),都带 `--log <目录>`;`board render <目录>` 把日志输出成只读的 Markdown。
+单元经 ssh 强制命令 `remote serve-log --unit <单元号> --log <目录>` 访问日志
+(`specs/task-olp-unit-serve.spec.md`):只能对派给自己的卡回执(`ack`)、报进度节点
+(`progress`),只能读到自己的卡的事件(`events`)。单元上的命令(`specs/task-olp-unit-client.spec.md`):
+`unit.conf` 里写了 `store = log` 时,`remote ack`、`remote mirror` 走这条通道,另有
+`remote progress <N> claimed | review <轮次> | rework <轮次>`;没写时一切照旧。
+派卡与唤醒(`specs/task-olp-delivery-wake.spec.md`):`card open --unit U --pane <窗格>` 写进日志
+就是送达;单元用 `remote inbox [<窗格>]` 看还没领取的卡,用 `remote progress <N> claimed`
+领取。`remote watch <窗格>` 是单元上的值守(不是 agent):有新卡且 agent 空闲时往窗格发一句
+固定短句"有新派卡,请执行:octoscode olp remote inbox <窗格>",不带卡的内容。
+
+迁到 Rust 的命令(`src/olp/`):`board inbox`。迁过去的命令不再经过打包的脚本;
+`OCTOSCODE_OLP_LEGACY=1` 让它改跑原脚本,保留一个版本作退路。
+
 ## 2. 命令一览
 
 ### 2.1 起步

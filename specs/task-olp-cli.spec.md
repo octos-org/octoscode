@@ -32,6 +32,13 @@ ssh 强制命令、git 钩子、保活任务都写死了脚本路径。目标是
 - 解释器:`.py` 用 `python3 -B`(`OCTOSCODE_PYTHON`),`.sh` 用 `bash`(`OCTOSCODE_BASH`)。
 - 列表与帮助:`octoscode olp` / `help` / `--help` 列出命令与别名;`octoscode olp <组>` 列出该组
   动作(退出码 2);未知组或动作退出码 2;`<组> <动作> --help` 由工具自己回答。
+- 命令目录(2026-11-21):`octoscode olp commands --json` 从同一张分发表生成,每条命令有
+  route、summary、subcommands、runs_on(hub/unit/any/internal)、writes、needs_lease、
+  implementation、help;`writes`/`needs_lease` 为 null 表示未记录,不当成 false。
+  `<组> <动作> --help --json`(两个词、顺序不限、没有别的参数)只输出该命令的记录并退出 0,
+  不运行命令;单独的 `--help` 仍由工具自己回答,单独的 `--json` 仍交给命令。单元测试
+  `every_command_has_catalog_facts` 要求每条命令都登记了这些事实。args 与 values_from 随
+  命令迁到 Rust 逐条补,本任务不做。
 - 两个单元测试守住打包清单:`scripts/` 下每个 `olp-*` 要么打包、要么在 `NOT_BUNDLED`;每条
   命令指向的脚本都已打包。
 
@@ -59,6 +66,12 @@ Scenario: 列出命令面;未知的组与动作以退出码 2 拒绝
   Given 一个空的沙箱
   When 不带参数、带 --help、带未知组、带已知组的未知动作、只带组名运行
   Then 列表含各组与别名、不含由 git 调用的内部动作;未知组与未知动作退出码 2 并给出可选项;只带组名时列出该组动作
+
+Scenario: 命令目录给程序读;查帮助不执行命令
+  Test: olp_commands_json_is_the_catalog_and_help_json_does_not_run
+  Given 一个空沙箱
+  When 执行 `olp commands --json`,再对一条命令执行 `--help --json`
+  Then 目录列出本版本的每条命令(含列表里隐藏的),每条有 route、summary、runs_on、writes、needs_lease、implementation;`--help --json` 只输出该命令的这条记录,不运行命令;单独的 `--json` 仍交给命令自己
 
 Scenario: 打包的工具与仓库里的逐字节相同,工具目录按内容复用(critical)
   Tags: critical

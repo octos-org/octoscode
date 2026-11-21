@@ -230,6 +230,11 @@ enum Target {
     Keepalive,
     /// A command that is already Rust: re-enter the dispatcher.
     Native(&'static str, &'static [&'static str]),
+    /// A command written in Rust from the start (`src/olp/`).
+    Rust(fn(&[String]) -> i32),
+    /// A command moved to Rust (`src/olp/`), with the script it replaced.
+    /// `OCTOSCODE_OLP_LEGACY=1` runs the script instead, for one release.
+    Moved(fn(&[String]) -> i32, &'static str),
 }
 
 struct Entry {
@@ -285,13 +290,18 @@ const COMMANDS: &[Entry] = &[
         &[],
         "在锁内向黑板追加(分配 {N}、按键去重)",
     ),
-    script(
-        "board",
-        Some("inbox"),
-        "olp-inbox.py",
-        &[],
-        "收件箱:等谁决定的卡;--units 看单元占用",
-    ),
+    Entry {
+        group: "board",
+        action: Some("inbox"),
+        target: Target::Moved(crate::olp::inbox::run, "olp-inbox.py"),
+        help: "收件箱:等谁决定的卡;--units 看单元占用",
+    },
+    Entry {
+        group: "board",
+        action: Some("import"),
+        target: Target::Rust(crate::olp::import::run),
+        help: "把 Markdown 黑板一次性导入成事件日志(JSON Lines):olp board import <板> --to <目录>",
+    },
     script(
         "board",
         Some("archive"),
@@ -320,6 +330,48 @@ const COMMANDS: &[Entry] = &[
         &[],
         "按自然键分配黑板以外的编号",
     ),
+    Entry {
+        group: "card",
+        action: Some("open"),
+        target: Target::Rust(|argv| crate::olp::card::run("open", argv)),
+        help: "事件日志:立一张卡,分配卡号(正文从 stdin):card open --log <目录> --title T [--unit U]",
+    },
+    Entry {
+        group: "card",
+        action: Some("ack"),
+        target: Target::Rust(|argv| crate::olp::card::run("ack", argv)),
+        help: "事件日志:内环回执 done / wontdo / blocked",
+    },
+    Entry {
+        group: "card",
+        action: Some("accept"),
+        target: Target::Rust(|argv| crate::olp::card::run("accept", argv)),
+        help: "事件日志:外环采认",
+    },
+    Entry {
+        group: "card",
+        action: Some("return"),
+        target: Target::Rust(|argv| crate::olp::card::run("return", argv)),
+        help: "事件日志:外环打回",
+    },
+    Entry {
+        group: "card",
+        action: Some("void"),
+        target: Target::Rust(|argv| crate::olp::card::run("void", argv)),
+        help: "事件日志:外环改判作废",
+    },
+    Entry {
+        group: "card",
+        action: Some("snooze"),
+        target: Target::Rust(|argv| crate::olp::card::run("snooze", argv)),
+        help: "事件日志:外环搁置到某一天",
+    },
+    Entry {
+        group: "board",
+        action: Some("render"),
+        target: Target::Rust(crate::olp::render::run),
+        help: "事件日志:输出成 Markdown 黑板(只读视图)",
+    },
     script(
         "card",
         Some("dispatch"),
@@ -334,6 +386,54 @@ const COMMANDS: &[Entry] = &[
         &[],
         "单元:register / set-state / status / check / where / receive / heartbeat",
     ),
+    Entry {
+        group: "remote",
+        action: Some("ack"),
+        target: Target::Rust(|argv| {
+            if crate::olp::client::log_mode() {
+                crate::olp::client::ack(argv)
+            } else {
+                run_script("olp-board-remote.py", &["ack"], argv, None)
+            }
+        }),
+        help: "单元回执 done / wontdo / blocked(hub 用事件日志时走新通道,否则写 Markdown 黑板)",
+    },
+    Entry {
+        group: "remote",
+        action: Some("mirror"),
+        target: Target::Rust(|argv| {
+            if crate::olp::client::log_mode() {
+                crate::olp::client::mirror(argv)
+            } else {
+                run_script("olp-board-remote.py", &["mirror"], argv, None)
+            }
+        }),
+        help: "把 hub 上本单元的卡同步成本机的只读 Markdown",
+    },
+    Entry {
+        group: "remote",
+        action: Some("progress"),
+        target: Target::Rust(crate::olp::client::progress),
+        help: "事件日志:单元上报进度节点 claimed / review <轮次> / rework <轮次>",
+    },
+    Entry {
+        group: "remote",
+        action: Some("inbox"),
+        target: Target::Rust(crate::olp::client::inbox),
+        help: "事件日志:派给本单元、还没领取的卡;领取用 remote progress <N> claimed",
+    },
+    Entry {
+        group: "remote",
+        action: Some("watch"),
+        target: Target::Rust(crate::olp::client::watch),
+        help: "事件日志:单元值守,有新派卡且 agent 空闲时往窗格发一句固定短句",
+    },
+    Entry {
+        group: "remote",
+        action: Some("serve-log"),
+        target: Target::Rust(crate::olp::serve::run),
+        help: "事件日志:ssh 强制命令,单元只能回执、报进度、读自己的卡",
+    },
     script(
         "remote",
         None,
@@ -500,6 +600,126 @@ const COMMANDS: &[Entry] = &[
     ),
 ];
 
+/// Where a command is meant to run.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RunsOn {
+    Hub,
+    Unit,
+    Any,
+    /// Called by git or by an ssh forced command, never typed.
+    Internal,
+}
+
+/// What an agent needs to know before it tries a command. `None` on
+/// `writes` / `needs_lease` means "not recorded here": the answer depends
+/// on a subcommand or has not been established yet, and the command's own
+/// `--help` is the place to look. Never guess `false`.
+struct Meta {
+    runs_on: RunsOn,
+    writes: Option<bool>,
+    needs_lease: Option<bool>,
+}
+
+const fn meta_of(runs_on: RunsOn, writes: Option<bool>, needs_lease: Option<bool>) -> Meta {
+    Meta {
+        runs_on,
+        writes,
+        needs_lease,
+    }
+}
+
+/// The catalog facts for one entry. A command missing here fails
+/// `every_command_has_catalog_facts`.
+fn meta(group: &str, action: Option<&str>) -> Option<Meta> {
+    use RunsOn::*;
+    let (yes, no) = (Some(true), Some(false));
+    Some(match (group, action) {
+        ("init", None) | ("skill", Some("install")) => meta_of(Any, yes, no),
+        ("doctor", None) => meta_of(Any, no, no),
+        ("board", Some("append" | "archive" | "import")) => meta_of(Hub, yes, yes),
+        ("board", Some("inbox" | "watch" | "summary")) => meta_of(Hub, no, no),
+        ("id", Some("alloc")) => meta_of(Hub, yes, no),
+        ("card", Some("dispatch" | "open" | "accept" | "return" | "void" | "snooze")) => {
+            meta_of(Hub, yes, yes)
+        }
+        ("card", Some("ack")) => meta_of(Any, yes, no),
+        ("board", Some("render")) => meta_of(Hub, no, no),
+        ("unit", None) | ("keepalive", None) | ("ask", None) => meta_of(Any, None, None),
+        ("remote", None) => meta_of(Unit, None, no),
+        ("repo", Some("init")) => meta_of(Hub, yes, no),
+        ("repo", Some("status")) => meta_of(Hub, no, no),
+        ("repo", Some("promote")) => meta_of(Hub, yes, yes),
+        ("repo", Some("connect-local" | "push")) => meta_of(Unit, yes, no),
+        ("repo", Some("serve" | "hook" | "local-pack")) => meta_of(Internal, None, no),
+        ("remote", Some("serve-log")) => meta_of(Internal, None, no),
+        ("remote", Some("ack" | "progress" | "mirror")) => meta_of(Unit, yes, no),
+        ("remote", Some("inbox" | "watch")) => meta_of(Unit, no, no),
+        ("ask", Some("mcp")) | ("guard", Some("watch")) => meta_of(Unit, no, no),
+        ("guard", Some("forward")) => meta_of(Unit, yes, no),
+        ("outer", None) | ("duty", None) => meta_of(Hub, None, None),
+        ("evo", Some(_)) | ("review", _) => meta_of(Hub, None, None),
+        _ => return None,
+    })
+}
+
+fn route(e: &Entry) -> String {
+    match e.action {
+        Some(a) => format!("octoscode olp {} {a}", e.group),
+        None => format!("octoscode olp {}", e.group),
+    }
+}
+
+/// One catalog record: what `olp commands --json` lists and what
+/// `olp <命令> --help --json` prints for a single command.
+fn describe(e: &Entry) -> serde_json::Value {
+    let m = meta(e.group, e.action);
+    let runs_on = match m.as_ref().map(|m| m.runs_on) {
+        Some(RunsOn::Hub) => "hub",
+        Some(RunsOn::Unit) => "unit",
+        Some(RunsOn::Internal) => "internal",
+        Some(RunsOn::Any) | None => "any",
+    };
+    let route = route(e);
+    serde_json::json!({
+        "route": route,
+        "summary": e.help,
+        // The next word is the tool's own subcommand; its --help lists them.
+        "subcommands": e.action.is_none() && e.group != "init" && e.group != "doctor",
+        "runs_on": runs_on,
+        "writes": m.as_ref().and_then(|m| m.writes),
+        "needs_lease": m.as_ref().and_then(|m| m.needs_lease),
+        "implementation": match e.target {
+            Target::Native(..) | Target::Moved(..) | Target::Rust(..) => "rust",
+            Target::Script(..) | Target::Keepalive => "script",
+        },
+        "help": format!("{route} --help"),
+    })
+}
+
+fn catalog() -> serde_json::Value {
+    let aliases: Vec<serde_json::Value> = ALIASES
+        .iter()
+        .map(|(alias, g, a)| {
+            serde_json::json!({
+                "alias": format!("octoscode olp {alias}"),
+                "route": format!("octoscode olp {g} {a}"),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "commands": COMMANDS.iter().map(describe).collect::<Vec<_>>(),
+        "aliases": aliases,
+    })
+}
+
+fn print_json(value: &serde_json::Value) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+    );
+}
+
 /// Top-level shortcuts for the three most used commands.
 const ALIASES: &[(&str, &str, &str)] = &[
     ("dispatch", "card", "dispatch"),
@@ -526,6 +746,7 @@ fn usage() -> String {
         out.push_str(&format!(" {alias}={g} {a}"));
     }
     out.push_str("\n参数、输出、退出码与 scripts/olp-* 相同;`octoscode olp <组> <动作> --help` 看该工具自己的帮助。\n");
+    out.push_str("命令目录(给程序读):`octoscode olp commands --json`;单条命令:`octoscode olp <组> <动作> --help --json`。查帮助不执行命令。\n");
     out
 }
 
@@ -666,6 +887,25 @@ pub fn run(argv: &[String]) -> i32 {
         print!("{}", usage());
         return 0;
     }
+    if words[0] == "commands" {
+        // The catalog of this version's commands. Read-only.
+        return match words.get(1).map(String::as_str) {
+            None | Some("-h") | Some("--help") => {
+                print!("{}", usage());
+                0
+            }
+            Some("--json") if words.len() == 2 => {
+                print_json(&catalog());
+                0
+            }
+            Some(other) => {
+                eprintln!(
+                    "octoscode olp commands: 不认识的参数: {other}(用法:octoscode olp commands [--json])"
+                );
+                2
+            }
+        };
+    }
     if let Some((_, g, a)) = ALIASES.iter().find(|(alias, _, _)| *alias == words[0]) {
         words.splice(0..1, [g.to_string(), a.to_string()]);
     }
@@ -702,6 +942,16 @@ pub fn run(argv: &[String]) -> i32 {
     } else {
         words[1..].to_vec()
     };
+    // `--help --json`, in either order and with nothing else: describe the
+    // command and stop. Help never runs the command; `--json` on its own
+    // belongs to the command and still runs it.
+    if rest.len() == 2
+        && rest.iter().any(|w| w == "--help" || w == "-h")
+        && rest.iter().any(|w| w == "--json")
+    {
+        print_json(&describe(entry));
+        return 0;
+    }
     match &entry.target {
         Target::Script(file, fixed) => {
             if group == "init" {
@@ -717,6 +967,13 @@ pub fn run(argv: &[String]) -> i32 {
                 return run_script(file, fixed, &rest, Some(&dir));
             }
             run_script(file, fixed, &rest, None)
+        }
+        Target::Rust(native) => native(&rest),
+        Target::Moved(native, file) => {
+            if std::env::var_os("OCTOSCODE_OLP_LEGACY").is_some_and(|v| !v.is_empty()) {
+                return run_script(file, &[], &rest, None);
+            }
+            native(&rest)
         }
         Target::Keepalive => {
             let file = if cfg!(target_os = "macos") {
@@ -805,7 +1062,7 @@ mod tests {
     #[test]
     fn every_command_names_a_bundled_script() {
         for e in COMMANDS {
-            if let Target::Script(file, _) = e.target {
+            if let Target::Script(file, _) | Target::Moved(_, file) = e.target {
                 assert!(
                     BUNDLE
                         .iter()
@@ -821,6 +1078,28 @@ mod tests {
                 COMMANDS
                     .iter()
                     .any(|e| e.group == *g && e.action == Some(*a))
+            );
+        }
+    }
+
+    #[test]
+    fn every_command_has_catalog_facts() {
+        for e in COMMANDS {
+            let m = meta(e.group, e.action)
+                .unwrap_or_else(|| panic!("{} {:?} has no catalog facts", e.group, e.action));
+            // Commands git calls are the ones the listing hides.
+            assert_eq!(
+                e.help.starts_with("(由 git"),
+                // ssh forced commands are internal too, but an operator
+                // writes them into authorized_keys: those stay listed.
+                m.runs_on == RunsOn::Internal && !e.action.is_some_and(|a| a.starts_with("serve")),
+                "{} {:?}",
+                e.group,
+                e.action
+            );
+            assert!(
+                COMMANDS.iter().all(|other| other.group != "commands"),
+                "`commands` is the catalog, not a group"
             );
         }
     }
