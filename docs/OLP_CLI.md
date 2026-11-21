@@ -51,7 +51,9 @@
 
 事件日志(JSON Lines,`specs/task-olp-event-log.spec.md`):`octoscode olp board import <板.md>
 --to <目录>` 把 Markdown 黑板一次性导入成事件日志;`board inbox <路径>` 的路径是目录时读
-事件日志,结论与原板相同。日志不手工编辑。
+事件日志,结论与原板相同。日志不手工编辑,写入走命令(`specs/task-olp-card-writes.spec.md`):
+`card open`(立卡,分配卡号)、`card ack`(内环回执)、`card accept` / `return` / `void` /
+`snooze`(外环判词),都带 `--log <目录>`;`board render <目录>` 把日志输出成只读的 Markdown。
 
 迁到 Rust 的命令(`src/olp/`):`board inbox`。迁过去的命令不再经过打包的脚本;
 `OCTOSCODE_OLP_LEGACY=1` 让它改跑原脚本,保留一个版本作退路。
