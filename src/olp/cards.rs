@@ -148,6 +148,48 @@ pub fn visible_to<'a>(events: &'a [Event], unit: &str) -> Vec<&'a Event> {
         .collect()
 }
 
+/// A card dispatched to a unit's pane that the unit has not claimed yet.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct Pending {
+    pub number: u64,
+    pub title: String,
+    pub pane: String,
+    #[serde(rename = "impl")]
+    pub implementer: Option<String>,
+    pub review: Vec<String>,
+}
+
+/// The unit's delivery inbox: its cards that name a pane, are not voided
+/// and have no `claimed` progress node yet, in number order. The log is the
+/// delivery — a card is in the inbox from the moment it is written.
+pub fn pending_for(events: &[Event], unit: &str) -> Vec<Pending> {
+    let scan = scan(events);
+    let mut out = Vec::new();
+    for (number, entry) in &scan.entries {
+        if entry.unit.as_deref() != Some(unit) {
+            continue;
+        }
+        let about = || events.iter().filter(|e| e.card == Some(*number));
+        let pane = about()
+            .find(|e| e.kind == "dispatched")
+            .map(|e| text(e, "pane").to_string())
+            .unwrap_or_default();
+        let closed = about()
+            .any(|e| e.kind == "voided" || (e.kind == "progress" && text(e, "node") == "claimed"));
+        if pane.is_empty() || closed {
+            continue;
+        }
+        out.push(Pending {
+            number: *number,
+            title: entry.title.clone(),
+            pane,
+            implementer: entry.implementer.clone(),
+            review: entry.review.clone(),
+        });
+    }
+    out
+}
+
 /// Questions asked through `ask_outer` that were neither answered nor
 /// timed out, in the order they were first asked.
 pub fn pending_questions(events: &[Event]) -> Vec<Question> {

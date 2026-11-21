@@ -418,6 +418,18 @@ const COMMANDS: &[Entry] = &[
     },
     Entry {
         group: "remote",
+        action: Some("inbox"),
+        target: Target::Rust(crate::olp::client::inbox),
+        help: "事件日志:派给本单元、还没领取的卡;领取用 remote progress <N> claimed",
+    },
+    Entry {
+        group: "remote",
+        action: Some("watch"),
+        target: Target::Rust(crate::olp::client::watch),
+        help: "事件日志:单元值守,有新派卡且 agent 空闲时往窗格发一句固定短句",
+    },
+    Entry {
+        group: "remote",
         action: Some("serve-log"),
         target: Target::Rust(crate::olp::serve::run),
         help: "事件日志:ssh 强制命令,单元只能回执、报进度、读自己的卡",
@@ -641,6 +653,7 @@ fn meta(group: &str, action: Option<&str>) -> Option<Meta> {
         ("repo", Some("serve" | "hook" | "local-pack")) => meta_of(Internal, None, no),
         ("remote", Some("serve-log")) => meta_of(Internal, None, no),
         ("remote", Some("ack" | "progress" | "mirror")) => meta_of(Unit, yes, no),
+        ("remote", Some("inbox" | "watch")) => meta_of(Unit, no, no),
         ("ask", Some("mcp")) | ("guard", Some("watch")) => meta_of(Unit, no, no),
         ("guard", Some("forward")) => meta_of(Unit, yes, no),
         ("outer", None) | ("duty", None) => meta_of(Hub, None, None),

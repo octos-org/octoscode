@@ -59,6 +59,10 @@
 (`progress`),只能读到自己的卡的事件(`events`)。单元上的命令(`specs/task-olp-unit-client.spec.md`):
 `unit.conf` 里写了 `store = log` 时,`remote ack`、`remote mirror` 走这条通道,另有
 `remote progress <N> claimed | review <轮次> | rework <轮次>`;没写时一切照旧。
+派卡与唤醒(`specs/task-olp-delivery-wake.spec.md`):`card open --unit U --pane <窗格>` 写进日志
+就是送达;单元用 `remote inbox [<窗格>]` 看还没领取的卡,用 `remote progress <N> claimed`
+领取。`remote watch <窗格>` 是单元上的值守(不是 agent):有新卡且 agent 空闲时往窗格发一句
+固定短句"有新派卡,请执行:octoscode olp remote inbox <窗格>",不带卡的内容。
 
 迁到 Rust 的命令(`src/olp/`):`board inbox`。迁过去的命令不再经过打包的脚本;
 `OCTOSCODE_OLP_LEGACY=1` 让它改跑原脚本,保留一个版本作退路。

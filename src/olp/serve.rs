@@ -13,6 +13,8 @@
 //!   recorded once;
 //! - `progress <N> claimed` / `progress <N> review|rework <轮次>` (optional
 //!   text on stdin) — a progress node, written once per node and round;
+//! - `inbox [<窗格>]` — this unit's cards that were dispatched to a pane and
+//!   not claimed yet (`progress <N> claimed` claims one);
 //! - `events [<之后的序号>]` — the events about this unit's cards, as JSON
 //!   Lines. Other units' cards are not shown.
 //!
@@ -240,6 +242,25 @@ pub fn run(argv: &[String]) -> i32 {
             }
             0
         }
-        _ => refuse("这个密钥只能用于 ack、progress 与 events"),
+        ["inbox"] | ["inbox", _] => {
+            let pane = request.get(1).copied();
+            if pane.is_some_and(|p| !super::card::is_pane(p)) {
+                return refuse("窗格标识不合法");
+            }
+            let events = match log.read() {
+                Ok(events) => events,
+                Err(e) => {
+                    eprintln!("olp-hub: {e}");
+                    return LOG_FAILED;
+                }
+            };
+            let items: Vec<cards::Pending> = cards::pending_for(&events, &unit)
+                .into_iter()
+                .filter(|item| pane.is_none_or(|p| p == item.pane))
+                .collect();
+            println!("{}", json!({ "unit": unit, "items": items }));
+            0
+        }
+        _ => refuse("这个密钥只能用于 ack、progress、events 与 inbox"),
     }
 }
