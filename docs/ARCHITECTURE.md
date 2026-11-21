@@ -515,6 +515,9 @@ added without a row here.
 | `src/event_loop.rs` | 7047 | Terminal raw mode, alternate screen, draw loop, keyboard dispatch, backend polling, send-error handling. |
 | `src/model.rs` | 11612 | `AppState`, the TUI view models, `AppUiCommand`, and the mapping from AppUI snapshots/tasks/messages into renderable state. |
 | `src/outer_duty.rs` | 358 | Outer-duty kernel lock: fs2 try_lock_exclusive, VACANT/HELD/ERROR, atomic 0600 metadata sidecar (#38); death coupling via PDEATHSIG on Linux and a guardian process on macOS. |
+| `src/olp/mod.rs` | 7 | OctoLoop tools in Rust: the `scripts/olp-*` commands move here one at a time, command line, output and exit codes unchanged (docs/OLP_CLI.md). |
+| `src/olp/board.rs` | 421 | The one reader of the blackboard's Markdown: lines outside code fences, the live (non-historical) part, numbered entries and the signed line-start forms (verdicts, ACKs, pushes, questions). |
+| `src/olp/inbox.rs` | 509 | `octoscode olp board inbox`: each entry's state from the last thing said about it (inbox / working / snoozed / settled), unit occupancy; output identical to `scripts/olp-inbox.py`. |
 | `src/olp_mcp.rs` | 397 | OLP-MCP outer-loop server: newline JSON-RPC stdio, mailbox quota/timeout, board audit (#31). |
 | `src/store.rs` | 37021 | The AppUI reducer: snapshots, RPC results, notifications, local commands, approvals, diffs, task output and queued prompts folded into `AppState`. |
 

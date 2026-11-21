@@ -20,6 +20,12 @@ T3 Code 的 Inbox / Working / Settled 模型:只把"等我决定"的事放进收
 
 - 工具 `scripts/olp-inbox.py <board> [--json] [--unit U] [--all] [--today YYYY-MM-DD]`,纯
   Python 标准库(兼容 Python 3.9),只读黑板,不写任何文件。
+- Rust 实现(2026-11-21,脚本迁移的第一条命令):`octoscode olp board inbox` 由 `src/olp/inbox.rs`
+  执行,黑板的读取在 `src/olp/board.rs`(以后各命令共用这一份)。参数、输出、退出码与脚本
+  逐字节一致:本任务的测试对每次调用同时运行两者并比较退出码、stdout、stderr(用法错误的
+  措辞除外,各自的参数解析器不同);`--help` 的排版也不同。脚本保留,`olp-dispatch.py`、
+  归档、汇总仍把它当库加载;`OCTOSCODE_OLP_LEGACY=1` 让命令改跑脚本,保留一个版本。
+  已知差异:脚本把单独的 `\r` 也当换行,Rust 只认 `\n` 与 `\r\n`。
 - **状态不存进黑板**,每次从现有的行算出来;黑板保持只追加。
 - 新增三个行首定式(逐字照抄;其中打回后来被采集哨收为 `returned`,见 task-olp-evo-cluster-signals):
   - `> 外环(<署名>)·采认(#N):<证据>`
