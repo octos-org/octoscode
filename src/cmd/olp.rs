@@ -500,6 +500,119 @@ const COMMANDS: &[Entry] = &[
     ),
 ];
 
+/// Where a command is meant to run.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RunsOn {
+    Hub,
+    Unit,
+    Any,
+    /// Called by git or by an ssh forced command, never typed.
+    Internal,
+}
+
+/// What an agent needs to know before it tries a command. `None` on
+/// `writes` / `needs_lease` means "not recorded here": the answer depends
+/// on a subcommand or has not been established yet, and the command's own
+/// `--help` is the place to look. Never guess `false`.
+struct Meta {
+    runs_on: RunsOn,
+    writes: Option<bool>,
+    needs_lease: Option<bool>,
+}
+
+const fn meta_of(runs_on: RunsOn, writes: Option<bool>, needs_lease: Option<bool>) -> Meta {
+    Meta {
+        runs_on,
+        writes,
+        needs_lease,
+    }
+}
+
+/// The catalog facts for one entry. A command missing here fails
+/// `every_command_has_catalog_facts`.
+fn meta(group: &str, action: Option<&str>) -> Option<Meta> {
+    use RunsOn::*;
+    let (yes, no) = (Some(true), Some(false));
+    Some(match (group, action) {
+        ("init", None) | ("skill", Some("install")) => meta_of(Any, yes, no),
+        ("doctor", None) => meta_of(Any, no, no),
+        ("board", Some("append" | "archive")) => meta_of(Hub, yes, yes),
+        ("board", Some("inbox" | "watch" | "summary")) => meta_of(Hub, no, no),
+        ("id", Some("alloc")) => meta_of(Hub, yes, no),
+        ("card", Some("dispatch")) => meta_of(Hub, yes, yes),
+        ("unit", None) | ("keepalive", None) | ("ask", None) => meta_of(Any, None, None),
+        ("remote", None) => meta_of(Unit, None, no),
+        ("repo", Some("init")) => meta_of(Hub, yes, no),
+        ("repo", Some("status")) => meta_of(Hub, no, no),
+        ("repo", Some("promote")) => meta_of(Hub, yes, yes),
+        ("repo", Some("connect-local" | "push")) => meta_of(Unit, yes, no),
+        ("repo", Some("serve" | "hook" | "local-pack")) => meta_of(Internal, None, no),
+        ("ask", Some("mcp")) | ("guard", Some("watch")) => meta_of(Unit, no, no),
+        ("guard", Some("forward")) => meta_of(Unit, yes, no),
+        ("outer", None) | ("duty", None) => meta_of(Hub, None, None),
+        ("evo", Some(_)) | ("review", _) => meta_of(Hub, None, None),
+        _ => return None,
+    })
+}
+
+fn route(e: &Entry) -> String {
+    match e.action {
+        Some(a) => format!("octoscode olp {} {a}", e.group),
+        None => format!("octoscode olp {}", e.group),
+    }
+}
+
+/// One catalog record: what `olp commands --json` lists and what
+/// `olp <命令> --help --json` prints for a single command.
+fn describe(e: &Entry) -> serde_json::Value {
+    let m = meta(e.group, e.action);
+    let runs_on = match m.as_ref().map(|m| m.runs_on) {
+        Some(RunsOn::Hub) => "hub",
+        Some(RunsOn::Unit) => "unit",
+        Some(RunsOn::Internal) => "internal",
+        Some(RunsOn::Any) | None => "any",
+    };
+    let route = route(e);
+    serde_json::json!({
+        "route": route,
+        "summary": e.help,
+        // The next word is the tool's own subcommand; its --help lists them.
+        "subcommands": e.action.is_none() && e.group != "init" && e.group != "doctor",
+        "runs_on": runs_on,
+        "writes": m.as_ref().and_then(|m| m.writes),
+        "needs_lease": m.as_ref().and_then(|m| m.needs_lease),
+        "implementation": match e.target {
+            Target::Native(..) => "rust",
+            Target::Script(..) | Target::Keepalive => "script",
+        },
+        "help": format!("{route} --help"),
+    })
+}
+
+fn catalog() -> serde_json::Value {
+    let aliases: Vec<serde_json::Value> = ALIASES
+        .iter()
+        .map(|(alias, g, a)| {
+            serde_json::json!({
+                "alias": format!("octoscode olp {alias}"),
+                "route": format!("octoscode olp {g} {a}"),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "commands": COMMANDS.iter().map(describe).collect::<Vec<_>>(),
+        "aliases": aliases,
+    })
+}
+
+fn print_json(value: &serde_json::Value) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+    );
+}
+
 /// Top-level shortcuts for the three most used commands.
 const ALIASES: &[(&str, &str, &str)] = &[
     ("dispatch", "card", "dispatch"),
@@ -526,6 +639,7 @@ fn usage() -> String {
         out.push_str(&format!(" {alias}={g} {a}"));
     }
     out.push_str("\n参数、输出、退出码与 scripts/olp-* 相同;`octoscode olp <组> <动作> --help` 看该工具自己的帮助。\n");
+    out.push_str("命令目录(给程序读):`octoscode olp commands --json`;单条命令:`octoscode olp <组> <动作> --help --json`。查帮助不执行命令。\n");
     out
 }
 
@@ -666,6 +780,25 @@ pub fn run(argv: &[String]) -> i32 {
         print!("{}", usage());
         return 0;
     }
+    if words[0] == "commands" {
+        // The catalog of this version's commands. Read-only.
+        return match words.get(1).map(String::as_str) {
+            None | Some("-h") | Some("--help") => {
+                print!("{}", usage());
+                0
+            }
+            Some("--json") if words.len() == 2 => {
+                print_json(&catalog());
+                0
+            }
+            Some(other) => {
+                eprintln!(
+                    "octoscode olp commands: 不认识的参数: {other}(用法:octoscode olp commands [--json])"
+                );
+                2
+            }
+        };
+    }
     if let Some((_, g, a)) = ALIASES.iter().find(|(alias, _, _)| *alias == words[0]) {
         words.splice(0..1, [g.to_string(), a.to_string()]);
     }
@@ -702,6 +835,16 @@ pub fn run(argv: &[String]) -> i32 {
     } else {
         words[1..].to_vec()
     };
+    // `--help --json`, in either order and with nothing else: describe the
+    // command and stop. Help never runs the command; `--json` on its own
+    // belongs to the command and still runs it.
+    if rest.len() == 2
+        && rest.iter().any(|w| w == "--help" || w == "-h")
+        && rest.iter().any(|w| w == "--json")
+    {
+        print_json(&describe(entry));
+        return 0;
+    }
     match &entry.target {
         Target::Script(file, fixed) => {
             if group == "init" {
@@ -821,6 +964,26 @@ mod tests {
                 COMMANDS
                     .iter()
                     .any(|e| e.group == *g && e.action == Some(*a))
+            );
+        }
+    }
+
+    #[test]
+    fn every_command_has_catalog_facts() {
+        for e in COMMANDS {
+            let m = meta(e.group, e.action)
+                .unwrap_or_else(|| panic!("{} {:?} has no catalog facts", e.group, e.action));
+            // Commands git calls are the ones the listing hides.
+            assert_eq!(
+                e.help.starts_with("(由 git"),
+                m.runs_on == RunsOn::Internal && e.action != Some("serve"),
+                "{} {:?}",
+                e.group,
+                e.action
+            );
+            assert!(
+                COMMANDS.iter().all(|other| other.group != "commands"),
+                "`commands` is the catalog, not a group"
             );
         }
     }
