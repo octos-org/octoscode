@@ -230,6 +230,9 @@ enum Target {
     Keepalive,
     /// A command that is already Rust: re-enter the dispatcher.
     Native(&'static str, &'static [&'static str]),
+    /// A command moved to Rust (`src/olp/`), with the script it replaced.
+    /// `OCTOSCODE_OLP_LEGACY=1` runs the script instead, for one release.
+    Moved(fn(&[String]) -> i32, &'static str),
 }
 
 struct Entry {
@@ -285,13 +288,12 @@ const COMMANDS: &[Entry] = &[
         &[],
         "在锁内向黑板追加(分配 {N}、按键去重)",
     ),
-    script(
-        "board",
-        Some("inbox"),
-        "olp-inbox.py",
-        &[],
-        "收件箱:等谁决定的卡;--units 看单元占用",
-    ),
+    Entry {
+        group: "board",
+        action: Some("inbox"),
+        target: Target::Moved(crate::olp::inbox::run, "olp-inbox.py"),
+        help: "收件箱:等谁决定的卡;--units 看单元占用",
+    },
     script(
         "board",
         Some("archive"),
@@ -582,7 +584,7 @@ fn describe(e: &Entry) -> serde_json::Value {
         "writes": m.as_ref().and_then(|m| m.writes),
         "needs_lease": m.as_ref().and_then(|m| m.needs_lease),
         "implementation": match e.target {
-            Target::Native(..) => "rust",
+            Target::Native(..) | Target::Moved(..) => "rust",
             Target::Script(..) | Target::Keepalive => "script",
         },
         "help": format!("{route} --help"),
@@ -861,6 +863,12 @@ pub fn run(argv: &[String]) -> i32 {
             }
             run_script(file, fixed, &rest, None)
         }
+        Target::Moved(native, file) => {
+            if std::env::var_os("OCTOSCODE_OLP_LEGACY").is_some_and(|v| !v.is_empty()) {
+                return run_script(file, &[], &rest, None);
+            }
+            native(&rest)
+        }
         Target::Keepalive => {
             let file = if cfg!(target_os = "macos") {
                 "olp-launchd.py"
@@ -948,7 +956,7 @@ mod tests {
     #[test]
     fn every_command_names_a_bundled_script() {
         for e in COMMANDS {
-            if let Target::Script(file, _) = e.target {
+            if let Target::Script(file, _) | Target::Moved(_, file) = e.target {
                 assert!(
                     BUNDLE
                         .iter()

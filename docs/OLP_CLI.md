@@ -49,6 +49,9 @@
 自己的 `--help` 为准,不要当成 `false`。参数的用法提示(`args`)和可选值的查询命令
 (`values_from`)随命令迁到 Rust 逐条补上,现在还没有。
 
+迁到 Rust 的命令(`src/olp/`):`board inbox`。迁过去的命令不再经过打包的脚本;
+`OCTOSCODE_OLP_LEGACY=1` 让它改跑原脚本,保留一个版本作退路。
+
 ## 2. 命令一览
 
 ### 2.1 起步
