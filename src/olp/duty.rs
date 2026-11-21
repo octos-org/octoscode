@@ -3,9 +3,24 @@
 //! `OLP_DUTY_LEASE`; a write carrying one goes through only while the
 //! project's duty lock is held with that lease.
 
-use std::path::Path;
+/// The lease as the duty lock sees it. The lock exists on Unix only
+/// (protocol R7: other platforms are unsupported), so elsewhere a lease in
+/// the environment cannot be verified and the write is refused.
+#[cfg(unix)]
+fn verify(project: &str, lease: &str) -> Result<(), String> {
+    use crate::outer_duty::{LeaseVerdict, verify_lease};
+    match verify_lease(std::path::Path::new(project), lease) {
+        LeaseVerdict::Valid => Ok(()),
+        LeaseVerdict::Vacant => Err("主审权锁空着:发出这份租约的外环会话已结束".to_string()),
+        LeaseVerdict::Superseded => Err("主审权已由后来的外环会话持有".to_string()),
+        LeaseVerdict::Error(why) => Err(why),
+    }
+}
 
-use crate::outer_duty::{LeaseVerdict, verify_lease};
+#[cfg(not(unix))]
+fn verify(_project: &str, _lease: &str) -> Result<(), String> {
+    Err("这个平台不支持主审权锁,无法核验租约".to_string())
+}
 
 /// Exit code of a write refused for a dead or replaced outer session.
 pub const EXIT_NO_LEASE: i32 = 6;
@@ -24,12 +39,7 @@ pub fn check() -> Result<(), String> {
     if project.is_empty() {
         return Err("环境里有 OLP_DUTY_LEASE,却没有 OLP_DUTY_PROJECT".to_string());
     }
-    match verify_lease(Path::new(&project), &lease) {
-        LeaseVerdict::Valid => Ok(()),
-        LeaseVerdict::Vacant => Err("主审权锁空着:发出这份租约的外环会话已结束".to_string()),
-        LeaseVerdict::Superseded => Err("主审权已由后来的外环会话持有".to_string()),
-        LeaseVerdict::Error(why) => Err(why),
-    }
+    verify(&project, &lease)
 }
 
 /// [`check`], reported the way every tool reports it. `Err` is the exit code.
