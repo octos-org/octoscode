@@ -52,12 +52,8 @@ impl Sandbox {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(stdin.as_bytes())
-            .unwrap();
+        // A command that refuses before reading closes the pipe first.
+        let _ = child.stdin.take().unwrap().write_all(stdin.as_bytes());
         child.wait_with_output().unwrap()
     }
 
@@ -295,7 +291,8 @@ fn concurrent_processes_get_distinct_consecutive_numbers() {
                 .stderr(Stdio::piped())
                 .spawn()
                 .unwrap();
-            child.stdin.take().unwrap().write_all(b"x\n").unwrap();
+            // A command that refuses before reading closes the pipe first.
+            let _ = child.stdin.take().unwrap().write_all(b"x\n");
             child
         })
         .collect();
@@ -333,7 +330,8 @@ fn outer_writes_need_a_live_lease() {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        child.stdin.take().unwrap().write_all(b"x\n").unwrap();
+        // A command that refuses before reading closes the pipe first.
+        let _ = child.stdin.take().unwrap().write_all(b"x\n");
         child.wait_with_output().unwrap()
     };
     for (action, args) in [
