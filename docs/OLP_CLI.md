@@ -54,6 +54,9 @@
 事件日志,结论与原板相同。日志不手工编辑,写入走命令(`specs/task-olp-card-writes.spec.md`):
 `card open`(立卡,分配卡号)、`card ack`(内环回执)、`card accept` / `return` / `void` /
 `snooze`(外环判词),都带 `--log <目录>`;`board render <目录>` 把日志输出成只读的 Markdown。
+单元经 ssh 强制命令 `remote serve-log --unit <单元号> --log <目录>` 访问日志
+(`specs/task-olp-unit-serve.spec.md`):只能对派给自己的卡回执(`ack`)、报进度节点
+(`progress`),只能读到自己的卡的事件(`events`)。
 
 迁到 Rust 的命令(`src/olp/`):`board inbox`。迁过去的命令不再经过打包的脚本;
 `OCTOSCODE_OLP_LEGACY=1` 让它改跑原脚本,保留一个版本作退路。

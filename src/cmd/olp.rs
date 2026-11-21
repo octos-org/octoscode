@@ -386,6 +386,12 @@ const COMMANDS: &[Entry] = &[
         &[],
         "单元:register / set-state / status / check / where / receive / heartbeat",
     ),
+    Entry {
+        group: "remote",
+        action: Some("serve-log"),
+        target: Target::Rust(crate::olp::serve::run),
+        help: "事件日志:ssh 强制命令,单元只能回执、报进度、读自己的卡",
+    },
     script(
         "remote",
         None,
@@ -603,6 +609,7 @@ fn meta(group: &str, action: Option<&str>) -> Option<Meta> {
         ("repo", Some("promote")) => meta_of(Hub, yes, yes),
         ("repo", Some("connect-local" | "push")) => meta_of(Unit, yes, no),
         ("repo", Some("serve" | "hook" | "local-pack")) => meta_of(Internal, None, no),
+        ("remote", Some("serve-log")) => meta_of(Internal, None, no),
         ("ask", Some("mcp")) | ("guard", Some("watch")) => meta_of(Unit, no, no),
         ("guard", Some("forward")) => meta_of(Unit, yes, no),
         ("outer", None) | ("duty", None) => meta_of(Hub, None, None),
@@ -1039,7 +1046,9 @@ mod tests {
             // Commands git calls are the ones the listing hides.
             assert_eq!(
                 e.help.starts_with("(由 git"),
-                m.runs_on == RunsOn::Internal && e.action != Some("serve"),
+                // ssh forced commands are internal too, but an operator
+                // writes them into authorized_keys: those stay listed.
+                m.runs_on == RunsOn::Internal && !e.action.is_some_and(|a| a.starts_with("serve")),
                 "{} {:?}",
                 e.group,
                 e.action
