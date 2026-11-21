@@ -388,6 +388,36 @@ const COMMANDS: &[Entry] = &[
     ),
     Entry {
         group: "remote",
+        action: Some("ack"),
+        target: Target::Rust(|argv| {
+            if crate::olp::client::log_mode() {
+                crate::olp::client::ack(argv)
+            } else {
+                run_script("olp-board-remote.py", &["ack"], argv, None)
+            }
+        }),
+        help: "单元回执 done / wontdo / blocked(hub 用事件日志时走新通道,否则写 Markdown 黑板)",
+    },
+    Entry {
+        group: "remote",
+        action: Some("mirror"),
+        target: Target::Rust(|argv| {
+            if crate::olp::client::log_mode() {
+                crate::olp::client::mirror(argv)
+            } else {
+                run_script("olp-board-remote.py", &["mirror"], argv, None)
+            }
+        }),
+        help: "把 hub 上本单元的卡同步成本机的只读 Markdown",
+    },
+    Entry {
+        group: "remote",
+        action: Some("progress"),
+        target: Target::Rust(crate::olp::client::progress),
+        help: "事件日志:单元上报进度节点 claimed / review <轮次> / rework <轮次>",
+    },
+    Entry {
+        group: "remote",
         action: Some("serve-log"),
         target: Target::Rust(crate::olp::serve::run),
         help: "事件日志:ssh 强制命令,单元只能回执、报进度、读自己的卡",
@@ -610,6 +640,7 @@ fn meta(group: &str, action: Option<&str>) -> Option<Meta> {
         ("repo", Some("connect-local" | "push")) => meta_of(Unit, yes, no),
         ("repo", Some("serve" | "hook" | "local-pack")) => meta_of(Internal, None, no),
         ("remote", Some("serve-log")) => meta_of(Internal, None, no),
+        ("remote", Some("ack" | "progress" | "mirror")) => meta_of(Unit, yes, no),
         ("ask", Some("mcp")) | ("guard", Some("watch")) => meta_of(Unit, no, no),
         ("guard", Some("forward")) => meta_of(Unit, yes, no),
         ("outer", None) | ("duty", None) => meta_of(Hub, None, None),
