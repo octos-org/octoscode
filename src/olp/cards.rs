@@ -109,6 +109,45 @@ pub fn scan(events: &[Event]) -> Scan {
     scan
 }
 
+/// The unit card `n` is with now: `None` when there is no such card,
+/// `Some(None)` when it was opened without a unit.
+pub fn unit_of(events: &[Event], n: u64) -> Option<Option<String>> {
+    let mut found = None;
+    let mut opened = false;
+    for event in events.iter().filter(|e| e.card == Some(n)) {
+        match event.kind.as_str() {
+            "dispatched" if !opened => {
+                opened = true;
+                found = Some(event.unit.clone());
+            }
+            "assigned" if opened => found = Some(event.unit.clone()),
+            _ => {}
+        }
+    }
+    found
+}
+
+/// What a unit may see: every event about a card that is with it now, and
+/// its own events that name no card (its questions). Nothing about any
+/// other unit's cards.
+pub fn visible_to<'a>(events: &'a [Event], unit: &str) -> Vec<&'a Event> {
+    let mut owner: std::collections::BTreeMap<u64, Option<String>> = Default::default();
+    for event in events {
+        if let Some(n) = event.card {
+            owner
+                .entry(n)
+                .or_insert_with(|| unit_of(events, n).flatten());
+        }
+    }
+    events
+        .iter()
+        .filter(|event| match event.card {
+            Some(n) => owner.get(&n).is_some_and(|o| o.as_deref() == Some(unit)),
+            None => event.unit.as_deref() == Some(unit),
+        })
+        .collect()
+}
+
 /// Questions asked through `ask_outer` that were neither answered nor
 /// timed out, in the order they were first asked.
 pub fn pending_questions(events: &[Event]) -> Vec<Question> {

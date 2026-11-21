@@ -516,14 +516,15 @@ added without a row here.
 | `src/model.rs` | 11612 | `AppState`, the TUI view models, `AppUiCommand`, and the mapping from AppUI snapshots/tasks/messages into renderable state. |
 | `src/outer_duty.rs` | 358 | Outer-duty kernel lock: fs2 try_lock_exclusive, VACANT/HELD/ERROR, atomic 0600 metadata sidecar (#38); death coupling via PDEATHSIG on Linux and a guardian process on macOS. |
 | `src/olp/log.rs` | 490 | The JSON Lines event log, the default store: append-only segments per project, every write decided and appended under one lock (idempotency keys, claim-once, numbering), torn tails cut off, corrupt lines refused. |
-| `src/olp/mod.rs` | 14 | OctoLoop tools in Rust: the `scripts/olp-*` commands move here one at a time, command line, output and exit codes unchanged (docs/OLP_CLI.md). |
+| `src/olp/mod.rs` | 15 | OctoLoop tools in Rust: the `scripts/olp-*` commands move here one at a time, command line, output and exit codes unchanged (docs/OLP_CLI.md). |
 | `src/olp/board.rs` | 462 | The one reader of the blackboard's Markdown: lines outside code fences, the live (non-historical) part, numbered entries and the signed line-start forms (verdicts, ACKs, pushes, questions). |
 | `src/olp/card.rs` | 374 | `octoscode olp card open/ack/accept/return/void/snooze`: a card's life written as events, each decided and appended under the log's lock (next number, key once, no writes to a missing or voided card). |
-| `src/olp/cards.rs` | 138 | Cards from the event log: replays events into the same picture a scan of the Markdown board gives (sequence numbers for line numbers), so every command judges both stores by one set of rules. |
+| `src/olp/cards.rs` | 177 | Cards from the event log: replays events into the same picture a scan of the Markdown board gives (sequence numbers for line numbers), so every command judges both stores by one set of rules. |
 | `src/olp/duty.rs` | 41 | The outer-duty lease check every writing command makes first (R7); same rule as the scripts' `duty_gate`, calling the Rust lease verification directly. |
 | `src/olp/import.rs` | 190 | `octoscode olp board import`: a Markdown board into a new event log, events numbered in source-line order; one-time, refuses a non-empty log. |
 | `src/olp/inbox.rs` | 526 | `octoscode olp board inbox`: each entry's state from the last thing said about it (inbox / working / snoozed / settled), unit occupancy; output identical to `scripts/olp-inbox.py`. |
-| `src/olp/render.rs` | 163 | `octoscode olp board render`: the event log as a read-only Markdown board that the inbox reads to the same conclusions as the log. |
+| `src/olp/render.rs` | 178 | `octoscode olp board render`: the event log as a read-only Markdown board that the inbox reads to the same conclusions as the log. |
+| `src/olp/serve.rs` | 228 | `octoscode olp remote serve-log`: the hub side of a unit's ssh forced command on the event log — ACKs and progress nodes only for cards dispatched to that unit, and a view of its own cards' events only. |
 | `src/olp_mcp.rs` | 397 | OLP-MCP outer-loop server: newline JSON-RPC stdio, mailbox quota/timeout, board audit (#31). |
 | `src/store.rs` | 37021 | The AppUI reducer: snapshots, RPC results, notifications, local commands, approvals, diffs, task output and queued prompts folded into `AppState`. |
 

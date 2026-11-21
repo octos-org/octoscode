@@ -40,6 +40,21 @@ fn signed_line(event: &Event) -> Option<String> {
         ("voided", Some(n)) => format!("> {}·改判(作废 #{n}){}", event.actor, colon(say)),
         // A snooze's text already starts with ` 至 YYYY-MM-DD`.
         ("snoozed", Some(n)) => format!("> {}·搁置(#{n}){say}", event.actor),
+        ("progress", Some(n)) => {
+            let node = match number(event, "round") {
+                0 => text(event, "node").to_string(),
+                round => format!("{} r{round}", text(event, "node")),
+            };
+            format!(
+                "> {}·进度(#{n}): {node}{}",
+                event.actor,
+                if say.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {say}")
+                }
+            )
+        }
         ("pushed", Some(n)) => format!("> {}·本地复验通过(#{n}){}", event.actor, colon(say)),
         ("asked", _) => format!(
             "> {}·- MCP(ask_outer) ask: id={} question={}",
