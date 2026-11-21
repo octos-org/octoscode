@@ -23,6 +23,7 @@ struct Args {
     implementer: Option<String>,
     review: Vec<String>,
     until: Option<String>,
+    pane: Option<String>,
     json: bool,
     rest: Vec<String>,
 }
@@ -30,7 +31,7 @@ struct Args {
 fn usage(action: &str) -> &'static str {
     match action {
         "open" => {
-            "用法: octoscode olp card open --log <目录> --title <标题> [--unit U] [--impl A] [--review A,B] [--key K] [--by 署名] [--json]  (正文从 stdin)"
+            "用法: octoscode olp card open --log <目录> --title <标题> [--unit U [--pane 窗格]] [--impl A] [--review A,B] [--key K] [--by 署名] [--json]  (正文从 stdin)"
         }
         "ack" => {
             "用法: octoscode olp card ack --log <目录> <N> <done|wontdo|blocked> <说明…> [--by 署名] [--key K]"
@@ -55,6 +56,7 @@ fn parse(argv: &[String]) -> Result<Option<Args>, String> {
         implementer: None,
         review: Vec::new(),
         until: None,
+        pane: None,
         json: false,
         rest: Vec::new(),
     };
@@ -76,6 +78,7 @@ fn parse(argv: &[String]) -> Result<Option<Args>, String> {
             "--unit" => args.unit = Some(value()?),
             "--impl" => args.implementer = Some(value()?),
             "--until" => args.until = Some(value()?),
+            "--pane" => args.pane = Some(value()?),
             "--review" => {
                 args.review = value()?
                     .split(',')
@@ -100,6 +103,14 @@ fn is_name(s: &str) -> bool {
     chars.next().is_some_and(|c| c.is_ascii_lowercase())
         && s.len() <= 32
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// A herdr pane id such as `w1:p2`.
+pub fn is_pane(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && s.len() <= 128
+        && chars.all(|c| c.is_ascii_alphanumeric() || "_.:-".contains(c))
 }
 
 fn single_line(s: &str) -> bool {
@@ -299,6 +310,16 @@ fn open(prog: &str, log: &Log, args: Args) -> i32 {
     if !args.rest.is_empty() {
         return fail(&format!("多余的参数: {}", args.rest.join(" ")));
     }
+    // The pane the card is delivered to: it puts the card in that unit's
+    // inbox, where the unit's watcher finds it.
+    if let Some(pane) = &args.pane {
+        if args.unit.is_none() {
+            return fail("--pane 要和 --unit 一起给:窗格是单元上的");
+        }
+        if !is_pane(pane) {
+            return fail("--pane 不是合法的窗格标识(字母或数字开头,字母、数字、_ . : -,最长 128)");
+        }
+    }
     let actor = match signature("外环", args.by.as_deref(), "hub") {
         Ok(actor) => actor,
         Err(why) => return fail(&why),
@@ -316,6 +337,7 @@ fn open(prog: &str, log: &Log, args: Args) -> i32 {
         "body": body,
         "impl": args.implementer,
         "review": args.review,
+        "pane": args.pane,
     });
     let mut reused: Option<u64> = None;
     let result = log.append_with(|events| {

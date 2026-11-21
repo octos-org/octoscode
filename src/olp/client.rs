@@ -403,3 +403,225 @@ fn replace(path: &Path, content: &str) -> std::io::Result<()> {
     tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
+
+const INBOX_USAGE: &str = "用法: octoscode olp remote inbox [<窗格>]";
+const WATCH_USAGE: &str = "用法: octoscode olp remote watch <窗格> [--once] [--interval 秒] [--renudge 秒] [--idle-wait 秒]";
+
+fn needs_log(prog: &str) -> bool {
+    if log_mode() {
+        return true;
+    }
+    eprintln!("{prog}: 需要事件日志(unit.conf 里 store = log);本单元的 hub 还在用 Markdown 黑板");
+    false
+}
+
+/// The cards waiting for this unit, as the hub lists them.
+fn pending(link: &Link, pane: Option<&str>) -> Result<serde_json::Value, (i32, String)> {
+    let mut request = vec!["inbox".to_string()];
+    request.extend(pane.map(str::to_string));
+    let reply = send(link, &request, "").ok_or((EX_TEMPFAIL, "没有连上 hub".to_string()))?;
+    if reply.code != 0 {
+        return Err((reply.code, reply.stderr));
+    }
+    serde_json::from_slice(&reply.stdout).map_err(|e| (4, format!("hub 的回答无法解析: {e}")))
+}
+
+/// `olp remote inbox [<窗格>]`: the cards dispatched to this unit that it
+/// has not claimed, as JSON. Claim one with `remote progress <N> claimed`.
+pub fn inbox(argv: &[String]) -> i32 {
+    let prog = "olp remote inbox";
+    let w = match words(argv) {
+        Ok(w) if w.help => {
+            println!(
+                "{INBOX_USAGE}\n\n列出派给本单元、还没领取的卡(JSON)。领取:octoscode olp remote progress <N> claimed"
+            );
+            return 0;
+        }
+        Ok(w) if w.rest.len() <= 1 => w,
+        Ok(_) => {
+            eprintln!("{INBOX_USAGE}");
+            return 2;
+        }
+        Err(why) => {
+            eprintln!("{prog}: {why}\n{INBOX_USAGE}");
+            return 2;
+        }
+    };
+    if !needs_log(prog) {
+        return 2;
+    }
+    let link = match link(w.hub.as_ref(), w.unit.as_ref()) {
+        Ok(link) => link,
+        Err(why) => {
+            eprintln!("{prog}: {why}");
+            return 2;
+        }
+    };
+    match pending(&link, w.rest.first().map(String::as_str)) {
+        Ok(report) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string())
+            );
+            0
+        }
+        Err((code, why)) => {
+            eprintln!("{prog}: {why}");
+            code
+        }
+    }
+}
+
+/// The one sentence a pane is woken with. It carries no card content: the
+/// inbox is where the card is, this only says to look.
+pub fn wake_sentence(pane: &str) -> String {
+    format!("有新派卡,请执行:octoscode olp remote inbox {pane}")
+}
+
+fn herdr(args: &[&str]) -> bool {
+    let exe = std::env::var("OLP_HERDR").ok().filter(|v| !v.is_empty());
+    Command::new(exe.as_deref().unwrap_or("herdr"))
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// `olp remote watch <窗格>`: the unit's watcher. Not an agent: it asks the
+/// hub what waits for this pane and, when something new does and the agent
+/// in the pane is idle, types the one fixed sentence. It never reads a
+/// card. A card is nudged once, and again after `--renudge` seconds if it
+/// is still unclaimed; a busy agent is left alone until the next round.
+pub fn watch(argv: &[String]) -> i32 {
+    let prog = "olp remote watch";
+    let (mut once, mut interval, mut renudge, mut idle_wait) = (false, 15u64, 900u64, 5u64);
+    let mut rest = Vec::new();
+    let mut it = argv.iter();
+    while let Some(word) = it.next() {
+        let mut seconds = |slot: &mut u64| match it.next().and_then(|v| v.parse::<u64>().ok()) {
+            Some(value) => {
+                *slot = value;
+                true
+            }
+            None => false,
+        };
+        let ok = match word.as_str() {
+            "-h" | "--help" => {
+                println!(
+                    "{WATCH_USAGE}\n\n单元值守:有新派卡且窗格里的 agent 空闲时,往窗格发一句固定短句。不读卡的内容。"
+                );
+                return 0;
+            }
+            "--once" => {
+                once = true;
+                true
+            }
+            "--interval" => seconds(&mut interval),
+            "--renudge" => seconds(&mut renudge),
+            "--idle-wait" => seconds(&mut idle_wait),
+            other if other.starts_with("--") => false,
+            other => {
+                rest.push(other.to_string());
+                true
+            }
+        };
+        if !ok {
+            eprintln!("{prog}: 参数不对: {word}\n{WATCH_USAGE}");
+            return 2;
+        }
+    }
+    let [pane] = rest.as_slice() else {
+        eprintln!("{WATCH_USAGE}");
+        return 2;
+    };
+    if !super::card::is_pane(pane) || !needs_log(prog) {
+        eprintln!("{WATCH_USAGE}");
+        return 2;
+    }
+    let link = match link(None, None) {
+        Ok(link) => link,
+        Err(why) => {
+            eprintln!("{prog}: {why}");
+            return 2;
+        }
+    };
+    // When each card was last nudged, kept across restarts.
+    let state_path = std::env::var_os("OLP_WATCH_STATE")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| {
+                Path::new(&home).join(format!(
+                    ".octos/outer/watch/{}-{}.json",
+                    link.unit,
+                    pane.replace(':', "_")
+                ))
+            })
+        });
+    let Some(state_path) = state_path else {
+        eprintln!("{prog}: 找不到 HOME,无处记录已提醒过的卡");
+        return 2;
+    };
+    loop {
+        let mut nudged: BTreeMap<String, u64> = std::fs::read_to_string(&state_path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        match pending(&link, Some(pane)) {
+            Err((_, why)) => eprintln!("{prog}: {why}(下一轮再试)"),
+            Ok(report) => {
+                let waiting: Vec<String> = report["items"]
+                    .as_array()
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|i| i["number"].as_u64())
+                            .map(|n| n.to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                // Forget cards that are no longer waiting.
+                nudged.retain(|card, _| waiting.contains(card));
+                let due = waiting
+                    .iter()
+                    .any(|card| nudged.get(card).is_none_or(|at| now() >= at + renudge));
+                let timeout = (idle_wait * 1000).to_string();
+                if due
+                    && herdr(&[
+                        "agent",
+                        "wait",
+                        pane,
+                        "--until",
+                        "idle",
+                        "--until",
+                        "done",
+                        "--timeout",
+                        &timeout,
+                    ])
+                    && herdr(&["agent", "prompt", pane, &wake_sentence(pane)])
+                {
+                    // One sentence covers everything that waits.
+                    for card in &waiting {
+                        nudged.insert(card.clone(), now());
+                    }
+                    println!("已提醒窗格 {pane}:{} 张卡待领取", waiting.len());
+                }
+                let text = serde_json::to_string(&nudged).unwrap_or_else(|_| "{}".to_string());
+                if let Err(e) = replace(&state_path, &text) {
+                    eprintln!("{prog}: 记不下已提醒的卡 {}: {e}", state_path.display());
+                }
+            }
+        }
+        if once {
+            return 0;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(interval.max(1)));
+    }
+}
