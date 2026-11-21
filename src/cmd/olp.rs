@@ -230,6 +230,8 @@ enum Target {
     Keepalive,
     /// A command that is already Rust: re-enter the dispatcher.
     Native(&'static str, &'static [&'static str]),
+    /// A command written in Rust from the start (`src/olp/`).
+    Rust(fn(&[String]) -> i32),
     /// A command moved to Rust (`src/olp/`), with the script it replaced.
     /// `OCTOSCODE_OLP_LEGACY=1` runs the script instead, for one release.
     Moved(fn(&[String]) -> i32, &'static str),
@@ -293,6 +295,12 @@ const COMMANDS: &[Entry] = &[
         action: Some("inbox"),
         target: Target::Moved(crate::olp::inbox::run, "olp-inbox.py"),
         help: "收件箱:等谁决定的卡;--units 看单元占用",
+    },
+    Entry {
+        group: "board",
+        action: Some("import"),
+        target: Target::Rust(crate::olp::import::run),
+        help: "把 Markdown 黑板一次性导入成事件日志(JSON Lines):olp board import <板> --to <目录>",
     },
     script(
         "board",
@@ -538,7 +546,7 @@ fn meta(group: &str, action: Option<&str>) -> Option<Meta> {
     Some(match (group, action) {
         ("init", None) | ("skill", Some("install")) => meta_of(Any, yes, no),
         ("doctor", None) => meta_of(Any, no, no),
-        ("board", Some("append" | "archive")) => meta_of(Hub, yes, yes),
+        ("board", Some("append" | "archive" | "import")) => meta_of(Hub, yes, yes),
         ("board", Some("inbox" | "watch" | "summary")) => meta_of(Hub, no, no),
         ("id", Some("alloc")) => meta_of(Hub, yes, no),
         ("card", Some("dispatch")) => meta_of(Hub, yes, yes),
@@ -584,7 +592,7 @@ fn describe(e: &Entry) -> serde_json::Value {
         "writes": m.as_ref().and_then(|m| m.writes),
         "needs_lease": m.as_ref().and_then(|m| m.needs_lease),
         "implementation": match e.target {
-            Target::Native(..) | Target::Moved(..) => "rust",
+            Target::Native(..) | Target::Moved(..) | Target::Rust(..) => "rust",
             Target::Script(..) | Target::Keepalive => "script",
         },
         "help": format!("{route} --help"),
@@ -863,6 +871,7 @@ pub fn run(argv: &[String]) -> i32 {
             }
             run_script(file, fixed, &rest, None)
         }
+        Target::Rust(native) => native(&rest),
         Target::Moved(native, file) => {
             if std::env::var_os("OCTOSCODE_OLP_LEGACY").is_some_and(|v| !v.is_empty()) {
                 return run_script(file, &[], &rest, None);

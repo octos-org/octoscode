@@ -49,6 +49,10 @@
 自己的 `--help` 为准,不要当成 `false`。参数的用法提示(`args`)和可选值的查询命令
 (`values_from`)随命令迁到 Rust 逐条补上,现在还没有。
 
+事件日志(JSON Lines,`specs/task-olp-event-log.spec.md`):`octoscode olp board import <板.md>
+--to <目录>` 把 Markdown 黑板一次性导入成事件日志;`board inbox <路径>` 的路径是目录时读
+事件日志,结论与原板相同。日志不手工编辑。
+
 迁到 Rust 的命令(`src/olp/`):`board inbox`。迁过去的命令不再经过打包的脚本;
 `OCTOSCODE_OLP_LEGACY=1` 让它改跑原脚本,保留一个版本作退路。
 

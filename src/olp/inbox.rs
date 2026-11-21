@@ -346,7 +346,10 @@ pub fn run(argv: &[String]) -> i32 {
             return 2;
         }
     };
-    if !std::path::Path::new(&args.board).is_file() {
+    let source = std::path::Path::new(&args.board);
+    // A directory is an event log (JSON Lines); a file is a Markdown board.
+    let from_log = source.is_dir();
+    if !from_log && !source.is_file() {
         eprintln!("olp-inbox: 板不存在: {}", args.board);
         return 2;
     }
@@ -360,15 +363,29 @@ pub fn run(argv: &[String]) -> i32 {
         },
         None => chrono::Local::now().date_naive(),
     };
-    let bytes = match std::fs::read(&args.board) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            eprintln!("olp-inbox: 读不了板 {}: {e}", args.board);
-            return 2;
+    let (mut scan, pending) = if from_log {
+        match super::log::Log::at(source).read() {
+            Ok(events) => (
+                super::cards::scan(&events),
+                super::cards::pending_questions(&events),
+            ),
+            Err(e) => {
+                eprintln!("olp-inbox: {e}");
+                return 1;
+            }
+        }
+    } else {
+        match std::fs::read(source) {
+            Ok(bytes) => {
+                let text = String::from_utf8_lossy(&bytes);
+                (board::scan(&text), board::pending_questions(&text))
+            }
+            Err(e) => {
+                eprintln!("olp-inbox: 读不了板 {}: {e}", args.board);
+                return 2;
+            }
         }
     };
-    let text = String::from_utf8_lossy(&bytes);
-    let mut scan = board::scan(&text);
 
     if args.units {
         let all = items(&mut scan, today, |e| e.unit.is_some());
@@ -435,7 +452,7 @@ pub fn run(argv: &[String]) -> i32 {
         settled: count(Partition::Settled),
     };
     let listed = |p: Partition| args.all || p != Partition::Settled;
-    let questions: Vec<board::Question> = board::pending_questions(&text)
+    let questions: Vec<board::Question> = pending
         .into_iter()
         .filter(|q| args.unit.is_none() || q.unit == args.unit)
         .collect();

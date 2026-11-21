@@ -351,26 +351,67 @@ fn mcp_audit(s: &str) -> Option<(&str, &str, Option<&str>)> {
     None
 }
 
-/// Inner-loop questions (`ask_outer`) that reached the board and were
-/// neither answered nor timed out.
-pub fn pending_questions(text: &str) -> Vec<Question> {
-    let mut asked: Vec<Question> = Vec::new();
-    let mut closed: Vec<String> = Vec::new();
+/// One `ask_outer` audit line: a question (`closes` empty), or the answer
+/// or timeout that closes the question `closes` names.
+pub struct QuestionLine {
+    pub question: Question,
+    /// `answer` or `timeout` when this line closes a question.
+    pub closes: Option<&'static str>,
+}
+
+/// Every `ask_outer` audit line on the live part of the board, in order.
+pub fn question_lines(text: &str) -> Vec<QuestionLine> {
+    let mut out = Vec::new();
     for (no, line) in active_lines(text) {
         let signed = strip_quote(line);
         let Some((kind, id, question)) = mcp_audit(signed) else {
             continue;
         };
-        if kind != "ask" {
-            closed.push(id.to_string());
+        out.push(QuestionLine {
+            question: Question {
+                id: id.to_string(),
+                unit: signature(signed, "单元").map(|(unit, _)| unit.to_string()),
+                question: question.unwrap_or("").trim().to_string(),
+                line: no,
+            },
+            closes: match kind {
+                "answer" => Some("answer"),
+                "timeout" => Some("timeout"),
+                _ => None,
+            },
+        });
+    }
+    out
+}
+
+/// The text under each numbered entry's heading, up to the next heading,
+/// as written (code fences included), keyed by the heading's line.
+pub fn entry_bodies(text: &str) -> BTreeMap<usize, String> {
+    let headings: Vec<usize> = active_lines(text)
+        .into_iter()
+        .filter(|(_, line)| line.starts_with("### ") || line.starts_with("## "))
+        .map(|(no, _)| no)
+        .collect();
+    let all: Vec<&str> = text.split_inclusive('\n').collect();
+    let mut bodies = BTreeMap::new();
+    for (i, start) in headings.iter().enumerate() {
+        let end = headings.get(i + 1).map_or(all.len(), |next| next - 1);
+        bodies.insert(*start, all[*start..end.max(*start)].concat());
+    }
+    bodies
+}
+
+/// Inner-loop questions (`ask_outer`) that reached the board and were
+/// neither answered nor timed out.
+pub fn pending_questions(text: &str) -> Vec<Question> {
+    let mut asked: Vec<Question> = Vec::new();
+    let mut closed: Vec<String> = Vec::new();
+    for line in question_lines(text) {
+        let record = line.question;
+        if line.closes.is_some() {
+            closed.push(record.id);
             continue;
         }
-        let record = Question {
-            id: id.to_string(),
-            unit: signature(signed, "单元").map(|(unit, _)| unit.to_string()),
-            question: question.unwrap_or("").trim().to_string(),
-            line: no,
-        };
         // A repeated id keeps its first position and takes the newer text.
         match asked.iter_mut().find(|q| q.id == record.id) {
             Some(existing) => *existing = record,
