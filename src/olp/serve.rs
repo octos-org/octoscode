@@ -8,8 +8,9 @@
 //! The unit is whatever that line says, never what the caller claims. What
 //! the unit asks for arrives in `SSH_ORIGINAL_COMMAND`:
 //!
-//! - `ack <N> done|wontdo|blocked` (text on stdin) — only about a card
-//!   dispatched to this unit;
+//! - `ack <N> done|wontdo|blocked [<键>]` (text on stdin) — only about a
+//!   card dispatched to this unit; with a key (`<unit>:…`) a retry is
+//!   recorded once;
 //! - `progress <N> claimed` / `progress <N> review|rework <轮次>` (optional
 //!   text on stdin) — a progress node, written once per node and round;
 //! - `events [<之后的序号>]` — the events about this unit's cards, as JSON
@@ -144,7 +145,23 @@ pub fn run(argv: &[String]) -> i32 {
     let log = Log::at(&dir);
     let card = |word: &str| word.parse::<u64>().ok().filter(|n| *n > 0);
     match request.as_slice() {
-        ["ack", n, result] => {
+        ["ack", n, result, key @ ..] if key.len() <= 1 => {
+            // A key lets a retried ACK be recorded once. It is the unit's
+            // own: `<unit>:…`.
+            let key = match key {
+                [] => None,
+                [key]
+                    if key.strip_prefix(&format!("{unit}:")).is_some_and(|rest| {
+                        (1..=180).contains(&rest.len())
+                            && rest
+                                .chars()
+                                .all(|c| c.is_ascii_alphanumeric() || "._:/@+=-".contains(c))
+                    }) =>
+                {
+                    Some(key.to_string())
+                }
+                _ => return refuse(&format!("键必须以 {unit}: 开头且只含 [A-Za-z0-9._:/@+=-]")),
+            };
             let Some(n) = card(n) else {
                 return refuse("卡号不合法");
             };
@@ -161,7 +178,7 @@ pub fn run(argv: &[String]) -> i32 {
                 card: Some(n),
                 actor: format!("内环({unit})"),
                 unit: Some(unit.clone()),
-                key: None,
+                key,
                 data: json!({ "result": result, "text": text }),
             };
             write(&log, &unit, n, draft)

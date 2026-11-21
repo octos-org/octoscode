@@ -7,6 +7,7 @@
 pub mod board;
 pub mod card;
 pub mod cards;
+pub mod client;
 pub mod duty;
 pub mod import;
 pub mod inbox;
