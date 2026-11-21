@@ -24,6 +24,7 @@ const ACTOR: &str = "导入";
 pub fn plan(text: &str) -> Plan {
     let scan = board::scan(text);
     let bodies = board::entry_bodies(text);
+    let raw: Vec<&str> = board::lines(text).map(|(_, line)| line).collect();
     let mut lines: Vec<(usize, Draft)> = Vec::new();
     let draft = |kind: &str, card: Option<u64>, unit: Option<String>, line: usize| Draft {
         kind: kind.to_string(),
@@ -31,7 +32,9 @@ pub fn plan(text: &str) -> Plan {
         actor: ACTOR.to_string(),
         unit,
         key: None,
-        data: json!({ "line": line }),
+        // Where it came from, and the line as written (a rendered view
+        // repeats it when it stood outside every card).
+        data: json!({ "line": line, "text": raw.get(line.wrapping_sub(1)).copied().unwrap_or("") }),
     };
     let with = |mut d: Draft, fields: serde_json::Value| {
         if let (Some(data), Some(extra)) = (d.data.as_object_mut(), fields.as_object()) {
@@ -47,6 +50,7 @@ pub fn plan(text: &str) -> Plan {
                 dispatched,
                 json!({
                     "title": entry.title,
+                    "span": bodies.get(&entry.line).map_or(0, |b| b.split_inclusive('\n').count()),
                     "body": bodies.get(&entry.line).cloned().unwrap_or_default(),
                     "impl": entry.implementer,
                     "review": entry.review,

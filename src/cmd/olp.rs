@@ -330,6 +330,48 @@ const COMMANDS: &[Entry] = &[
         &[],
         "按自然键分配黑板以外的编号",
     ),
+    Entry {
+        group: "card",
+        action: Some("open"),
+        target: Target::Rust(|argv| crate::olp::card::run("open", argv)),
+        help: "事件日志:立一张卡,分配卡号(正文从 stdin):card open --log <目录> --title T [--unit U]",
+    },
+    Entry {
+        group: "card",
+        action: Some("ack"),
+        target: Target::Rust(|argv| crate::olp::card::run("ack", argv)),
+        help: "事件日志:内环回执 done / wontdo / blocked",
+    },
+    Entry {
+        group: "card",
+        action: Some("accept"),
+        target: Target::Rust(|argv| crate::olp::card::run("accept", argv)),
+        help: "事件日志:外环采认",
+    },
+    Entry {
+        group: "card",
+        action: Some("return"),
+        target: Target::Rust(|argv| crate::olp::card::run("return", argv)),
+        help: "事件日志:外环打回",
+    },
+    Entry {
+        group: "card",
+        action: Some("void"),
+        target: Target::Rust(|argv| crate::olp::card::run("void", argv)),
+        help: "事件日志:外环改判作废",
+    },
+    Entry {
+        group: "card",
+        action: Some("snooze"),
+        target: Target::Rust(|argv| crate::olp::card::run("snooze", argv)),
+        help: "事件日志:外环搁置到某一天",
+    },
+    Entry {
+        group: "board",
+        action: Some("render"),
+        target: Target::Rust(crate::olp::render::run),
+        help: "事件日志:输出成 Markdown 黑板(只读视图)",
+    },
     script(
         "card",
         Some("dispatch"),
@@ -549,7 +591,11 @@ fn meta(group: &str, action: Option<&str>) -> Option<Meta> {
         ("board", Some("append" | "archive" | "import")) => meta_of(Hub, yes, yes),
         ("board", Some("inbox" | "watch" | "summary")) => meta_of(Hub, no, no),
         ("id", Some("alloc")) => meta_of(Hub, yes, no),
-        ("card", Some("dispatch")) => meta_of(Hub, yes, yes),
+        ("card", Some("dispatch" | "open" | "accept" | "return" | "void" | "snooze")) => {
+            meta_of(Hub, yes, yes)
+        }
+        ("card", Some("ack")) => meta_of(Any, yes, no),
+        ("board", Some("render")) => meta_of(Hub, no, no),
         ("unit", None) | ("keepalive", None) | ("ask", None) => meta_of(Any, None, None),
         ("remote", None) => meta_of(Unit, None, no),
         ("repo", Some("init")) => meta_of(Hub, yes, no),

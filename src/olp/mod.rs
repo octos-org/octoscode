@@ -5,8 +5,10 @@
 //! that replaces that Markdown as the place data is kept.
 
 pub mod board;
+pub mod card;
 pub mod cards;
 pub mod duty;
 pub mod import;
 pub mod inbox;
 pub mod log;
+pub mod render;
