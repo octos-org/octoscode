@@ -31,13 +31,14 @@
     > 单元(<单元号>)·本地复验通过(#N): …     单元已推送到 hub 的本地仓库
 
   对同一个条目,以**最后发生**(行号最大)的那件事为准:
-    采认 / 打回                 → 已了结
+    采认 / 无单元的卡被打回     → 已了结
+    已派给单元的卡被打回        → 进行中,等原单元返工
     ACK(done)                   → 收件箱:待复验
     ACK(wontdo)                 → 收件箱:待回应(接受或升级)
     ACK(blocked)                → 收件箱:待解阻塞
     单元已推送                  → 收件箱:待审核
     以上都没有                  → 进行中
-  改判作废与归档桩不看先后,直接是已了结。
+  改判作废直接了结。归档桩保留可读性;单元卡的返工和待复验仍占用单元。
   搁置行只有落在最后一件事**之后**才生效;之后内环又有新的 ACK 或推送,
   搁置自动失效,条目回到收件箱。
 
@@ -106,88 +107,121 @@ def strip_quote(line):
     return s
 
 
-def scan(board):
-    """One pass over the board. Returns (entries, events, warnings):
-    entries: number -> {title, line, unit, archived, acks: [(line, kind)]}
-    events:  number -> [(line, kind, detail)] for verdict lines found anywhere
+def markdown_lines(lines):
+    """Yield numbered lines outside backtick or tilde fences."""
+    fence = None
+    for no, raw in enumerate(lines, start=1):
+        line = raw.rstrip("\r\n")
+        stripped = line.lstrip()
+        if fence:
+            if stripped.startswith(fence) and not stripped.rstrip().strip(fence[0]):
+                fence = None
+            continue
+        opening = re.match(r"`{3,}|~{3,}", stripped)
+        if opening:
+            fence = opening.group()
+            continue
+        yield no, line
+
+
+def active_lines(lines):
+    """Skip history bounded by an explicit return to Active.
+
+    Legacy writers append live cards and events to EOF without adding an
+    Active heading. An unterminated historical section is therefore ambiguous.
     """
+    history = None
+    for no, line in markdown_lines(lines):
+        heading = line.rstrip().casefold()
+        if history is not None:
+            if heading != "## active":
+                history.append((no, line))
+                continue
+            history = None
+        elif heading == "## historical record":
+            history = [(no, line)]
+            continue
+        yield no, line
+    if history is not None:
+        yield from history
+
+
+def scan(board):
+    with open(board, "r", encoding="utf-8", errors="replace") as f:
+        return scan_lines(f)
+
+
+def scan_lines(lines):
+    """Parse one board snapshot into numbered entries, events and warnings."""
     entries, events, warnings = {}, {}, []
     current = None
-    in_fence = False
-    with open(board, "r", encoding="utf-8", errors="replace") as f:
-        for no, raw in enumerate(f, start=1):
-            line = raw.rstrip("\r\n")
-            stripped = line.lstrip()
-            if stripped.startswith("```") or stripped.startswith("~~~"):
-                in_fence = not in_fence
-                continue
-            if in_fence:
-                continue
-            if line.startswith("### ") or line.startswith("## "):
-                m = HEADING.match(line)
-                if m:
-                    number = int(m.group(1))
-                    if number in entries:
-                        warnings.append(
-                            f"编号 #{number} 出现两次(第 {entries[number]['line']} 行与第 {no} 行),以第一次为准"
-                        )
-                        current = None
-                    else:
-                        current = number
-                        entries[number] = {
-                            "title": m.group(2).strip(),
-                            "line": no,
-                            "unit": None,
-                            "impl": None,
-                            "review": [],
-                            "archived": False,
-                            "acks": [],
-                        }
-                else:
+    for no, line in active_lines(lines):
+        if line.startswith("### ") or line.startswith("## "):
+            m = HEADING.match(line)
+            if m:
+                number = int(m.group(1))
+                if number in entries:
+                    warnings.append(
+                        f"编号 #{number} 出现两次(第 {entries[number]['line']} 行与第 {no} 行),以第一次为准"
+                    )
                     current = None
-                continue
-            if current is not None:
-                entry = entries[current]
-                m = ACK.match(line)
-                if m:
-                    entry["acks"].append((no, "ack_" + m.group(1)))
-                    continue
-                m = UNIT_LINE.match(line)
-                if m:
-                    entry["unit"] = m.group(1)
-                    continue
-                m = ROLE_LINE.match(line)
-                if m:
-                    if m.group(1) == "impl":
-                        entry["impl"] = m.group(2)
-                    else:
-                        entry["review"] = [r.strip() for r in m.group(2).split(",") if r.strip()]
-                    continue
-                if line.startswith(ARCHIVED_MARK):
-                    entry["archived"] = True
-                    continue
-            signed = strip_quote(line)
-            m = INNER_ACK.match(signed)
+                else:
+                    current = number
+                    entries[number] = {
+                        "title": m.group(2).strip(),
+                        "line": no,
+                        "unit": None,
+                        "impl": None,
+                        "review": [],
+                        "archived": False,
+                        "acks": [],
+                    }
+            else:
+                current = None
+            continue
+        if current is not None:
+            entry = entries[current]
+            m = ACK.match(line)
             if m:
-                ref = m.group(1) or m.group(3)
-                target = int(ref) if ref else current
-                if target in entries:
-                    entries[target]["acks"].append((no, "ack_" + m.group(2)))
-                elif target is not None:
-                    events.setdefault(target, []).append((no, "dangling", ""))
+                entry["acks"].append((no, "ack_" + m.group(1)))
                 continue
-            m = SIGNED.match(signed)
+            m = UNIT_LINE.match(line)
             if m:
-                kind = {"采认": "accepted", "打回": "returned", "搁置": "snooze"}[m.group(2)]
-                events.setdefault(int(m.group(3)), []).append((no, kind, m.group(4)))
+                entry["unit"] = m.group(1)
                 continue
-            m = VOID.match(signed)
+            m = ROLE_LINE.match(line)
             if m:
-                events.setdefault(int(m.group(2)), []).append((no, "voided", ""))
+                if m.group(1) == "impl":
+                    entry["impl"] = m.group(2)
+                else:
+                    entry["review"] = [r.strip() for r in m.group(2).split(",") if r.strip()]
                 continue
-            m = PUSHED.match(signed)
-            if m:
-                events.setdefault(int(m.group(2)), []).append((no, "pushed", m.group(1)))
+            if line.startswith(ARCHIVED_MARK):
+                entry["archived"] = True
+                entry["archive_line"] = no
+                continue
+        signed = strip_quote(line)
+        m = INNER_ACK.match(signed)
+        if m:
+            ref = m.group(1) or m.group(3)
+            target = int(ref) if ref else current
+            if target in entries:
+                entries[target]["acks"].append((no, "ack_" + m.group(2)))
+            elif target is not None:
+                events.setdefault(target, []).append((no, "dangling", ""))
+            continue
+        m = SIGNED.match(signed)
+        if m:
+            kind = {"采认": "accepted", "打回": "returned", "搁置": "snooze"}[m.group(2)]
+            events.setdefault(int(m.group(3)), []).append((no, kind, m.group(4)))
+            continue
+        m = VOID.match(signed)
+        if m:
+            events.setdefault(int(m.group(2)), []).append((no, "voided", ""))
+            continue
+        m = PUSHED.match(signed)
+        if m:
+            events.setdefault(int(m.group(2)), []).append((no, "pushed", m.group(1)))
     for number in sorted(events):
         if number not in entries:
             first = events[number][0][0]
@@ -207,16 +241,8 @@ def pending_questions(board):
     signed as `> 单元(<unit>)·- <time> MCP(ask_outer) ask: id=… question=…`;
     on a single machine the same lines appear unsigned."""
     asked, closed = {}, set()
-    in_fence = False
     with open(board, "r", encoding="utf-8", errors="replace") as f:
-        for no, raw in enumerate(f, start=1):
-            line = raw.rstrip("\r\n")
-            stripped = line.lstrip()
-            if stripped.startswith("```") or stripped.startswith("~~~"):
-                in_fence = not in_fence
-                continue
-            if in_fence:
-                continue
+        for no, line in active_lines(f):
             signed = strip_quote(line)
             m = MCP_AUDIT.search(signed)
             if not m:
@@ -238,8 +264,6 @@ def pending_questions(board):
 def classify(number, entry, events, today, warnings):
     """Return (partition, reason, extra) for one entry."""
     evs = events.get(number, [])
-    if entry["archived"]:
-        return SETTLED, "已归档", {}
     if any(kind == "voided" for _, kind, _ in evs):
         return SETTLED, "已被改判作废", {}
 
@@ -251,6 +275,14 @@ def classify(number, entry, events, today, warnings):
     else:
         last_line, last = timeline[-1]
 
+    # Old archivers also stubbed returned unit cards and outstanding ACKs.
+    # Their machine-readable lines survive; use them to recover the open work.
+    # An unassigned legacy stub still represents its historical disposition.
+    if entry["archived"] and (
+        last is None or last == "accepted"
+        or (not entry["unit"] and last_line <= entry["archive_line"])
+    ):
+        return SETTLED, "已归档", {}
     if last == "accepted":
         return SETTLED, "已采认", {}
     if last == "returned":
