@@ -13,6 +13,8 @@
 //!   recorded once;
 //! - `progress <N> claimed` / `progress <N> review|rework <轮次>` (optional
 //!   text on stdin) — a progress node, written once per node and round;
+//!   `progress <N> undelivered` is the unit's watcher saying the pane did
+//!   not take the card;
 //! - `inbox [<窗格>]` — this unit's cards that were dispatched to a pane and
 //!   not claimed yet (`progress <N> claimed` claims one);
 //! - `events [<之后的序号>]` — the events about this unit's cards, as JSON
@@ -191,13 +193,17 @@ pub fn run(argv: &[String]) -> i32 {
             };
             let (node, round) = match rest {
                 ["claimed"] => ("claimed", 0),
+                // The unit's watcher: the pane did not take the card.
+                ["undelivered"] => ("undelivered", 0),
                 [node @ ("review" | "rework"), round] => {
                     match round.parse::<u32>().ok().filter(|r| (1..=999).contains(r)) {
                         Some(round) => (*node, round),
                         None => return refuse("轮次应为 1–999 的整数"),
                     }
                 }
-                _ => return refuse("节点只能是 claimed、review <轮次>、rework <轮次>"),
+                _ => {
+                    return refuse("节点只能是 claimed、undelivered、review <轮次>、rework <轮次>");
+                }
             };
             let text = match one_line() {
                 Ok(text) => text,

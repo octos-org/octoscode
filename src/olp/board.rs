@@ -141,6 +141,11 @@ pub enum EventKind {
     Pushed(String),
     /// A signed ACK that names an entry the board does not have.
     Dangling,
+    /// The unit took the card (`进度(#N): claimed`).
+    Claimed,
+    /// The unit's watcher could not hand the card to its pane
+    /// (`进度(#N): undelivered`).
+    Undelivered,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -305,6 +310,21 @@ pub fn scan(text: &str) -> Scan {
                     line: no,
                     kind: EventKind::Pushed(unit.to_string()),
                 });
+            }
+            // A log rendered as Markdown: `进度(#N): claimed|undelivered …`.
+            if let Some((n, detail)) = rest.strip_prefix("进度").and_then(card_ref) {
+                let node = detail.trim_start_matches([':', '：', ' ']);
+                let kind = match node.split_whitespace().next() {
+                    Some("claimed") => Some(EventKind::Claimed),
+                    Some("undelivered") => Some(EventKind::Undelivered),
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    scan.events
+                        .entry(n)
+                        .or_default()
+                        .push(Event { line: no, kind });
+                }
             }
         }
     }

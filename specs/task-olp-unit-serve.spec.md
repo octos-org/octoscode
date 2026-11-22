@@ -19,7 +19,9 @@ hub 一侧:单元能做什么、能看到什么,由 hub 决定。两个目的:�
   `SSH_ORIGINAL_COMMAND`(按 shell 词法拆开,不执行):
   - `ack <N> done|wontdo|blocked`,说明从 stdin(单行、非空、≤64 KiB)→ `ack` 事件,署名
     `内环(<单元号>)`。
-  - `progress <N> claimed`、`progress <N> review <轮次>`、`progress <N> rework <轮次>`(轮次
+  - `progress <N> undelivered`(单元的值守报告窗格没有接住这张卡,见
+    `specs/task-olp-delivery-wake.spec.md`)、
+    `progress <N> claimed`、`progress <N> review <轮次>`、`progress <N> rework <轮次>`(轮次
     1–999),说明从 stdin(可空)→ `progress` 事件,署名 `单元(<单元号>)`,带幂等键
     `<单元>:progress:<N>:<节点>:<轮次>`:同一节点同一轮只记一次。
   - `events [<序号>]`→ 以 JSON Lines 输出该单元可见、序号大于给定值的事件。

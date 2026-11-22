@@ -3,7 +3,8 @@
 //! pending questions — with an event's sequence number where the board had
 //! a line number, so every command judges both stores by the same rules.
 //!
-//! Event kinds read here (others, such as `progress`, are ignored):
+//! Event kinds read here (others are ignored; of `progress`, only the
+//! `claimed` and `undelivered` nodes are read):
 //!
 //! | kind | card | data |
 //! |---|---|---|
@@ -95,6 +96,11 @@ pub fn scan(events: &[Event]) -> Scan {
             "voided" => verdict(EventKind::Voided),
             "snoozed" => verdict(EventKind::Snooze(text(event, "text").to_string())),
             "pushed" => verdict(EventKind::Pushed(event.unit.clone().unwrap_or_default())),
+            "progress" => match text(event, "node") {
+                "claimed" => verdict(EventKind::Claimed),
+                "undelivered" => verdict(EventKind::Undelivered),
+                _ => {}
+            },
             _ => {}
         }
     }

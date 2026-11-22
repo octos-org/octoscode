@@ -85,7 +85,7 @@ pub fn plan(text: &str) -> Plan {
                     json!({ "text": text }),
                 ),
                 EventKind::Pushed(unit) => draft("pushed", Some(*number), Some(unit.clone()), line),
-                EventKind::Dangling => continue,
+                EventKind::Dangling | EventKind::Claimed | EventKind::Undelivered => continue,
             };
             lines.push((line, d));
         }

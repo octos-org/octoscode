@@ -40,13 +40,28 @@ impl Site {
             ),
         )
         .unwrap();
-        // A herdr that logs what it is asked. It reports the agent idle
-        // unless the file `busy` exists, and working after a prompt unless
-        // the file `stuck` exists.
-        let herdr = format!(
-            "#!/bin/sh\necho \"$*\" >> '{0}/herdr.log'\nif [ \"$1 $2\" = 'agent wait' ]; then\n  case \"$*\" in\n    *working*) [ -e '{0}/stuck' ] && exit 1 ;;\n    *) [ -e '{0}/busy' ] && exit 1 ;;\n  esac\nfi\nexit 0\n",
-            site.dir.path().display()
-        );
+        // A herdr that logs what it is asked. The agent is idle unless the
+        // file `busy` (working) or `blocked` exists; after a prompt it
+        // starts working unless the file `stuck` exists.
+        let herdr = r#"#!/bin/sh
+echo "$*" >> 'DIR/herdr.log'
+if [ "$1 $2" = 'agent get' ]; then
+  s=idle
+  [ -e 'DIR/busy' ] && s=working
+  [ -e 'DIR/blocked' ] && s=blocked
+  echo "{\"result\":{\"agent\":{\"agent_status\":\"$s\"}}}"
+  exit 0
+fi
+if [ "$1 $2" = 'agent wait' ]; then
+  if [ -e 'DIR/busy' ] || [ -e 'DIR/blocked' ]; then exit 1; fi
+fi
+if [ "$1 $2" = 'agent prompt' ]; then
+  if [ -e 'DIR/blocked' ]; then echo '{"error":{"code":"agent_blocked"}}' >&2; exit 1; fi
+  if [ -e 'DIR/stuck' ]; then echo '{"error":{"code":"agent_prompt_stalled"}}' >&2; exit 1; fi
+fi
+exit 0
+"#
+        .replace("DIR", &site.dir.path().display().to_string());
         std::fs::write(site.herdr(), herdr).unwrap();
         std::fs::set_permissions(site.herdr(), std::fs::Permissions::from_mode(0o755)).unwrap();
         site
@@ -255,8 +270,7 @@ fn the_watcher_wakes_an_idle_pane_with_one_fixed_sentence() {
         site.herdr_calls(),
         [
             "agent wait w1:p1 --until idle --until done --timeout 5000",
-            "agent prompt w1:p1 有新派卡,请执行:octoscode olp remote inbox w1:p1,再按输出里的 next 领取、办理、回执",
-            "agent wait w1:p1 --until working --timeout 10000",
+            "agent prompt w1:p1 有新派卡,请执行:octoscode olp remote inbox w1:p1,再按输出里的 next 领取、办理、回执 --wait --until working --until blocked --timeout 10000",
         ],
         "one sentence for both cards, and nothing of theirs in it"
     );
@@ -326,37 +340,14 @@ fn a_busy_agent_is_left_alone_until_it_is_idle() {
     );
 }
 
-/// Scenario: `olp remote --help` 列出本程序自己的动作
-#[test]
-fn remote_help_lists_the_actions_this_binary_has() {
-    let out = Command::new(BIN)
-        .args(["olp", "remote", "--help"])
-        .output()
-        .unwrap();
-    let text = stdout(&out);
-    assert!(out.status.success(), "{}", stderr(&out));
-    for action in ["ack", "mirror", "progress", "inbox", "watch", "serve-log"] {
-        assert!(
-            text.lines()
-                .any(|l| l.trim_start().starts_with(&format!("{action} "))),
-            "{action} missing from:\n{text}"
-        );
-    }
-    // The actions a script still handles keep their own help below.
-    assert!(text.contains("flush"), "{text}");
-}
-
 /// Scenario: 发了话而 agent 没有开始工作的,不算提醒过
 #[test]
 fn a_nudge_the_agent_did_not_pick_up_is_tried_again() {
     let site = Site::new();
     assert!(
-        site.open(
-            "被对话框挡住时派来的",
-            &["--unit", "m07", "--pane", "w1:p1"]
-        )
-        .status
-        .success()
+        site.open("被挡住时派来的", &["--unit", "m07", "--pane", "w1:p1"])
+            .status
+            .success()
     );
     // herdr calls the agent idle, takes the prompt, and the agent never starts.
     std::fs::write(site.dir.path().join("stuck"), "").unwrap();
@@ -370,7 +361,7 @@ fn a_nudge_the_agent_did_not_pick_up_is_tried_again() {
     // After the retry time it is said once more, long before the re-nudge time.
     let out = site.unit(&["watch", "w1:p1", "--once", "--retry", "0"]);
     assert_eq!(site.prompts().len(), 2);
-    assert!(stdout(&out).contains("请人看一下"), "{}", stdout(&out));
+    assert!(stdout(&out).contains("不再追着发"), "{}", stdout(&out));
     // Twice in a row: the pane is not taking input. Typing again would only
     // pile sentences up in its prompt, so the retry time no longer applies.
     assert!(
@@ -390,4 +381,87 @@ fn a_nudge_the_agent_did_not_pick_up_is_tried_again() {
             .success()
     );
     assert_eq!(site.prompts().len(), 3);
+}
+
+/// Scenario: 窗格接不了卡时不打字,并让 hub 知道(critical)
+#[test]
+fn a_pane_that_cannot_take_a_card_is_reported_to_the_hub() {
+    let site = Site::new();
+    assert!(
+        site.open("派给被挡住的窗格", &["--unit", "m07", "--pane", "w1:p1"])
+            .status
+            .success()
+    );
+    let hub_inbox = |what: &str| {
+        let mut cmd = Command::new(BIN);
+        cmd.args(["olp", "inbox", what]);
+        stdout(&site.run(cmd, ""))
+    };
+    assert!(hub_inbox(&site.log()).contains("已派出,等内环 ACK"));
+
+    // A dialog or an approval covers the agent's prompt: herdr says blocked.
+    std::fs::write(site.dir.path().join("blocked"), "").unwrap();
+    let out = site.unit(&["watch", "w1:p1", "--once"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        site.prompts().is_empty(),
+        "nothing is typed into a blocked pane"
+    );
+    assert!(
+        stdout(&out).contains("agent 状态:blocked"),
+        "{}",
+        stdout(&out)
+    );
+    // Not long enough to bother the hub yet.
+    assert!(hub_inbox(&site.log()).contains("已派出,等内环 ACK"));
+
+    // Still blocked after the retry time: the hub is told, once.
+    for _ in 0..2 {
+        let out = site.unit(&["watch", "w1:p1", "--once", "--retry", "0"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+    }
+    assert!(site.prompts().is_empty());
+    let seen = hub_inbox(&site.log());
+    assert!(seen.contains("送达失败"), "{seen}");
+    assert!(
+        seen.contains("== 收件箱(1)"),
+        "the outer loop has to look:\n{seen}"
+    );
+    let events = std::fs::read_to_string(format!("{}/events-000001.jsonl", site.log())).unwrap();
+    assert_eq!(events.matches("\"undelivered\"").count(), 1, "{events}");
+    // The rendered board says the same as the log.
+    let board = site.dir.path().join("board.md");
+    let mut render = Command::new(BIN);
+    render.args(["olp", "board", "render", &site.log()]);
+    std::fs::write(&board, site.run(render, "").stdout).unwrap();
+    assert_eq!(hub_inbox(&board.to_string_lossy()), seen);
+
+    // Unblocked: the next round wakes it, and a claim clears the report.
+    std::fs::remove_file(site.dir.path().join("blocked")).unwrap();
+    assert!(site.unit(&["watch", "w1:p1", "--once"]).status.success());
+    assert_eq!(site.prompts().len(), 1);
+    assert!(site.unit(&["progress", "1", "claimed"]).status.success());
+    let seen = hub_inbox(&site.log());
+    assert!(!seen.contains("送达失败"), "{seen}");
+    assert!(seen.contains("已派出,等内环 ACK"), "{seen}");
+}
+
+/// Scenario: `olp remote --help` 列出本程序自己的动作
+#[test]
+fn remote_help_lists_the_actions_this_binary_has() {
+    let out = Command::new(BIN)
+        .args(["olp", "remote", "--help"])
+        .output()
+        .unwrap();
+    let text = stdout(&out);
+    assert!(out.status.success(), "{}", stderr(&out));
+    for action in ["ack", "mirror", "progress", "inbox", "watch", "serve-log"] {
+        assert!(
+            text.lines()
+                .any(|l| l.trim_start().starts_with(&format!("{action} "))),
+            "{action} missing from:\n{text}"
+        );
+    }
+    // The actions a script still handles keep their own help below.
+    assert!(text.contains("flush"), "{text}");
 }

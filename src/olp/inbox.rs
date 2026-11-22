@@ -173,7 +173,18 @@ pub fn classify(
     };
     let reason = match last {
         None if until.is_some() => "搁置到期,尚未 ACK",
-        None => return state(Partition::Working, "已派出,等内环 ACK"),
+        None => {
+            // The unit's watcher said it could not hand the card to its
+            // pane, and the card was not claimed since: someone has to look.
+            let at = |kind: EventKind| events.iter().rev().find(|e| e.kind == kind).map(|e| e.line);
+            return match (at(EventKind::Undelivered), at(EventKind::Claimed)) {
+                (Some(missed), claimed) if claimed.is_none_or(|c| c < missed) => state(
+                    Partition::Inbox,
+                    "送达失败:单元报告窗格没有接住提醒,请看一下该窗格",
+                ),
+                _ => state(Partition::Working, "已派出,等内环 ACK"),
+            };
+        }
         Some(Last::AckDone) => "待复验:内环已 ACK(done)",
         Some(Last::AckWontdo) => "待回应:内环 ACK(wontdo),接受或升级",
         Some(Last::AckBlocked) => "待解阻塞:内环 ACK(blocked)",

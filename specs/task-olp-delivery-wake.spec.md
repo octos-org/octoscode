@@ -33,15 +33,27 @@ agent 不轮询。
 - 单元值守 `remote watch <窗格> [--once] [--interval 15] [--renudge 900] [--retry 120] [--idle-wait 5]`:每轮
   向 hub 问该窗格的收件箱;有还没提醒过(或距上次提醒已过 `--renudge` 秒)的卡时,先
   `herdr agent wait <窗格> --until idle --until done --timeout <毫秒>`,agent 空闲才
-  `herdr agent prompt <窗格> "有新派卡,请执行:octoscode olp remote inbox <窗格>,再按输出里的 next 领取、办理、回执"`。
+  `herdr agent prompt <窗格> "有新派卡,请执行:octoscode olp remote inbox <窗格>,再按输出里的 next 领取、办理、回执" --wait --until working --until blocked --timeout 10000`。
   - 短句固定,不含卡号、标题、正文;值守不读卡的内容。
   - 一轮只发一句,不论有几张卡在等。
   - agent 在忙就不发,下一轮再看。
-  - 发话之后再等 `herdr agent wait <窗格> --until working --timeout 10000`:agent 开始工作才算
-    提醒过。没有开始的(herdr 在对话框挡着输入时也报空闲,话会丢——2026-11-22 真实环境里
-    遇到)记为未送达,`--retry` 秒后再发一次。连续两次都没接住,说明窗格不在收输入,再发只会
-    让短句在输入框里越堆越多(同一次验证里看到),于是不再按 `--retry` 追发,改按 `--renudge`
-    的间隔,并提示找人看这个窗格。被接住一次后计数清零。
+  - 发话用 herdr 自带的"提交并等待":提交后看到 agent 进入 working 或 blocked(它自己要审批)
+    才算提醒过。herdr 报 `agent_prompt_stalled`/`timeout`(话打进去了,agent 没有开始——herdr
+    在对话框挡着输入时也可能报空闲,2026-11-22 在 octoscode 与 kimi 两种 agent 上都遇到)记为
+    未送达,`--retry` 秒后再发一次。连续两次都没接住,说明窗格不在收输入,再发只会让短句在
+    输入框里越堆越多(同一次验证里看到),于是不再按 `--retry` 追发,改按 `--renudge` 的间隔。
+    被接住一次后计数清零。herdr 报 `agent_blocked` 时它没有打字,按"接不了卡"处理。
+  - 已提醒、还没领取的卡在等的时候,每轮也用 `herdr agent get` 看一眼:窗格此后卡在审批、
+    对话框,或 agent 没了,同样算接不了卡。
+  - 等空闲没等到时,用 `herdr agent get <窗格>` 问 agent 的状态:`working` 是在忙,下一轮再看;
+    其余(`blocked`——被对话框或审批挡住,`unknown`——窗格里没有 agent 或 herdr 没在跑)是
+    接不了卡,**不往里打字**。
+  - **送达失败要让 hub 知道**:窗格持续 `--retry` 秒接不了卡(上面两种情况,或发话没人接),
+    值守对每张在等的卡上报一次 `progress <N> undelivered`(说明里带窗格与原因)。hub 的收件箱
+    把这样的卡从"进行中"提到"收件箱",理由是"送达失败:单元报告窗格没有接住提醒,请看一下
+    该窗格";卡被领取(`claimed`)后恢复为"已派出,等内环 ACK"。一张卡要么被领取,要么 hub
+    知道它卡住了,不会无声地等着。
+  - 状态文件现在是 `{nudged, misses, stuck, reported}`;旧格式读不出时从空开始。
   - 已提醒的卡记在状态文件(`OLP_WATCH_STATE`,默认
     `~/.octos/outer/watch/<单元>-<窗格>.json`),重启不重复提醒;卡被领取或作废后从中去掉。
   - hub 连不上时报一句、下一轮再试。`OLP_HERDR` 指定 herdr。
@@ -86,6 +98,13 @@ Scenario: agent 正忙时不打扰,空闲后再提醒
   Given 有一张卡在等,agent 正忙
   When 值守跑两轮,agent 转为空闲后再跑一轮;另一个窗格的值守也跑一轮
   Then 忙时不发短句,空闲后发一句;别的窗格的值守不发;缺窗格或参数不对退出码 2
+
+Scenario: 窗格接不了卡时不打字,并让 hub 知道(critical)
+  Tags: critical
+  Test: a_pane_that_cannot_take_a_card_is_reported_to_the_hub
+  Given 一张派给窗格的卡,herdr 报该窗格的 agent 为 blocked
+  When 跑一轮;--retry 0 再跑两轮;解除阻塞后再跑一轮,单元领取
+  Then 始终没有往被挡住的窗格打字;第一轮只说明接不了;过了重试时间向 hub 上报一次 undelivered,hub 收件箱把该卡列入"收件箱"并写明送达失败,日志渲染出的 Markdown 读出来一样;解除后被唤醒,领取后提示消失
 
 Scenario: `olp remote --help` 列出本程序自己的动作
   Test: remote_help_lists_the_actions_this_binary_has

@@ -212,8 +212,7 @@ fn deliver(prog: &str, link: &Link, request: &[String], text: &str) -> i32 {
 }
 
 const ACK_USAGE: &str = "用法: octoscode olp remote ack <N> <done|wontdo|blocked> <说明…>";
-const PROGRESS_USAGE: &str =
-    "用法: octoscode olp remote progress <N> claimed | review <轮次> | rework <轮次> [说明…]";
+const PROGRESS_USAGE: &str = "用法: octoscode olp remote progress <N> claimed | review <轮次> | rework <轮次> [说明…]\n      (另有 undelivered:值守进程报告窗格没有接住卡,一般不用手工发)";
 const MIRROR_USAGE: &str = "用法: octoscode olp remote mirror [--to <Markdown 文件>]";
 
 /// `olp remote ack` on the event-log channel.
@@ -279,7 +278,7 @@ pub fn progress(argv: &[String]) -> i32 {
         return 2;
     }
     let (request, text) = match w.rest.as_slice() {
-        [n, node, text @ ..] if node == "claimed" => {
+        [n, node, text @ ..] if node == "claimed" || node == "undelivered" => {
             (vec![n.clone(), node.clone()], text.join(" "))
         }
         [n, node, round, text @ ..] if node == "review" || node == "rework" => {
@@ -404,9 +403,84 @@ fn replace(path: &Path, content: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The key, in the watcher's state, of the count of nudges in a row that
-/// the agent did not pick up.
-const MISSES: &str = "_misses";
+/// What the watcher remembers between rounds and across restarts.
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+#[serde(default)]
+struct WatchState {
+    /// When each waiting card was last nudged; negative when the agent did
+    /// not pick that nudge up.
+    nudged: BTreeMap<String, i64>,
+    /// Nudges in a row that were not picked up.
+    misses: u64,
+    /// Since when the pane has not been able to take a card, and why.
+    stuck: Option<(u64, String)>,
+    /// Cards already reported to the hub as undelivered.
+    reported: std::collections::BTreeSet<String>,
+}
+
+/// What became of the wake sentence.
+enum Prompted {
+    /// herdr typed it and saw the agent start (working, or blocked on an
+    /// approval of its own).
+    Started,
+    /// herdr typed it and the agent did not start.
+    Stalled,
+    /// herdr did not type it (the agent is blocked or gone, no server).
+    Refused,
+}
+
+/// Types the wake sentence and waits, as herdr does it, for the agent to
+/// start: `agent prompt --wait` fails with `agent_prompt_stalled` when no
+/// working or blocked state follows the submission, and with
+/// `agent_blocked` — before typing anything — when the agent is blocked.
+fn prompt(pane: &str) -> Prompted {
+    let exe = std::env::var("OLP_HERDR").ok().filter(|v| !v.is_empty());
+    let out = Command::new(exe.as_deref().unwrap_or("herdr"))
+        .args(["agent", "prompt", pane, &wake_sentence(pane)])
+        .args(["--wait", "--until", "working", "--until", "blocked"])
+        .args(["--timeout", "10000"])
+        .stdin(Stdio::null())
+        .output();
+    let Ok(out) = out else {
+        return Prompted::Refused;
+    };
+    if out.status.success() {
+        return Prompted::Started;
+    }
+    // herdr writes its error object to stderr.
+    let code = [&out.stderr, &out.stdout]
+        .into_iter()
+        .filter_map(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
+        .find_map(|v| v["error"]["code"].as_str().map(str::to_string))
+        .unwrap_or_default();
+    match code.as_str() {
+        // Refused before a key was sent.
+        "agent_blocked" | "agent_not_ready" | "agent_not_found" | "server_not_running" => {
+            Prompted::Refused
+        }
+        // Anything else may have typed: never assume the prompt is clean.
+        _ => Prompted::Stalled,
+    }
+}
+
+/// herdr's word for the agent in a pane: `idle`, `working`, `blocked`, …;
+/// `unknown` when herdr cannot say (no agent there, no server).
+fn agent_status(pane: &str) -> String {
+    let exe = std::env::var("OLP_HERDR").ok().filter(|v| !v.is_empty());
+    Command::new(exe.as_deref().unwrap_or("herdr"))
+        .args(["agent", "get", pane])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .and_then(|out| serde_json::from_slice::<serde_json::Value>(&out.stdout).ok())
+        .and_then(|v| {
+            v["result"]["agent"]["agent_status"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
 const INBOX_USAGE: &str = "用法: octoscode olp remote inbox [<窗格>]";
 const WATCH_USAGE: &str = "用法: octoscode olp remote watch <窗格> [--once] [--interval 秒] [--renudge 秒] [--retry 秒] [--idle-wait 秒]";
 
@@ -538,7 +612,11 @@ fn now() -> u64 {
 /// there is lost. Such a nudge is tried once more after `--retry` seconds;
 /// after two in a row the pane is not taking input, and typing into it
 /// again only piles sentences up in its prompt, so the watcher falls back
-/// to the `--renudge` pace and says a person should look.
+/// to the `--renudge` pace. A pane that cannot take its cards for `--retry`
+/// seconds — blocked on a dialog or an approval, no agent in it, or not
+/// picking nudges up — is reported to the hub (`progress <N> undelivered`),
+/// where the outer loop's inbox shows it: a card is claimed or known to be
+/// stuck, never silently waiting.
 pub fn watch(argv: &[String]) -> i32 {
     let prog = "olp remote watch";
     let (mut once, mut interval, mut renudge, mut idle_wait) = (false, 15u64, 900u64, 5u64);
@@ -556,7 +634,7 @@ pub fn watch(argv: &[String]) -> i32 {
         let ok = match word.as_str() {
             "-h" | "--help" => {
                 println!(
-                    "{WATCH_USAGE}\n\n单元值守:有新派卡且窗格里的 agent 空闲时,往窗格发一句固定短句。不读卡的内容。\n发话后 agent 没有开始工作(例如有对话框挡着)的,--retry 秒后再发一次;连续两次都没接住就不再追着发,\n改按 --renudge 的间隔,并提示找人看窗格。已开始工作而卡仍未领取的,--renudge 秒后再发。"
+                    "{WATCH_USAGE}\n\n单元值守:有新派卡且窗格里的 agent 空闲时,往窗格发一句固定短句。不读卡的内容。\n发话后 agent 没有开始工作(例如有对话框挡着)的,--retry 秒后再发一次;连续两次都没接住就不再追着发,\n改按 --renudge 的间隔。\n窗格持续 --retry 秒接不了卡(被对话框或审批挡住、里面没有 agent、发话没人接)时向 hub 报告送达失败,外环的收件箱里会看到。已开始工作而卡仍未领取的,--renudge 秒后再发。"
                 );
                 return 0;
             }
@@ -594,8 +672,6 @@ pub fn watch(argv: &[String]) -> i32 {
             return 2;
         }
     };
-    // When each card was last nudged, kept across restarts. A negative time
-    // is a nudge the agent did not pick up; `MISSES` counts those in a row.
     let state_path = std::env::var_os("OLP_WATCH_STATE")
         .map(PathBuf::from)
         .or_else(|| {
@@ -612,7 +688,7 @@ pub fn watch(argv: &[String]) -> i32 {
         return 2;
     };
     loop {
-        let mut nudged: BTreeMap<String, i64> = std::fs::read_to_string(&state_path)
+        let mut st: WatchState = std::fs::read_to_string(&state_path)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
@@ -629,15 +705,16 @@ pub fn watch(argv: &[String]) -> i32 {
                             .collect()
                     })
                     .unwrap_or_default();
-                let mut misses = nudged.remove(MISSES).unwrap_or(0);
                 // Forget cards that are no longer waiting.
-                nudged.retain(|card, _| waiting.contains(card));
+                st.nudged.retain(|card, _| waiting.contains(card));
+                st.reported.retain(|card| waiting.contains(card));
                 if waiting.is_empty() {
-                    misses = 0;
+                    st.misses = 0;
+                    st.stuck = None;
                 }
                 let due = waiting.iter().any(|card| {
-                    nudged.get(card).is_none_or(|at| {
-                        let after = if *at < 0 && misses < 2 {
+                    st.nudged.get(card).is_none_or(|at| {
+                        let after = if *at < 0 && st.misses < 2 {
                             retry
                         } else {
                             renudge
@@ -646,8 +723,21 @@ pub fn watch(argv: &[String]) -> i32 {
                     })
                 });
                 let timeout = (idle_wait * 1000).to_string();
-                if due
-                    && herdr(&[
+                // Not idle, or herdr would not type: a working agent is
+                // simply busy; anything else cannot take a card.
+                let not_ready = |st: &mut WatchState| {
+                    let status = agent_status(pane);
+                    if status == "working" {
+                        if st.misses == 0 {
+                            st.stuck = None;
+                        }
+                    } else if st.stuck.is_none() {
+                        println!("窗格 {pane} 现在接不了提醒(agent 状态:{status}),没有往里打字");
+                        st.stuck = Some((now(), format!("agent 状态 {status}")));
+                    }
+                };
+                if due {
+                    let idle = herdr(&[
                         "agent",
                         "wait",
                         pane,
@@ -657,40 +747,81 @@ pub fn watch(argv: &[String]) -> i32 {
                         "done",
                         "--timeout",
                         &timeout,
-                    ])
-                    && herdr(&["agent", "prompt", pane, &wake_sentence(pane)])
-                {
-                    let started = herdr(&[
-                        "agent",
-                        "wait",
-                        pane,
-                        "--until",
-                        "working",
-                        "--timeout",
-                        "10000",
                     ]);
-                    let at = i64::try_from(now()).unwrap_or(i64::MAX);
-                    // One sentence covers everything that waits.
-                    for card in &waiting {
-                        nudged.insert(card.clone(), if started { at } else { -at });
+                    match idle.then(|| prompt(pane)) {
+                        Some(Prompted::Started) => {
+                            let at = i64::try_from(now()).unwrap_or(i64::MAX);
+                            // One sentence covers everything that waits.
+                            for card in &waiting {
+                                st.nudged.insert(card.clone(), at);
+                            }
+                            st.misses = 0;
+                            st.stuck = None;
+                            println!("已提醒窗格 {pane}:{} 张卡待领取", waiting.len());
+                        }
+                        Some(Prompted::Stalled) => {
+                            let at = i64::try_from(now()).unwrap_or(i64::MAX);
+                            for card in &waiting {
+                                st.nudged.insert(card.clone(), -at);
+                            }
+                            st.misses += 1;
+                            st.stuck
+                                .get_or_insert((now(), "发话后 agent 没有开始工作".to_string()));
+                            if st.misses < 2 {
+                                println!(
+                                    "已往窗格 {pane} 发话,但 agent 没有开始工作(可能有对话框挡着输入);{retry} 秒后再发一次"
+                                );
+                            } else {
+                                println!(
+                                    "窗格 {pane} 连续 {} 次没有接住提醒,不再追着发(改为每 {renudge} 秒一次)",
+                                    st.misses
+                                );
+                            }
+                        }
+                        Some(Prompted::Refused) | None => not_ready(&mut st),
                     }
-                    misses = if started { 0 } else { misses + 1 };
-                    if started {
-                        println!("已提醒窗格 {pane}:{} 张卡待领取", waiting.len());
-                    } else if misses < 2 {
-                        println!(
-                            "已往窗格 {pane} 发话,但 agent 没有开始工作(可能有对话框挡着输入);{retry} 秒后再发一次"
-                        );
+                } else if !waiting.is_empty() {
+                    // Nudged and not claimed yet: a pane that got stuck since
+                    // (an approval, a dialog, the agent gone) is still the
+                    // hub's to know about.
+                    let status = agent_status(pane);
+                    if matches!(status.as_str(), "idle" | "done" | "working") {
+                        if st.misses == 0 {
+                            st.stuck = None;
+                        }
                     } else {
-                        println!(
-                            "窗格 {pane} 连续 {misses} 次没有接住提醒,不再追着发(改为每 {renudge} 秒一次);请人看一下这个窗格"
-                        );
+                        not_ready(&mut st);
                     }
                 }
-                if misses > 0 {
-                    nudged.insert(MISSES.to_string(), misses);
+                // A pane that has not taken its cards for `--retry` seconds
+                // is the hub's to know about: said once per card.
+                if let Some((since, why)) = st.stuck.clone() {
+                    if now() >= since + retry {
+                        for card in &waiting {
+                            if st.reported.contains(card) {
+                                continue;
+                            }
+                            let request =
+                                ["progress", card.as_str(), "undelivered"].map(str::to_string);
+                            let text = format!("窗格 {pane}:{why}");
+                            match send(&link, &request, &text) {
+                                Some(reply) if reply.code == 0 => {
+                                    println!("已向 hub 报告:#{card} 没有送达窗格 {pane}({why})");
+                                    st.reported.insert(card.clone());
+                                }
+                                Some(reply) => {
+                                    eprintln!(
+                                        "{prog}: hub 没有收下 #{card} 的送达失败报告: {}",
+                                        reply.stderr
+                                    );
+                                    st.reported.insert(card.clone());
+                                }
+                                None => eprintln!("{prog}: 没有连上 hub,送达失败的报告下一轮再发"),
+                            }
+                        }
+                    }
                 }
-                let text = serde_json::to_string(&nudged).unwrap_or_else(|_| "{}".to_string());
+                let text = serde_json::to_string(&st).unwrap_or_else(|_| "{}".to_string());
                 if let Err(e) = replace(&state_path, &text) {
                     eprintln!("{prog}: 记不下已提醒的卡 {}: {e}", state_path.display());
                 }
