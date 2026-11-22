@@ -404,8 +404,11 @@ fn replace(path: &Path, content: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The key, in the watcher's state, of the count of nudges in a row that
+/// the agent did not pick up.
+const MISSES: &str = "_misses";
 const INBOX_USAGE: &str = "用法: octoscode olp remote inbox [<窗格>]";
-const WATCH_USAGE: &str = "用法: octoscode olp remote watch <窗格> [--once] [--interval 秒] [--renudge 秒] [--idle-wait 秒]";
+const WATCH_USAGE: &str = "用法: octoscode olp remote watch <窗格> [--once] [--interval 秒] [--renudge 秒] [--retry 秒] [--idle-wait 秒]";
 
 fn needs_log(prog: &str) -> bool {
     if log_mode() {
@@ -530,9 +533,16 @@ fn now() -> u64 {
 /// in the pane is idle, types the one fixed sentence. It never reads a
 /// card. A card is nudged once, and again after `--renudge` seconds if it
 /// is still unclaimed; a busy agent is left alone until the next round.
+/// A nudge counts only if the agent then starts working: herdr also calls
+/// an agent idle while a dialog covers its prompt, and a sentence typed
+/// there is lost. Such a nudge is tried once more after `--retry` seconds;
+/// after two in a row the pane is not taking input, and typing into it
+/// again only piles sentences up in its prompt, so the watcher falls back
+/// to the `--renudge` pace and says a person should look.
 pub fn watch(argv: &[String]) -> i32 {
     let prog = "olp remote watch";
     let (mut once, mut interval, mut renudge, mut idle_wait) = (false, 15u64, 900u64, 5u64);
+    let mut retry = 120u64;
     let mut rest = Vec::new();
     let mut it = argv.iter();
     while let Some(word) = it.next() {
@@ -546,7 +556,7 @@ pub fn watch(argv: &[String]) -> i32 {
         let ok = match word.as_str() {
             "-h" | "--help" => {
                 println!(
-                    "{WATCH_USAGE}\n\n单元值守:有新派卡且窗格里的 agent 空闲时,往窗格发一句固定短句。不读卡的内容。"
+                    "{WATCH_USAGE}\n\n单元值守:有新派卡且窗格里的 agent 空闲时,往窗格发一句固定短句。不读卡的内容。\n发话后 agent 没有开始工作(例如有对话框挡着)的,--retry 秒后再发一次;连续两次都没接住就不再追着发,\n改按 --renudge 的间隔,并提示找人看窗格。已开始工作而卡仍未领取的,--renudge 秒后再发。"
                 );
                 return 0;
             }
@@ -556,6 +566,7 @@ pub fn watch(argv: &[String]) -> i32 {
             }
             "--interval" => seconds(&mut interval),
             "--renudge" => seconds(&mut renudge),
+            "--retry" => seconds(&mut retry),
             "--idle-wait" => seconds(&mut idle_wait),
             other if other.starts_with("--") => false,
             other => {
@@ -583,7 +594,8 @@ pub fn watch(argv: &[String]) -> i32 {
             return 2;
         }
     };
-    // When each card was last nudged, kept across restarts.
+    // When each card was last nudged, kept across restarts. A negative time
+    // is a nudge the agent did not pick up; `MISSES` counts those in a row.
     let state_path = std::env::var_os("OLP_WATCH_STATE")
         .map(PathBuf::from)
         .or_else(|| {
@@ -600,7 +612,7 @@ pub fn watch(argv: &[String]) -> i32 {
         return 2;
     };
     loop {
-        let mut nudged: BTreeMap<String, u64> = std::fs::read_to_string(&state_path)
+        let mut nudged: BTreeMap<String, i64> = std::fs::read_to_string(&state_path)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
@@ -617,11 +629,22 @@ pub fn watch(argv: &[String]) -> i32 {
                             .collect()
                     })
                     .unwrap_or_default();
+                let mut misses = nudged.remove(MISSES).unwrap_or(0);
                 // Forget cards that are no longer waiting.
                 nudged.retain(|card, _| waiting.contains(card));
-                let due = waiting
-                    .iter()
-                    .any(|card| nudged.get(card).is_none_or(|at| now() >= at + renudge));
+                if waiting.is_empty() {
+                    misses = 0;
+                }
+                let due = waiting.iter().any(|card| {
+                    nudged.get(card).is_none_or(|at| {
+                        let after = if *at < 0 && misses < 2 {
+                            retry
+                        } else {
+                            renudge
+                        };
+                        now() >= at.unsigned_abs() + after
+                    })
+                });
                 let timeout = (idle_wait * 1000).to_string();
                 if due
                     && herdr(&[
@@ -637,11 +660,35 @@ pub fn watch(argv: &[String]) -> i32 {
                     ])
                     && herdr(&["agent", "prompt", pane, &wake_sentence(pane)])
                 {
+                    let started = herdr(&[
+                        "agent",
+                        "wait",
+                        pane,
+                        "--until",
+                        "working",
+                        "--timeout",
+                        "10000",
+                    ]);
+                    let at = i64::try_from(now()).unwrap_or(i64::MAX);
                     // One sentence covers everything that waits.
                     for card in &waiting {
-                        nudged.insert(card.clone(), now());
+                        nudged.insert(card.clone(), if started { at } else { -at });
                     }
-                    println!("已提醒窗格 {pane}:{} 张卡待领取", waiting.len());
+                    misses = if started { 0 } else { misses + 1 };
+                    if started {
+                        println!("已提醒窗格 {pane}:{} 张卡待领取", waiting.len());
+                    } else if misses < 2 {
+                        println!(
+                            "已往窗格 {pane} 发话,但 agent 没有开始工作(可能有对话框挡着输入);{retry} 秒后再发一次"
+                        );
+                    } else {
+                        println!(
+                            "窗格 {pane} 连续 {misses} 次没有接住提醒,不再追着发(改为每 {renudge} 秒一次);请人看一下这个窗格"
+                        );
+                    }
+                }
+                if misses > 0 {
+                    nudged.insert(MISSES.to_string(), misses);
                 }
                 let text = serde_json::to_string(&nudged).unwrap_or_else(|_| "{}".to_string());
                 if let Err(e) = replace(&state_path, &text) {

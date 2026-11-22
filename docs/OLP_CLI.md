@@ -63,7 +63,8 @@
 就是送达;单元用 `remote inbox [<窗格>]` 看还没领取的卡(`body` 是卡的全文,`next` 是接下来的
 领取与回执命令),用 `remote progress <N> claimed` 领取。`remote watch <窗格>` 是单元上的值守(不是 agent):有新卡且 agent 空闲时往窗格发一句
 固定短句"有新派卡,请执行:octoscode olp remote inbox <窗格>,再按输出里的 next 领取、办理、回执",
-不带卡的内容。
+不带卡的内容。发话后 agent 开始工作才算提醒过;没接住的隔 `--retry` 秒再发一次,连续两次没接住就
+不再追发,提示找人看窗格。
 
 迁到 Rust 的命令(`src/olp/`):`board inbox`。迁过去的命令不再经过打包的脚本;
 `OCTOSCODE_OLP_LEGACY=1` 让它改跑原脚本,保留一个版本作退路。

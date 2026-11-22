@@ -30,13 +30,18 @@ agent 不轮询。
   hub 较旧、不返回 `body` 时,`next.read` 指向 `remote mirror`。
 - `olp remote --help` 先列出本程序自己的动作(ack、mirror、progress、inbox、watch、serve-log),
   再给出仍由脚本处理的动作的帮助。
-- 单元值守 `remote watch <窗格> [--once] [--interval 15] [--renudge 900] [--idle-wait 5]`:每轮
+- 单元值守 `remote watch <窗格> [--once] [--interval 15] [--renudge 900] [--retry 120] [--idle-wait 5]`:每轮
   向 hub 问该窗格的收件箱;有还没提醒过(或距上次提醒已过 `--renudge` 秒)的卡时,先
   `herdr agent wait <窗格> --until idle --until done --timeout <毫秒>`,agent 空闲才
   `herdr agent prompt <窗格> "有新派卡,请执行:octoscode olp remote inbox <窗格>,再按输出里的 next 领取、办理、回执"`。
   - 短句固定,不含卡号、标题、正文;值守不读卡的内容。
   - 一轮只发一句,不论有几张卡在等。
   - agent 在忙就不发,下一轮再看。
+  - 发话之后再等 `herdr agent wait <窗格> --until working --timeout 10000`:agent 开始工作才算
+    提醒过。没有开始的(herdr 在对话框挡着输入时也报空闲,话会丢——2026-11-22 真实环境里
+    遇到)记为未送达,`--retry` 秒后再发一次。连续两次都没接住,说明窗格不在收输入,再发只会
+    让短句在输入框里越堆越多(同一次验证里看到),于是不再按 `--retry` 追发,改按 `--renudge`
+    的间隔,并提示找人看这个窗格。被接住一次后计数清零。
   - 已提醒的卡记在状态文件(`OLP_WATCH_STATE`,默认
     `~/.octos/outer/watch/<单元>-<窗格>.json`),重启不重复提醒;卡被领取或作废后从中去掉。
   - hub 连不上时报一句、下一轮再试。`OLP_HERDR` 指定 herdr。
@@ -87,3 +92,9 @@ Scenario: `olp remote --help` 列出本程序自己的动作
   Given 打包了 remote 的脚本的 octoscode
   When 执行 olp remote --help
   Then 输出先列出 ack、mirror、progress、inbox、watch、serve-log,后面仍有脚本处理的动作(如 flush)的帮助,退出码 0
+
+Scenario: 发了话而 agent 没有开始工作的,不算提醒过
+  Test: a_nudge_the_agent_did_not_pick_up_is_tried_again
+  Given 一张待领取的卡,herdr 报 agent 空闲、收下了话,但 agent 没有开始工作
+  When 跑一轮;紧接着再跑一轮;--retry 0 再跑两轮;对话框消失后 --renudge 0 跑一轮,再 --retry 0 跑一轮
+  Then 第一轮发话并说明没有开始工作;未到重试时间不再发;到了再发一次并提示找人看窗格;连续两次未接住后不再按重试时间追发;到 --renudge 时被接住的那次算数,此后不再发

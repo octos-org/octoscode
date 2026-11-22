@@ -40,10 +40,11 @@ impl Site {
             ),
         )
         .unwrap();
-        // A herdr that logs what it is asked and reports the agent idle
-        // unless the file `busy` exists.
+        // A herdr that logs what it is asked. It reports the agent idle
+        // unless the file `busy` exists, and working after a prompt unless
+        // the file `stuck` exists.
         let herdr = format!(
-            "#!/bin/sh\necho \"$*\" >> '{0}/herdr.log'\nif [ \"$1 $2\" = 'agent wait' ] && [ -e '{0}/busy' ]; then exit 1; fi\nexit 0\n",
+            "#!/bin/sh\necho \"$*\" >> '{0}/herdr.log'\nif [ \"$1 $2\" = 'agent wait' ]; then\n  case \"$*\" in\n    *working*) [ -e '{0}/stuck' ] && exit 1 ;;\n    *) [ -e '{0}/busy' ] && exit 1 ;;\n  esac\nfi\nexit 0\n",
             site.dir.path().display()
         );
         std::fs::write(site.herdr(), herdr).unwrap();
@@ -255,6 +256,7 @@ fn the_watcher_wakes_an_idle_pane_with_one_fixed_sentence() {
         [
             "agent wait w1:p1 --until idle --until done --timeout 5000",
             "agent prompt w1:p1 有新派卡,请执行:octoscode olp remote inbox w1:p1,再按输出里的 next 领取、办理、回执",
+            "agent wait w1:p1 --until working --timeout 10000",
         ],
         "one sentence for both cards, and nothing of theirs in it"
     );
@@ -342,4 +344,50 @@ fn remote_help_lists_the_actions_this_binary_has() {
     }
     // The actions a script still handles keep their own help below.
     assert!(text.contains("flush"), "{text}");
+}
+
+/// Scenario: 发了话而 agent 没有开始工作的,不算提醒过
+#[test]
+fn a_nudge_the_agent_did_not_pick_up_is_tried_again() {
+    let site = Site::new();
+    assert!(
+        site.open(
+            "被对话框挡住时派来的",
+            &["--unit", "m07", "--pane", "w1:p1"]
+        )
+        .status
+        .success()
+    );
+    // herdr calls the agent idle, takes the prompt, and the agent never starts.
+    std::fs::write(site.dir.path().join("stuck"), "").unwrap();
+    let out = site.unit(&["watch", "w1:p1", "--once"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(site.prompts().len(), 1);
+    assert!(stdout(&out).contains("没有开始工作"), "{}", stdout(&out));
+    // Not due yet: the pane is not typed into every round.
+    assert!(site.unit(&["watch", "w1:p1", "--once"]).status.success());
+    assert_eq!(site.prompts().len(), 1);
+    // After the retry time it is said once more, long before the re-nudge time.
+    let out = site.unit(&["watch", "w1:p1", "--once", "--retry", "0"]);
+    assert_eq!(site.prompts().len(), 2);
+    assert!(stdout(&out).contains("请人看一下"), "{}", stdout(&out));
+    // Twice in a row: the pane is not taking input. Typing again would only
+    // pile sentences up in its prompt, so the retry time no longer applies.
+    assert!(
+        site.unit(&["watch", "w1:p1", "--once", "--retry", "0"])
+            .status
+            .success()
+    );
+    assert_eq!(site.prompts().len(), 2);
+    // The dialog is gone: at the re-nudge time it is picked up, and counts.
+    std::fs::remove_file(site.dir.path().join("stuck")).unwrap();
+    let out = site.unit(&["watch", "w1:p1", "--once", "--renudge", "0"]);
+    assert_eq!(site.prompts().len(), 3);
+    assert!(stdout(&out).contains("已提醒窗格"), "{}", stdout(&out));
+    assert!(
+        site.unit(&["watch", "w1:p1", "--once", "--retry", "0"])
+            .status
+            .success()
+    );
+    assert_eq!(site.prompts().len(), 3);
 }
