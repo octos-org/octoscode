@@ -186,8 +186,25 @@ fn a_dispatched_card_waits_in_the_units_inbox_until_claimed() {
     let report: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
     assert_eq!(
         report["items"][0],
-        serde_json::json!({"number": 1, "title": "给 m07 窗格 p1", "pane": "w1:p1", "impl": "octoscode", "review": ["codex"]})
+        serde_json::json!({
+            "number": 1,
+            "title": "给 m07 窗格 p1",
+            "pane": "w1:p1",
+            "impl": "octoscode",
+            "review": ["codex"],
+            "body": "卡的正文:机密细节不该出现在唤醒里",
+            "next": {
+                "claim": "octoscode olp remote progress 1 claimed",
+                "ack": "octoscode olp remote ack 1 done|wontdo|blocked <说明>"
+            }
+        })
     );
+    // The answer says what to do with a card, so a woken agent need not guess.
+    assert!(report["how"].as_str().unwrap().contains("next.claim"));
+    // The commands it names are real: the claim below is `next.claim`.
+    let empty: serde_json::Value =
+        serde_json::from_str(&stdout(&site.unit_as("m09", &["inbox"]))).unwrap();
+    assert!(empty.get("how").is_none());
 
     // Claiming is the `claimed` progress node; claiming twice is the same claim.
     for _ in 0..2 {
@@ -237,7 +254,7 @@ fn the_watcher_wakes_an_idle_pane_with_one_fixed_sentence() {
         site.herdr_calls(),
         [
             "agent wait w1:p1 --until idle --until done --timeout 5000",
-            "agent prompt w1:p1 有新派卡,请执行:octoscode olp remote inbox w1:p1",
+            "agent prompt w1:p1 有新派卡,请执行:octoscode olp remote inbox w1:p1,再按输出里的 next 领取、办理、回执",
         ],
         "one sentence for both cards, and nothing of theirs in it"
     );
@@ -305,4 +322,24 @@ fn a_busy_agent_is_left_alone_until_it_is_idle() {
             .code(),
         Some(2)
     );
+}
+
+/// Scenario: `olp remote --help` 列出本程序自己的动作
+#[test]
+fn remote_help_lists_the_actions_this_binary_has() {
+    let out = Command::new(BIN)
+        .args(["olp", "remote", "--help"])
+        .output()
+        .unwrap();
+    let text = stdout(&out);
+    assert!(out.status.success(), "{}", stderr(&out));
+    for action in ["ack", "mirror", "progress", "inbox", "watch", "serve-log"] {
+        assert!(
+            text.lines()
+                .any(|l| l.trim_start().starts_with(&format!("{action} "))),
+            "{action} missing from:\n{text}"
+        );
+    }
+    // The actions a script still handles keep their own help below.
+    assert!(text.contains("flush"), "{text}");
 }

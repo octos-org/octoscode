@@ -433,7 +433,7 @@ pub fn inbox(argv: &[String]) -> i32 {
     let w = match words(argv) {
         Ok(w) if w.help => {
             println!(
-                "{INBOX_USAGE}\n\n列出派给本单元、还没领取的卡(JSON)。领取:octoscode olp remote progress <N> claimed"
+                "{INBOX_USAGE}\n\n列出派给本单元、还没领取的卡(JSON):body 是卡的全文,next 是接下来的命令(领取、回执)"
             );
             return 0;
         }
@@ -458,7 +458,8 @@ pub fn inbox(argv: &[String]) -> i32 {
         }
     };
     match pending(&link, w.rest.first().map(String::as_str)) {
-        Ok(report) => {
+        Ok(mut report) => {
+            with_next_steps(&mut report);
             println!(
                 "{}",
                 serde_json::to_string_pretty(&report).unwrap_or_else(|_| report.to_string())
@@ -472,10 +473,39 @@ pub fn inbox(argv: &[String]) -> i32 {
     }
 }
 
+/// Says, on each waiting card, the commands that come next, so an agent
+/// that was only told to look here can go on without guessing: claim, do
+/// what `body` says, then ACK. A hub too old to send the body is read
+/// through the mirror instead.
+fn with_next_steps(report: &mut serde_json::Value) {
+    let Some(items) = report.get_mut("items").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    if items.is_empty() {
+        return;
+    }
+    for item in items.iter_mut() {
+        let Some(n) = item.get("number").and_then(|v| v.as_u64()) else {
+            continue;
+        };
+        let mut next = serde_json::json!({
+            "claim": format!("octoscode olp remote progress {n} claimed"),
+            "ack": format!("octoscode olp remote ack {n} done|wontdo|blocked <说明>"),
+        });
+        if item.get("body").is_none() {
+            next["read"] = serde_json::json!("octoscode olp remote mirror");
+        }
+        item["next"] = next;
+    }
+    report["how"] = serde_json::json!(
+        "每张卡:先执行 next.claim 领取,按 body(卡的全文)办理,做完执行 next.ack 回执——done 附 commit/测试证据,wontdo 附理由,blocked 附原因"
+    );
+}
+
 /// The one sentence a pane is woken with. It carries no card content: the
 /// inbox is where the card is, this only says to look.
 pub fn wake_sentence(pane: &str) -> String {
-    format!("有新派卡,请执行:octoscode olp remote inbox {pane}")
+    format!("有新派卡,请执行:octoscode olp remote inbox {pane},再按输出里的 next 领取、办理、回执")
 }
 
 fn herdr(args: &[&str]) -> bool {

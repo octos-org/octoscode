@@ -920,6 +920,19 @@ pub fn run(argv: &[String]) -> i32 {
         .iter()
         .find(|e| e.action.is_some() && e.action == action.as_deref())
         .or_else(|| in_group.iter().find(|e| e.action.is_none()));
+    // `olp <组> --help` where a script handles the rest of the group: say
+    // the actions this binary has first — the script's help cannot know them.
+    if words.len() == 2
+        && matches!(action.as_deref(), Some("-h") | Some("--help"))
+        && entry.is_some_and(|e| e.action.is_none())
+        && in_group.iter().any(|e| e.action.is_some())
+    {
+        println!("octoscode olp {group} <动作>:");
+        for e in in_group.iter().filter(|e| e.action.is_some()) {
+            println!("  {:<10} {}", e.action.unwrap_or_default(), e.help);
+        }
+        println!("\n其余动作(下面是它们的帮助):\n");
+    }
     let Some(entry) = entry else {
         let actions: Vec<&str> = in_group.iter().filter_map(|e| e.action).collect();
         match action.as_deref() {

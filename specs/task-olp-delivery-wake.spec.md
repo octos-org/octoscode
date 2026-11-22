@@ -21,12 +21,19 @@ agent 不轮询。
   的卡,按卡号排列。**领取就是上报 `claimed`**(`remote progress <N> claimed`,幂等),不另设
   领取动作。
 - hub 一侧 `remote serve-log` 增加请求 `inbox [<窗格>]`,输出
-  `{"unit": …, "items": [{number, title, pane, impl, review}]}`。只有本单元的卡。
-- 单元一侧 `remote inbox [<窗格>]`:把上面的 JSON 打出来。
+  `{"unit": …, "items": [{number, title, pane, impl, review, body}]}`。只有本单元的卡;
+  `body` 是卡的全文。
+- 单元一侧 `remote inbox [<窗格>]`:把上面的 JSON 打出来,并给每张卡加上 `next`——接下来的
+  命令 `claim`(`remote progress <N> claimed`)和 `ack`(`remote ack <N> done|wontdo|blocked <说明>`);
+  有卡时另有一句 `how` 说明顺序(领取、按 `body` 办理、回执)。被唤醒的 agent 只凭这一次输出
+  就能办完,不用猜命令(2026-11-22 真实环境验证:没有这些时,agent 读完收件箱就停下来问人)。
+  hub 较旧、不返回 `body` 时,`next.read` 指向 `remote mirror`。
+- `olp remote --help` 先列出本程序自己的动作(ack、mirror、progress、inbox、watch、serve-log),
+  再给出仍由脚本处理的动作的帮助。
 - 单元值守 `remote watch <窗格> [--once] [--interval 15] [--renudge 900] [--idle-wait 5]`:每轮
   向 hub 问该窗格的收件箱;有还没提醒过(或距上次提醒已过 `--renudge` 秒)的卡时,先
   `herdr agent wait <窗格> --until idle --until done --timeout <毫秒>`,agent 空闲才
-  `herdr agent prompt <窗格> "有新派卡,请执行:octoscode olp remote inbox <窗格>"`。
+  `herdr agent prompt <窗格> "有新派卡,请执行:octoscode olp remote inbox <窗格>,再按输出里的 next 领取、办理、回执"`。
   - 短句固定,不含卡号、标题、正文;值守不读卡的内容。
   - 一轮只发一句,不论有几张卡在等。
   - agent 在忙就不发,下一轮再看。
@@ -50,7 +57,8 @@ agent 不轮询。
 
 - 派卡前的单元健康与占用检查(`card dispatch` 迁移时接上)。
 - 把值守注册成常驻任务(`olp keepalive`)、往上的方向(外环事件收件箱与外环值守)。
-- 在真实的 herdr 与真实的 agent 窗格上验证:本任务的测试用的是记录调用的假 herdr。
+- 自动化测试用的是记录调用的假 herdr;真实 herdr 与真实 agent 窗格上的验证是手工做的
+  (2026-11-22,hagency herdr 0.9.5,octoscode agent),不在测试套件里。
 
 ## Completion Criteria
 
@@ -59,7 +67,7 @@ Scenario: 派出的卡在单元的收件箱里等到被领取(critical)
   Test: a_dispatched_card_waits_in_the_units_inbox_until_claimed
   Given 四张卡:两张给 m07 的不同窗格,一张给 m08,一张给 m07 但没有窗格
   When 各单元查收件箱(带与不带窗格),m07 领取一张两次,外环作废另一张
-  Then m07 只看到自己带窗格的两张、按窗格可筛选,m08 只看到自己的,没有卡的单元为空;领取后该卡离开收件箱,作废的也离开;没有单元的 --pane 与非法窗格被拒
+  Then m07 只看到自己带窗格的两张、按窗格可筛选,m08 只看到自己的,没有卡的单元为空;每张卡带全文 body 与 next(领取、回执命令),有卡时带 how,空收件箱不带;领取后该卡离开收件箱,作废的也离开;没有单元的 --pane 与非法窗格被拒
 
 Scenario: 值守在 agent 空闲时发一句固定短句,不带卡的内容,不重复提醒(critical)
   Tags: critical
@@ -73,3 +81,9 @@ Scenario: agent 正忙时不打扰,空闲后再提醒
   Given 有一张卡在等,agent 正忙
   When 值守跑两轮,agent 转为空闲后再跑一轮;另一个窗格的值守也跑一轮
   Then 忙时不发短句,空闲后发一句;别的窗格的值守不发;缺窗格或参数不对退出码 2
+
+Scenario: `olp remote --help` 列出本程序自己的动作
+  Test: remote_help_lists_the_actions_this_binary_has
+  Given 打包了 remote 的脚本的 octoscode
+  When 执行 olp remote --help
+  Then 输出先列出 ack、mirror、progress、inbox、watch、serve-log,后面仍有脚本处理的动作(如 flush)的帮助,退出码 0

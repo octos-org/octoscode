@@ -157,6 +157,8 @@ pub struct Pending {
     #[serde(rename = "impl")]
     pub implementer: Option<String>,
     pub review: Vec<String>,
+    /// The card's text as dispatched: the inbox is where the unit reads it.
+    pub body: String,
 }
 
 /// The unit's delivery inbox: its cards that name a pane, are not voided
@@ -170,8 +172,8 @@ pub fn pending_for(events: &[Event], unit: &str) -> Vec<Pending> {
             continue;
         }
         let about = || events.iter().filter(|e| e.card == Some(*number));
-        let pane = about()
-            .find(|e| e.kind == "dispatched")
+        let dispatched = about().find(|e| e.kind == "dispatched");
+        let pane = dispatched
             .map(|e| text(e, "pane").to_string())
             .unwrap_or_default();
         let closed = about()
@@ -185,6 +187,9 @@ pub fn pending_for(events: &[Event], unit: &str) -> Vec<Pending> {
             pane,
             implementer: entry.implementer.clone(),
             review: entry.review.clone(),
+            body: dispatched
+                .map(|e| text(e, "body").trim().to_string())
+                .unwrap_or_default(),
         });
     }
     out
