@@ -18,12 +18,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
 fn tool() -> PathBuf {
-    repo_root().join("scripts/olp-board-remote.py")
+    PathBuf::from(env!("CARGO_BIN_EXE_octoscode"))
 }
 
 fn stderr(out: &Output) -> String {
@@ -61,7 +57,7 @@ impl Net {
              [ \"$mode\" = down ] && exit 255\n\
              while [ \"$1\" = \"-o\" ]; do shift 2; done\n\
              shift\n\
-             SSH_ORIGINAL_COMMAND=\"$*\" python3 -B '{tool}' serve --unit m07 --board '{board}'\n\
+             SSH_ORIGINAL_COMMAND=\"$*\" '{tool}' olp remote serve --unit m07 --board '{board}'\n\
              rc=$?\n\
              [ \"$mode\" = lost-reply ] && exit 255\n\
              exit $rc\n",
@@ -97,9 +93,8 @@ impl Net {
 
     /// A unit-side command with the unit's configuration in the environment.
     fn unit(&self, args: &[&str], stdin: Option<&str>) -> Output {
-        let mut cmd = Command::new("python3");
-        cmd.arg("-B")
-            .arg(tool())
+        let mut cmd = Command::new(tool());
+        cmd.args(["olp", "remote"])
             .args(args)
             .env("OLP_SSH", self.fake_ssh())
             .env("OLP_HUB", "olp@hub-01")
@@ -121,9 +116,8 @@ impl Net {
 
     /// The hub-side forced command, called directly.
     fn serve(&self, original: &str, body: &str) -> Output {
-        let mut child = Command::new("python3")
-            .arg("-B")
-            .arg(tool())
+        let mut child = Command::new(tool())
+            .args(["olp", "remote"])
             .args(["serve", "--unit", "m07", "--board"])
             .arg(self.board())
             .env("SSH_ORIGINAL_COMMAND", original)
@@ -344,9 +338,8 @@ fn remote_mirror_target_comes_from_configuration() {
     )
     .unwrap();
     let run = |conf: &Path, args: &[&str], env: &[(&str, &str)]| {
-        let mut cmd = Command::new("python3");
-        cmd.arg("-B")
-            .arg(tool())
+        let mut cmd = Command::new(tool());
+        cmd.args(["olp", "remote"])
             .args(args)
             .env("OLP_SSH", n.fake_ssh())
             .env("OLP_QUEUE_DIR", n.queue())
@@ -401,9 +394,8 @@ fn remote_mirror_target_comes_from_configuration() {
 fn remote_requires_configuration_and_valid_input() {
     let n = Net::new();
     let bare = |args: &[&str], env: &[(&str, &str)], stdin: &str| {
-        let mut cmd = Command::new("python3");
-        cmd.arg("-B")
-            .arg(tool())
+        let mut cmd = Command::new(tool());
+        cmd.args(["olp", "remote"])
             .args(args)
             .env("OLP_SSH", n.fake_ssh())
             .env("OLP_QUEUE_DIR", n.queue())

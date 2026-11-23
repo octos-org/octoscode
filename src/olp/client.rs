@@ -26,7 +26,7 @@ use super::log::Event;
 const EX_TEMPFAIL: i32 = 75;
 const LOCAL: &str = "local";
 
-fn conf() -> BTreeMap<String, String> {
+pub(super) fn conf() -> BTreeMap<String, String> {
     let path = std::env::var_os("OLP_UNIT_CONF")
         .map(PathBuf::from)
         .or_else(|| {
@@ -48,7 +48,12 @@ fn conf() -> BTreeMap<String, String> {
     out
 }
 
-fn setting(flag: Option<&String>, env: &str, conf: &BTreeMap<String, String>, key: &str) -> String {
+pub(super) fn setting(
+    flag: Option<&String>,
+    env: &str,
+    conf: &BTreeMap<String, String>,
+    key: &str,
+) -> String {
     flag.cloned()
         .or_else(|| std::env::var(env).ok().filter(|v| !v.is_empty()))
         .or_else(|| conf.get(key).cloned())

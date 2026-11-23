@@ -56,6 +56,7 @@ estimate: 1d
 ## Boundaries
 
 ### Allowed Changes
+- src/olp/mdremote.rs、src/olp/append.rs(2026-11-23:远程写板的 Rust 实现;本 spec 的场景改为对 `octoscode olp remote …` 运行,规则、输出、退出码不变;hub 一侧写板在进程内完成,不再需要 flock 程序)
 - scripts/olp-board-remote.py
 - tests/olp_board_remote.rs
 - docs/OLP_REMOTE_BOARD.md

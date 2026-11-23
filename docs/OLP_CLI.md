@@ -122,8 +122,8 @@
 
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
-| `olp remote append\|ack\|flush\|queue\|mirror …` | `olp-board-remote.py` 同名子命令 | 单元 |
-| `olp remote serve --unit U --board <板>` | `olp-board-remote.py serve` | hub(ssh 强制命令) |
+| `olp remote append\|ack\|flush\|queue\|mirror …` | Rust(`src/olp/mdremote.rs`),原 `olp-board-remote.py` 同名子命令 | 单元 |
+| `olp remote serve --unit U --board <板>` | Rust(`src/olp/mdremote.rs`),原 `olp-board-remote.py serve` | hub(ssh 强制命令) |
 
 ### 2.6 本地仓库与本地 PR(repo)
 
@@ -150,7 +150,7 @@
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
 | `olp guard watch …` | `octoscode olp-runtime-watch` | 单元 |
-| `olp guard forward [--include K] [--only K]` | `olp-alert-forward.py` | 单元 |
+| `olp guard forward [--include K] [--only K]` | Rust(`src/olp/forward.rs`),原 `olp-alert-forward.py` | 单元 |
 
 ### 2.9 保活(keepalive)——按平台自动选 launchd 或 systemd
 

@@ -65,6 +65,7 @@ monitor 进程、真实 UI ledger、任务自有源文件做有界探测，及�
 ## Boundaries
 
 ### Allowed Changes
+- src/olp/forward.rs(2026-11-23:负哨转发的 Rust 实现;相关场景改为对 `octoscode olp guard forward` 运行)
 - src/cmd/olp_runtime_watch.rs、src/cmd/mod.rs（dispatch/route/CLI help）
 - tests/olp_runtime_watch.rs、docs/OLP_OUTER_BOOT.md、本 spec
 - scripts/olp-alert-forward.py、tests/olp_alert_forward.rs、docs/OLP_CLUSTER.md(hub 转发)

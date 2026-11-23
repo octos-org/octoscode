@@ -15,10 +15,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
-fn scripts() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts")
-}
-
 fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
@@ -43,9 +39,9 @@ impl Net {
         };
         std::fs::write(n.board(), "# 板\n\n### 212. 一张卡\nunit: m07\n\n").unwrap();
         let script = format!(
-            "#!/bin/sh\n[ -e '{down}' ] && exit 255\nwhile [ \"$1\" = \"-o\" ]; do shift 2; done\nshift\nSSH_ORIGINAL_COMMAND=\"$*\" exec python3 -B '{tool}' serve --unit m07 --board '{board}'\n",
+            "#!/bin/sh\n[ -e '{down}' ] && exit 255\nwhile [ \"$1\" = \"-o\" ]; do shift 2; done\nshift\nSSH_ORIGINAL_COMMAND=\"$*\" exec '{tool}' olp remote serve --unit m07 --board '{board}'\n",
             down = n.down().display(),
-            tool = scripts().join("olp-board-remote.py").display(),
+            tool = env!("CARGO_BIN_EXE_octoscode"),
             board = n.board().display(),
         );
         std::fs::write(n.fake_ssh(), script).unwrap();
@@ -67,15 +63,18 @@ impl Net {
     }
 
     fn command(&self, script: &str, args: &[&str]) -> Command {
-        let mut cmd = Command::new("python3");
-        cmd.arg("-B")
-            .arg(scripts().join(script))
-            .args(args)
-            .env("OLP_SSH", self.fake_ssh())
-            .env("OLP_HUB", "olp@hub-01")
-            .env("OLP_UNIT_ID", "m07")
-            .env("OLP_QUEUE_DIR", self.queue())
-            .env("OLP_UNIT_CONF", self.dir.path().join("absent.conf"));
+        // Both tools are Rust now; the script names are kept in the calls.
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_octoscode"));
+        cmd.args(match script {
+            "olp-alert-forward.py" => ["olp", "guard", "forward"].as_slice(),
+            _ => ["olp", "remote"].as_slice(),
+        })
+        .args(args)
+        .env("OLP_SSH", self.fake_ssh())
+        .env("OLP_HUB", "olp@hub-01")
+        .env("OLP_UNIT_ID", "m07")
+        .env("OLP_QUEUE_DIR", self.queue())
+        .env("OLP_UNIT_CONF", self.dir.path().join("absent.conf"));
         cmd
     }
 
@@ -297,9 +296,8 @@ fn alert_forward_only_emits_whitelisted_fields() {
 
     // Usage: an unknown kind, and no unit configuration.
     assert_eq!(n.forward(&["--only", "bogus"], &[]).status.code(), Some(2));
-    let out = Command::new("python3")
-        .arg("-B")
-        .arg(scripts().join("olp-alert-forward.py"))
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "guard", "forward"])
         .env("OLP_UNIT_CONF", n.dir.path().join("absent.conf"))
         .env_remove("OLP_HUB")
         .env_remove("OLP_UNIT_ID")

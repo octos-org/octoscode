@@ -62,11 +62,11 @@ impl Cluster {
              while [ \"$1\" = \"-o\" ]; do shift 2; done\n\
              shift\n\
              case \"$1\" in\n\
-               append|read) SSH_ORIGINAL_COMMAND=\"$*\" exec python3 -B '{remote}' serve --unit m07 --board '{board}' ;;\n\
+               append|read) SSH_ORIGINAL_COMMAND=\"$*\" exec '{remote}' olp remote serve --unit m07 --board '{board}' ;;\n\
                *) SSH_ORIGINAL_COMMAND=\"$*\" exec '{answer}' olp ask serve --root '{root}' --max-age \"$(cat '{max_age}' 2>/dev/null || echo 50)\" ;;\n\
              esac\n",
             down = c.down().display(),
-            remote = scripts().join("olp-board-remote.py").display(),
+            remote = env!("CARGO_BIN_EXE_octoscode"),
             answer = env!("CARGO_BIN_EXE_octoscode"),
             board = c.board().display(),
             root = c.unit_root().display(),
@@ -75,8 +75,8 @@ impl Cluster {
         c.write_executable(&c.fake_ssh(), &ssh);
         // The unit's MCP audit hook: forward, signed, to the hub.
         let hook = format!(
-            "#!/bin/sh\nexec python3 -B '{}' append --sign\n",
-            scripts().join("olp-board-remote.py").display()
+            "#!/bin/sh\nexec '{}' olp remote append --sign\n",
+            env!("CARGO_BIN_EXE_octoscode")
         );
         c.write_executable(&c.unit_root().join("board_append.sh"), &hook);
         c

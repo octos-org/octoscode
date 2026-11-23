@@ -149,6 +149,14 @@ pub fn board_append(argv: &[String]) -> i32 {
     if std::io::stdin().read_to_end(&mut body).is_err() {
         return die(prog, "读不了 stdin");
     }
+    write_entry(board, key, body)
+}
+
+/// Append `body` to `board` under its lock: number it when its first line
+/// starts `### {N}`, skip it when `key` is already on the board. Prints the
+/// number (when there is one) to stdout. Returns the exit code.
+pub fn write_entry(board: &Path, key: Option<&str>, body: Vec<u8>) -> i32 {
+    let prog = "olp-board-append";
     if body.is_empty() {
         return if key.is_some() {
             die(prog, "正文为空")

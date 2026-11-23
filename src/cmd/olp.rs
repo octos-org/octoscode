@@ -400,7 +400,9 @@ const COMMANDS: &[Entry] = &[
             if crate::olp::client::log_mode() {
                 crate::olp::client::ack(argv)
             } else {
-                run_script("olp-board-remote.py", &["ack"], argv, None)
+                let mut words = vec!["ack".to_string()];
+                words.extend(argv.iter().cloned());
+                crate::olp::mdremote::run(&words)
             }
         }),
         help: "单元回执 done / wontdo / blocked(hub 用事件日志时走新通道,否则写 Markdown 黑板)",
@@ -412,7 +414,9 @@ const COMMANDS: &[Entry] = &[
             if crate::olp::client::log_mode() {
                 crate::olp::client::mirror(argv)
             } else {
-                run_script("olp-board-remote.py", &["mirror"], argv, None)
+                let mut words = vec!["mirror".to_string()];
+                words.extend(argv.iter().cloned());
+                crate::olp::mdremote::run(&words)
             }
         }),
         help: "把 hub 上本单元的卡同步成本机的只读 Markdown",
@@ -441,13 +445,12 @@ const COMMANDS: &[Entry] = &[
         target: Target::Rust(crate::olp::serve::run),
         help: "事件日志:ssh 强制命令,单元只能回执、报进度、读自己的卡",
     },
-    script(
-        "remote",
-        None,
-        "olp-board-remote.py",
-        &[],
-        "单元写 hub 的黑板:append / ack / flush / queue / mirror / serve",
-    ),
+    Entry {
+        group: "remote",
+        action: None,
+        target: Target::Moved(crate::olp::mdremote::run, "olp-board-remote.py"),
+        help: "单元写 hub 的黑板:append / ack / flush / queue / mirror / serve",
+    },
     Entry {
         group: "repo",
         action: Some("init"),
@@ -554,13 +557,12 @@ const COMMANDS: &[Entry] = &[
         target: Target::Native("olp-runtime-watch", &[]),
         help: "运行时守护(只观察)",
     },
-    script(
-        "guard",
-        Some("forward"),
-        "olp-alert-forward.py",
-        &[],
-        "把守护的告警作为负哨送到 hub",
-    ),
+    Entry {
+        group: "guard",
+        action: Some("forward"),
+        target: Target::Moved(crate::olp::forward::run, "olp-alert-forward.py"),
+        help: "把守护的告警作为负哨送到 hub",
+    },
     Entry {
         group: "keepalive",
         action: None,
