@@ -121,6 +121,19 @@ pub fn render(events: &[Event]) -> String {
                 if !review.is_empty() {
                     out.push_str(&format!("review: {}\n", review.join(", ")));
                 }
+                if let Some(original) = event.data.get("verify_of").and_then(|v| v.as_u64()) {
+                    out.push_str(&format!("verify-of: #{original}\n"));
+                }
+                for avoid in event
+                    .data
+                    .get("avoid")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|a| a.as_str())
+                {
+                    out.push_str(&format!("avoid: {avoid}\n"));
+                }
                 out.push('\n');
             }
             out.push_str(text(event, "body"));

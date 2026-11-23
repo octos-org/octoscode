@@ -372,13 +372,20 @@ const COMMANDS: &[Entry] = &[
         target: Target::Rust(crate::olp::render::run),
         help: "事件日志:输出成 Markdown 黑板(只读视图)",
     },
-    script(
-        "card",
-        Some("dispatch"),
-        "olp-dispatch.py",
-        &[],
-        "一步派卡(查健康、查空闲、写板、唤醒)",
-    ),
+    Entry {
+        group: "card",
+        action: Some("dispatch"),
+        // The event log is dispatched to in Rust; a Markdown board
+        // (`--board`) still goes through the script that writes it.
+        target: Target::Rust(|argv| {
+            if argv.iter().any(|w| w == "--board") {
+                run_script("olp-dispatch.py", &[], argv, None)
+            } else {
+                crate::olp::dispatch::run(argv)
+            }
+        }),
+        help: "一步派卡(查健康、查复验方、查空闲、写入);--log 事件日志,--board Markdown 板",
+    },
     Entry {
         group: "unit",
         action: None,

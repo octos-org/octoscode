@@ -180,7 +180,7 @@ fn olp_commands_json_is_the_catalog_and_help_json_does_not_run() {
     assert_eq!(dispatch["runs_on"], "hub");
     assert_eq!(dispatch["writes"], true);
     assert_eq!(dispatch["needs_lease"], true);
-    assert_eq!(dispatch["implementation"], "script");
+    assert_eq!(dispatch["implementation"], "rust");
     assert_eq!(dispatch["help"], "octoscode olp card dispatch --help");
     let inbox = find("octoscode olp board inbox");
     assert_eq!(inbox["writes"], false);

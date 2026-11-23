@@ -165,6 +165,9 @@ pub struct Pending {
     pub review: Vec<String>,
     /// The card's text as dispatched: the inbox is where the unit reads it.
     pub body: String,
+    /// What this card must not touch, as the outer loop listed it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub avoid: Vec<String>,
 }
 
 /// The unit's delivery inbox: its cards that name a pane, are not voided
@@ -195,6 +198,15 @@ pub fn pending_for(events: &[Event], unit: &str) -> Vec<Pending> {
             review: entry.review.clone(),
             body: dispatched
                 .map(|e| text(e, "body").trim().to_string())
+                .unwrap_or_default(),
+            avoid: dispatched
+                .and_then(|e| e.data.get("avoid"))
+                .and_then(|v| v.as_array())
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|a| a.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default(),
         });
     }

@@ -574,9 +574,14 @@ fn with_next_steps(report: &mut serde_json::Value) {
         }
         item["next"] = next;
     }
-    report["how"] = serde_json::json!(
-        "每张卡:先执行 next.claim 领取,按 body(卡的全文)办理,做完执行 next.ack 回执——done 附 commit/测试证据,wontdo 附理由,blocked 附原因"
-    );
+    let avoid = if items.iter().any(|item| item.get("avoid").is_some()) {
+        ";avoid 列出的东西不要碰,非碰不可就回执 blocked 说明"
+    } else {
+        ""
+    };
+    report["how"] = serde_json::json!(format!(
+        "每张卡:先执行 next.claim 领取,按 body(卡的全文)办理,做完执行 next.ack 回执——done 附 commit/测试证据,wontdo 附理由,blocked 附原因{avoid}"
+    ));
 }
 
 /// The one sentence a pane is woken with. It carries no card content: the

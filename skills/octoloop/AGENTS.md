@@ -179,7 +179,8 @@ macOS 与 Linux 各自的前提也在那里。步骤在单元和 hub 之间来�
    标准,并**指定单元里的分工**:实现方一个、复验方至少一个且与实现方不同,
    按任务挑 agent(例如 `--impl octoscode --review codex,claude`)。复验方只在
    operator 给的范围内挑(哪台单元上有哪些可用的 agent、什么样的卡用几个);
-   operator 直接点名时照写;没给范围就先问,不自己猜。
+   operator 直接点名时照写;没给范围就先问,不自己猜。卡是单元拿到的全部信息:
+   它不许碰的东西(别的卡在改的文件、公开接口)用 `--avoid` 逐条写上(事件日志上的派卡)。
 3. **派发**:`octoscode olp dispatch <单元> --board <板> --title … --impl … --review …
    --wake <单元主持的窗格>`。一台单元同一时间一张卡,按单元健康与占用分配。
 4. **汇总**:`octoscode olp summary --board <板> --repo <hub 仓库> [--json]`,

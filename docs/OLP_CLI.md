@@ -96,6 +96,11 @@
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
 | `olp card dispatch <单元> --board <板> --title … [--impl A] [--review B,C] [--wake 窗格] …` | `olp-dispatch.py` | hub |
+| `olp card dispatch <单元> --log <目录> --title … [--impl A] [--review B,C] [--avoid 文本]… [--verify-of M] [--wake 窗格] …` | Rust(`src/olp/dispatch.rs`) | hub |
+
+事件日志上的派卡(`specs/task-olp-dispatch-log.spec.md`)在日志锁内依次查:单元健康、卡上的复验方
+这台单元跑不跑得了(按心跳里的复验 CLI 与在跑的内环;`--allow-reviewers` 放行)、回测卡不派给
+原作者、单元是否还占着卡,然后写入。`--avoid` 写明这张卡不许碰什么,单元在收件箱里看得到。
 
 ### 2.4 单元(unit)——登记、心跳、健康
 
