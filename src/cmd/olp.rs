@@ -622,13 +622,15 @@ const COMMANDS: &[Entry] = &[
         target: Target::Moved(crate::olp::evo::skeleton, "olp-evo-spec-skeleton.sh"),
         help: "从 FLAW 记录出契约骨架",
     },
-    script(
-        "review",
-        Some("cargo"),
-        "olp-review-evidence-cargo.py",
-        &[],
-        "互审:cargo 测试执行适配",
-    ),
+    Entry {
+        group: "review",
+        action: Some("cargo"),
+        target: Target::Moved(
+            crate::olp::reviewcargo::run_cli,
+            "olp-review-evidence-cargo.py",
+        ),
+        help: "互审:cargo 测试执行适配",
+    },
     script(
         "review",
         Some("monitor"),

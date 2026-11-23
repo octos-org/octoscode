@@ -452,15 +452,9 @@ fn run_adapter(
     env_fixture: Option<&str>,
     deadline: u64,
 ) -> (bool, String) {
-    let adapter =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/olp-review-evidence-cargo.py");
-    assert!(
-        adapter.exists(),
-        "生产 cargo adapter 缺失: {}",
-        adapter.display()
-    );
-    let mut c = Command::new("python3");
-    c.arg(&adapter)
+    // The adapter is Rust now: `octoscode olp review cargo`.
+    let mut c = Command::new(env!("CARGO_BIN_EXE_octoscode"));
+    c.args(["olp", "review", "cargo"])
         .arg("--repo")
         .arg(repo)
         .args(args)

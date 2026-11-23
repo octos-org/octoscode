@@ -31,6 +31,7 @@ pub mod outer;
 pub mod outerwatch;
 pub mod render;
 pub mod repo;
+pub mod reviewcargo;
 pub mod sentinel;
 pub mod serve;
 pub mod stall;
