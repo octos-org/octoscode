@@ -40,6 +40,7 @@ skill 记下的规程位置——都用了自己的绝对路径,于是落在某�
 ## Boundaries
 
 ### Allowed Changes
+- src/olp/doctor.rs(2026-11-23:体检的 Rust 实现;本 spec 中 doctor 的场景原本就对 `octoscode olp doctor` 运行,检查项、输出、退出码不变。macOS 上进程的可执行文件路径:`ps` 给出绝对路径时直接用,否则问 `lsof`,不再用 libproc)
 - src/cmd/olp.rs
 - scripts/olp-cli-lib.py、scripts/olp-doctor.py(含复盘第 06、10、13 条的检查)
 - scripts/olp-git-hub.py、scripts/olp-launchd.py、scripts/olp-systemd.py、scripts/olp-install-skill.sh

@@ -78,7 +78,7 @@
 |---|---|---|
 | `olp init [目录]` | `scripts/olp-init.sh` | 任意 |
 | `olp skill install [--to F \| --print \| --home-only] [--force]` | `scripts/olp-install-skill.sh` | 任意 |
-| `olp doctor [--repo R]… [--work W]… [--remote hub] [--json]` | `scripts/olp-doctor.py` | 任意 |
+| `olp doctor [--repo R]… [--work W]… [--remote hub] [--json]` | Rust(`src/olp/doctor.rs`),原 `scripts/olp-doctor.py` | 任意 |
 
 ### 2.2 黑板(board)——一块黑板文件上的操作
 

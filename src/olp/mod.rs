@@ -12,6 +12,7 @@ pub mod card;
 pub mod cards;
 pub mod client;
 pub mod dispatch;
+pub mod doctor;
 pub mod duty;
 pub mod forward;
 pub mod import;

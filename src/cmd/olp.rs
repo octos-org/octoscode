@@ -276,13 +276,12 @@ const COMMANDS: &[Entry] = &[
         &[],
         "安装 /octoloop 全局入口",
     ),
-    script(
-        "doctor",
-        None,
-        "olp-doctor.py",
-        &[],
-        "检查钩子、保活任务、ssh 强制命令等处写下的命令还能不能用:olp doctor [--repo R] [--work W] [--json]",
-    ),
+    Entry {
+        group: "doctor",
+        action: None,
+        target: Target::Moved(crate::olp::doctor::run, "olp-doctor.py"),
+        help: "检查钩子、保活任务、ssh 强制命令等处写下的命令还能不能用:olp doctor [--repo R] [--work W] [--json]",
+    },
     Entry {
         group: "board",
         action: Some("append"),
