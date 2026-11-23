@@ -163,7 +163,12 @@
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
 | `olp duty hold\|check\|lease …` | `octoscode outer-duty` | hub |
-| `olp outer supervise\|resume\|install …` | `olp-outer.py` | hub(外环所在机器) |
+| `olp outer supervise\|resume\|install …` | Rust(`src/olp/outer.rs`),原 `olp-outer.py` | hub(外环所在机器) |
+| `olp outer watch <日志目录> --pane <窗格> [--once]` | Rust(`src/olp/outerwatch.rs`) | hub(外环所在机器) |
+
+外环值守(`specs/task-olp-outer-watch.spec.md`)是"收件箱 + 唤醒"往上的那一半:日志里出现等外环处理
+的事件(单元的回执、推送登记、提问、送达失败)或集群整体静默时,在外环的 agent 空闲时往它的窗格
+发一句固定短句,指向 `olp inbox` 与 `olp board stall`。短句不带内容;外环不轮询。
 
 ### 2.11 进化环(evo)
 

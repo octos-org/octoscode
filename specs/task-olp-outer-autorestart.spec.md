@@ -34,6 +34,7 @@ estimate: 1d
 ## Boundaries
 
 ### Allowed Changes
+- src/olp/outer.rs(2026-11-23:外环自动拉起与接班简报的 Rust 实现;本 spec 的场景原本就对 `octoscode olp outer …` 运行,行为、输出、退出码不变;接班简报的 `--board` 也可以是事件日志目录)
 - scripts/olp-outer.py
 - src/cmd/olp.rs
 - tests/olp_outer.rs

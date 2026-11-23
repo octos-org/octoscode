@@ -71,7 +71,7 @@ fn real(path: &str) -> PathBuf {
 /// This binary as a later command should call it: the `octoscode` on PATH
 /// when that is the same file (a package manager's link survives upgrades),
 /// else the running file.
-fn self_exe() -> String {
+pub(super) fn self_exe() -> String {
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("octoscode"));
     let on_path = std::env::var_os("PATH").and_then(|paths| {
         std::env::split_paths(&paths)

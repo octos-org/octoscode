@@ -19,6 +19,8 @@ pub mod inbox;
 pub mod localpr;
 pub mod log;
 pub mod mdremote;
+pub mod outer;
+pub mod outerwatch;
 pub mod render;
 pub mod repo;
 pub mod sentinel;

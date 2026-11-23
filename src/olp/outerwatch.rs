@@ -1,0 +1,236 @@
+//! `octoscode olp outer watch <日志目录> --pane <窗格>` — the outer loop's
+//! side of "inbox plus wake": tell the outer loop's pane, with one fixed
+//! sentence, that something on the event log now waits for it.
+//!
+//! What waits for the outer loop: a unit's ACK, a recorded push, a question,
+//! a delivery a unit reported as failed — and a stall of the whole cluster
+//! (`olp board stall`). The sentence carries none of it; it only says where
+//! to look. The outer loop is not polled and never polls.
+//!
+//! The watcher keeps its own cursor: the highest event number it has handed
+//! over. An event that arrives while the outer loop is busy is not slept
+//! through — the cursor moves only when the sentence was taken.
+//!
+//! Exit codes: 0 (with `--once`: the round is done); 2 usage; 4 the log
+//! could not be read.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use super::log::{Event, Log};
+
+const USAGE: &str = "用法: octoscode olp outer watch <日志目录> --pane <外环的窗格> [--once] [--interval 30] [--quiet 600] [--idle-wait 5] [--session herdr 会话]
+
+外环值守:日志里有等外环处理的新事件(单元的回执、推送登记、提问、送达失败),或集群整体静默时,
+在外环的 agent 空闲时往它的窗格发一句固定短句。不带任何内容。
+退出码:0;2 用法;4 日志读不了";
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
+struct Cursor {
+    /// The highest event number handed over to the outer loop.
+    seen: u64,
+}
+
+/// The one sentence the outer loop's pane is woken with.
+pub fn sentence(log: &str) -> String {
+    format!(
+        "有等外环处理的新事件,请执行:octoscode olp inbox {log};整体静默时另见 octoscode olp board stall {log}"
+    )
+}
+
+/// Does this event wait for the outer loop?
+fn for_outer(event: &Event) -> bool {
+    match event.kind.as_str() {
+        "ack" | "pushed" | "asked" => true,
+        "progress" => event.data.get("node").and_then(|n| n.as_str()) == Some("undelivered"),
+        _ => false,
+    }
+}
+
+fn herdr(args: &[&str], session: Option<&str>) -> Option<std::process::Output> {
+    let exe = std::env::var("OLP_HERDR").ok().filter(|v| !v.is_empty());
+    let mut cmd = Command::new(exe.as_deref().unwrap_or("herdr"));
+    if let Some(session) = session {
+        cmd.args(["--session", session]);
+    }
+    cmd.args(args).stdin(Stdio::null()).output().ok()
+}
+
+/// New stall alerts, by asking `olp board stall` (which keeps its own
+/// record of what it has already said).
+fn stall_alerts(log: &str, quiet: u64) -> usize {
+    let Ok(exe) = std::env::current_exe() else {
+        return 0;
+    };
+    Command::new(exe)
+        .args([
+            "olp",
+            "board",
+            "stall",
+            log,
+            "--json",
+            "--quiet",
+            &quiet.to_string(),
+        ])
+        .output()
+        .ok()
+        .and_then(|out| serde_json::from_slice::<serde_json::Value>(&out.stdout).ok())
+        .and_then(|doc| doc["alerts"].as_array().map(Vec::len))
+        .unwrap_or(0)
+}
+
+/// `argv` is what follows `olp outer watch`.
+pub fn run(argv: &[String]) -> i32 {
+    let prog = "olp outer watch";
+    let (mut once, mut interval, mut quiet, mut idle_wait) = (false, 30u64, 600u64, 5u64);
+    let (mut pane, mut session, mut rest) = (None, None, Vec::new());
+    let mut words = argv.iter();
+    while let Some(word) = words.next() {
+        let mut number = |slot: &mut u64| match words.next().and_then(|v| v.parse::<u64>().ok()) {
+            Some(value) => {
+                *slot = value;
+                true
+            }
+            None => false,
+        };
+        let ok = match word.as_str() {
+            "-h" | "--help" => {
+                println!("{USAGE}");
+                return 0;
+            }
+            "--once" => {
+                once = true;
+                true
+            }
+            "--interval" => number(&mut interval),
+            "--quiet" => number(&mut quiet),
+            "--idle-wait" => number(&mut idle_wait),
+            "--pane" => {
+                pane = words.next().cloned();
+                pane.is_some()
+            }
+            "--session" => {
+                session = words.next().cloned();
+                session.is_some()
+            }
+            other if other.starts_with("--") => false,
+            other => {
+                rest.push(other.to_string());
+                true
+            }
+        };
+        if !ok {
+            eprintln!("{prog}: 参数不对: {word}\n{USAGE}");
+            return 2;
+        }
+    }
+    let ([log], Some(pane)) = (rest.as_slice(), pane) else {
+        eprintln!("{USAGE}");
+        return 2;
+    };
+    if !super::card::is_pane(&pane) || !Path::new(log).is_dir() {
+        eprintln!("{prog}: 窗格标识不合法,或日志目录不存在\n{USAGE}");
+        return 2;
+    }
+    let state_path = std::env::var_os("OLP_OUTER_WATCH_STATE")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let real = std::fs::canonicalize(log).unwrap_or_else(|_| PathBuf::from(log));
+            let digest = Sha256::digest(real.to_string_lossy().as_bytes());
+            let name: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+            PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+                .join(format!(".octos/outer/watch/outer-{name}.json"))
+        });
+    let session = session.as_deref();
+    loop {
+        let events = match Log::at(log).read() {
+            Ok(events) => events,
+            Err(e) => {
+                eprintln!("{prog}: {e}");
+                return 4;
+            }
+        };
+        let mut cursor: Cursor = std::fs::read_to_string(&state_path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        let head = events.last().map(|e| e.seq).unwrap_or(0);
+        let waiting = events
+            .iter()
+            .filter(|e| e.seq > cursor.seen && for_outer(e))
+            .count();
+        let stalled = stall_alerts(log, quiet);
+        if waiting > 0 || stalled > 0 {
+            let timeout = (idle_wait * 1000).to_string();
+            let idle = herdr(
+                &[
+                    "agent",
+                    "wait",
+                    &pane,
+                    "--until",
+                    "idle",
+                    "--until",
+                    "done",
+                    "--timeout",
+                    &timeout,
+                ],
+                session,
+            )
+            .is_some_and(|out| out.status.success());
+            let taken = idle
+                && herdr(
+                    &[
+                        "agent",
+                        "prompt",
+                        &pane,
+                        &sentence(log),
+                        "--wait",
+                        "--until",
+                        "working",
+                        "--until",
+                        "blocked",
+                        "--timeout",
+                        "10000",
+                    ],
+                    session,
+                )
+                .is_some_and(|out| out.status.success());
+            if taken {
+                // Everything up to the log's head has been pointed to.
+                cursor.seen = head;
+                println!(
+                    "已提醒外环窗格 {pane}:{waiting} 条新事件{}",
+                    if stalled > 0 {
+                        format!(",{stalled} 条静默提醒")
+                    } else {
+                        String::new()
+                    }
+                );
+                let written = state_path
+                    .parent()
+                    .map(std::fs::create_dir_all)
+                    .unwrap_or(Ok(()))
+                    .and_then(|()| {
+                        std::fs::write(
+                            &state_path,
+                            serde_json::to_string(&cursor).unwrap_or_default(),
+                        )
+                    });
+                if let Err(e) = written {
+                    eprintln!("{prog}: 记不下读到哪条 {}: {e}", state_path.display());
+                }
+            } else {
+                println!("外环窗格 {pane} 现在不空闲或没有接住提醒,下一轮再试");
+            }
+        }
+        if once {
+            return 0;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(interval.max(1)));
+    }
+}

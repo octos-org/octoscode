@@ -561,13 +561,12 @@ const COMMANDS: &[Entry] = &[
         target: Target::Keepalive,
         help: "保活:doctor / heartbeat / install / uninstall / list / render(macOS launchd,Linux systemd)",
     },
-    script(
-        "outer",
-        None,
-        "olp-outer.py",
-        &[],
-        "外环挂了自动拉起:supervise(检查一次,锁空着就在外环窗格里重新 hold)/ install(注册成常驻任务)",
-    ),
+    Entry {
+        group: "outer",
+        action: None,
+        target: Target::Moved(crate::olp::outer::run, "olp-outer.py"),
+        help: "外环挂了自动拉起:supervise(检查一次,锁空着就在外环窗格里重新 hold)/ install(注册成常驻任务)",
+    },
     Entry {
         group: "duty",
         action: None,
