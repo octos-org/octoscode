@@ -115,8 +115,8 @@ impl Sandbox {
         if !ensure_gnu_tooling_or_skip() {
             panic!("host lacks required tooling; see stderr");
         }
-        let mut cmd = Command::new("bash");
-        cmd.arg(script()).arg(&self.repo);
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_octoscode"));
+        cmd.args(["olp", "evo", "harvest"]).arg(&self.repo);
         if dry_run {
             cmd.arg("--dry-run");
         }
@@ -128,8 +128,8 @@ impl Sandbox {
 
     /// Run with explicit source env overrides (fault injection etc.).
     fn run_env(&self, extra: &[(&str, &str)]) -> Output {
-        let mut cmd = Command::new("bash");
-        cmd.arg(script())
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_octoscode"));
+        cmd.args(["olp", "evo", "harvest"])
             .arg(&self.repo)
             .env("OLP_EVO_STATE", &self.state_root)
             .env("OLP_EVO_EVENTS", &self.events_path)
@@ -332,8 +332,8 @@ fn olp_evo_harvest_negative_matrix_yields_zero_cards() {
     );
     std::fs::copy(fixtures("negative/events.jsonl"), &sb.events_path).unwrap();
     std::fs::copy(fixtures("negative/mcp-board.md"), &sb.mcp_path).unwrap();
-    let out = Command::new("bash")
-        .arg(script())
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "harvest"])
         .arg(&sb.repo)
         .env("OLP_EVO_STATE", &sb.state_root)
         .env("OLP_EVO_EVENTS", &sb.events_path)
@@ -445,8 +445,8 @@ fn olp_evo_harvest_mcp_symptom_excludes_question_text() {
         "- 2026-08-30 05:00:00 MCP(ask_outer) blocked: id=abc123 reason=inner stuck needs=op question=SECRET-QUESTION\n",
     )
     .unwrap();
-    let out = Command::new("bash")
-        .arg(script())
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "harvest"])
         .arg(&sb.repo)
         .env("OLP_EVO_STATE", &sb.state_root)
         .env("OLP_EVO_EVENTS", "")
@@ -488,8 +488,8 @@ fn olp_evo_harvest_partial_line_then_completed_yields_one_card() {
     std::fs::write(&events, complete).unwrap();
     let complete_only_len = std::fs::metadata(&events).unwrap().len() as usize;
     std::fs::write(&events, format!("{complete}{partial}")).unwrap();
-    let out = Command::new("bash")
-        .arg(script())
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "harvest"])
         .arg(&sb.repo)
         .env("OLP_EVO_STATE", &sb.state_root)
         .env("OLP_EVO_EVENTS", &events)
@@ -511,8 +511,8 @@ fn olp_evo_harvest_partial_line_then_completed_yields_one_card() {
     );
     // complete the partial line and rerun
     std::fs::write(&events, format!("{complete}{{\"ts\":\"2026-08-30T03:00:00Z\",\"kind\":\"turn_error\",\"data\":{{\"detail\":\"y\"}}}}\n")).unwrap();
-    let out2 = Command::new("bash")
-        .arg(script())
+    let out2 = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "harvest"])
         .arg(&sb.repo)
         .env("OLP_EVO_STATE", &sb.state_root)
         .env("OLP_EVO_EVENTS", &events)
@@ -916,8 +916,8 @@ fn olp_evo_harvest_missing_repo_root_exits_two() {
     let missing = root.join("no-such-repo");
     let state_root = root.join("state");
     std::fs::create_dir_all(&state_root).unwrap();
-    let out = Command::new("bash")
-        .arg(script())
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "harvest"])
         .arg(&missing)
         .env("OLP_EVO_STATE", &state_root)
         .output()
@@ -950,8 +950,8 @@ fn olp_evo_harvest_resets_on_truncate_or_replace_without_duplicates() {
     };
     std::fs::write(&events, format!("{}{}", esc(1), esc(2))).unwrap();
     let run = || {
-        Command::new("bash")
-            .arg(script())
+        Command::new(env!("CARGO_BIN_EXE_octoscode"))
+            .args(["olp", "evo", "harvest"])
             .arg(&sb.repo)
             .env("OLP_EVO_STATE", &sb.state_root)
             .env("OLP_EVO_EVENTS", &events)
@@ -1035,8 +1035,9 @@ fn olp_evo_harvest_concurrent_runs_allocate_unique_ids() {
         let events = sb.events_path.clone();
         let mcp = sb.mcp_path.clone();
         handles.push(std::thread::spawn(move || {
-            Command::new("bash")
-                .arg(script)
+            let _ = script;
+            Command::new(env!("CARGO_BIN_EXE_octoscode"))
+                .args(["olp", "evo", "harvest"])
                 .arg(repo)
                 .env("OLP_EVO_STATE", state)
                 .env("OLP_EVO_EVENTS", events)
@@ -1124,8 +1125,8 @@ fn olp_evo_harvest_skips_missing_optional_sources() {
         "### 1. base\n\nnothing\n",
     )
     .unwrap();
-    let out = Command::new("bash")
-        .arg(script())
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "harvest"])
         .arg(&sb.repo)
         .env("OLP_EVO_STATE", &sb.state_root)
         .env("OLP_EVO_EVENTS", "")
@@ -1149,8 +1150,8 @@ fn olp_evo_harvest_state_is_per_project() {
     let state_root = root.join("state");
     std::fs::create_dir_all(&state_root).unwrap();
     let run = |repo: &Path| {
-        Command::new("bash")
-            .arg(script())
+        Command::new(env!("CARGO_BIN_EXE_octoscode"))
+            .args(["olp", "evo", "harvest"])
             .arg(repo)
             .env("OLP_EVO_STATE", &state_root)
             .env("OLP_EVO_EVENTS", "")
@@ -1200,8 +1201,8 @@ fn olp_evo_harvest_runs_from_outside_repo_cwd() {
     sb.full_trigger_board();
     let outside = sb.root.join("elsewhere");
     std::fs::create_dir_all(&outside).unwrap();
-    let out = Command::new("bash")
-        .arg(script())
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "harvest"])
         .arg(sb.repo.canonicalize().unwrap())
         .current_dir(&outside)
         .env("OLP_EVO_STATE", &sb.state_root)

@@ -14,10 +14,6 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
 }
 
-fn harvest() -> PathBuf {
-    repo_root().join("scripts/olp-evo-harvest.sh")
-}
-
 fn replay_dir() -> PathBuf {
     repo_root().join("fixtures/evolution/replay")
 }
@@ -74,8 +70,8 @@ fn olp_evo_replay_matches_expected() {
             .env("OLP_EVO_MCP_BOARD", &mcp)
             .current_dir(&sb.repo);
     };
-    let mut h = Command::new("bash");
-    h.arg(harvest()).arg(&sb.repo);
+    let mut h = Command::new(env!("CARGO_BIN_EXE_octoscode"));
+    h.args(["olp", "evo", "harvest"]).arg(&sb.repo);
     env(&mut h);
     let out = h.output().unwrap();
     assert!(

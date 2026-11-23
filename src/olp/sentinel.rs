@@ -26,17 +26,12 @@ fn newlines(path: &Path) -> Option<(usize, Vec<u8>)> {
 }
 
 fn harvest(repo: &str) -> i32 {
-    let script = Path::new(repo).join("scripts/olp-evo-harvest.sh");
-    let status = if script.is_file() {
-        Command::new("bash").arg(&script).arg(repo).status()
-    } else {
-        // No checkout to run from: this binary carries the tool.
-        std::env::current_exe().and_then(|exe| {
-            Command::new(exe)
-                .args(["olp", "evo", "harvest", repo])
-                .status()
-        })
-    };
+    // This binary's own harvest: no checkout is needed beside the board.
+    let status = std::env::current_exe().and_then(|exe| {
+        Command::new(exe)
+            .args(["olp", "evo", "harvest", repo])
+            .status()
+    });
     match status {
         Ok(status) => status.code().unwrap_or(1),
         Err(_) => 127,

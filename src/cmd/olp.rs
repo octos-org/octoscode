@@ -592,13 +592,12 @@ const COMMANDS: &[Entry] = &[
         target: Target::Native("outer-duty", &[]),
         help: "主审权锁:hold / check / lease",
     },
-    script(
-        "evo",
-        Some("harvest"),
-        "olp-evo-harvest.sh",
-        &[],
-        "采集摩擦信号成症状卡",
-    ),
+    Entry {
+        group: "evo",
+        action: Some("harvest"),
+        target: Target::Moved(crate::olp::evoharvest::run, "olp-evo-harvest.sh"),
+        help: "采集摩擦信号成症状卡",
+    },
     Entry {
         group: "evo",
         action: Some("retro"),

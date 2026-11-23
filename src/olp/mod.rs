@@ -15,6 +15,7 @@ pub mod dispatch;
 pub mod doctor;
 pub mod duty;
 pub mod evo;
+pub mod evoharvest;
 pub mod evolib;
 pub mod evometrics;
 pub mod evoretro;

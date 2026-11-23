@@ -500,3 +500,58 @@ fn native_watch_fires_only_on_new_lines_and_skips_signed_ones() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
 }
+
+/// Scenario: Rust 版侦听哨的 --harvest 命中时落卡、推进基线并继续监视
+#[test]
+fn native_watch_harvest_cards_each_hit_and_keeps_watching() {
+    let repo = temp_repo("native-hit", "l1\nl2\nl3\n");
+    let board = repo.join(".octos/OUTER_LOOP_REVIEW.md");
+    let state = repo.parent().unwrap().join("state");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "board", "watch"])
+        .arg(&board)
+        .args(["ACK(blocked", "--interval", "1", "--harvest"])
+        .arg(&repo)
+        .env("OLP_EVO_STATE", &state)
+        .env("OLP_EVO_EVENTS", "")
+        .env(
+            "OLP_EVO_MCP_BOARD",
+            repo.parent().unwrap().join("mcp-board.absent"),
+        )
+        .env_remove("OLP_HUB_HOST")
+        .env(
+            "OLP_HUB_HOST_FILE",
+            repo.parent().unwrap().join("no-hub-host"),
+        )
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let cards = || {
+        std::fs::read_to_string(repo.join(".octos/EVOLUTION.md"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.starts_with("### EVO-"))
+            .count()
+    };
+    std::thread::sleep(Duration::from_millis(1500));
+    append(&board, "ACK(blocked): waiting for outer decision\n");
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(cards(), 1, "one card for the first hit");
+    assert!(still_running(&mut child), "--harvest keeps watching");
+    // A line without the token harvests nothing; the next hit does.
+    append(&board, "an unrelated line\n");
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(cards(), 1);
+    append(&board, "ACK(blocked): a second, different blocker\n");
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        cards(),
+        2,
+        "the baseline moved: the second hit is carded too"
+    );
+    assert!(still_running(&mut child));
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(repo.parent().unwrap());
+}
