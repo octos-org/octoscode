@@ -53,7 +53,8 @@ agent 不轮询。
     把这样的卡从"进行中"提到"收件箱",理由是"送达失败:单元报告窗格没有接住提醒,请看一下
     该窗格";卡被领取(`claimed`)后恢复为"已派出,等内环 ACK"。一张卡要么被领取,要么 hub
     知道它卡住了,不会无声地等着。
-  - 状态文件现在是 `{nudged, misses, stuck, reported}`;旧格式读不出时从空开始。
+  - 状态文件现在是 `{nudged, misses, stuck, reported, picked}`;旧格式读不出时从空开始。
+  - agent 每次都开始工作、卡却一直没领取的情况见 `specs/task-olp-stall.spec.md`:两次之后上报。
   - 已提醒的卡记在状态文件(`OLP_WATCH_STATE`,默认
     `~/.octos/outer/watch/<单元>-<窗格>.json`),重启不重复提醒;卡被领取或作废后从中去掉。
   - hub 连不上时报一句、下一轮再试。`OLP_HERDR` 指定 herdr。

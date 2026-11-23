@@ -90,6 +90,11 @@
 | `olp board watch <板> <token> [--harvest <repo>] …` | `olp-watch-board.sh` | hub |
 | `olp board summary --board <板> [--repo R] [--json]` | `olp-summary.py` | hub |
 | `olp id alloc …` | `olp-id-alloc.sh` | 任意 |
+| `olp board stall <日志目录> [--quiet 秒] [--json]` | Rust(`src/olp/stall.rs`) | hub |
+
+`board stall`(`specs/task-olp-stall.spec.md`)回答"是不是所有人都在等":有卡未了结、占着卡的
+单元上没有内环在工作、日志 `--quiet` 秒没有新事件,三条都成立才算。有人在工作就不算,做得久
+不是问题。静默时逐张卡给出原因、起始事件和谁能推动;同一段沉默最多报三次。
 
 ### 2.3 卡(card)——派发
 

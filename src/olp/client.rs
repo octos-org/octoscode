@@ -416,6 +416,8 @@ struct WatchState {
     stuck: Option<(u64, String)>,
     /// Cards already reported to the hub as undelivered.
     reported: std::collections::BTreeSet<String>,
+    /// How many nudges the agent started working on, per card still unclaimed.
+    picked: BTreeMap<String, u32>,
 }
 
 /// What became of the wake sentence.
@@ -713,6 +715,39 @@ pub fn watch(argv: &[String]) -> i32 {
                 // Forget cards that are no longer waiting.
                 st.nudged.retain(|card, _| waiting.contains(card));
                 st.reported.retain(|card| waiting.contains(card));
+                st.picked.retain(|card, _| waiting.contains(card));
+                // The agent started on two nudges and the card is still not
+                // claimed when the next one is due: it works and gets
+                // nowhere (an error, a quota). The hub is told once.
+                let abandoned: Vec<(String, u32)> = waiting
+                    .iter()
+                    .filter(|card| !st.reported.contains(*card))
+                    .filter_map(|card| {
+                        let times = *st.picked.get(card).filter(|n| **n >= 2)?;
+                        let at = st.nudged.get(card).filter(|at| **at > 0)?;
+                        (now() >= at.unsigned_abs() + renudge).then(|| (card.clone(), times))
+                    })
+                    .collect();
+                for (card, times) in abandoned {
+                    let request = ["progress", card.as_str(), "undelivered"].map(str::to_string);
+                    let text = format!(
+                        "窗格 {pane}:agent 已 {times} 次开始工作,卡仍未领取(可能出错或额度用完)"
+                    );
+                    match send(&link, &request, &text) {
+                        Some(reply) => {
+                            if reply.code == 0 {
+                                println!("已向 hub 报告:#{card} 提醒了 {times} 次仍未领取");
+                            } else {
+                                eprintln!(
+                                    "{prog}: hub 没有收下 #{card} 的送达失败报告: {}",
+                                    reply.stderr
+                                );
+                            }
+                            st.reported.insert(card);
+                        }
+                        None => eprintln!("{prog}: 没有连上 hub,送达失败的报告下一轮再发"),
+                    }
+                }
                 if waiting.is_empty() {
                     st.misses = 0;
                     st.stuck = None;
@@ -759,6 +794,7 @@ pub fn watch(argv: &[String]) -> i32 {
                             // One sentence covers everything that waits.
                             for card in &waiting {
                                 st.nudged.insert(card.clone(), at);
+                                *st.picked.entry(card.clone()).or_default() += 1;
                             }
                             st.misses = 0;
                             st.stuck = None;

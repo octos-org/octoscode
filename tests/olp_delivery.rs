@@ -446,6 +446,46 @@ fn a_pane_that_cannot_take_a_card_is_reported_to_the_hub() {
     assert!(seen.contains("已派出,等内环 ACK"), "{seen}");
 }
 
+/// Scenario: agent 每次都开始工作、卡却一直没领取的,也让 hub 知道
+#[test]
+fn a_card_the_agent_keeps_starting_on_but_never_claims_is_reported() {
+    let site = Site::new();
+    assert!(
+        site.open("领不走的卡", &["--unit", "m07", "--pane", "w1:p1"])
+            .status
+            .success()
+    );
+    let hub_inbox = |what: &str| {
+        let mut cmd = Command::new(BIN);
+        cmd.args(["olp", "inbox", what]);
+        stdout(&site.run(cmd, ""))
+    };
+    // Two nudges the agent started working on; the card stays unclaimed.
+    for expected in 1..=2 {
+        let out = site.unit(&["watch", "w1:p1", "--once", "--renudge", "0"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert_eq!(site.prompts().len(), expected);
+        assert!(!stdout(&out).contains("仍未领取"), "{}", stdout(&out));
+    }
+    assert!(hub_inbox(&site.log()).contains("已派出,等内环 ACK"));
+    // Not yet time for another nudge: nothing is reported early.
+    let out = site.unit(&["watch", "w1:p1", "--once"]);
+    assert!(!stdout(&out).contains("仍未领取"), "{}", stdout(&out));
+    // Due again and still unclaimed: the hub is told, once.
+    for _ in 0..2 {
+        let out = site.unit(&["watch", "w1:p1", "--once", "--renudge", "0"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+    }
+    let events = std::fs::read_to_string(format!("{}/events-000001.jsonl", site.log())).unwrap();
+    assert_eq!(events.matches("\"undelivered\"").count(), 1, "{events}");
+    assert!(events.contains("次开始工作,卡仍未领取"), "{events}");
+    let seen = hub_inbox(&site.log());
+    assert!(seen.contains("送达失败"), "{seen}");
+    // Claimed at last: the report is cleared.
+    assert!(site.unit(&["progress", "1", "claimed"]).status.success());
+    assert!(!hub_inbox(&site.log()).contains("送达失败"));
+}
+
 /// Scenario: `olp remote --help` 列出本程序自己的动作
 #[test]
 fn remote_help_lists_the_actions_this_binary_has() {

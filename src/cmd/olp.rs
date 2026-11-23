@@ -368,6 +368,12 @@ const COMMANDS: &[Entry] = &[
     },
     Entry {
         group: "board",
+        action: Some("stall"),
+        target: Target::Rust(crate::olp::stall::run),
+        help: "事件日志:集群是否整体静默(有卡未结、没有内环在工作、日志无新事件)",
+    },
+    Entry {
+        group: "board",
         action: Some("render"),
         target: Target::Rust(crate::olp::render::run),
         help: "事件日志:输出成 Markdown 黑板(只读视图)",
@@ -649,7 +655,7 @@ fn meta(group: &str, action: Option<&str>) -> Option<Meta> {
             meta_of(Hub, yes, yes)
         }
         ("card", Some("ack")) => meta_of(Any, yes, no),
-        ("board", Some("render")) => meta_of(Hub, no, no),
+        ("board", Some("render" | "stall")) => meta_of(Hub, no, no),
         ("unit", None) | ("keepalive", None) | ("ask", None) => meta_of(Any, None, None),
         ("remote", None) => meta_of(Unit, None, no),
         ("repo", Some("init")) => meta_of(Hub, yes, no),
