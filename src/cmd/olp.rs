@@ -599,20 +599,18 @@ const COMMANDS: &[Entry] = &[
         &[],
         "采集摩擦信号成症状卡",
     ),
-    script(
-        "evo",
-        Some("retro"),
-        "olp-evo-retro.sh",
-        &[],
-        "出 retro 简报",
-    ),
-    script(
-        "evo",
-        Some("metrics"),
-        "olp-evo-metrics.sh",
-        &[],
-        "窗口化诊断",
-    ),
+    Entry {
+        group: "evo",
+        action: Some("retro"),
+        target: Target::Moved(crate::olp::evoretro::run, "olp-evo-retro.sh"),
+        help: "出 retro 简报",
+    },
+    Entry {
+        group: "evo",
+        action: Some("metrics"),
+        target: Target::Moved(crate::olp::evometrics::run, "olp-evo-metrics.sh"),
+        help: "窗口化诊断",
+    },
     Entry {
         group: "evo",
         action: Some("index"),

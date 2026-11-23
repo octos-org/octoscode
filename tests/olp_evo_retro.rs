@@ -60,8 +60,8 @@ impl Sandbox {
     }
 
     fn run(&self, dry_run: bool) -> Output {
-        let mut cmd = Command::new("bash");
-        cmd.arg(script()).arg(&self.repo);
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_octoscode"));
+        cmd.args(["olp", "evo", "retro"]).arg(&self.repo);
         if dry_run {
             cmd.arg("--dry-run");
         }
@@ -70,8 +70,8 @@ impl Sandbox {
     }
 
     fn run_env(&self, extra: &[(&str, &str)]) -> Output {
-        let mut cmd = Command::new("bash");
-        cmd.arg(script())
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_octoscode"));
+        cmd.args(["olp", "evo", "retro"])
             .arg(&self.repo)
             .env("OLP_EVO_STATE", &self.state_root);
         for (k, v) in extra {
@@ -366,8 +366,9 @@ fn olp_evo_retro_concurrent_runs_keep_records() {
         let repo = sb.repo.clone();
         let state = sb.state_root.clone();
         handles.push(std::thread::spawn(move || {
-            Command::new("bash")
-                .arg(script)
+            let _ = script;
+            Command::new(env!("CARGO_BIN_EXE_octoscode"))
+                .args(["olp", "evo", "retro"])
                 .arg(repo)
                 .env("OLP_EVO_STATE", state)
                 .output()

@@ -1639,6 +1639,7 @@ dependencies = [
  "color-eyre",
  "crossterm",
  "eyre",
+ "fancy-regex",
  "fs2",
  "futures",
  "libc",

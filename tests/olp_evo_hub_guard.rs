@@ -58,8 +58,17 @@ impl Sandbox {
     }
 
     fn run(&self, name: &str, dry_run: bool, hub_env: Option<&str>) -> Output {
-        let mut cmd = Command::new("bash");
-        cmd.arg(script(name)).arg(&self.repo);
+        // The retro is Rust now; the harvest is still its script.
+        let mut cmd = if name == "olp-evo-retro.sh" {
+            let mut c = Command::new(env!("CARGO_BIN_EXE_octoscode"));
+            c.args(["olp", "evo", "retro"]);
+            c
+        } else {
+            let mut c = Command::new("bash");
+            c.arg(script(name));
+            c
+        };
+        cmd.arg(&self.repo);
         if dry_run {
             cmd.arg("--dry-run");
         }

@@ -175,8 +175,8 @@
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
 | `olp evo harvest <repo> [--dry-run]` | `olp-evo-harvest.sh` | hub |
-| `olp evo retro <repo> [--dry-run]` | `olp-evo-retro.sh` | hub |
-| `olp evo metrics <repo> …` | `olp-evo-metrics.sh` | hub |
+| `olp evo retro <repo> [--dry-run]` | Rust(`src/olp/evoretro.rs`),原 `olp-evo-retro.sh` | hub |
+| `olp evo metrics <repo> …` | Rust(`src/olp/evometrics.rs`),原 `olp-evo-metrics.sh` | hub |
 | `olp evo index <repo>` | Rust(`src/olp/evo.rs`),原 `olp-evo-index.sh` | hub |
 | `olp evo skeleton <FLAW-NNN.md> [--out F]` | Rust(`src/olp/evo.rs`),原 `olp-evo-spec-skeleton.sh` | hub |
 

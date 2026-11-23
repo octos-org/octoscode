@@ -18,10 +18,6 @@ fn harvest() -> PathBuf {
     repo_root().join("scripts/olp-evo-harvest.sh")
 }
 
-fn retro() -> PathBuf {
-    repo_root().join("scripts/olp-evo-retro.sh")
-}
-
 fn replay_dir() -> PathBuf {
     repo_root().join("fixtures/evolution/replay")
 }
@@ -87,8 +83,8 @@ fn olp_evo_replay_matches_expected() {
         "harvest stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let mut r = Command::new("bash");
-    r.arg(retro()).arg(&sb.repo);
+    let mut r = Command::new(env!("CARGO_BIN_EXE_octoscode"));
+    r.args(["olp", "evo", "retro"]).arg(&sb.repo);
     env(&mut r);
     let out = r.output().unwrap();
     assert!(
