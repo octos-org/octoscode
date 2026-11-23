@@ -186,7 +186,7 @@
 |---|---|---|
 | `olp review init\|freeze\|challenge\|cross\|status\|classify …` | `olp-review-evidence.py` | 任意 |
 | `olp review cargo …` | Rust(`src/olp/reviewcargo.rs`),原 `olp-review-evidence-cargo.py` | 任意 |
-| `olp review monitor …` | `olp-review-monitor.py` | 任意 |
+| `olp review monitor …` | Rust(`src/olp/reviewmonitor.rs`),原 `olp-review-monitor.py` | 任意 |
 
 ## 3. 写进系统里的命令
 

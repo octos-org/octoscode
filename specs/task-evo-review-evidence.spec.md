@@ -97,6 +97,7 @@ satisfies: [REQ-OLP-REVIEW-EVIDENCE]
 
 ### Allowed Changes(octoscode 仓库)
 - src/olp/reviewcargo.rs(2026-11-23:cargo 执行适配的 Rust 实现 `octoscode olp review cargo`;回执字段、错误码、判定规则不变,回执里的 `adapter` 字段仍写原脚本路径以保持兼容。直接调用 adapter 的场景改为对二进制运行;`olp review` 主入口的 `--live-cargo` 仍调用它旁边的脚本,对脚本内部函数的 Python 级测试仍对脚本运行)
+- src/olp/reviewmonitor.rs(2026-11-23:只读监控的 Rust 实现 `octoscode olp review monitor`;区块、字段、判定与原因文字不变,review-monitor 规则下的场景改为对二进制运行;对脚本内部函数的 Python 级测试仍对脚本运行)
 - scripts/olp-review-*.py(含共享 helper)
 - tests/olp_review_evidence.rs
 - tests/olp_review_models.py

@@ -631,13 +631,12 @@ const COMMANDS: &[Entry] = &[
         ),
         help: "互审:cargo 测试执行适配",
     },
-    script(
-        "review",
-        Some("monitor"),
-        "olp-review-monitor.py",
-        &[],
-        "互审:只读进度视图",
-    ),
+    Entry {
+        group: "review",
+        action: Some("monitor"),
+        target: Target::Moved(crate::olp::reviewmonitor::run_cli, "olp-review-monitor.py"),
+        help: "互审:只读进度视图",
+    },
     script(
         "review",
         None,
