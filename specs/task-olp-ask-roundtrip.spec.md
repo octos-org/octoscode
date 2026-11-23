@@ -19,7 +19,8 @@ estimate: 1d
   上的 `~/.octos/outer/board_append.sh`(MCP 服务的审计钩子)写成对它的一行转发,于是 hub
   的黑板上出现 `> 单元(m07)·- <时间> MCP(ask_outer) ask: id=<id> question=<前 200 字>`,
   以及同形的 `answer`、`timeout`、`blocked`、`refusal` 行。`src/olp_mcp.rs` 不改。
-- 回程:新工具 `scripts/olp-answer.py`(纯 Python 标准库)。hub 侧 `list <U>`、
+- 回程:`octoscode olp ask`(Rust,`src/olp/answer.rs`,2026-11-23 起;原 `scripts/olp-answer.py`,
+  输出与退出码不变;单元就是本机时在进程内执行单元一侧,不再另起进程)。hub 侧 `list <U>`、
   `show <U> <id>`、`answer <U> <id>`(回答走 stdin),经
   `ssh -o BatchMode=yes -o ConnectTimeout=10 <目标> <动作> [id]` 到单元;目标默认等于单元号
   (约定主机名即单元号),`--to` 可改。单元侧 `serve [--root] [--max-age]` 是 ssh 强制命令,
@@ -49,6 +50,7 @@ estimate: 1d
 
 ### Allowed Changes
 - scripts/olp-answer.py
+- src/olp/answer.rs
 - scripts/olp-board-remote.py(`append --sign`)
 - scripts/olp-inbox.py(待回答的提问)
 - scripts/olp-evo-harvest.sh(仅活板扫描里新增单元署名的 MCP 行)

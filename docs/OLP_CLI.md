@@ -141,8 +141,8 @@
 
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
-| `olp ask list\|show\|answer <单元> [id]` | `olp-answer.py` 同名子命令 | hub |
-| `olp ask serve` | `olp-answer.py serve` | 单元(ssh 强制命令) |
+| `olp ask list\|show\|answer <单元> [id]` | Rust(`src/olp/answer.rs`),原 `olp-answer.py` 同名子命令 | hub |
+| `olp ask serve` | Rust,原 `olp-answer.py serve` | 单元(ssh 强制命令) |
 | `olp ask mcp` | `octoscode olp-mcp-serve` | 单元(MCP 服务) |
 
 ### 2.8 守护(guard)——单元上的负哨

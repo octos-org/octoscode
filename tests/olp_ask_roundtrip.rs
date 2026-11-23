@@ -63,11 +63,11 @@ impl Cluster {
              shift\n\
              case \"$1\" in\n\
                append|read) SSH_ORIGINAL_COMMAND=\"$*\" exec python3 -B '{remote}' serve --unit m07 --board '{board}' ;;\n\
-               *) SSH_ORIGINAL_COMMAND=\"$*\" exec python3 -B '{answer}' serve --root '{root}' --max-age \"$(cat '{max_age}' 2>/dev/null || echo 50)\" ;;\n\
+               *) SSH_ORIGINAL_COMMAND=\"$*\" exec '{answer}' olp ask serve --root '{root}' --max-age \"$(cat '{max_age}' 2>/dev/null || echo 50)\" ;;\n\
              esac\n",
             down = c.down().display(),
             remote = scripts().join("olp-board-remote.py").display(),
-            answer = scripts().join("olp-answer.py").display(),
+            answer = env!("CARGO_BIN_EXE_octoscode"),
             board = c.board().display(),
             root = c.unit_root().display(),
             max_age = c.max_age().display(),
@@ -129,10 +129,17 @@ impl Cluster {
     }
 
     fn python(&self, script: &str, args: &[&str], stdin: Option<&str>) -> Output {
-        let mut cmd = Command::new("python3");
-        cmd.arg("-B")
-            .arg(scripts().join(script))
-            .args(args)
+        // The answer tool is Rust now; the name is kept in the calls below.
+        let mut cmd = if script == "olp-answer.py" {
+            let mut c = Command::new(env!("CARGO_BIN_EXE_octoscode"));
+            c.args(["olp", "ask"]);
+            c
+        } else {
+            let mut c = Command::new("python3");
+            c.arg("-B").arg(scripts().join(script));
+            c
+        };
+        cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -344,9 +351,8 @@ fn answer_validates_input_and_reports_an_unreachable_unit() {
 
     // The unit's forced command allows nothing else.
     for original in ["", "cat /etc/passwd", "answer", "answer a b", "show ../x"] {
-        let out = Command::new("python3")
-            .arg("-B")
-            .arg(scripts().join("olp-answer.py"))
+        let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+            .args(["olp", "ask"])
             .args(["serve", "--root"])
             .arg(c.unit_root())
             .env("SSH_ORIGINAL_COMMAND", original)
@@ -389,9 +395,8 @@ fn answer_list_hides_questions_that_timed_out_long_ago() {
             .unwrap();
     }
     let serve = |original: &str, extra: &[&str]| {
-        Command::new("python3")
-            .arg("-B")
-            .arg(scripts().join("olp-answer.py"))
+        Command::new(env!("CARGO_BIN_EXE_octoscode"))
+            .args(["olp", "ask"])
             .args(["serve", "--root", dir.path().to_str().unwrap()])
             .args(extra)
             .env("SSH_ORIGINAL_COMMAND", original)

@@ -514,13 +514,12 @@ const COMMANDS: &[Entry] = &[
         target: Target::Native("olp-mcp-serve", &[]),
         help: "单元上的提问 MCP 服务(ask_outer / report_blocked)",
     },
-    script(
-        "ask",
-        None,
-        "olp-answer.py",
-        &[],
-        "提问:list / show / answer(hub),serve(单元)",
-    ),
+    Entry {
+        group: "ask",
+        action: None,
+        target: Target::Moved(crate::olp::answer::run, "olp-answer.py"),
+        help: "提问:list / show / answer(hub),serve(单元)",
+    },
     Entry {
         group: "guard",
         action: Some("watch"),

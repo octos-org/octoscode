@@ -4,6 +4,7 @@
 //! Markdown; every command shares it. `log` is the JSON Lines event log
 //! that replaces that Markdown as the place data is kept.
 
+pub mod answer;
 pub mod board;
 pub mod card;
 pub mod cards;
