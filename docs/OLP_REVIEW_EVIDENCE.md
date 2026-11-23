@@ -1,6 +1,8 @@
 # OLP Review Evidence — 行为证据互审流程
 
-> 入口: `scripts/olp-review-evidence.py` · 监控: `scripts/olp-review-monitor.py`
+> 入口: `octoscode olp review …`(Rust,`src/olp/reviewevidence.rs`;原 `scripts/olp-review-evidence.py`,`OCTOSCODE_OLP_LEGACY=1` 时仍运行脚本) · 监控: `octoscode olp review monitor`
+>
+> 下文命令示例写作 `python3 scripts/olp-review-evidence.py <子命令> …`,等价于 `octoscode olp review <子命令> …`,参数相同。`challenge --live-cargo` 执行的固定 adapter 是本二进制自身的 `olp review cargo`。
 > Spec: [specs/task-evo-review-evidence.spec.md](../specs/task-evo-review-evidence.spec.md)
 > Plan: [docs/superpowers/plans/2026-09-09-review-evidence.md](superpowers/plans/2026-09-09-review-evidence.md)
 

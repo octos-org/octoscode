@@ -313,7 +313,7 @@ fn cwd_suffix_at(session: &str) -> Option<usize> {
 }
 
 /// A session id as (what precedes the suffix, the suffix).
-fn trunk_and_cwd(session: &str) -> (&str, Option<&str>) {
+pub(super) fn trunk_and_cwd(session: &str) -> (&str, Option<&str>) {
     match cwd_suffix_at(session) {
         Some(at) => (&session[..at], Some(&session[at..])),
         None => (session, None),
@@ -322,7 +322,7 @@ fn trunk_and_cwd(session: &str) -> (&str, Option<&str>) {
 
 /// Two session ids name the same originator: the same trunk, and the same
 /// working directory when both carry one.
-fn same_origin(a: &str, b: &str) -> bool {
+pub(super) fn same_origin(a: &str, b: &str) -> bool {
     let (trunk_a, cwd_a) = trunk_and_cwd(a);
     let (trunk_b, cwd_b) = trunk_and_cwd(b);
     if trunk_a.is_empty() || trunk_a != trunk_b {

@@ -224,8 +224,6 @@ pub const NOT_BUNDLED: &[&str] = &["olp-cross-check-diagnostic.sh", "olp-mcp-ser
 
 /// What a command runs.
 enum Target {
-    /// A bundled script; `fixed` arguments go before the caller's.
-    Script(&'static str, &'static [&'static str]),
     /// The script for this platform's service manager.
     Keepalive,
     /// A command that is already Rust: re-enter the dispatcher.
@@ -243,21 +241,6 @@ struct Entry {
     action: Option<&'static str>,
     target: Target,
     help: &'static str,
-}
-
-const fn script(
-    group: &'static str,
-    action: Option<&'static str>,
-    file: &'static str,
-    fixed: &'static [&'static str],
-    help: &'static str,
-) -> Entry {
-    Entry {
-        group,
-        action,
-        target: Target::Script(file, fixed),
-        help,
-    }
 }
 
 /// The command surface (docs/OLP_CLI.md §2). Order is the listing order.
@@ -637,13 +620,15 @@ const COMMANDS: &[Entry] = &[
         target: Target::Moved(crate::olp::reviewmonitor::run_cli, "olp-review-monitor.py"),
         help: "互审:只读进度视图",
     },
-    script(
-        "review",
-        None,
-        "olp-review-evidence.py",
-        &[],
-        "行为证据互审:init / freeze / challenge / cross / status / classify",
-    ),
+    Entry {
+        group: "review",
+        action: None,
+        target: Target::Moved(
+            crate::olp::reviewevidence::run_cli,
+            "olp-review-evidence.py",
+        ),
+        help: "行为证据互审:init / freeze / challenge / cross / status / classify",
+    },
 ];
 
 /// Where a command is meant to run.
@@ -738,7 +723,6 @@ fn describe(e: &Entry) -> serde_json::Value {
             Target::Native(..) | Target::Moved(..) | Target::Rust(..) | Target::Keepalive => {
                 "rust"
             }
-            Target::Script(..) => "script",
         },
         "help": format!("{route} --help"),
     })
@@ -1014,7 +998,6 @@ pub fn run(argv: &[String]) -> i32 {
         return 0;
     }
     match &entry.target {
-        Target::Script(file, fixed) => run_script(file, fixed, &rest, None),
         Target::Rust(native) => native(&rest),
         Target::Moved(native, file) => {
             if std::env::var_os("OCTOSCODE_OLP_LEGACY").is_some_and(|v| !v.is_empty()) {
@@ -1112,7 +1095,7 @@ mod tests {
     #[test]
     fn every_command_names_a_bundled_script() {
         for e in COMMANDS {
-            if let Target::Script(file, _) | Target::Moved(_, file) = e.target {
+            if let Target::Moved(_, file) = e.target {
                 assert!(
                     BUNDLE
                         .iter()
