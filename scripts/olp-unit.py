@@ -69,7 +69,7 @@
     claude 看 `claude auth status` 的 loggedIn,codex 看 `codex login status`
     的退出码。只留是/否,账号信息不离开单元。找命令依次看 OLP_CLAUDE /
     OLP_CODEX、PATH 与常见安装目录(常驻任务的 PATH 很短)。只是告知,不参与
-    健康判定:用哪些复验方由 operator 按卡决定。status 里显示为"复验方"一列。
+    健康判定:用哪些复验方由大外环在 operator 给的范围内按卡挑。status 里显示为"复验方"一列。
 
 巡检项
     内置:agent(herdr 里至少有一个内环,任何一种)、serve(本机有
@@ -766,7 +766,7 @@ def cmd_status(args):
                 "permission": (beat or {}).get("permission", "unknown") if beat else None,
                 "backends": (beat or {}).get("backends", []) if beat else [],
                 "agents": (beat or {}).get("agents", []) if beat else [],
-                # 单元自报的复验方(装没装、登没登录);只是告知,派什么卡由 operator 定。
+                # 单元自报的复验方(装没装、登没登录);只是告知,外环据此在 operator 给的范围内挑复验方。
                 "reviewers": (beat or {}).get("reviewers", []) if beat else [],
             }
         )
