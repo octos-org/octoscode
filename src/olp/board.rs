@@ -184,6 +184,36 @@ fn heading(line: &str) -> Option<(u64, &str)> {
     Some((n, rest.trim()))
 }
 
+/// Whether a line (already through [`strip_quote`]) is one of the signed
+/// line-start forms the tools read: an outer verdict, snooze or override, a
+/// unit's push record, or a signed inner ACK.
+pub fn is_signed_form(signed: &str) -> bool {
+    if let Some((_, rest)) = signature(signed, "外环") {
+        let verdict = ["采认", "打回", "搁置"]
+            .iter()
+            .any(|word| rest.strip_prefix(word).and_then(card_ref).is_some());
+        let voided = rest
+            .strip_prefix("改判(作废 #")
+            .and_then(number)
+            .is_some_and(|(_, rest)| rest.starts_with(')'));
+        return verdict || voided;
+    }
+    if let Some((_, rest)) = signature(signed, "单元") {
+        return rest
+            .strip_prefix("本地复验通过")
+            .and_then(card_ref)
+            .is_some();
+    }
+    if let Some((_, rest)) = signature(signed, "内环") {
+        let rest = match rest.strip_prefix('#').and_then(number) {
+            Some((_, rest)) => rest.trim_start(),
+            None => rest,
+        };
+        return ack(rest).is_some();
+    }
+    false
+}
+
 /// One pass over the board: numbered entries, the verdict lines about them
 /// (found anywhere on the board), and what does not add up.
 pub fn scan(text: &str) -> Scan {

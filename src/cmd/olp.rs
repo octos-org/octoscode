@@ -301,20 +301,18 @@ const COMMANDS: &[Entry] = &[
         target: Target::Rust(crate::olp::import::run),
         help: "把 Markdown 黑板一次性导入成事件日志(JSON Lines):olp board import <板> --to <目录>",
     },
-    script(
-        "board",
-        Some("archive"),
-        "olp-board-archive.py",
-        &[],
-        "归档已了结的卡,留编号桩",
-    ),
-    script(
-        "board",
-        Some("watch"),
-        "olp-watch-board.sh",
-        &[],
-        "板面侦听哨",
-    ),
+    Entry {
+        group: "board",
+        action: Some("archive"),
+        target: Target::Moved(crate::olp::archive::run, "olp-board-archive.py"),
+        help: "归档已了结的卡,留编号桩",
+    },
+    Entry {
+        group: "board",
+        action: Some("watch"),
+        target: Target::Moved(crate::olp::sentinel::run, "olp-watch-board.sh"),
+        help: "板面侦听哨",
+    },
     Entry {
         group: "board",
         action: Some("summary"),

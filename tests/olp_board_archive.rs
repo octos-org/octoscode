@@ -15,10 +15,6 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn tool() -> PathBuf {
-    repo_root().join("scripts/olp-board-archive.py")
-}
-
 fn stdout(out: &Output) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
@@ -28,8 +24,8 @@ fn stderr(out: &Output) -> String {
 }
 
 fn archive(board: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
-    let mut cmd = Command::new("python3");
-    cmd.arg("-B").arg(tool()).arg(board).args(args);
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_octoscode"));
+    cmd.args(["olp", "board", "archive"]).arg(board).args(args);
     for (k, v) in env {
         cmd.env(k, v);
     }

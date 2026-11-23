@@ -54,6 +54,7 @@ estimate: 1d
 ## Boundaries
 
 ### Allowed Changes
+- src/olp/archive.rs、src/olp/board.rs(2026-11-23:归档的 Rust 实现;本 spec 的全部场景改为对 `octoscode olp board archive` 运行,输出与退出码不变)
 - scripts/olp-board-archive.py
 - scripts/olp-inbox.py
 - tests/olp_board_archive.rs

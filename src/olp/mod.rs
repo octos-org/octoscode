@@ -6,6 +6,7 @@
 
 pub mod answer;
 pub mod append;
+pub mod archive;
 pub mod board;
 pub mod card;
 pub mod cards;
@@ -16,6 +17,7 @@ pub mod import;
 pub mod inbox;
 pub mod log;
 pub mod render;
+pub mod sentinel;
 pub mod serve;
 pub mod stall;
 pub mod summary;

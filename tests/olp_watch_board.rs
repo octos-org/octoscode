@@ -448,3 +448,55 @@ fn olp_watch_board_harvest_survives_burst_hits() {
     let _ = std::fs::remove_dir_all(&root);
     let _ = status;
 }
+
+/// Scenario: Rust 版侦听哨只对挂哨后新增的行触发,并排除带署名的行
+#[test]
+fn native_watch_fires_only_on_new_lines_and_skips_signed_ones() {
+    let board = temp_board("native-watch", "任务书里引用了 ACK(45a done) 字样\n");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "board", "watch"])
+        .arg(&board)
+        .args([
+            "ACK(45a",
+            "--interval",
+            "1",
+            "--skip-signature",
+            "外环(hub)",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(still_running(&mut child), "old text must not fire");
+    append(&board, "> 外环(hub)·批注:等 ACK(45a done|blocked)\n");
+    std::thread::sleep(Duration::from_millis(2000));
+    assert!(
+        still_running(&mut child),
+        "the outer loop's own note is skipped"
+    );
+    append(&board, "- ACK(45a done): commit abc\n");
+    let (exited, out) = wait_exit(&mut child, Duration::from_secs(10));
+    assert!(exited, "a new line with the token fires");
+    assert!(out.contains("BOARD-SIGNAL: ACK(45a"), "{out}");
+    assert!(out.contains("- ACK(45a done): commit abc"), "{out}");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "board", "watch"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args([
+            "olp",
+            "board",
+            "watch",
+            "/tmp/x",
+            "tok",
+            "--interval",
+            "abc",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+}
