@@ -17,6 +17,7 @@ pub mod duty;
 pub mod forward;
 pub mod import;
 pub mod inbox;
+pub mod init;
 pub mod keepalive;
 pub mod localpr;
 pub mod log;

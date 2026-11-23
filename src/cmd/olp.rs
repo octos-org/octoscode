@@ -262,20 +262,40 @@ const fn script(
 
 /// The command surface (docs/OLP_CLI.md §2). Order is the listing order.
 const COMMANDS: &[Entry] = &[
-    script(
-        "init",
-        None,
-        "olp-init.sh",
-        &[],
-        "铺 OctoLoop 脚手架:olp init [目录]",
-    ),
-    script(
-        "skill",
-        Some("install"),
-        "olp-install-skill.sh",
-        &[],
-        "安装 /octoloop 全局入口",
-    ),
+    Entry {
+        group: "init",
+        action: None,
+        target: Target::Rust(|argv| {
+            if std::env::var_os("OCTOSCODE_OLP_LEGACY").is_some_and(|v| !v.is_empty()) {
+                // The script works on its current directory.
+                let (dir, rest) = match argv.split_first() {
+                    Some((d, r)) if !d.starts_with('-') => (PathBuf::from(d), r),
+                    _ => (PathBuf::from("."), argv),
+                };
+                return run_script("olp-init.sh", &[], rest, Some(&dir));
+            }
+            crate::olp::init::init(argv)
+        }),
+        help: "铺 OctoLoop 脚手架:olp init [目录]",
+    },
+    Entry {
+        group: "skill",
+        action: Some("install"),
+        target: Target::Rust(|argv| {
+            if std::env::var_os("OCTOSCODE_OLP_LEGACY").is_some_and(|v| !v.is_empty()) {
+                return run_script("olp-install-skill.sh", &[], argv, None);
+            }
+            // The protocol text lives in this binary's tool directory.
+            match bundle_dir() {
+                Ok(dir) => crate::olp::init::skill_install(argv, &dir),
+                Err(e) => {
+                    eprintln!("octoscode olp skill install: 无法准备工具目录: {e}");
+                    1
+                }
+            }
+        }),
+        help: "安装 /octoloop 全局入口",
+    },
     Entry {
         group: "doctor",
         action: None,
@@ -998,21 +1018,7 @@ pub fn run(argv: &[String]) -> i32 {
         return 0;
     }
     match &entry.target {
-        Target::Script(file, fixed) => {
-            if group == "init" {
-                // `olp init [目录]`: the script works on its current directory.
-                let (dir, rest) = match rest.split_first() {
-                    Some((d, r)) if !d.starts_with('-') => (PathBuf::from(d), r.to_vec()),
-                    _ => (PathBuf::from("."), rest.clone()),
-                };
-                if !dir.is_dir() {
-                    eprintln!("octoscode olp init: 目录不存在: {}", dir.display());
-                    return 2;
-                }
-                return run_script(file, fixed, &rest, Some(&dir));
-            }
-            run_script(file, fixed, &rest, None)
-        }
+        Target::Script(file, fixed) => run_script(file, fixed, &rest, None),
         Target::Rust(native) => native(&rest),
         Target::Moved(native, file) => {
             if std::env::var_os("OCTOSCODE_OLP_LEGACY").is_some_and(|v| !v.is_empty()) {
