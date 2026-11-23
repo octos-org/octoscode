@@ -316,13 +316,12 @@ const COMMANDS: &[Entry] = &[
         &[],
         "板面侦听哨",
     ),
-    script(
-        "board",
-        Some("summary"),
-        "olp-summary.py",
-        &[],
-        "汇总进展,交给项目全景台",
-    ),
+    Entry {
+        group: "board",
+        action: Some("summary"),
+        target: Target::Moved(crate::olp::summary::run, "olp-summary.py"),
+        help: "汇总进展,交给项目全景台",
+    },
     script(
         "id",
         Some("alloc"),

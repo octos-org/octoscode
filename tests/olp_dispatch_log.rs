@@ -311,3 +311,71 @@ fn what_a_card_must_not_touch_reaches_the_unit() {
     assert!(inbox["items"][0].get("avoid").is_none(), "{inbox}");
     assert!(!inbox["how"].as_str().unwrap().contains("avoid"));
 }
+
+/// Scenario: 汇总也读事件日志
+#[test]
+fn the_summary_reads_the_event_log() {
+    let hub = Hub::new();
+    hub.unit("m07", true, &[("codex", true, true)], &["octoscode"]);
+    let roles = [
+        "--impl",
+        "octoscode",
+        "--review",
+        "codex",
+        "--wake",
+        "w1:p1",
+    ];
+    assert_eq!(hub.dispatch("m07", "第一张", &roles).status.code(), Some(0));
+    let log = hub.log();
+    let conf = hub.dir.path().join("unit.conf");
+    std::fs::write(
+        &conf,
+        format!("hub = local\nunit = m07\nstore = log\nlog = {log}\n"),
+    )
+    .unwrap();
+    let out = Command::new(BIN)
+        .args([
+            "olp",
+            "remote",
+            "progress",
+            "1",
+            "undelivered",
+            "窗格 w1:p1:agent 状态 blocked",
+        ])
+        .env("OLP_UNIT_CONF", &conf)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let out = hub.olp(
+        &["summary", "--board", &log, "--name", "demo", "--json"],
+        "",
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+    let s: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(s["project"], "demo");
+    assert_eq!(s["counts"]["inbox"], 1, "{s}");
+    assert_eq!(s["cards"][0]["review"], serde_json::json!(["codex"]));
+    assert!(
+        s["cards"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("送达失败"),
+        "{s}"
+    );
+    assert_eq!(s["units"][0]["state"], "healthy");
+    assert_eq!(s["alerts"][0]["card"], 1);
+    assert!(
+        s["alerts"][0]["alert"]
+            .as_str()
+            .unwrap()
+            .contains("blocked"),
+        "{s}"
+    );
+    let text = stdout(&hub.olp(&["summary", "--board", &log, "--name", "demo"], ""));
+    assert!(
+        text.contains("#1 [m07] 实现 octoscode / 复验 codex 第一张 — 收件箱"),
+        "{text}"
+    );
+    assert!(text.contains("m07 正常"), "{text}");
+}

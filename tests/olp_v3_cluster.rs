@@ -35,7 +35,12 @@ fn has_flock() -> bool {
 }
 
 fn run(dir: &Path, program: &str, args: &[&str], stdin: &str) -> Output {
-    let mut cmd = if program.ends_with(".py") {
+    let mut cmd = if let Some(words) = program.strip_prefix("olp ") {
+        // A command that has moved to Rust.
+        let mut c = Command::new(env!("CARGO_BIN_EXE_octoscode"));
+        c.arg("olp").args(words.split(' '));
+        c
+    } else if program.ends_with(".py") {
         let mut c = Command::new("python3");
         c.arg("-B").arg(scripts().join(program));
         c
@@ -428,7 +433,7 @@ fn v3_summary_collects_cards_units_prs_and_alerts() {
 
     let out = run(
         d,
-        "olp-summary.py",
+        "olp board summary",
         &[
             "--board",
             board.to_str().unwrap(),
@@ -457,7 +462,7 @@ fn v3_summary_collects_cards_units_prs_and_alerts() {
     // are left out.
     let out = run(
         d,
-        "olp-summary.py",
+        "olp board summary",
         &["--board", board.to_str().unwrap(), "--name", "demo"],
         "",
     );
@@ -474,7 +479,7 @@ fn v3_summary_collects_cards_units_prs_and_alerts() {
     // A repository that cannot be read is reported, the rest still comes out.
     let out = run(
         d,
-        "olp-summary.py",
+        "olp board summary",
         &[
             "--board",
             board.to_str().unwrap(),
@@ -491,7 +496,7 @@ fn v3_summary_collects_cards_units_prs_and_alerts() {
 
     let out = run(
         d,
-        "olp-summary.py",
+        "olp board summary",
         &["--board", "/nonexistent/board.md"],
         "",
     );

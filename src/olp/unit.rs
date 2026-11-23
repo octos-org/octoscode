@@ -1196,48 +1196,87 @@ fn reviewers_text(beat: &Value) -> String {
     }
 }
 
+/// One record per registered unit, as `status --json` lists them.
+pub fn report(stale_after: u64) -> Vec<Value> {
+    let now = now_seconds();
+    load_registry()
+        .iter()
+        .map(|(unit, row)| {
+            let h = evaluate(row, now, stale_after);
+            let beat = h.beat.as_ref();
+            let of = |key: &str| {
+                beat.and_then(|b| b.get(key))
+                    .cloned()
+                    .unwrap_or_else(|| json!([]))
+            };
+            json!({
+                "unit": unit,
+                "state": h.state,
+                "dispatchable": h.state == "healthy",
+                "reasons": h.reasons,
+                "hostname": row["hostname"],
+                "mac": row["mac"],
+                "heartbeat_age_seconds": beat
+                    .map(|b| (now - b["received_at"].as_f64().unwrap_or(0.0)) as i64),
+                // What the unit said about itself; told, never judged.
+                "permission": beat.map(|b| {
+                    b.get("permission")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                }),
+                "backends": of("backends"),
+                "agents": of("agents"),
+                "reviewers": of("reviewers"),
+            })
+        })
+        .collect()
+}
+
+/// The inner-loop kinds in a unit record, sorted, or `-`.
+pub fn kinds_text(record: &Value) -> String {
+    let mut kinds: Vec<&str> = list(record, "agents")
+        .iter()
+        .map(|a| a.get("kind").and_then(Value::as_str).unwrap_or("?"))
+        .collect();
+    kinds.sort();
+    kinds.dedup();
+    if kinds.is_empty() {
+        "-".to_string()
+    } else {
+        kinds.join(",")
+    }
+}
+
 fn status(argv: &[String]) -> Result<i32, Fail> {
     let args = parse(argv, &["--stale-after"], &["--json"])?;
     if !args.rest.is_empty() {
         return usage_err(format!("多余的参数: {}", args.rest.join(" ")));
     }
-    let stale_after = args.stale_after()?;
-    let now = now_seconds();
-    let empty = json!({});
-    let mut report = Vec::new();
-    let mut lines = Vec::new();
-    for (unit, row) in &load_registry() {
-        let h = evaluate(row, now, stale_after);
-        let beat = h.beat.as_ref();
-        let age = beat.map(|b| (now - b["received_at"].as_f64().unwrap_or(0.0)) as i64);
-        let of = |key: &str| {
-            beat.and_then(|b| b.get(key))
-                .cloned()
-                .unwrap_or_else(|| json!([]))
-        };
-        let permission = beat.map(|b| {
-            b.get("permission")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-        });
-        let mut kinds: Vec<&str> = list(beat.unwrap_or(&empty), "agents")
-            .iter()
-            .map(|a| a.get("kind").and_then(Value::as_str).unwrap_or("?"))
-            .collect();
-        kinds.sort();
-        kinds.dedup();
+    let report = report(args.stale_after()?);
+    if args.flags.iter().any(|f| f == "--json") {
+        let doc = json!({ "units": report });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&doc).unwrap_or_else(|_| doc.to_string())
+        );
+        return Ok(0);
+    }
+    if report.is_empty() {
+        println!("没有登记任何单元");
+    }
+    for r in &report {
+        let word = |key: &str| r.get(key).and_then(Value::as_str).unwrap_or_default();
         let mut line = format!(
-            "{unit}\t{}({})\t心跳 {}\t内环 {}\t权限 {}\t复验方 {}\t{}",
-            state_zh(h.state),
-            h.state,
-            age.map(|a| format!("{a}s"))
+            "{}\t{}({})\t心跳 {}\t内环 {}\t权限 {}\t复验方 {}\t{}",
+            word("unit"),
+            state_zh(word("state")),
+            word("state"),
+            r["heartbeat_age_seconds"]
+                .as_i64()
+                .map(|a| format!("{a}s"))
                 .unwrap_or_else(|| "-".to_string()),
-            if kinds.is_empty() {
-                "-".to_string()
-            } else {
-                kinds.join(",")
-            },
-            match permission {
+            kinds_text(r),
+            match r["permission"].as_str() {
                 Some("full") => "完全访问",
                 Some("sandboxed") => "沙箱",
                 Some("mixed") => "混合",
@@ -1245,39 +1284,18 @@ fn status(argv: &[String]) -> Result<i32, Fail> {
                 Some("unknown") => "未知",
                 _ => "-",
             },
-            reviewers_text(beat.unwrap_or(&empty)),
-            row["hostname"],
+            reviewers_text(r),
+            word("hostname"),
         );
-        if !h.reasons.is_empty() {
+        let reasons: Vec<&str> = list(r, "reasons")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        if !reasons.is_empty() {
             line.push('\t');
-            line.push_str(&h.reasons.join(";"));
+            line.push_str(&reasons.join(";"));
         }
-        lines.push(line);
-        report.push(json!({
-            "unit": unit,
-            "state": h.state,
-            "dispatchable": h.state == "healthy",
-            "reasons": h.reasons,
-            "hostname": row["hostname"],
-            "mac": row["mac"],
-            "heartbeat_age_seconds": age,
-            // What the unit said about itself; told, never judged.
-            "permission": permission,
-            "backends": of("backends"),
-            "agents": of("agents"),
-            "reviewers": of("reviewers"),
-        }));
-    }
-    if args.flags.iter().any(|f| f == "--json") {
-        let doc = json!({ "units": report });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&doc).unwrap_or_else(|_| doc.to_string())
-        );
-    } else if lines.is_empty() {
-        println!("没有登记任何单元");
-    } else {
-        println!("{}", lines.join("\n"));
+        println!("{line}");
     }
     Ok(0)
 }

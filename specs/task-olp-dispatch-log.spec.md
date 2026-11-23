@@ -88,3 +88,9 @@ Scenario: 卡上写明不许碰什么,单元在收件箱里看得到
   Given 一台正常的单元
   When 带两条 --avoid 派一张卡,单元查收件箱;再派一张不带清单的卡
   Then 事件里有 avoid 清单,渲染出的板上逐条有 avoid: 行,收件箱里该卡带 avoid、how 里提到它;不带清单的卡没有这个字段,how 也不提
+
+Scenario: 汇总也读事件日志
+  Test: the_summary_reads_the_event_log
+  Given 一张派出的卡,单元上报了送达失败
+  When 对日志目录执行 olp summary(JSON 与文本)
+  Then 卡、分工、各区计数、单元状态都在;告警里有这张卡的送达失败;文本里该卡在收件箱

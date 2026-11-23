@@ -16,4 +16,5 @@ pub mod log;
 pub mod render;
 pub mod serve;
 pub mod stall;
+pub mod summary;
 pub mod unit;
