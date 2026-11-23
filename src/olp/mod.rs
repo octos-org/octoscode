@@ -17,6 +17,7 @@ pub mod import;
 pub mod inbox;
 pub mod log;
 pub mod render;
+pub mod repo;
 pub mod sentinel;
 pub mod serve;
 pub mod stall;

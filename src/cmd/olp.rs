@@ -448,27 +448,39 @@ const COMMANDS: &[Entry] = &[
         &[],
         "单元写 hub 的黑板:append / ack / flush / queue / mirror / serve",
     ),
-    script(
-        "repo",
-        Some("init"),
-        "olp-git-hub.py",
-        &["init"],
-        "建或刷新 hub 的本地仓库与钩子",
-    ),
-    script(
-        "repo",
-        Some("serve"),
-        "olp-git-hub.py",
-        &["serve"],
-        "ssh 强制命令:单元推拉 hub 仓库",
-    ),
-    script(
-        "repo",
-        Some("connect-local"),
-        "olp-git-hub.py",
-        &["connect-local"],
-        "单机部署:把克隆的 hub 远程接到本机仓库",
-    ),
+    Entry {
+        group: "repo",
+        action: Some("init"),
+        target: Target::Rust(|argv| {
+            if std::env::var_os("OCTOSCODE_OLP_LEGACY").is_some_and(|v| !v.is_empty()) {
+                return run_script("olp-git-hub.py", &["init"], argv, None);
+            }
+            crate::olp::repo::run("init", argv)
+        }),
+        help: "建或刷新 hub 的本地仓库与钩子",
+    },
+    Entry {
+        group: "repo",
+        action: Some("serve"),
+        target: Target::Rust(|argv| {
+            if std::env::var_os("OCTOSCODE_OLP_LEGACY").is_some_and(|v| !v.is_empty()) {
+                return run_script("olp-git-hub.py", &["serve"], argv, None);
+            }
+            crate::olp::repo::run("serve", argv)
+        }),
+        help: "ssh 强制命令:单元推拉 hub 仓库",
+    },
+    Entry {
+        group: "repo",
+        action: Some("connect-local"),
+        target: Target::Rust(|argv| {
+            if std::env::var_os("OCTOSCODE_OLP_LEGACY").is_some_and(|v| !v.is_empty()) {
+                return run_script("olp-git-hub.py", &["connect-local"], argv, None);
+            }
+            crate::olp::repo::run("connect-local", argv)
+        }),
+        help: "单机部署:把克隆的 hub 远程接到本机仓库",
+    },
     script(
         "repo",
         Some("push"),
@@ -490,20 +502,28 @@ const COMMANDS: &[Entry] = &[
         &["promote"],
         "采认后推 GitHub",
     ),
-    script(
-        "repo",
-        Some("hook"),
-        "olp-git-hub.py",
-        &["hook"],
-        "(由 git 调用)",
-    ),
-    script(
-        "repo",
-        Some("local-pack"),
-        "olp-git-hub.py",
-        &["local-pack"],
-        "(由 git 调用)",
-    ),
+    Entry {
+        group: "repo",
+        action: Some("hook"),
+        target: Target::Rust(|argv| {
+            if std::env::var_os("OCTOSCODE_OLP_LEGACY").is_some_and(|v| !v.is_empty()) {
+                return run_script("olp-git-hub.py", &["hook"], argv, None);
+            }
+            crate::olp::repo::run("hook", argv)
+        }),
+        help: "(由 git 调用)",
+    },
+    Entry {
+        group: "repo",
+        action: Some("local-pack"),
+        target: Target::Rust(|argv| {
+            if std::env::var_os("OCTOSCODE_OLP_LEGACY").is_some_and(|v| !v.is_empty()) {
+                return run_script("olp-git-hub.py", &["local-pack"], argv, None);
+            }
+            crate::olp::repo::run("local-pack", argv)
+        }),
+        help: "(由 git 调用)",
+    },
     Entry {
         group: "ask",
         action: Some("mcp"),

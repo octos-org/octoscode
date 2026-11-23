@@ -129,9 +129,9 @@
 
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
-| `olp repo init <裸仓库> --board <板>` | `olp-git-hub.py init` | hub |
-| `olp repo serve --unit U --repo R` | `olp-git-hub.py serve` | hub(ssh 强制命令) |
-| `olp repo connect-local --unit U --repo R` | `olp-git-hub.py connect-local` | 单元(单机部署) |
+| `olp repo init <裸仓库> --board <板>` | Rust(`src/olp/repo.rs`),原 `olp-git-hub.py init` | hub |
+| `olp repo serve --unit U --repo R` | Rust(`src/olp/repo.rs`),原 `olp-git-hub.py serve` | hub(ssh 强制命令) |
+| `olp repo connect-local --unit U --repo R` | Rust(`src/olp/repo.rs`),原 `olp-git-hub.py connect-local` | 单元(单机部署) |
 | `olp repo push <N> --verified-by S [--force]` | `olp-task-push.sh` | 单元 |
 | `olp repo status --repo R --board <板>` | `olp-local-pr.py status` | hub |
 | `olp repo promote <N> --repo R --board <板>` | `olp-local-pr.py promote` | hub |

@@ -59,6 +59,7 @@ ssh 强制命令和单元侧的推送命令,并把三道关的规则写进协议
 ## Boundaries
 
 ### Allowed Changes
+- src/olp/repo.rs(2026-11-23:hub 仓库这道门的 Rust 实现;本 spec 中针对 `olp-git-hub.py` 的场景改为对 `octoscode olp repo …` 运行,规则、输出、退出码不变。黑板是事件日志目录时,卡从日志里读,推送以 `pushed` 事件登记进日志)
 - scripts/olp-git-hub.py
 - scripts/olp-task-push.sh
 - tests/olp_git_hub.rs
@@ -153,3 +154,9 @@ Scenario: init 可重跑且拒绝非裸仓库
   Given 一个已初始化并有引用的 hub 仓库
   When 重跑 init;对一个普通工作仓库 init;以不存在的黑板 init 新路径
   Then 重跑成功且引用不变、两个钩子可执行;后两种退出码 2,新路径没有被创建
+
+Scenario: 黑板是事件日志时,卡从日志里读,推送登记进日志
+  Test: hub_reads_the_card_from_an_event_log_and_records_the_push_there
+  Given hub 仓库的 olp.board 指向一个事件日志目录,日志里 #1 派给 m07 并指定复验方 codex、claude,#2 派给 m08
+  When m07 推 task/2;以只含 codex 的署名推 task/1;以覆盖两个复验方的署名推 task/1
+  Then 前两次被拒并说明(派给的是 m08;缺少 claude);第三次被接收,日志里多一条 pushed 事件(带提交号前 12 位与署名),渲染出的板上有"本地复验通过(#1)"一行,Markdown 板没有被写入
