@@ -283,13 +283,12 @@ const COMMANDS: &[Entry] = &[
         &[],
         "检查钩子、保活任务、ssh 强制命令等处写下的命令还能不能用:olp doctor [--repo R] [--work W] [--json]",
     ),
-    script(
-        "board",
-        Some("append"),
-        "olp-board-append.sh",
-        &[],
-        "在锁内向黑板追加(分配 {N}、按键去重)",
-    ),
+    Entry {
+        group: "board",
+        action: Some("append"),
+        target: Target::Moved(crate::olp::append::board_append, "olp-board-append.sh"),
+        help: "在锁内向黑板追加(分配 {N}、按键去重)",
+    },
     Entry {
         group: "board",
         action: Some("inbox"),
@@ -322,13 +321,12 @@ const COMMANDS: &[Entry] = &[
         target: Target::Moved(crate::olp::summary::run, "olp-summary.py"),
         help: "汇总进展,交给项目全景台",
     },
-    script(
-        "id",
-        Some("alloc"),
-        "olp-id-alloc.sh",
-        &[],
-        "按自然键分配黑板以外的编号",
-    ),
+    Entry {
+        group: "id",
+        action: Some("alloc"),
+        target: Target::Moved(crate::olp::append::id_alloc, "olp-id-alloc.sh"),
+        help: "按自然键分配黑板以外的编号",
+    },
     Entry {
         group: "card",
         action: Some("open"),

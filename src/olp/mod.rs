@@ -5,6 +5,7 @@
 //! that replaces that Markdown as the place data is kept.
 
 pub mod answer;
+pub mod append;
 pub mod board;
 pub mod card;
 pub mod cards;

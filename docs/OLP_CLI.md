@@ -84,12 +84,12 @@
 
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
-| `olp board append [--key K] <板>` | `olp-board-append.sh` | 黑板所在机器 |
+| `olp board append [--key K] <板>` | Rust(`src/olp/append.rs`),原 `olp-board-append.sh` | 黑板所在机器 |
 | `olp board inbox <板> [--units] [--json] …` | `olp-inbox.py` | hub |
 | `olp board archive <板> [--keep N] [--dry-run]` | `olp-board-archive.py` | hub |
 | `olp board watch <板> <token> [--harvest <repo>] …` | `olp-watch-board.sh` | hub |
 | `olp board summary --board <板或日志目录> [--repo R] [--json]` | Rust(`src/olp/summary.rs`),原 `olp-summary.py` | hub |
-| `olp id alloc …` | `olp-id-alloc.sh` | 任意 |
+| `olp id alloc …` | Rust(`src/olp/append.rs`),原 `olp-id-alloc.sh` | 任意 |
 | `olp board stall <日志目录> [--quiet 秒] [--json]` | Rust(`src/olp/stall.rs`) | hub |
 
 `board stall`(`specs/task-olp-stall.spec.md`)回答"是不是所有人都在等":有卡未了结、占着卡的
