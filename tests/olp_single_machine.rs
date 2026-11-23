@@ -102,10 +102,15 @@ impl Box1 {
     }
 
     fn cmd(&self, program: &str) -> Command {
-        let mut cmd = if program == "olp-board-remote.py" {
-            // Moved to Rust: the same actions under `olp remote`.
+        let moved = match program {
+            "olp-board-remote.py" => Some(["olp", "remote"].as_slice()),
+            "olp-dispatch.py" => Some(["olp", "card", "dispatch"].as_slice()),
+            _ => None,
+        };
+        let mut cmd = if let Some(words) = moved {
+            // Moved to Rust: the same actions under `octoscode olp`.
             let mut c = Command::new(env!("CARGO_BIN_EXE_octoscode"));
-            c.args(["olp", "remote"]);
+            c.args(words);
             c
         } else if program.ends_with(".py") {
             let mut c = Command::new("python3");

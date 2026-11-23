@@ -419,9 +419,8 @@ fn inbox_json(board: &Path, args: &[&str]) -> serde_json::Value {
 }
 
 fn dispatch_to(board: &Path, unit: &str) -> Output {
-    let mut dispatch = Command::new("python3")
-        .arg("-B")
-        .arg(repo_root().join("scripts/olp-dispatch.py"))
+    let mut dispatch = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "card", "dispatch"])
         .args([unit, "--title", "新任务", "--skip-health", "--board"])
         .arg(board)
         .stdin(Stdio::piped())

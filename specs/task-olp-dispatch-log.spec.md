@@ -16,7 +16,8 @@ estimate: 1d
 ## Decisions
 
 - 入口:`octoscode olp card dispatch <单元> --log <目录> --title <标题> […]`,正文从 stdin。
-  给的是 `--board`(Markdown 板)时仍走 `olp-dispatch.py`,那条通道不变。
+  给的是 `--board`(Markdown 板)时走同一个文件里的 Markdown 路径(2026-11-23 起也是 Rust,
+  见 `specs/task-olp-dispatch.spec.md`):规则与原 `olp-dispatch.py` 相同,不核对复验方。
 - 顺序:键是否已存在 → 健康 → 复验方 → 回测不派给原作者 → 占用 → 写入。读日志的检查和写入
   在日志锁内完成,两次并发派卡不会都看到"空闲"。
 - 幂等键 `--key`;不给时为 `dispatch:<单元>:<摘要>`,摘要取自单元号、标题、正文、分工与
@@ -47,7 +48,7 @@ estimate: 1d
 - specs/task-olp-dispatch-log.spec.md
 
 ### Forbidden
-- 不改 `scripts/olp-dispatch.py`:Markdown 板的派卡照旧。
+- 不改 `scripts/olp-dispatch.py`(保留一个版本作退路,`OCTOSCODE_OLP_LEGACY=1`)。
 
 ## Out of Scope
 

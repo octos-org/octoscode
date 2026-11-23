@@ -152,42 +152,35 @@ pub fn board_append(argv: &[String]) -> i32 {
     write_entry(board, key, body)
 }
 
+/// What an append did.
+pub enum Written {
+    /// A numbered entry, with the number it was given.
+    Numbered(u64),
+    /// Appended as it was.
+    Plain,
+    /// The key was already on the board, with its number if it had one.
+    Already(Option<u64>),
+}
+
 /// Append `body` to `board` under its lock: number it when its first line
-/// starts `### {N}`, skip it when `key` is already on the board. Prints the
-/// number (when there is one) to stdout. Returns the exit code.
-pub fn write_entry(board: &Path, key: Option<&str>, body: Vec<u8>) -> i32 {
+/// starts `### {N}`, skip it when `key` is already on the board. `Err` is
+/// the exit code and why.
+pub fn append_entry(
+    board: &Path,
+    key: Option<&str>,
+    body: Vec<u8>,
+) -> Result<Written, (i32, String)> {
     let prog = "olp-board-append";
-    if body.is_empty() {
-        return if key.is_some() {
-            die(prog, "正文为空")
-        } else {
-            0
-        };
-    }
     // Only an entry whose first line starts `### {N}` is numbered: `{N}`
     // elsewhere (quoted text, say) is not a placeholder.
     let numbered = body.starts_with(b"### {N}");
-
-    let _lock = match lock(board) {
-        Ok(lock) => lock,
-        Err(e) => return die(prog, &format!("拿不到板的锁: {e}")),
-    };
+    let _lock = lock(board).map_err(|e| (2, format!("拿不到板的锁: {e}")))?;
     // A command left behind by an outer session that ended or was replaced
     // must not write: checked inside the lock, before the write.
-    if let Err(code) = super::duty::gate(prog) {
-        return code;
-    }
+    super::duty::gate(prog).map_err(|code| (code, String::new()))?;
     let existing = std::fs::read(board).unwrap_or_default();
     if let Some(hit) = key.and_then(|k| key_hit(&existing, k)) {
-        let key = key.unwrap_or_default();
-        match hit {
-            None => eprintln!("{prog}: 键 {key} 已在板上,未重复追加"),
-            Some(n) => {
-                eprintln!("{prog}: 键 {key} 已在板上(#{n}),未重复追加");
-                println!("{n}");
-            }
-        }
-        return 0;
+        return Ok(Written::Already(hit));
     }
     let number = numbered.then(|| max_heading(&existing) + 1);
     let mut entry = match number {
@@ -221,13 +214,53 @@ pub fn write_entry(board: &Path, key: Option<&str>, body: Vec<u8>) -> i32 {
         }
     }
     lead.extend_from_slice(&entry);
-    if let Err(e) = append_to(board, &lead) {
-        return die(prog, &format!("写不了板 {}: {e}", board.display()));
+    append_to(board, &lead).map_err(|e| (2, format!("写不了板 {}: {e}", board.display())))?;
+    Ok(match number {
+        Some(n) => Written::Numbered(n),
+        None => Written::Plain,
+    })
+}
+
+/// [`append_entry`] as the command reports it: the number (when there is
+/// one) on stdout, the exit code returned.
+pub fn write_entry(board: &Path, key: Option<&str>, body: Vec<u8>) -> i32 {
+    let prog = "olp-board-append";
+    if body.is_empty() {
+        return if key.is_some() {
+            die(prog, "正文为空")
+        } else {
+            0
+        };
     }
-    if let Some(n) = number {
-        println!("{n}");
+    match append_entry(board, key, body) {
+        Ok(Written::Numbered(n)) => {
+            println!("{n}");
+            0
+        }
+        Ok(Written::Plain) => 0,
+        Ok(Written::Already(hit)) => {
+            let key = key.unwrap_or_default();
+            match hit {
+                None => eprintln!("{prog}: 键 {key} 已在板上,未重复追加"),
+                Some(n) => {
+                    eprintln!("{prog}: 键 {key} 已在板上(#{n}),未重复追加");
+                    println!("{n}");
+                }
+            }
+            0
+        }
+        Err((code, why)) => {
+            if !why.is_empty() {
+                eprintln!("{prog}: {why}");
+            }
+            code
+        }
     }
-    0
+}
+
+/// The number the board records for `key`, when it records one.
+pub fn number_for_key(board: &Path, key: &str) -> Option<u64> {
+    key_hit(&std::fs::read(board).ok()?, key).flatten()
 }
 
 /// `argv` is what follows `olp id alloc`.

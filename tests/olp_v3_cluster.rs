@@ -75,7 +75,7 @@ fn dispatch(dir: &Path, board: &Path, title: &str, roles: &[&str]) -> Output {
         "2026-11-14",
     ];
     args.extend_from_slice(roles);
-    run(dir, "olp-dispatch.py", &args, "正文。\n")
+    run(dir, "olp card dispatch", &args, "正文。\n")
 }
 
 /// Scenario: 大外环按卡指定实现方与复验方
@@ -145,9 +145,8 @@ fn v3_dispatch_names_the_implementer_and_reviewers_per_card() {
     )
     .unwrap();
     std::fs::set_permissions(&herdr, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    let out = Command::new("python3")
-        .arg("-B")
-        .arg(scripts().join("olp-dispatch.py"))
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "card", "dispatch"])
         .args([
             "m07",
             "--board",

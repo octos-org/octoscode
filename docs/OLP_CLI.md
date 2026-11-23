@@ -100,7 +100,7 @@
 
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
-| `olp card dispatch <单元> --board <板> --title … [--impl A] [--review B,C] [--wake 窗格] …` | `olp-dispatch.py` | hub |
+| `olp card dispatch <单元> --board <板> --title … [--impl A] [--review B,C] [--wake 窗格] …` | Rust(`src/olp/dispatch.rs`),原 `olp-dispatch.py` | hub |
 | `olp card dispatch <单元> --log <目录> --title … [--impl A] [--review B,C] [--avoid 文本]… [--verify-of M] [--wake 窗格] …` | Rust(`src/olp/dispatch.rs`) | hub |
 
 事件日志上的派卡(`specs/task-olp-dispatch-log.spec.md`)在日志锁内依次查:单元健康、卡上的复验方

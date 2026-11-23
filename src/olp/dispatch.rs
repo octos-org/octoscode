@@ -37,7 +37,9 @@ const USAGE: &str = "用法: octoscode olp card dispatch <单元号> --log <日�
   --stale-after 秒    心跳多久算失联,默认 180
   --json              以 JSON 输出结果
 
-Markdown 板:把 --log 换成 --board <板>,由 olp-dispatch.py 处理(它自己的 --help 另有说明)。
+Markdown 板:把 --log 换成 --board <板>。卡写进板里,--wake 经 herdr 往窗格发一句话;署名用
+--signature(默认 外环(hub)),--date 指定标题里的日期;不核对复验方。退出码另有 5:已写板但
+唤醒失败,原样重跑即可。
 退出码:0 成功;1 被规则拒绝,未写入;2 用法;4 日志读写失败;6 主审权已失效";
 
 #[derive(Default)]
@@ -57,6 +59,10 @@ struct Args {
     allow_busy: bool,
     allow_reviewers: bool,
     json: bool,
+    /// A Markdown board instead of an event log.
+    board: Option<String>,
+    /// The date in a Markdown card's heading (default: today).
+    date: Option<String>,
 }
 
 fn parse(argv: &[String]) -> Result<Option<Args>, String> {
@@ -80,6 +86,8 @@ fn parse(argv: &[String]) -> Result<Option<Args>, String> {
             "--allow-busy" => args.allow_busy = true,
             "--allow-reviewers" => args.allow_reviewers = true,
             "--log" => args.log = value()?,
+            "--board" => args.board = Some(value()?),
+            "--date" => args.date = Some(value()?),
             "--title" => args.title = value()?.trim().to_string(),
             "--by" | "--signature" => args.by = Some(value()?),
             "--key" => args.key = Some(value()?),
@@ -119,8 +127,10 @@ fn parse(argv: &[String]) -> Result<Option<Args>, String> {
         [] => return Err("缺少单元号".to_string()),
         more => return Err(format!("多余的参数: {}", more[1..].join(" "))),
     }
-    if args.log.is_empty() {
-        return Err("缺少 --log <日志目录>".to_string());
+    match (args.log.is_empty(), &args.board) {
+        (true, None) => return Err("缺少 --log <日志目录> 或 --board <黑板文件>".to_string()),
+        (false, Some(_)) => return Err("--log 与 --board 只能给一个".to_string()),
+        _ => {}
     }
     let single = |s: &str| !s.trim().is_empty() && !s.contains(['\n', '\r']);
     if !single(&args.title) {
@@ -165,6 +175,15 @@ fn parse(argv: &[String]) -> Result<Option<Args>, String> {
             return Err("--key 只允许 [A-Za-z0-9._:/@+=-],最长 200".to_string());
         }
     }
+    if args.board.is_some() {
+        // On a Markdown board the signature is the whole `外环(…)` text.
+        let signature = args.by.as_deref().unwrap_or("外环(hub)").trim();
+        if !single(signature) {
+            return Err("--signature 必须是非空的单行".to_string());
+        }
+        args.by = Some(signature.to_string());
+        return Ok(Some(args));
+    }
     let by = args.by.as_deref().unwrap_or("hub").trim();
     if !single(by) || by.contains(['(', ')', '(', ')']) {
         return Err("--by 必须是非空的单行,不含括号".to_string());
@@ -201,6 +220,207 @@ fn missing_reviewers(beat: &serde_json::Value, review: &[String]) -> Vec<String>
         .collect()
 }
 
+/// Wake the unit's pane for card `number`: one sentence that says where the
+/// card is. `Err` is why herdr did not take it.
+fn wake(args: &Args, pane: &str, number: u64) -> Result<(), String> {
+    // The unit reads a mirror that was last synced before this card was
+    // written, so the wake names the sync as the first step, as a command
+    // that runs from any directory.
+    let sync = "octoscode olp remote mirror(不可用时:python3 \"$(cat ~/.octos/outer/octoscode-home)/scripts/olp-board-remote.py\" mirror)";
+    let message = if args.implementer.is_some() || !args.review.is_empty() {
+        // The pane woken for a card with roles is the unit host, who
+        // organises the work rather than doing it.
+        format!(
+            "黑板新条目 #{number} 派给本单元,指定实现方 {}、复验方 {}。你是单元主持,不要自己实现:按 $(cat ~/.octos/outer/octoscode-home)/skills/octoloop/AGENTS.md 的「模式 unit」组织实现与对抗复验,全部复验通过才推送并向 hub 回执。第一步同步镜像:{sync}",
+            args.implementer.as_deref().unwrap_or("(由你定)"),
+            if args.review.is_empty() {
+                "(由你定)".to_string()
+            } else {
+                args.review.join("、")
+            }
+        )
+    } else {
+        format!("黑板新条目 #{number} 派给本单元。先同步本机的黑板镜像:{sync},再读 #{number} 执行")
+    };
+    let herdr = std::env::var("OLP_HERDR")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "herdr".to_string());
+    let mut cmd = std::process::Command::new(herdr);
+    // A unit registered with this machine's hostname has its panes in the
+    // local herdr, not on a saved herdr machine.
+    if unit::is_local(&args.unit) != Some(true) {
+        cmd.args(["--machine", &args.unit]);
+    }
+    match cmd.args(["agent", "prompt", pane, &message]).output() {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => {
+            let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            Err(if said.is_empty() {
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            } else {
+                said
+            })
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Dispatch on a Markdown board: the same checks, the card appended under
+/// the board's lock, and the unit's pane woken through herdr.
+///
+/// Exit codes here: 0; 1 refused, nothing written; 2 usage; 4 the board
+/// could not be written; 5 written but the wake failed (run it again: the
+/// key is on the board, so only the wake is repeated); 6 lease invalid.
+fn on_board(args: &Args, raw_body: &str) -> i32 {
+    let prog = "olp-dispatch";
+    let fail = |code: i32, why: String| {
+        eprintln!("{prog}: {why}");
+        code
+    };
+    let target = &args.unit;
+    let board = std::path::Path::new(args.board.as_deref().unwrap_or_default());
+    if !board.is_file() {
+        return fail(2, format!("黑板不存在: {}", board.display()));
+    }
+    let date = match &args.date {
+        Some(text) => match chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d") {
+            Ok(date) => date,
+            Err(_) => return fail(2, format!("--date 不是合法日期: {text}")),
+        },
+        None => chrono::Local::now().date_naive(),
+    };
+    let key = args.key.clone().unwrap_or_else(|| {
+        let roles = if args.implementer.is_some() || !args.review.is_empty() {
+            format!(
+                "\nimpl={}\nreview={}",
+                args.implementer.as_deref().unwrap_or(""),
+                args.review.join(",")
+            )
+        } else {
+            String::new()
+        };
+        let said = format!("{target}\n{}\n{raw_body}{roles}", args.title);
+        let digest = Sha256::digest(said.as_bytes());
+        let hex: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+        format!("dispatch:{target}:{hex}")
+    });
+    let existing = super::append::number_for_key(board, &key);
+    let number = match existing {
+        Some(number) => number,
+        None => {
+            if !args.skip_health {
+                let why = match unit::health(target, args.stale_after) {
+                    None => Some(format!("olp-unit: 单元未登记: {target}")),
+                    Some(h) if h.state != "healthy" => Some(format!(
+                        "{target} {},不要派卡:{}",
+                        unit::state_zh(h.state),
+                        h.reasons.join(";")
+                    )),
+                    Some(_) => None,
+                };
+                if let Some(why) = why {
+                    return fail(1, format!("单元 {target} 现在不能接卡:{why}"));
+                }
+            }
+            let text = match std::fs::read(board) {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                Err(e) => return fail(2, format!("读不了黑板: {e}")),
+            };
+            let mut scan = super::board::scan(&text);
+            if let Some(original) = args.verify_of {
+                match scan.entries.get(&original) {
+                    None => {
+                        return fail(1, format!("板上没有 #{original},无法派它的回测卡"));
+                    }
+                    Some(entry) if entry.unit.as_deref() == Some(target) => {
+                        return fail(
+                            1,
+                            format!("#{original} 就是 {target} 做的,回测卡要派给另一台单元"),
+                        );
+                    }
+                    Some(_) => {}
+                }
+            }
+            if !args.allow_busy {
+                let held: Vec<String> =
+                    items(&mut scan, date, |e| e.unit.as_deref() == Some(target))
+                        .into_iter()
+                        .filter(|i| i.partition != Partition::Settled)
+                        .map(|i| format!("#{}", i.number))
+                        .collect();
+                if !held.is_empty() {
+                    return fail(
+                        1,
+                        format!(
+                            "单元 {target} 正忙:还占着 {}。等它了结,或加 --allow-busy",
+                            held.join("、")
+                        ),
+                    );
+                }
+            }
+            let mut entry = format!(
+                "### {{N}}. {}({date},{})\nunit: {target}\n",
+                args.title,
+                args.by.as_deref().unwrap_or("外环(hub)")
+            );
+            if let Some(original) = args.verify_of {
+                entry.push_str(&format!("verify-of: #{original}\n"));
+            }
+            if let Some(implementer) = &args.implementer {
+                entry.push_str(&format!("impl: {implementer}\n"));
+            }
+            if !args.review.is_empty() {
+                entry.push_str(&format!("review: {}\n", args.review.join(", ")));
+            }
+            for avoid in &args.avoid {
+                entry.push_str(&format!("avoid: {avoid}\n"));
+            }
+            entry.push_str(&format!("\n{}\n", raw_body.trim_end_matches('\n')));
+            match super::append::append_entry(board, Some(&key), entry.into_bytes()) {
+                Ok(super::append::Written::Numbered(n))
+                | Ok(super::append::Written::Already(Some(n))) => n,
+                Ok(_) => return fail(4, "写板失败: 没有得到编号".to_string()),
+                Err((6, _)) => return 6,
+                Err((_, why)) => return fail(4, format!("写板失败: {why}")),
+            }
+        }
+    };
+    let created = existing.is_none();
+    let woken = args.pane.as_deref().map(|pane| wake(args, pane, number));
+    if args.json {
+        println!(
+            "{}",
+            json!({
+                "number": number,
+                "unit": target,
+                "created": created,
+                "key": key,
+                "woken": woken.as_ref().map(Result::is_ok),
+                "watch_token": format!("本地复验通过(#{number})"),
+            })
+        );
+    } else {
+        if created {
+            println!("已派出 #{number} → {target}");
+        } else {
+            println!("#{number} 已在板上(同一个键),没有重复派卡");
+        }
+        if let (Some(Ok(())), Some(pane)) = (&woken, &args.pane) {
+            println!("已唤醒 {target} 的窗格 {pane}");
+        }
+        println!("挂哨标记:本地复验通过(#{number})");
+        println!("{number}");
+    }
+    if let Some(Err(why)) = woken {
+        eprintln!(
+            "{prog}: #{number} 已写板,但唤醒 {target} 失败:{why}。原样重跑本命令即可补做唤醒"
+        );
+        return 5;
+    }
+    0
+}
+
 /// `argv` is what follows `olp card dispatch`.
 pub fn run(argv: &[String]) -> i32 {
     let prog = "olp card dispatch";
@@ -219,6 +439,9 @@ pub fn run(argv: &[String]) -> i32 {
     if std::io::stdin().read_to_string(&mut body).is_err() || body.trim().is_empty() {
         eprintln!("{prog}: 正文为空(从 stdin 喂)");
         return 2;
+    }
+    if args.board.is_some() {
+        return on_board(&args, &body);
     }
     let body = format!("{}\n", body.trim_end_matches(['\n', '\r']));
     let target = &args.unit;

@@ -376,15 +376,7 @@ const COMMANDS: &[Entry] = &[
     Entry {
         group: "card",
         action: Some("dispatch"),
-        // The event log is dispatched to in Rust; a Markdown board
-        // (`--board`) still goes through the script that writes it.
-        target: Target::Rust(|argv| {
-            if argv.iter().any(|w| w == "--board") {
-                run_script("olp-dispatch.py", &[], argv, None)
-            } else {
-                crate::olp::dispatch::run(argv)
-            }
-        }),
+        target: Target::Moved(crate::olp::dispatch::run, "olp-dispatch.py"),
         help: "一步派卡(查健康、查复验方、查空闲、写入);--log 事件日志,--board Markdown 板",
     },
     Entry {
