@@ -16,16 +16,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
 fn hub_tool() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_octoscode"))
-}
-
-fn push_tool() -> PathBuf {
-    repo_root().join("scripts/olp-task-push.sh")
 }
 
 fn stderr(out: &Output) -> String {
@@ -176,8 +168,8 @@ impl Cluster {
 
     /// The unit-side push: `olp-task-push.sh <n> --verified-by <signer>`.
     fn task_push(&self, n: &str, extra: &[&str], unit: Option<&str>) -> Output {
-        let mut cmd = self.base("bash");
-        cmd.arg(push_tool()).arg(n).args(extra);
+        let mut cmd = self.base(env!("CARGO_BIN_EXE_octoscode"));
+        cmd.args(["olp", "repo", "push"]).arg(n).args(extra);
         if let Some(u) = unit {
             cmd.env("OLP_UNIT", u);
         }
@@ -732,4 +724,38 @@ fn hub_reads_the_card_from_an_event_log_and_records_the_push_there() {
     );
     // The Markdown board was not written to.
     assert!(!c.board_text().contains("本地复验通过"));
+
+    // The local pull request's state comes from the same log.
+    let state = || {
+        let out = Command::new(&bin)
+            .args(["olp", "repo", "status", "--json", "--repo"])
+            .arg(c.hub())
+            .args(["--board", log_str])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
+        let doc: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+        doc["items"][0].clone()
+    };
+    let item = state();
+    assert_eq!(
+        (item["number"].as_u64(), item["state"].as_str()),
+        (Some(1), Some("pending"))
+    );
+    assert_eq!(item["unit"], "m07");
+    assert_eq!(item["registered"].as_str(), Some(&sha1[..12]));
+    let out = Command::new(&bin)
+        .args([
+            "olp",
+            "card",
+            "accept",
+            "--log",
+            log_str,
+            "1",
+            "复验通过,采认",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(state()["state"], "accepted");
 }

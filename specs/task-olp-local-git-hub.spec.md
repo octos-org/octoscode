@@ -59,6 +59,7 @@ ssh 强制命令和单元侧的推送命令,并把三道关的规则写进协议
 ## Boundaries
 
 ### Allowed Changes
+- src/olp/localpr.rs(2026-11-23:单元侧推送 `olp repo push` 的 Rust 实现,原 `olp-task-push.sh`;事件日志场景同时核对本地 PR 状态从日志里读)
 - src/olp/repo.rs(2026-11-23:hub 仓库这道门的 Rust 实现;本 spec 中针对 `olp-git-hub.py` 的场景改为对 `octoscode olp repo …` 运行,规则、输出、退出码不变。黑板是事件日志目录时,卡从日志里读,推送以 `pushed` 事件登记进日志)
 - scripts/olp-git-hub.py
 - scripts/olp-task-push.sh

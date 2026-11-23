@@ -132,9 +132,9 @@
 | `olp repo init <裸仓库> --board <板>` | Rust(`src/olp/repo.rs`),原 `olp-git-hub.py init` | hub |
 | `olp repo serve --unit U --repo R` | Rust(`src/olp/repo.rs`),原 `olp-git-hub.py serve` | hub(ssh 强制命令) |
 | `olp repo connect-local --unit U --repo R` | Rust(`src/olp/repo.rs`),原 `olp-git-hub.py connect-local` | 单元(单机部署) |
-| `olp repo push <N> --verified-by S [--force]` | `olp-task-push.sh` | 单元 |
-| `olp repo status --repo R --board <板>` | `olp-local-pr.py status` | hub |
-| `olp repo promote <N> --repo R --board <板>` | `olp-local-pr.py promote` | hub |
+| `olp repo push <N> --verified-by S [--force]` | Rust(`src/olp/localpr.rs`),原 `olp-task-push.sh` | 单元 |
+| `olp repo status --repo R --board <板>` | Rust(`src/olp/localpr.rs`),原 `olp-local-pr.py status` | hub |
+| `olp repo promote <N> --repo R --board <板>` | Rust(`src/olp/localpr.rs`),原 `olp-local-pr.py promote` | hub |
 | (内部)`olp repo hook …`、`olp repo local-pack …` | `olp-git-hub.py hook / local-pack` | 由 git 调用 |
 
 ### 2.7 提问(ask)

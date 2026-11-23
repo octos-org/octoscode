@@ -15,6 +15,7 @@ pub mod dispatch;
 pub mod duty;
 pub mod import;
 pub mod inbox;
+pub mod localpr;
 pub mod log;
 pub mod render;
 pub mod repo;

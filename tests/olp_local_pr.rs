@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 
 fn tool() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/olp-local-pr.py")
+    PathBuf::from(env!("CARGO_BIN_EXE_octoscode"))
 }
 
 fn stderr(out: &Output) -> String {
@@ -138,9 +138,8 @@ impl Hub {
 
     fn run(&self, args: &[&str]) -> Output {
         let (cmd, rest) = args.split_first().unwrap();
-        Command::new("python3")
-            .arg("-B")
-            .arg(tool())
+        Command::new(tool())
+            .args(["olp", "repo"])
             .arg(cmd)
             .args(rest)
             .arg("--repo")
@@ -363,9 +362,8 @@ fn local_pr_reports_mismatches_as_warnings() {
 fn local_pr_rejects_bad_usage() {
     let h = Hub::new();
     let run = |args: &[&str]| {
-        Command::new("python3")
-            .arg("-B")
-            .arg(tool())
+        Command::new(tool())
+            .args(["olp", "repo"])
             .args(args)
             .output()
             .unwrap()

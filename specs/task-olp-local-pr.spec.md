@@ -44,6 +44,7 @@ PR 看板用)和推 GitHub 前的采认闸门。
 ## Boundaries
 
 ### Allowed Changes
+- src/olp/localpr.rs(2026-11-23:本地 PR 状态与 GitHub 闸门的 Rust 实现;本 spec 的场景改为对 `octoscode olp repo status|promote` 运行,输出与退出码不变;`--board` 也可以是事件日志目录,推送登记与判词从日志里读)
 - scripts/olp-local-pr.py
 - tests/olp_local_pr.rs
 - docs/OLP_LOCAL_PR.md

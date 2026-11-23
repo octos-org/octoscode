@@ -481,27 +481,39 @@ const COMMANDS: &[Entry] = &[
         }),
         help: "单机部署:把克隆的 hub 远程接到本机仓库",
     },
-    script(
-        "repo",
-        Some("push"),
-        "olp-task-push.sh",
-        &[],
-        "复验通过后推送 task/N",
-    ),
-    script(
-        "repo",
-        Some("status"),
-        "olp-local-pr.py",
-        &["status"],
-        "本地 PR 状态",
-    ),
-    script(
-        "repo",
-        Some("promote"),
-        "olp-local-pr.py",
-        &["promote"],
-        "采认后推 GitHub",
-    ),
+    Entry {
+        group: "repo",
+        action: Some("push"),
+        target: Target::Rust(|argv| {
+            if std::env::var_os("OCTOSCODE_OLP_LEGACY").is_some_and(|v| !v.is_empty()) {
+                return run_script("olp-task-push.sh", &[], argv, None);
+            }
+            crate::olp::localpr::run("push", argv)
+        }),
+        help: "复验通过后推送 task/N",
+    },
+    Entry {
+        group: "repo",
+        action: Some("status"),
+        target: Target::Rust(|argv| {
+            if std::env::var_os("OCTOSCODE_OLP_LEGACY").is_some_and(|v| !v.is_empty()) {
+                return run_script("olp-local-pr.py", &["status"], argv, None);
+            }
+            crate::olp::localpr::run("status", argv)
+        }),
+        help: "本地 PR 状态",
+    },
+    Entry {
+        group: "repo",
+        action: Some("promote"),
+        target: Target::Rust(|argv| {
+            if std::env::var_os("OCTOSCODE_OLP_LEGACY").is_some_and(|v| !v.is_empty()) {
+                return run_script("olp-local-pr.py", &["promote"], argv, None);
+            }
+            crate::olp::localpr::run("promote", argv)
+        }),
+        help: "采认后推 GitHub",
+    },
     Entry {
         group: "repo",
         action: Some("hook"),
