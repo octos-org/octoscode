@@ -613,20 +613,18 @@ const COMMANDS: &[Entry] = &[
         &[],
         "窗口化诊断",
     ),
-    script(
-        "evo",
-        Some("index"),
-        "olp-evo-index.sh",
-        &[],
-        "生成 FLAW 索引",
-    ),
-    script(
-        "evo",
-        Some("skeleton"),
-        "olp-evo-spec-skeleton.sh",
-        &[],
-        "从 FLAW 记录出契约骨架",
-    ),
+    Entry {
+        group: "evo",
+        action: Some("index"),
+        target: Target::Moved(crate::olp::evo::index, "olp-evo-index.sh"),
+        help: "生成 FLAW 索引",
+    },
+    Entry {
+        group: "evo",
+        action: Some("skeleton"),
+        target: Target::Moved(crate::olp::evo::skeleton, "olp-evo-spec-skeleton.sh"),
+        help: "从 FLAW 记录出契约骨架",
+    },
     script(
         "review",
         Some("cargo"),

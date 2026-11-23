@@ -177,8 +177,8 @@
 | `olp evo harvest <repo> [--dry-run]` | `olp-evo-harvest.sh` | hub |
 | `olp evo retro <repo> [--dry-run]` | `olp-evo-retro.sh` | hub |
 | `olp evo metrics <repo> …` | `olp-evo-metrics.sh` | hub |
-| `olp evo index <repo>` | `olp-evo-index.sh` | hub |
-| `olp evo skeleton <FLAW-NNN.md> [--out F]` | `olp-evo-spec-skeleton.sh` | hub |
+| `olp evo index <repo>` | Rust(`src/olp/evo.rs`),原 `olp-evo-index.sh` | hub |
+| `olp evo skeleton <FLAW-NNN.md> [--out F]` | Rust(`src/olp/evo.rs`),原 `olp-evo-spec-skeleton.sh` | hub |
 
 ### 2.12 行为证据互审(review)
 

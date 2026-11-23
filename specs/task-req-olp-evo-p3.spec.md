@@ -67,6 +67,7 @@ estimate: 2d
 ## 边界
 
 ### Allowed Changes
+- src/olp/evo.rs(2026-11-23:FLAW 索引与合约骨架的 Rust 实现;相关场景改为对 `octoscode olp evo index|skeleton` 运行,生成的内容与退出码不变)
 - scripts/olp-watch-board.sh
 - scripts/olp-evo-harvest.sh(主审追认 44-r1:仅限 olp-board-append.sh 的定位回退,不改采集判定)
 - scripts/olp-evo-lib.py

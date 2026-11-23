@@ -14,6 +14,7 @@ pub mod client;
 pub mod dispatch;
 pub mod doctor;
 pub mod duty;
+pub mod evo;
 pub mod forward;
 pub mod import;
 pub mod inbox;
