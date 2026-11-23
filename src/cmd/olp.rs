@@ -720,8 +720,10 @@ fn describe(e: &Entry) -> serde_json::Value {
         "writes": m.as_ref().and_then(|m| m.writes),
         "needs_lease": m.as_ref().and_then(|m| m.needs_lease),
         "implementation": match e.target {
-            Target::Native(..) | Target::Moved(..) | Target::Rust(..) => "rust",
-            Target::Script(..) | Target::Keepalive => "script",
+            Target::Native(..) | Target::Moved(..) | Target::Rust(..) | Target::Keepalive => {
+                "rust"
+            }
+            Target::Script(..) => "script",
         },
         "help": format!("{route} --help"),
     })
@@ -1020,15 +1022,18 @@ pub fn run(argv: &[String]) -> i32 {
             native(&rest)
         }
         Target::Keepalive => {
-            let file = if cfg!(target_os = "macos") {
-                "olp-launchd.py"
-            } else if cfg!(target_os = "linux") {
-                "olp-systemd.py"
-            } else {
-                eprintln!("octoscode olp keepalive: 只支持 macOS(launchd)与 Linux(systemd)");
-                return 2;
-            };
-            run_script(file, &[], &rest, None)
+            if std::env::var_os("OCTOSCODE_OLP_LEGACY").is_some_and(|v| !v.is_empty()) {
+                let file = if cfg!(target_os = "macos") {
+                    "olp-launchd.py"
+                } else if cfg!(target_os = "linux") {
+                    "olp-systemd.py"
+                } else {
+                    eprintln!("octoscode olp keepalive: 只支持 macOS(launchd)与 Linux(systemd)");
+                    return 2;
+                };
+                return run_script(file, &[], &rest, None);
+            }
+            crate::olp::keepalive::run(&rest)
         }
         Target::Native(sub, fixed) => {
             let mut inner = vec!["octoscode".to_string(), sub.to_string()];

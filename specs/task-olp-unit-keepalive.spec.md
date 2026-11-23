@@ -49,6 +49,7 @@ estimate: 0.5d
 ## Boundaries
 
 ### Allowed Changes
+- src/olp/keepalive.rs(2026-11-23:保活的 Rust 实现,launchd 与 systemd 两个后端在同一个文件里;本 spec 的场景改为对 `octoscode olp keepalive …` 运行(测试用 `OLP_KEEPALIVE_BACKEND` 选后端),生成的文件、输出、退出码不变;心跳任务默认调用 `<octoscode> olp unit …`,`--scripts` 仍可指定脚本目录)
 - scripts/olp-launchd.py
 - tests/olp_launchd.rs
 - docs/OLP_KEEPALIVE.md

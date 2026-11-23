@@ -156,7 +156,7 @@
 
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
-| `olp keepalive doctor\|heartbeat\|install\|uninstall\|list\|render …` | macOS:`olp-launchd.py`;Linux:`olp-systemd.py`(同名子命令) | 单元(hub 也可) |
+| `olp keepalive doctor\|heartbeat\|install\|uninstall\|list\|render …` | Rust(`src/olp/keepalive.rs`);原 macOS:`olp-launchd.py`,Linux:`olp-systemd.py` | 单元(hub 也可) |
 
 ### 2.10 主审权锁(duty)
 
