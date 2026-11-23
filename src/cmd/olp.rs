@@ -379,13 +379,12 @@ const COMMANDS: &[Entry] = &[
         &[],
         "一步派卡(查健康、查空闲、写板、唤醒)",
     ),
-    script(
-        "unit",
-        None,
-        "olp-unit.py",
-        &[],
-        "单元:register / set-state / status / check / where / receive / heartbeat",
-    ),
+    Entry {
+        group: "unit",
+        action: None,
+        target: Target::Moved(crate::olp::unit::run, "olp-unit.py"),
+        help: "单元:register / set-state / status / check / where / receive / heartbeat",
+    },
     Entry {
         group: "remote",
         action: Some("ack"),

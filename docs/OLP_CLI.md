@@ -101,9 +101,12 @@
 
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
-| `olp unit register\|set-state\|status\|check\|where …` | `olp-unit.py` 同名子命令 | hub |
-| `olp unit receive [--unit U]` | `olp-unit.py receive` | hub(ssh 强制命令) |
-| `olp unit heartbeat --unit U [--require …]` | `olp-unit.py heartbeat` | 单元 |
+| `olp unit register\|set-state\|status\|check\|where …` | Rust(`src/olp/unit.rs`),原 `olp-unit.py` 同名子命令 | hub |
+| `olp unit receive [--unit U]` | Rust,原 `olp-unit.py receive` | hub(ssh 强制命令) |
+| `olp unit heartbeat --unit U [--require …]` | Rust,原 `olp-unit.py heartbeat` | 单元 |
+
+登记文件与心跳文件的格式不变,hub 换二进制不用重新登记。`OCTOSCODE_OLP_LEGACY=1` 改跑原脚本。
+还没迁移的脚本(派卡、汇总、提问、体检、保活)仍直接调用 `olp-unit.py`,所以脚本暂时保留。
 
 ### 2.5 远程写板(remote)——单元写 hub 的黑板
 

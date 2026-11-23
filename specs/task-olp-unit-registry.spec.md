@@ -16,7 +16,8 @@ estimate: 1d
 
 ## Decisions
 
-- 工具:`scripts/olp-unit.py`,纯 Python 标准库(兼容系统自带的 Python 3.9),子命令
+- 工具:`octoscode olp unit`(Rust,`src/olp/unit.rs`,2026-11-23 起;此前是 `scripts/olp-unit.py`,
+  文件格式、输出、退出码不变,`OCTOSCODE_OLP_LEGACY=1` 改跑原脚本),子命令
   `register`、`set-state`、`receive`、`status`、`check`(hub)与 `heartbeat`(单元)。
 - 登记文件 `${OLP_UNITS_DIR:-~/.octos/outer/units}/registry.tsv`,每行七列:单元号、主机
   名、网卡地址、主机密钥指纹、序列号、enabled、备注。写入在 `registry.tsv.lock` 的 flock
@@ -71,6 +72,7 @@ estimate: 1d
 
 ### Allowed Changes
 - scripts/olp-unit.py
+- src/olp/unit.rs
 - tests/olp_unit.rs
 - docs/OLP_CLUSTER.md
 - specs/task-olp-unit-registry.spec.md

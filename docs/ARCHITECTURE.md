@@ -526,6 +526,7 @@ added without a row here.
 | `src/olp/inbox.rs` | 526 | `octoscode olp board inbox`: each entry's state from the last thing said about it (inbox / working / snoozed / settled), unit occupancy; output identical to `scripts/olp-inbox.py`. |
 | `src/olp/render.rs` | 178 | `octoscode olp board render`: the event log as a read-only Markdown board that the inbox reads to the same conclusions as the log. |
 | `src/olp/serve.rs` | 266 | `octoscode olp remote serve-log`: the hub side of a unit's ssh forced command on the event log — ACKs and progress nodes only for cards dispatched to that unit, and a view of its own cards' events only. |
+| `src/olp/unit.rs` | 1359 | `octoscode olp unit`: the unit registry and heartbeats — `register`, `set-state`, `receive`, `status`, `check`, `where` on the hub, `heartbeat` on a unit; same files and output as `scripts/olp-unit.py`, which it replaces |
 | `src/olp_mcp.rs` | 397 | OLP-MCP outer-loop server: newline JSON-RPC stdio, mailbox quota/timeout, board audit (#31). |
 | `src/store.rs` | 37021 | The AppUI reducer: snapshots, RPC results, notifications, local commands, approvals, diffs, task output and queued prompts folded into `AppState`. |
 

@@ -238,7 +238,10 @@ fn olp_commands_json_is_the_catalog_and_help_json_does_not_run() {
 #[test]
 fn olp_bundle_matches_the_repository_and_is_reused() {
     let sb = Sb::new();
-    let out = sb.olp(&["unit", "status"], "");
+    // `unit` is Rust now; the legacy switch still runs its script, and with
+    // it unpacks the bundle.
+    let legacy = [("OCTOSCODE_OLP_LEGACY".to_string(), "1".to_string())];
+    let out = sb.olp_env(&["unit", "status"], "", &legacy);
     assert!(out.status.success(), "{}", stderr(&out));
     assert_eq!(stdout(&out).trim(), "没有登记任何单元");
     let bundle = sb.bundle();
@@ -261,7 +264,11 @@ fn olp_bundle_matches_the_repository_and_is_reused() {
         .unwrap()
         .modified()
         .unwrap();
-    assert!(sb.olp(&["unit", "status"], "").status.success());
+    assert!(
+        sb.olp_env(&["unit", "status"], "", &legacy)
+            .status
+            .success()
+    );
     assert_eq!(sb.bundle(), bundle);
     assert_eq!(
         std::fs::metadata(bundle.join("scripts/olp-unit.py"))

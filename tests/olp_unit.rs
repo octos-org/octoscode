@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-//! Contract tests for `scripts/olp-unit.py` (SDD spec:
+//! Contract tests for `octoscode olp unit` (SDD spec:
 //! `specs/task-olp-unit-registry.spec.md`): unit registration, heartbeats and
 //! the health states the hub derives from them.
 
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 fn tool() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/olp-unit.py")
+    PathBuf::from(env!("CARGO_BIN_EXE_octoscode"))
 }
 
 fn stdout(out: &Output) -> String {
@@ -94,9 +94,8 @@ impl Hub {
     }
 
     fn cmd(&self) -> Command {
-        let mut cmd = Command::new("python3");
-        cmd.arg("-B")
-            .arg(tool())
+        let mut cmd = Command::new(tool());
+        cmd.args(["olp", "unit"])
             .env("OLP_UNITS_DIR", self.units_dir())
             .env("OLP_UNIT_CHECKS_DIR", self.checks_dir())
             .env("OLP_HERDR", self.dir.path().join("herdr"));
