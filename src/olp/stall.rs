@@ -24,15 +24,20 @@ use super::inbox::{Partition, items};
 use super::log::{Event, Log};
 use super::{policy, unit};
 
-const USAGE: &str = "用法: octoscode olp board stall <日志目录> [--quiet 秒] [--stale-after 秒] [--state 文件] [--policy 命令 | --policy-crate 目录] [--json]
+const USAGE: &str = "用法: octoscode olp board stall <日志目录> [--quiet 秒] [--stale-after 秒] [--state 文件] [--policy 命令 | --policy-crate 目录] [--samples 文件] [--json]
+      octoscode olp board stall --replay <样本文件> [--policy 命令 | --policy-crate 目录] [--json]
 
 集群是否整体静默:有未了结的卡、占着卡的单元上没有内环在工作、日志已 --quiet 秒(默认 600)
 没有新事件时,逐张卡说明在等什么、从哪条事件起、谁能推动。有人在工作就不算。
 --policy:把事实(JSON)从 stdin 交给这条命令,由它判定是否静默、每张卡在等谁(stdout 一行 JSON);
 命令失败、超时或输出不合规时改用内置规则并在 stderr 说明。也可用环境变量 OLP_STALL_POLICY。
 --policy-crate:策略是一个 Rust 包,由 Relax 从源码直接运行(需要带 relax feature 的构建;relax 取 OLP_RELAX 或 PATH)。
+--samples:把这次的事实和判定(内置规则的、策略的)追加到样本文件,一行一份 JSON;与上一份只差
+秒数的不重复记。也可用环境变量 OLP_STALL_SAMPLES。
+--replay:不读日志,把样本文件里的事实逐份重算,比较两个判定:带策略时拿内置规则对这个策略,
+不带时拿这个版本的内置规则对样本里当时的判定。全部一致退出码 0,有不同退出码 1。
 同一段沉默不连着报:卡的状态变了、或又过了 3 次运行才再报,最多 3 次。
-退出码:0(是否静默看输出);2 用法;4 日志读不了";
+退出码:0(是否静默看输出;--replay 时为全部一致);1 --replay 发现不同;2 用法;4 日志或样本读不了";
 
 /// Runs between two reports of the same silence, and how many reports.
 const REPEAT_AFTER_RUNS: u64 = 3;
@@ -99,12 +104,12 @@ fn working_units(units: &BTreeSet<String>, stale_after: u64) -> (BTreeSet<String
 }
 
 /// What a policy is told about one open card.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct CardFact {
     number: u64,
     unit: String,
     /// `inbox` (waiting on the outer loop) or `working`.
-    partition: &'static str,
+    partition: String,
     reason: String,
     claimed: bool,
     last_seq: u64,
@@ -117,7 +122,7 @@ struct CardFact {
 }
 
 /// Everything the decision may depend on. A policy sees exactly this.
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct Facts {
     quiet: u64,
     silent_seconds: i64,
@@ -126,18 +131,190 @@ struct Facts {
     cards: Vec<CardFact>,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct Verdict {
     number: u64,
     waits_on: String,
     cause: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct Decision {
     stalled: bool,
     #[serde(default)]
     alerts: Vec<Verdict>,
+}
+
+impl Decision {
+    /// What the decision comes to: nothing is reported when it is no stall,
+    /// and the order of the alerts does not matter.
+    fn outcome(&self) -> Option<BTreeMap<u64, (&str, &str)>> {
+        self.stalled.then(|| {
+            self.alerts
+                .iter()
+                .map(|v| (v.number, (v.waits_on.as_str(), v.cause.as_str())))
+                .collect()
+        })
+    }
+}
+
+/// One line of a samples file: what was known and what was decided.
+#[derive(Serialize, Deserialize)]
+struct Sample {
+    ts: String,
+    facts: Facts,
+    builtin: Decision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    policy: Option<Decision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    policy_error: Option<String>,
+}
+
+/// A samples file keeps this many lines; the older half goes when it is full.
+const MAX_SAMPLES: usize = 2000;
+
+/// The sample without what changes by merely waiting.
+fn shape(sample: &Sample) -> serde_json::Value {
+    let mut value = serde_json::to_value(sample).unwrap_or_default();
+    if let Some(map) = value.as_object_mut() {
+        map.remove("ts");
+    }
+    if let Some(facts) = value.get_mut("facts").and_then(|f| f.as_object_mut()) {
+        facts.remove("silent_seconds");
+        for card in facts
+            .get_mut("cards")
+            .and_then(|c| c.as_array_mut())
+            .into_iter()
+            .flatten()
+        {
+            if let Some(card) = card.as_object_mut() {
+                card.remove("silent_seconds");
+            }
+        }
+    }
+    value
+}
+
+/// Appends `sample` unless the last one recorded differs only in seconds.
+fn record(path: &std::path::Path, sample: &Sample) -> Result<(), String> {
+    let old = std::fs::read_to_string(path).unwrap_or_default();
+    let mut lines: Vec<&str> = old.lines().filter(|l| !l.trim().is_empty()).collect();
+    let same = lines
+        .last()
+        .and_then(|line| serde_json::from_str::<Sample>(line).ok())
+        .is_some_and(|last| shape(&last) == shape(sample));
+    if same {
+        return Ok(());
+    }
+    let line = serde_json::to_string(sample).map_err(|e| e.to_string())?;
+    if lines.len() >= MAX_SAMPLES {
+        lines.drain(..lines.len() - MAX_SAMPLES / 2);
+    }
+    lines.push(&line);
+    std::fs::write(path, lines.join("\n") + "\n").map_err(|e| e.to_string())
+}
+
+/// How two decisions on the same facts differ, one line per difference.
+fn differences(ours: &Decision, theirs: &Decision, names: (&str, &str)) -> Vec<String> {
+    let (a, b) = (ours.outcome(), theirs.outcome());
+    let says = |stalled: bool| if stalled { "静默" } else { "不算静默" };
+    if a.is_some() != b.is_some() {
+        return vec![format!(
+            "{}判为{},{}判为{}",
+            names.0,
+            says(a.is_some()),
+            names.1,
+            says(b.is_some())
+        )];
+    }
+    let (a, b) = (a.unwrap_or_default(), b.unwrap_or_default());
+    let cards: BTreeSet<u64> = a.keys().chain(b.keys()).copied().collect();
+    let show = |v: Option<&(&str, &str)>| match v {
+        Some((waits_on, cause)) => format!("等 {waits_on}:{cause}"),
+        None => "不报".to_string(),
+    };
+    cards
+        .into_iter()
+        .filter(|n| a.get(n) != b.get(n))
+        .map(|n| {
+            format!(
+                "#{n} {}:{};{}:{}",
+                names.0,
+                show(a.get(&n)),
+                names.1,
+                show(b.get(&n))
+            )
+        })
+        .collect()
+}
+
+/// `--replay`: decide again on recorded facts and compare.
+fn replay(prog: &str, file: &str, source: Option<&policy::Source>, as_json: bool) -> i32 {
+    let text = match std::fs::read_to_string(file) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("{prog}: 读不了样本文件 {file}: {e}");
+            return 4;
+        }
+    };
+    let names = match source {
+        Some(_) => ("内置规则", "策略"),
+        None => ("这个版本的内置规则", "当时的判定"),
+    };
+    let (mut total, mut same) = (0usize, 0usize);
+    let mut differing = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let sample: Sample = match serde_json::from_str(line) {
+            Ok(sample) => sample,
+            Err(e) => {
+                eprintln!("{prog}: 样本文件第 {} 行不是样本: {e}", index + 1);
+                return 4;
+            }
+        };
+        total += 1;
+        let ours = builtin(&sample.facts);
+        let found = match source {
+            Some(source) => match ask_policy(source, &sample.facts) {
+                Ok(theirs) => differences(&ours, &theirs, names),
+                Err(why) => vec![format!("策略没有给出可用的判定({why})")],
+            },
+            None => {
+                let then = sample.policy.as_ref().unwrap_or(&sample.builtin);
+                differences(&ours, then, names)
+            }
+        };
+        if found.is_empty() {
+            same += 1;
+        } else {
+            differing.push((index + 1, sample.ts, found));
+        }
+    }
+    if as_json {
+        let list: Vec<_> = differing
+            .iter()
+            .map(|(line, ts, found)| json!({"line": line, "ts": ts, "differences": found}))
+            .collect();
+        println!(
+            "{}",
+            json!({"samples": total, "same": same, "differing": list})
+        );
+    } else {
+        println!(
+            "{total} 份样本:{same} 份一致,{} 份不同({} 对 {})",
+            differing.len(),
+            names.0,
+            names.1
+        );
+        for (line, ts, found) in &differing {
+            for difference in found {
+                println!("  第 {line} 行({ts}):{difference}");
+            }
+        }
+    }
+    if differing.is_empty() { 0 } else { 1 }
 }
 
 /// The rule this tool ships with.
@@ -149,7 +326,7 @@ fn builtin(facts: &Facts) -> Decision {
         .cards
         .iter()
         .map(|c| {
-            let (waits_on, cause) = match c.partition {
+            let (waits_on, cause) = match c.partition.as_str() {
                 "inbox" => ("outer", format!("等外环:{}", c.reason)),
                 _ if !c.claimed => (
                     "unit",
@@ -223,6 +400,11 @@ pub fn run(argv: &[String]) -> i32 {
         .ok()
         .filter(|p| !p.is_empty())
         .map(policy::Source::Command);
+    let mut samples = std::env::var("OLP_STALL_SAMPLES")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from);
+    let mut replay_file: Option<String> = None;
     let mut rest = Vec::new();
     let mut words = argv.iter();
     while let Some(word) = words.next() {
@@ -247,6 +429,20 @@ pub fn run(argv: &[String]) -> i32 {
             "--state" => match words.next() {
                 Some(path) => {
                     state_file = Some(PathBuf::from(path));
+                    true
+                }
+                None => false,
+            },
+            "--samples" => match words.next() {
+                Some(path) => {
+                    samples = Some(PathBuf::from(path));
+                    true
+                }
+                None => false,
+            },
+            "--replay" => match words.next() {
+                Some(path) => {
+                    replay_file = Some(path.clone());
                     true
                 }
                 None => false,
@@ -279,6 +475,13 @@ pub fn run(argv: &[String]) -> i32 {
             eprintln!("{prog}: 参数不对: {word}\n{USAGE}");
             return 2;
         }
+    }
+    if let Some(file) = &replay_file {
+        if !rest.is_empty() {
+            eprintln!("{prog}: --replay 不读日志,不要再给日志目录\n{USAGE}");
+            return 2;
+        }
+        return replay(prog, file, source.as_ref(), as_json);
     }
     let [dir] = rest.as_slice() else {
         eprintln!("{USAGE}");
@@ -315,7 +518,7 @@ pub fn run(argv: &[String]) -> i32 {
         .last()
         .and_then(|e| seconds_since(&e.ts, now))
         .unwrap_or(i64::MAX);
-    let facts = Facts {
+    let mut facts = Facts {
         quiet,
         silent_seconds: silent_for,
         working_units: working.iter().cloned().collect(),
@@ -328,9 +531,9 @@ pub fn run(argv: &[String]) -> i32 {
                     number: item.number,
                     unit: item.unit.clone().unwrap_or_default(),
                     partition: if matches!(item.partition, Partition::Inbox) {
-                        "inbox"
+                        "inbox".to_string()
                     } else {
-                        "working"
+                        "working".to_string()
                     },
                     reason: item.reason.clone(),
                     claimed: events.iter().any(|e| {
@@ -351,12 +554,35 @@ pub fn run(argv: &[String]) -> i32 {
             })
             .collect(),
     };
-    let decision = match &source {
-        Some(source) => ask_policy(source, &facts).unwrap_or_else(|why| {
-            eprintln!("{prog}: 策略没有给出可用的判定({why}),改用内置规则");
-            builtin(&facts)
-        }),
-        None => builtin(&facts),
+    let ours = builtin(&facts);
+    let asked = source.as_ref().map(|source| ask_policy(source, &facts));
+    if let Some(Err(why)) = &asked {
+        eprintln!("{prog}: 策略没有给出可用的判定({why}),改用内置规则");
+    }
+    if let Some(path) = &samples {
+        // Only a moment with open cards has anything to decide.
+        if !facts.cards.is_empty() {
+            let (theirs, failed) = match &asked {
+                Some(Ok(decision)) => (Some(decision.clone()), None),
+                Some(Err(why)) => (None, Some(why.clone())),
+                None => (None, None),
+            };
+            let sample = Sample {
+                ts: now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                facts,
+                builtin: ours.clone(),
+                policy: theirs,
+                policy_error: failed,
+            };
+            if let Err(e) = record(path, &sample) {
+                eprintln!("{prog}: 记不下样本 {}: {e}", path.display());
+            }
+            facts = sample.facts;
+        }
+    }
+    let decision = match asked {
+        Some(Ok(decision)) => decision,
+        _ => ours,
     };
     let stalled = decision.stalled;
 

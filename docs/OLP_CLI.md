@@ -95,7 +95,8 @@
 `board stall`(`specs/task-olp-stall.spec.md`)回答"是不是所有人都在等":有卡未了结、占着卡的
 单元上没有内环在工作、日志 `--quiet` 秒没有新事件,三条都成立才算。有人在工作就不算,做得久
 不是问题。静默时逐张卡给出原因、起始事件和谁能推动;同一段沉默最多报三次。判定可以交给外部策略
-(`--policy`,或带 `relax` feature 时的 `--policy-crate`),见 `docs/OLP_POLICY.md`。
+(`--policy`,或带 `relax` feature 时的 `--policy-crate`);`--samples` 留下每次的事实与判定,
+`--replay <样本文件>` 在这些样本上比较两个判定。见 `docs/OLP_POLICY.md`。
 
 ### 2.3 卡(card)——派发
 

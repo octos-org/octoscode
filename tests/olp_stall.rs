@@ -424,6 +424,187 @@ fn a_policy_that_fails_or_oversteps_falls_back_to_the_builtin_rule() {
     );
 }
 
+/// Scenario: 样本文件留下每次的事实和判定,只差秒数的不重复记
+#[test]
+fn samples_keep_the_facts_and_both_decisions_once_per_change() {
+    let hub = Hub::new();
+    hub.beat("m08", "blocked");
+    let log = hub.log();
+    std::fs::create_dir_all(&log).unwrap();
+    let file = hub.dir.path().join("samples.jsonl");
+    let samples = file.to_string_lossy().into_owned();
+    let lines = || -> Vec<serde_json::Value> {
+        std::fs::read_to_string(&file)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    };
+    // Nothing open: nothing to decide, nothing recorded.
+    hub.stall(&[
+        "--quiet",
+        "0",
+        "--state",
+        "/dev/null",
+        "--samples",
+        &samples,
+    ]);
+    assert!(lines().is_empty());
+
+    hub.card("m08", "卡在审批框的卡");
+    hub.stall(&[
+        "--quiet",
+        "0",
+        "--state",
+        "/dev/null",
+        "--samples",
+        &samples,
+    ]);
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    hub.stall(&[
+        "--quiet",
+        "0",
+        "--state",
+        "/dev/null",
+        "--samples",
+        &samples,
+    ]);
+    let seen = lines();
+    assert_eq!(seen.len(), 1, "a second run a second later adds nothing");
+    let first = &seen[0];
+    assert_eq!(
+        first["facts"]["cards"][0]["agents"],
+        serde_json::json!(["blocked"])
+    );
+    assert_eq!(first["builtin"]["stalled"], true);
+    assert!(first.get("policy").is_none() && !first["ts"].as_str().unwrap().is_empty());
+
+    // A policy's decision is recorded beside the built-in one; so is a policy's failure.
+    let policy = script(
+        hub.dir.path(),
+        "policy.sh",
+        "echo '{\"stalled\":true,\"alerts\":[{\"number\":1,\"waits_on\":\"unit\",\"cause\":\"内环停在审批框上\"}]}'",
+    );
+    hub.stall(&[
+        "--quiet",
+        "0",
+        "--state",
+        "/dev/null",
+        "--samples",
+        &samples,
+        "--policy",
+        &policy,
+    ]);
+    let broken = script(hub.dir.path(), "broken.sh", "exit 3");
+    let out = Command::new(BIN)
+        .args(["olp", "board", "stall", &log, "--quiet", "0", "--json"])
+        .args(["--state", "/dev/null", "--policy", &broken])
+        .env("OLP_UNITS_DIR", hub.dir.path().join("units"))
+        .env("OLP_STALL_SAMPLES", &samples)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let seen = lines();
+    assert_eq!(seen.len(), 3, "{seen:?}");
+    assert_eq!(seen[1]["policy"]["alerts"][0]["cause"], "内环停在审批框上");
+    assert!(
+        seen[1]["builtin"]["alerts"][0]["cause"]
+            .as_str()
+            .unwrap()
+            .contains("没有领取")
+    );
+    assert_eq!(seen[2]["policy_error"], "退出码 3");
+    assert!(seen[2].get("policy").is_none());
+}
+
+/// Scenario: 重放样本,比较内置规则与策略、或这个版本与当时的判定
+#[test]
+fn a_replay_compares_decisions_on_recorded_facts() {
+    let hub = Hub::new();
+    hub.beat("m08", "blocked");
+    hub.card("m08", "卡在审批框的卡");
+    let file = hub.dir.path().join("samples.jsonl");
+    let samples = file.to_string_lossy().into_owned();
+    let blocked = script(
+        hub.dir.path(),
+        "blocked.sh",
+        "echo '{\"stalled\":true,\"alerts\":[{\"number\":1,\"waits_on\":\"unit\",\"cause\":\"内环停在审批框上\"}]}'",
+    );
+    // One sample decided by the built-in rule alone, one decided by a policy.
+    hub.stall(&[
+        "--quiet",
+        "0",
+        "--state",
+        "/dev/null",
+        "--samples",
+        &samples,
+    ]);
+    hub.stall(&[
+        "--quiet",
+        "0",
+        "--state",
+        "/dev/null",
+        "--samples",
+        &samples,
+        "--policy",
+        &blocked,
+    ]);
+    let replay = |extra: &[&str]| {
+        let mut args = vec!["board", "stall", "--replay", &samples];
+        args.extend_from_slice(extra);
+        hub.olp(&args, "")
+    };
+
+    // No policy: this build's rule against what was decided then. The first
+    // sample agrees; the second was decided by a policy this build does not have.
+    let out = replay(&[]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("2 份样本:1 份一致,1 份不同"), "{text}");
+    assert!(
+        text.contains("第 2 行") && text.contains("#1 ") && text.contains("内环停在审批框上"),
+        "{text}"
+    );
+    assert!(text.contains("没有领取"), "{text}");
+
+    // With the policy: the built-in rule against it, on both samples.
+    let out = replay(&["--policy", &blocked, "--json"]);
+    assert_eq!(out.status.code(), Some(1));
+    let seen: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(
+        (seen["samples"].as_u64(), seen["same"].as_u64()),
+        (Some(2), Some(0)),
+        "{seen}"
+    );
+    assert_eq!(seen["differing"][0]["line"], 1);
+
+    // A policy that calls it no stall, and one that fails, both count as different.
+    let calm = script(hub.dir.path(), "calm.sh", "echo '{\"stalled\":false}'");
+    let text = stdout(&replay(&["--policy", &calm]));
+    assert!(text.contains("内置规则判为静默,策略判为不算静默"), "{text}");
+    let broken = script(hub.dir.path(), "broken.sh", "exit 3");
+    let out = replay(&["--policy", &broken]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stdout(&out).contains("策略没有给出可用的判定(退出码 3)"));
+
+    // Only samples the built-in rule decided: all agree, exit 0.
+    let first = std::fs::read_to_string(&file).unwrap();
+    let only = hub.dir.path().join("only.jsonl");
+    std::fs::write(&only, first.lines().next().unwrap()).unwrap();
+    let only = only.to_string_lossy().into_owned();
+    let out = hub.olp(&["board", "stall", "--replay", &only], "");
+    assert_eq!(out.status.code(), Some(0), "{}", stdout(&out));
+    assert!(stdout(&out).contains("1 份样本:1 份一致,0 份不同"));
+
+    // Bad input.
+    let log = hub.log();
+    assert_eq!(replay(&[&log[..]]).status.code(), Some(2));
+    let missing = hub.olp(&["board", "stall", "--replay", "/nonexistent/samples"], "");
+    assert_eq!(missing.status.code(), Some(4));
+    std::fs::write(&file, "not a sample\n").unwrap();
+    assert_eq!(replay(&[]).status.code(), Some(4));
+}
+
 /// Scenario: 没有带 relax feature 的构建拒绝 --policy-crate
 #[cfg(not(feature = "relax"))]
 #[test]

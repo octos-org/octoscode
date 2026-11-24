@@ -41,6 +41,13 @@ hub 侧的"超时"原先的设计是按单张卡计时。借鉴 Antigravity Swar
   程序 Relax 在包目录里执行 `relax run --unattended --quiet <包名>`(`OLP_RELAX` 或 PATH,超时
   180 秒)。目录里没有可用的 `Cargo.toml` 是用法错误;没带 feature 的构建以退出码 2 拒绝。
   Relax 只运行策略,日志、锁、关口不经过它。
+- 样本(`--samples <文件>` 或 `OLP_STALL_SAMPLES`):有未了结的卡时,把事实、内置规则的判定、策略的
+  判定或失败原因追加为一行 JSON;与上一行只差秒数的不追加;最多 2000 行,满了丢掉较旧的一半。
+  写不下样本只在 stderr 说明,不影响判定。
+- 重放(`--replay <样本文件>`):不读日志、不写状态。逐份样本比较两个判定——带策略时是内置规则对
+  这个策略(策略失败算不同),不带时是这个版本的内置规则对样本里当时的判定(有策略判定用它,否则
+  用当时内置规则的)。比较的是结果:不算静默时不看卡,卡的顺序无关。退出码 0 全部一致,1 有不同
+  并逐条列出样本行号与差异,2 同时给了日志目录,4 样本文件读不了或某行不是样本。
 - 单元值守(`remote watch`):状态文件增加 `picked`(每张未领取的卡,agent 开始工作的提醒次数)。
   某张卡已有 2 次这样的提醒、到了下一次该提醒的时间仍未领取,向 hub 上报一次
   `progress <N> undelivered`,说明为"agent 已 N 次开始工作,卡仍未领取(可能出错或额度用完)"。
@@ -119,3 +126,17 @@ Scenario: 带 relax feature 时,策略包由 relax 在包目录里从源码运�
   Given 带 relax feature 的构建,一个策略包目录,OLP_RELAX 指向一个记录调用的替身
   When 带 --policy-crate 运行;再把它指向一个没有 Cargo.toml 的目录
   Then 替身在包目录里以 run --unattended --quiet <包名> 被调用,它的回答被采用;不是包的目录退出码 2
+
+Scenario: 样本文件留下每次的事实和判定,只差秒数的不重复记(critical)
+  Tags: critical
+  Test: samples_keep_the_facts_and_both_decisions_once_per_change
+  Given 一台内环 blocked 的单元,一个样本文件
+  When 没有卡时带 --samples 查;派一张卡后隔一秒查两次;带一个策略查;用环境变量指样本文件、带一个失败的策略查
+  Then 没有卡不记;两次只记一行,含事实(内环状态)与内置规则的判定;带策略的一行并列记下两个判定;策略失败的一行记下失败原因而没有策略判定
+
+Scenario: 重放样本,比较内置规则与策略、或这个版本与当时的判定(critical)
+  Tags: critical
+  Test: a_replay_compares_decisions_on_recorded_facts
+  Given 两份样本:一份由内置规则判定,一份由一条改了原因的策略判定
+  When 不带策略重放;带该策略重放(--json);带一条判为不算静默的策略、一条失败的策略重放;只重放第一份;给了日志目录、文件不存在、内容不是样本
+  Then 不带策略时一份一致一份不同并指出行号与两边的原因,退出码 1;带策略时两份都不同;判为不算静默与策略失败都算不同;只有内置规则判定的样本全部一致,退出码 0;三种错误输入分别是 2、4、4

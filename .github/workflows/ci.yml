@@ -53,6 +53,9 @@ jobs:
       # everything clippy would — so a separate `cargo check` job would only
       # repeat this work.
       - run: scripts/verify.sh -- cargo test --all-targets
+      # The `relax` feature is off by default, so the run above never builds
+      # the code behind it. Only the suite that has feature-gated tests.
+      - run: scripts/verify.sh -- cargo test --features relax --test olp_stall
       # --all-targets skips doctests, so run them separately.
       - run: scripts/verify.sh -- cargo test --doc
 
@@ -86,6 +89,7 @@ jobs:
       # Gating, not reporting: the 5 warnings `main` carried are cleared in
       # this same PR, so the baseline is zero and any new one fails the build.
       - run: scripts/verify.sh -- cargo clippy --all-targets -- -D warnings
+      - run: scripts/verify.sh -- cargo clippy --all-targets --features relax -- -D warnings
 
   # Aggregate gate for the `default-branch-protection` ruleset, whose required
   # status context is literally "CI required" (added to the ruleset on
