@@ -211,7 +211,8 @@ fn a_dispatched_card_waits_in_the_units_inbox_until_claimed() {
             "body": "卡的正文:机密细节不该出现在唤醒里",
             "next": {
                 "claim": "octoscode olp remote progress 1 claimed",
-                "ack": "octoscode olp remote ack 1 done|wontdo|blocked <说明>"
+                "ack": "octoscode olp remote ack 1 done|wontdo|blocked <说明>",
+                "host": "这张卡指定了实现方 octoscode、复验方 codex:你是单元主持,不要自己实现。按 $(cat ~/.octos/outer/octoscode-home)/skills/octoloop/AGENTS.md 的「模式 unit」组织实现与对抗复验;全部复验方通过后执行 octoscode olp repo push 1 --verified-by <单元号>-<复验方>+<复验方>,再回执"
             }
         })
     );

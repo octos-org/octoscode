@@ -568,6 +568,7 @@ fn with_next_steps(report: &mut serde_json::Value) {
     if items.is_empty() {
         return;
     }
+    let mut hosted = false;
     for item in items.iter_mut() {
         let Some(n) = item.get("number").and_then(|v| v.as_u64()) else {
             continue;
@@ -579,15 +580,43 @@ fn with_next_steps(report: &mut serde_json::Value) {
         if item.get("body").is_none() {
             next["read"] = serde_json::json!("octoscode olp remote mirror");
         }
+        // A card that names who implements and who reviews is not for the
+        // woken agent to do itself: it hosts the unit's inner loops.
+        let implementer = item.get("impl").and_then(|v| v.as_str()).unwrap_or("");
+        let review: Vec<&str> = item
+            .get("review")
+            .and_then(|v| v.as_array())
+            .map(|names| names.iter().filter_map(|n| n.as_str()).collect())
+            .unwrap_or_default();
+        if !implementer.is_empty() || !review.is_empty() {
+            let named = |who: &str| {
+                if who.is_empty() {
+                    "由你定".to_string()
+                } else {
+                    who.to_string()
+                }
+            };
+            next["host"] = serde_json::json!(format!(
+                "这张卡指定了实现方 {}、复验方 {}:你是单元主持,不要自己实现。按 $(cat ~/.octos/outer/octoscode-home)/skills/octoloop/AGENTS.md 的「模式 unit」组织实现与对抗复验;全部复验方通过后执行 octoscode olp repo push {n} --verified-by <单元号>-<复验方>+<复验方>,再回执",
+                named(implementer),
+                named(&review.join("、")),
+            ));
+            hosted = true;
+        }
         item["next"] = next;
     }
+    let host = if hosted {
+        ";带 next.host 的卡由你主持而不是由你实现,照 next.host 办"
+    } else {
+        ""
+    };
     let avoid = if items.iter().any(|item| item.get("avoid").is_some()) {
         ";avoid 列出的东西不要碰,非碰不可就回执 blocked 说明"
     } else {
         ""
     };
     report["how"] = serde_json::json!(format!(
-        "每张卡:先执行 next.claim 领取,按 body(卡的全文)办理,做完执行 next.ack 回执——done 附 commit/测试证据,wontdo 附理由,blocked 附原因{avoid}"
+        "每张卡:先执行 next.claim 领取,按 body(卡的全文)办理,做完执行 next.ack 回执——done 附 commit/测试证据,wontdo 附理由,blocked 附原因{avoid}{host}"
     ));
 }
 

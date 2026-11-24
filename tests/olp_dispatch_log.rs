@@ -312,6 +312,98 @@ fn what_a_card_must_not_touch_reaches_the_unit() {
     assert!(!inbox["how"].as_str().unwrap().contains("avoid"));
 }
 
+/// Scenario: 作废的卡不会被同一个键重新派出
+#[test]
+fn a_voided_card_is_not_dispatched_again_under_its_key() {
+    let hub = Hub::new();
+    hub.unit("m07", true, &[], &["octoscode"]);
+    let out = hub.dispatch("m07", "修复解析器", &["--wake", "w1:p1"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let out = hub.olp(&["card", "void", "1", "--log", &hub.log(), "窗格没了"], "");
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    // The same card again would hash to the same key. Answering "already
+    // there" would point at a card nobody will do.
+    let again = hub.dispatch("m07", "修复解析器", &["--wake", "w1:p2"]);
+    assert_eq!(again.status.code(), Some(1), "{}", stdout(&again));
+    assert!(stderr(&again).contains("#1 已作废"), "{}", stderr(&again));
+    assert!(stderr(&again).contains("--key"), "{}", stderr(&again));
+    assert_eq!(hub.events().len(), 2, "nothing written");
+
+    // Said differently, or under a new key, it is a new card.
+    let out = hub.dispatch(
+        "m07",
+        "修复解析器",
+        &["--wake", "w1:p2", "--key", "retry-1"],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let events = hub.events();
+    assert_eq!(events.len(), 3, "{events:?}");
+    assert_eq!(events[2]["card"], 2);
+}
+
+/// Scenario: 带分工的卡告诉被唤醒的 agent 它是单元主持
+#[test]
+fn a_card_with_roles_tells_the_woken_agent_it_hosts() {
+    let hub = Hub::new();
+    hub.unit("m07", true, &[("codex", true, true)], &["octoscode"]);
+    let conf = hub.dir.path().join("unit.conf");
+    std::fs::write(
+        &conf,
+        format!(
+            "hub = local\nunit = m07\nstore = log\nlog = {}\n",
+            hub.log()
+        ),
+    )
+    .unwrap();
+    let inbox = || -> serde_json::Value {
+        let out = Command::new(BIN)
+            .args(["olp", "remote", "inbox"])
+            .env("OLP_UNIT_CONF", &conf)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
+        serde_json::from_str(&stdout(&out)).unwrap()
+    };
+
+    // A plain card is for the woken agent to do.
+    let out = hub.dispatch("m07", "小改动", &["--wake", "w1:p1"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let plain = inbox();
+    assert!(plain["items"][0]["next"].get("host").is_none(), "{plain}");
+    assert!(!plain["how"].as_str().unwrap().contains("next.host"));
+
+    // One that names an implementer and reviewers is for it to host.
+    let out = hub.dispatch(
+        "m07",
+        "改解析器",
+        &[
+            "--wake",
+            "w1:p1",
+            "--impl",
+            "octoscode",
+            "--review",
+            "codex",
+            "--allow-busy",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let both = inbox();
+    assert!(both["items"][0]["next"].get("host").is_none(), "{both}");
+    let host = both["items"][1]["next"]["host"].as_str().expect("host");
+    assert!(host.contains("实现方 octoscode、复验方 codex"), "{host}");
+    assert!(host.contains("不要自己实现"), "{host}");
+    assert!(host.contains("「模式 unit」"), "{host}");
+    assert!(
+        host.contains("octoscode olp repo push 2 --verified-by"),
+        "{host}"
+    );
+    assert!(
+        both["how"].as_str().unwrap().contains("next.host"),
+        "{both}"
+    );
+}
+
 /// Scenario: 汇总也读事件日志
 #[test]
 fn the_summary_reads_the_event_log() {

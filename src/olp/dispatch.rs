@@ -491,6 +491,17 @@ pub fn run(argv: &[String]) -> i32 {
                     first.card.unwrap_or(0)
                 ));
             }
+            // A voided card does not come back: saying "already there"
+            // would leave the outer loop waiting on a card nobody will do.
+            let voided = events
+                .iter()
+                .any(|e| e.kind == "voided" && e.card == first.card);
+            if voided {
+                return Err(format!(
+                    "键 {key} 的 #{} 已作废,不会重新生效;要重派请改标题或正文,或给一个新的 --key",
+                    first.card.unwrap_or(0)
+                ));
+            }
             reused = first.card;
             return Ok(Vec::new());
         }

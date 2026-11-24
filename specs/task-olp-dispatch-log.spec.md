@@ -22,6 +22,8 @@ estimate: 1d
   在日志锁内完成,两次并发派卡不会都看到"空闲"。
 - 幂等键 `--key`;不给时为 `dispatch:<单元>:<摘要>`,摘要取自单元号、标题、正文、分工与
   不碰清单。键已存在且是派给同一台单元的卡:不再检查、不再写,返回原卡号(`created: false`)。
+  同一个键的卡已作废时拒绝(退出码 1):作废的卡不会重新生效,答"已在日志里"会让外环等一张
+  没人做的卡(2026-11-24 实测)。改标题或正文,或给新的 `--key`,才是一张新卡。
 - 健康:读 `olp unit` 的登记与心跳(`unit::health`),只有"正常"才派;未登记也拒绝。
   `--skip-health` 跳过健康与复验方两项。
 - 复验方:`--review` 里的每个名字,在单元最近一次心跳里——
@@ -35,6 +37,10 @@ estimate: 1d
 - 不碰清单 `--avoid <文本>`(可重复,每条单行、最长 400 字节):写进 `data.avoid`;渲染为
   `avoid: …` 行;单元的收件箱(`remote inbox`)每张卡带 `avoid`,`how` 里加一句"avoid 列出的
   东西不要碰,非碰不可就回执 blocked 说明"。没有清单的卡不带这个字段。
+- 主持提示(2026-11-24):卡上写了 `--impl` 或 `--review` 时,单元收件箱里该卡的 `next` 多一项
+  `host`——说明实现方与复验方是谁、被唤醒的 agent 是单元主持不要自己实现、按规程「模式 unit」
+  组织、全部复验通过后的推送命令;`how` 里加一句指向它。没写分工的卡不带。原因:值守只说
+  "去看收件箱",收件箱原先只说"领取、办理、回执",被唤醒的 agent 会把带分工的卡自己做掉。
 - 送达:`--wake <窗格>` 把窗格记进卡里(同 `card open --pane`),卡进单元的收件箱,由单元值守
   唤醒;hub 不往窗格打字。
 - 退出码:0 成功;1 被规则拒绝,未写入;2 用法;4 日志读写失败;6 主审权已失效。
@@ -89,6 +95,18 @@ Scenario: 卡上写明不许碰什么,单元在收件箱里看得到
   Given 一台正常的单元
   When 带两条 --avoid 派一张卡,单元查收件箱;再派一张不带清单的卡
   Then 事件里有 avoid 清单,渲染出的板上逐条有 avoid: 行,收件箱里该卡带 avoid、how 里提到它;不带清单的卡没有这个字段,how 也不提
+
+Scenario: 作废的卡不会被同一个键重新派出
+  Test: a_voided_card_is_not_dispatched_again_under_its_key
+  Given 一张已派出又被作废的卡
+  When 原样再派一次;再用新的 --key 派一次
+  Then 第一次以退出码 1 拒绝,说明 #1 已作废并提示改内容或换 --key,日志不变;第二次写入一张新卡 #2
+
+Scenario: 带分工的卡告诉被唤醒的 agent 它是单元主持
+  Test: a_card_with_roles_tells_the_woken_agent_it_hosts
+  Given 一台有 codex 复验方的正常单元
+  When 派一张不带分工的卡,再派一张带 --impl octoscode --review codex 的卡,单元查收件箱
+  Then 不带分工的卡的 next 没有 host,how 不提它;带分工的卡的 next.host 写明实现方与复验方、不要自己实现、「模式 unit」与 `octoscode olp repo push 2 --verified-by`,how 指向 next.host
 
 Scenario: 汇总也读事件日志
   Test: the_summary_reads_the_event_log

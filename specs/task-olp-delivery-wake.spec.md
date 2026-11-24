@@ -85,7 +85,7 @@ Scenario: 派出的卡在单元的收件箱里等到被领取(critical)
   Test: a_dispatched_card_waits_in_the_units_inbox_until_claimed
   Given 四张卡:两张给 m07 的不同窗格,一张给 m08,一张给 m07 但没有窗格
   When 各单元查收件箱(带与不带窗格),m07 领取一张两次,外环作废另一张
-  Then m07 只看到自己带窗格的两张、按窗格可筛选,m08 只看到自己的,没有卡的单元为空;每张卡带全文 body 与 next(领取、回执命令),有卡时带 how,空收件箱不带;领取后该卡离开收件箱,作废的也离开;没有单元的 --pane 与非法窗格被拒
+  Then m07 只看到自己带窗格的两张、按窗格可筛选,m08 只看到自己的,没有卡的单元为空;每张卡带全文 body 与 next(领取、回执命令;带分工的卡另有 host,见 task-olp-dispatch-log),有卡时带 how,空收件箱不带;领取后该卡离开收件箱,作废的也离开;没有单元的 --pane 与非法窗格被拒
 
 Scenario: 值守在 agent 空闲时发一句固定短句,不带卡的内容,不重复提醒(critical)
   Tags: critical
