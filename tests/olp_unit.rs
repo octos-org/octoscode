@@ -556,6 +556,22 @@ fn unit_heartbeat_reports_launch_permission() {
     assert_eq!(hb["permission"], "none");
     assert_eq!(hb["backends"], serde_json::json!([]));
 
+    // A serve without `--solo` is somebody's own service, not an inner
+    // loop's backend: it is listed, and it does not decide the permission.
+    let (_, hb) = heartbeat(
+        "  4101 octos serve --stdio --solo --danger-full-access\n  4200 /usr/local/bin/octos serve --port 8080\n",
+    );
+    assert_eq!(hb["permission"], "full");
+    assert_eq!(
+        hb["backends"],
+        serde_json::json!([
+            {"pid": 4101, "full_access": true, "solo": true},
+            {"pid": 4200, "full_access": false, "solo": false},
+        ])
+    );
+    let (_, hb) = heartbeat("  4200 /usr/local/bin/octos serve --port 8080\n");
+    assert_eq!(hb["permission"], "none");
+
     // Through the hub: the status shows what the unit reported, and the
     // permission does not change the health state.
     hub.register("m01", "m01", "aa:bb:cc:dd:ee:01");

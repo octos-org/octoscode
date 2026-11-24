@@ -736,6 +736,7 @@ fn is_serve_argv0(path: &str) -> bool {
 
 /// How the octos backends on this machine were launched. Only two launch
 /// flags are read; the rest of the command line never leaves the machine.
+/// Every serve is listed, but only the solo ones decide the permission.
 fn serve_permission(ps_output: Option<&str>) -> (&'static str, Vec<Value>) {
     let text = match ps_output {
         Some(file) => match std::fs::read(file) {
@@ -766,11 +767,17 @@ fn serve_permission(ps_output: Option<&str>) -> (&'static str, Vec<Value>) {
             continue;
         }
         let full_access = argv.contains(&"--danger-full-access");
-        full.push(full_access);
+        let solo = argv.contains(&"--solo");
+        // Only a solo serve can back an inner loop: without `--solo` octos
+        // refuses a permission profile, so such a serve is somebody's own
+        // service and says nothing about how the inner loops were launched.
+        if solo {
+            full.push(full_access);
+        }
         backends.push(json!({
             "pid": pid,
             "full_access": full_access,
-            "solo": argv.contains(&"--solo"),
+            "solo": solo,
         }));
     }
     (fold(&full), backends)

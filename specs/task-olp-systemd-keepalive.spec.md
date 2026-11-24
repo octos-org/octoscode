@@ -45,7 +45,12 @@ estimate: 0.5d
   `sudo loginctl enable-linger <用户>`,并提醒关闭自动休眠;只报告不修改,有问题时退出码 1。
   `--linger-output <文件>` 读文件代替运行 `loginctl`。没有 linger 时 `daemon-reload` 会因为
   连不上用户总线而失败,报错里直接给出这条修正命令。
-- `heartbeat` 的命令与 launchd 版完全相同。
+- `heartbeat` 的命令与 launchd 版完全相同。2026-11-24 起两版都如此:设了 `OLP_SSH`(环境里或
+  `--env OLP_SSH=…`)时管道用它代替 `ssh`,写成绝对路径,选项不变;没给 `--env PATH=…` 时,
+  注册当时 `claude`、`codex`、`node` 所在的目录放在任务 PATH 的最前(与 shell 的查找顺序一致),默认目录跟在后面;注册当时 shell 解析到的
+  `claude`、`codex` 的路径另记为 `OLP_CLAUDE`、`OLP_CODEX`(已用 `--env` 给出的不动)。原因:
+  任务的 PATH 与 shell 不同,心跳要么找不到复验方的 CLI,要么先找到另一个同名文件(实测:
+  默认目录里有同名的安装占位脚本,会联网且不返回,`node` 也有一个),复验方的登录状态就成了"未知"。
 - 有意不做,与 launchd 版相同:不恢复内环会话;不把 `outer-duty hold` 做成常驻任务;不
   单独保活 `octos serve`;不改系统设置。
 - 退出码:0 成功;1 `systemctl` 失败或 `doctor` 发现问题;2 用法错误,或在非 Linux 上要求
@@ -93,8 +98,8 @@ Scenario: 心跳任务把巡检结果经 ssh 送到 hub(critical)
   Tags: critical
   Test: systemd_heartbeat_job_pipes_the_unit_heartbeat_to_the_hub
   Given 脚本目录的路径含空格
-  When 注册心跳任务;以不存在的脚本目录再注册;以非法单元号、含命令注入的 hub、以 `-` 开头的 hub 注册
-  Then 任务每 60 秒运行一条管道;`--require` 原样传给心跳命令,非法值以退出码 2 拒绝;herdr 在 PATH 上时任务记下它的真实路径(`OLP_HERDR`),不在时成功但给出提醒;脚本路径被正确引用,ssh 带 BatchMode 与超时;脚本不存在时成功但给出提醒;三种非法输入都以退出码 2 拒绝
+  When 注册心跳任务;在设了 `OLP_SSH`、PATH 上只有一个含 `codex` 与 `node` 的目录时再注册;以不存在的脚本目录再注册;以非法单元号、含命令注入的 hub、以 `-` 开头的 hub 注册
+  Then 任务每 60 秒运行一条管道;设了 `OLP_SSH` 时管道用它连 hub,任务的 PATH 以那个目录开头、只出现一次,默认目录仍在;任务记下 `OLP_CODEX` 为那个目录里的 codex,没装的 claude 不记;`--require` 原样传给心跳命令,非法值以退出码 2 拒绝;herdr 在 PATH 上时任务记下它的真实路径(`OLP_HERDR`),不在时成功但给出提醒;脚本路径被正确引用,ssh 带 BatchMode 与超时;脚本不存在时成功但给出提醒;三种非法输入都以退出码 2 拒绝
 
 ### Rule: doctor — linger 检查
 Scenario: linger 检查只报告不修改

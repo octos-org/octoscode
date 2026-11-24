@@ -83,6 +83,22 @@ fn which(name: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// The PATH written into a job: a service manager's own is too short.
+fn default_path(backend: Backend) -> String {
+    match backend {
+        Backend::Launchd => {
+            "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_string()
+        }
+        Backend::Systemd => {
+            let h = home();
+            format!(
+                "{0}/.local/bin:{0}/.cargo/bin:/usr/local/bin:/usr/bin:/bin",
+                h.display()
+            )
+        }
+    }
+}
+
 fn output(cmd: &mut Command) -> (bool, String, String) {
     match cmd.output() {
         Ok(out) => (
@@ -145,19 +161,7 @@ fn job(
         );
     }
     let mut env = BTreeMap::new();
-    let path = match backend {
-        Backend::Launchd => {
-            "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".to_string()
-        }
-        Backend::Systemd => {
-            let h = home();
-            format!(
-                "{0}/.local/bin:{0}/.cargo/bin:/usr/local/bin:/usr/bin:/bin",
-                h.display()
-            )
-        }
-    };
-    env.insert("PATH".to_string(), path);
+    env.insert("PATH".to_string(), default_path(backend));
     for pair in env_pairs {
         let ok = pair.split_once('=').filter(|(key, _)| {
             let mut chars = key.chars();
@@ -609,6 +613,56 @@ fn heartbeat(backend: Backend, argv: &[String]) -> Result<i32, Fail> {
             ),
         }
     }
+    // The heartbeat asks the reviewer CLIs whether they are logged in. A
+    // job's PATH is not the shell's: the CLI may be outside it, or another
+    // file of the same name may come first there (seen: an installer stub
+    // that goes to the network and never returns). So record the very
+    // executables this shell resolves, and put their directories, and
+    // `node`'s, first on the job's PATH for what they start in turn.
+    for (name, key) in [("claude", "OLP_CLAUDE"), ("codex", "OLP_CODEX")] {
+        if env.iter().any(|pair| pair.starts_with(&format!("{key}="))) {
+            continue;
+        }
+        if let Some(path) = which(name).and_then(|p| std::path::absolute(p).ok()) {
+            env.push(format!("{key}={}", path.display()));
+        }
+    }
+    if !env.iter().any(|pair| pair.starts_with("PATH=")) {
+        let base = default_path(backend);
+        // Found directories first, in the order this shell would search.
+        let mut dirs: Vec<String> = Vec::new();
+        for name in ["claude", "codex", "node"] {
+            let dir = which(name).and_then(|p| p.parent().map(Path::to_path_buf));
+            if let Some(dir) = dir.and_then(|d| d.to_str().map(str::to_string)) {
+                if dir.starts_with('/') && !dir.contains(':') && !dirs.contains(&dir) {
+                    dirs.push(dir);
+                }
+            }
+        }
+        for dir in base.split(':') {
+            if !dirs.iter().any(|d| d == dir) {
+                dirs.push(dir.to_string());
+            }
+        }
+        if dirs.join(":") != base {
+            env.push(format!("PATH={}", dirs.join(":")));
+        }
+    }
+    // The same ssh the other commands use: `OLP_SSH` when it is set, here
+    // or with `--env`. A job has no shell profile, so the path is absolute.
+    let ssh = env
+        .iter()
+        .find_map(|pair| pair.strip_prefix("OLP_SSH="))
+        .map(str::to_string)
+        .or_else(|| std::env::var("OLP_SSH").ok())
+        .filter(|v| !v.is_empty())
+        .map(|v| match which(&v) {
+            Some(found) if !v.contains('/') => found.to_string_lossy().into_owned(),
+            _ => std::path::absolute(&v)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or(v),
+        })
+        .unwrap_or_else(|| "ssh".to_string());
     // One shell word, quoted only when it has to be.
     let quote = |word: &str| {
         let plain = !word.is_empty()
@@ -634,8 +688,9 @@ fn heartbeat(backend: Backend, argv: &[String]) -> Result<i32, Fail> {
         format!("{} | {}", shell(&send), shell(&take))
     } else {
         format!(
-            "{} | ssh -o BatchMode=yes -o ConnectTimeout=10 {} receive",
+            "{} | {} -o BatchMode=yes -o ConnectTimeout=10 {} receive",
             shell(&send),
+            shell(&[&ssh]),
             shell(&[hub])
         )
     };

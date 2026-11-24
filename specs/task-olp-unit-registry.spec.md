@@ -42,7 +42,8 @@ estimate: 1d
 - 启动权限:心跳带 `permission` 与 `backends`。读进程表(`ps -axo pid=,command=`),只算
   argv[0] 的文件名是 `octos` 或 `octos-<后缀>` 且 argv[1] 是 `serve` 的进程——TUI 把同样的
   字样放在一个参数里,不算后端。每个后端只取 `--danger-full-access` 与 `--solo` 两个开关,
-  命令行的其余部分不进心跳。Claude Code 与 Codex 内环的启动参数取自 `herdr pane
+  命令行的其余部分不进心跳。只有带 `--solo` 的后端参与权限判定:不带 `--solo` 的 serve
+  拿不到权限档,是机器上别的常驻服务,照样列进 `backends`,但不算内环。Claude Code 与 Codex 内环的启动参数取自 `herdr pane
   process-info`(窗格前台进程的 argv):Claude Code 的 `--dangerously-skip-permissions`、
   `--permission-mode bypassPermissions`,Codex 的
   `--dangerously-bypass-approvals-and-sandbox`、`--yolo`、`--sandbox danger-full-access`
@@ -142,9 +143,9 @@ Scenario: 心跳带上内置巡检与扩展检查的结果
 
 Scenario: 心跳报告内环后端的启动权限
   Test: unit_heartbeat_reports_launch_permission
-  Given 进程表里有 TUI 包裹进程、两个带完全访问的后端(其中一个的命令行含密钥)、一个无关进程;以及只有不带完全访问的后端、两种混合、只有 TUI 的进程表
+  Given 进程表里有 TUI 包裹进程、两个带完全访问的后端(其中一个的命令行含密钥)、一个无关进程;以及只有不带完全访问的后端、两种混合、只有 TUI 的进程表;一个完全访问的后端加一个不带 `--solo` 的 serve,和只有后者的进程表
   When 分别生成心跳;把带额外字段与畸形条目的 `backends` 交给 hub;再交给 hub 一个未知的权限值和一条不带该字段的旧心跳
-  Then 权限依次为 full、sandboxed、mixed、none;后端只含 pid 与两个开关,密钥不出现在心跳里;hub 的状态显示 full 且健康状态不受影响,额外字段与畸形条目被丢弃;未知值与缺失都显示为 unknown
+  Then 权限依次为 full、sandboxed、mixed、none;不带 `--solo` 的 serve 列在 `backends` 里但不改变权限(仍为 full,只有它时为 none);后端只含 pid 与两个开关,密钥不出现在心跳里;hub 的状态显示 full 且健康状态不受影响,额外字段与畸形条目被丢弃;未知值与缺失都显示为 unknown
 
 Scenario: 心跳报告复验方装没装、登没登录,只是告知(复盘第 16 条)
   Test: unit_heartbeat_reports_reviewer_logins_without_judging_health
