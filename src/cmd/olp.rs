@@ -208,6 +208,10 @@ const BUNDLE: &[(&str, &[u8])] = &[
         include_bytes!("../../docs/OLP_REVIEW_EVIDENCE.md"),
     ),
     (
+        "docs/OLP_POLICY.md",
+        include_bytes!("../../docs/OLP_POLICY.md"),
+    ),
+    (
         "docs/OUTER_LOOP_PROTOCOL.md",
         include_bytes!("../../docs/OUTER_LOOP_PROTOCOL.md"),
     ),

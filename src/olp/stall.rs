@@ -22,12 +22,15 @@ use serde_json::json;
 
 use super::inbox::{Partition, items};
 use super::log::{Event, Log};
-use super::unit;
+use super::{policy, unit};
 
-const USAGE: &str = "用法: octoscode olp board stall <日志目录> [--quiet 秒] [--stale-after 秒] [--state 文件] [--json]
+const USAGE: &str = "用法: octoscode olp board stall <日志目录> [--quiet 秒] [--stale-after 秒] [--state 文件] [--policy 命令 | --policy-crate 目录] [--json]
 
 集群是否整体静默:有未了结的卡、占着卡的单元上没有内环在工作、日志已 --quiet 秒(默认 600)
 没有新事件时,逐张卡说明在等什么、从哪条事件起、谁能推动。有人在工作就不算。
+--policy:把事实(JSON)从 stdin 交给这条命令,由它判定是否静默、每张卡在等谁(stdout 一行 JSON);
+命令失败、超时或输出不合规时改用内置规则并在 stderr 说明。也可用环境变量 OLP_STALL_POLICY。
+--policy-crate:策略是一个 Rust 包,由 Relax 从源码直接运行(需要带 relax feature 的构建;relax 取 OLP_RELAX 或 PATH)。
 同一段沉默不连着报:卡的状态变了、或又过了 3 次运行才再报,最多 3 次。
 退出码:0(是否静默看输出);2 用法;4 日志读不了";
 
@@ -95,6 +98,118 @@ fn working_units(units: &BTreeSet<String>, stale_after: u64) -> (BTreeSet<String
     (working, unknown)
 }
 
+/// What a policy is told about one open card.
+#[derive(Serialize)]
+struct CardFact {
+    number: u64,
+    unit: String,
+    /// `inbox` (waiting on the outer loop) or `working`.
+    partition: &'static str,
+    reason: String,
+    claimed: bool,
+    last_seq: u64,
+    last_ts: String,
+    last_kind: String,
+    silent_seconds: i64,
+    /// What herdr last saw each inner loop on the card's unit doing
+    /// (`working`, `idle`, `blocked`, `done`); empty when the unit is unknown.
+    agents: Vec<String>,
+}
+
+/// Everything the decision may depend on. A policy sees exactly this.
+#[derive(Serialize)]
+struct Facts {
+    quiet: u64,
+    silent_seconds: i64,
+    working_units: Vec<String>,
+    unknown_units: Vec<String>,
+    cards: Vec<CardFact>,
+}
+
+#[derive(Deserialize)]
+struct Verdict {
+    number: u64,
+    waits_on: String,
+    cause: String,
+}
+
+#[derive(Deserialize)]
+struct Decision {
+    stalled: bool,
+    #[serde(default)]
+    alerts: Vec<Verdict>,
+}
+
+/// The rule this tool ships with.
+fn builtin(facts: &Facts) -> Decision {
+    let stalled = !facts.cards.is_empty()
+        && facts.working_units.is_empty()
+        && facts.silent_seconds >= facts.quiet as i64;
+    let alerts = facts
+        .cards
+        .iter()
+        .map(|c| {
+            let (waits_on, cause) = match c.partition {
+                "inbox" => ("outer", format!("等外环:{}", c.reason)),
+                _ if !c.claimed => (
+                    "unit",
+                    format!("派出后没有领取,{} 上没有内环在工作", c.unit),
+                ),
+                _ => (
+                    "unit",
+                    format!("领取后没有回执,{} 上没有内环在工作", c.unit),
+                ),
+            };
+            Verdict {
+                number: c.number,
+                waits_on: waits_on.to_string(),
+                cause,
+            }
+        })
+        .collect();
+    Decision { stalled, alerts }
+}
+
+/// Asks an external policy. It may only choose among the open cards, name
+/// `unit` or `outer`, and give a short cause; anything else is refused and
+/// the caller falls back to [`builtin`].
+fn ask_policy(source: &policy::Source, facts: &Facts) -> Result<Decision, String> {
+    let input = serde_json::to_vec(facts).map_err(|e| e.to_string())?;
+    let line = policy::ask(source, input)?;
+    let decision: Decision =
+        serde_json::from_str(&line).map_err(|e| format!("输出不是约定的 JSON: {e}"))?;
+    let open: BTreeSet<u64> = facts.cards.iter().map(|c| c.number).collect();
+    let mut named = BTreeSet::new();
+    for v in &decision.alerts {
+        if !open.contains(&v.number) {
+            return Err(format!("#{} 不是未了结的卡", v.number));
+        }
+        if !named.insert(v.number) {
+            return Err(format!("#{} 出现了两次", v.number));
+        }
+        if v.waits_on != "unit" && v.waits_on != "outer" {
+            return Err(format!("#{} 的 waits_on 只能是 unit 或 outer", v.number));
+        }
+        let length = v.cause.chars().count();
+        if length == 0 || length > 200 || v.cause.contains('\n') {
+            return Err(format!("#{} 的 cause 要是 1 到 200 字的一行", v.number));
+        }
+    }
+    Ok(decision)
+}
+
+/// The status of every inner loop in a unit's fresh heartbeat.
+fn agent_statuses(name: &str, stale_after: u64) -> Vec<String> {
+    unit::health(name, stale_after)
+        .filter(|h| h.state != "stale")
+        .and_then(|h| h.beat)
+        .and_then(|beat| beat.get("agents").and_then(|v| v.as_array()).cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|a| a.get("status").and_then(|s| s.as_str()).map(String::from))
+        .collect()
+}
+
 fn last_about(events: &[Event], card: u64) -> Option<&Event> {
     events.iter().rev().find(|e| e.card == Some(card))
 }
@@ -104,6 +219,10 @@ pub fn run(argv: &[String]) -> i32 {
     let prog = "olp board stall";
     let (mut quiet, mut stale_after, mut as_json) = (600u64, unit::DEFAULT_STALE, false);
     let mut state_file: Option<PathBuf> = None;
+    let mut source = std::env::var("OLP_STALL_POLICY")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .map(policy::Source::Command);
     let mut rest = Vec::new();
     let mut words = argv.iter();
     while let Some(word) = words.next() {
@@ -129,6 +248,24 @@ pub fn run(argv: &[String]) -> i32 {
                 Some(path) => {
                     state_file = Some(PathBuf::from(path));
                     true
+                }
+                None => false,
+            },
+            "--policy" => match words.next() {
+                Some(command) => {
+                    source = Some(policy::Source::Command(command.clone()));
+                    true
+                }
+                None => false,
+            },
+            "--policy-crate" => match words.next().map(|dir| policy::package(dir)) {
+                Some(Ok(package)) => {
+                    source = Some(package);
+                    true
+                }
+                Some(Err(why)) => {
+                    eprintln!("{prog}: --policy-crate: {why}");
+                    return 2;
                 }
                 None => false,
             },
@@ -178,7 +315,50 @@ pub fn run(argv: &[String]) -> i32 {
         .last()
         .and_then(|e| seconds_since(&e.ts, now))
         .unwrap_or(i64::MAX);
-    let stalled = !open.is_empty() && working.is_empty() && silent_for >= quiet as i64;
+    let facts = Facts {
+        quiet,
+        silent_seconds: silent_for,
+        working_units: working.iter().cloned().collect(),
+        unknown_units: unknown.clone(),
+        cards: open
+            .iter()
+            .filter_map(|item| {
+                let last = last_about(&events, item.number)?;
+                Some(CardFact {
+                    number: item.number,
+                    unit: item.unit.clone().unwrap_or_default(),
+                    partition: if matches!(item.partition, Partition::Inbox) {
+                        "inbox"
+                    } else {
+                        "working"
+                    },
+                    reason: item.reason.clone(),
+                    claimed: events.iter().any(|e| {
+                        e.card == Some(item.number)
+                            && e.kind == "progress"
+                            && e.data.get("node").and_then(|n| n.as_str()) == Some("claimed")
+                    }),
+                    last_seq: last.seq,
+                    last_ts: last.ts.clone(),
+                    last_kind: last.kind.clone(),
+                    silent_seconds: seconds_since(&last.ts, now).unwrap_or(i64::MAX),
+                    agents: item
+                        .unit
+                        .as_deref()
+                        .map(|name| agent_statuses(name, stale_after))
+                        .unwrap_or_default(),
+                })
+            })
+            .collect(),
+    };
+    let decision = match &source {
+        Some(source) => ask_policy(source, &facts).unwrap_or_else(|why| {
+            eprintln!("{prog}: 策略没有给出可用的判定({why}),改用内置规则");
+            builtin(&facts)
+        }),
+        None => builtin(&facts),
+    };
+    let stalled = decision.stalled;
 
     // A card that is no longer open is forgotten, so a later stall on a
     // reopened card is reported afresh.
@@ -188,23 +368,12 @@ pub fn run(argv: &[String]) -> i32 {
     let mut alerts = Vec::new();
     let mut held_back = 0usize;
     if stalled {
-        for item in &open {
-            let Some(last) = last_about(&events, item.number) else {
+        for verdict in decision.alerts {
+            let Some(fact) = facts.cards.iter().find(|c| c.number == verdict.number) else {
                 continue;
             };
-            let claimed = events.iter().any(|e| {
-                e.card == Some(item.number)
-                    && e.kind == "progress"
-                    && e.data.get("node").and_then(|n| n.as_str()) == Some("claimed")
-            });
-            let target = item.unit.clone().unwrap_or_default();
-            let (waits_on, cause) = match item.partition {
-                Partition::Inbox => ("outer", format!("等外环:{}", item.reason)),
-                _ if !claimed => ("unit", format!("派出后没有领取,{target} 上没有内环在工作")),
-                _ => ("unit", format!("领取后没有回执,{target} 上没有内环在工作")),
-            };
-            let seen = st.cards.entry(item.number.to_string()).or_default();
-            let changed = seen.seq != last.seq;
+            let seen = st.cards.entry(fact.number.to_string()).or_default();
+            let changed = seen.seq != fact.last_seq;
             if changed {
                 seen.reports = 0;
             }
@@ -213,16 +382,20 @@ pub fn run(argv: &[String]) -> i32 {
                 held_back += 1;
                 continue;
             }
-            seen.seq = last.seq;
+            seen.seq = fact.last_seq;
             seen.run = st.runs;
             seen.reports += 1;
             alerts.push(Alert {
-                number: item.number,
-                unit: target,
-                waits_on,
-                cause,
-                since: last.ts.clone(),
-                seq: last.seq,
+                number: fact.number,
+                unit: fact.unit.clone(),
+                waits_on: if verdict.waits_on == "outer" {
+                    "outer"
+                } else {
+                    "unit"
+                },
+                cause: verdict.cause,
+                since: fact.last_ts.clone(),
+                seq: fact.last_seq,
                 reports: seen.reports,
             });
         }

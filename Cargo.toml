@@ -83,6 +83,10 @@ default = ["update"]
 # Enables axoupdater-backed in-place self-update for cargo-dist installs.
 # Distro/package builds can disable it (matches rustup's `no-self-update`).
 update = ["dep:axoupdater"]
+# OctoLoop policies written as Rust packages and run from source by the Relax
+# JIT (`--policy-crate`, src/olp/policy.rs). Off by default. It adds no
+# dependency: `relax` is an external program found at run time.
+relax = []
 
 [lints.rust]
 unsafe_code = "deny"

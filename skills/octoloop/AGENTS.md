@@ -46,6 +46,7 @@ Markdown,没有哪个 agent 专有的指令。Claude Code 经
 | 黑板太长、归档已了结的卡 | `docs/OLP_OUTER_BOOT.md` §7 | `octoscode olp board archive` |
 | 进化环:采集摩擦信号、出 retro 简报 | `docs/OLP_OUTER_BOOT.md` §7,本文件 outer 模式第 5 步 | `octoscode olp evo harvest`、`octoscode olp evo retro` |
 | 两个 octos peer 审查员的初审结论不一致,用实际执行的测试裁决(只适用于以 octos peer 方式跑的审查,不是通用的人工仲裁) | `docs/OLP_REVIEW_EVIDENCE.md` | `octoscode olp review`;只读的进度视图 `octoscode olp review monitor` |
+| 想改一条判定规则(目前是"什么算集群静默、每张卡在等谁")而不重新构建 octoscode | `docs/OLP_POLICY.md` | `octoscode olp board stall --policy <命令>`;带 `relax` feature 的构建另有 `--policy-crate <目录>` |
 | 给落地项目的 agent 一张自包含的上岗卡 | `docs/OCTOLOOP_AGENTS.zh-CN.md`(英文 `docs/OCTOLOOP_AGENTS.md`),由 `olp-init.sh` 铺成项目的 `AGENTS.md` | `octoscode olp init` |
 | 想通读原理,或查某项能力的缺省状态 | `docs/OCTOLOOP_GUIDE.md`、`docs/OCTOLOOP_FEATURES.md` | — |
 

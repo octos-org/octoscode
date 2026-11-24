@@ -32,6 +32,15 @@ hub 侧的"超时"原先的设计是按单张卡计时。借鉴 Antigravity Swar
 - 不重复:同一张卡,最后一条事件没变时,报过之后要再过 3 次运行才再报,最多报 3 次;事件
   变了从头算。卡了结后从状态里去掉。被压下不报的张数在 `held_back` 里。
 - 退出码:0(是否静默看输出);2 用法;4 日志读不了。
+- 外部策略(2026-11-25,`docs/OLP_POLICY.md`):`--policy <命令>` 或环境变量 `OLP_STALL_POLICY`
+  把事实(JSON)从 stdin 交给一个外部命令,由它决定是否静默、报哪些卡、每张卡等谁和原因;
+  stdout 最后一行以 `{` 开头的内容是回答。策略只能点未了结的卡、不重复,`waits_on` 只能是
+  `unit`/`outer`,`cause` 是 1 到 200 字的一行;单元、起始事件与时间、"最多报三次"仍由本命令决定。
+  策略起不来、非零退出、超时(20 秒)或回答不合规:改用内置规则,在 stderr 说明,退出码不变。
+- cargo feature `relax`(默认关闭,不增加依赖):`--policy-crate <目录>` 把策略写成 Rust 包,由外部
+  程序 Relax 在包目录里执行 `relax run --unattended --quiet <包名>`(`OLP_RELAX` 或 PATH,超时
+  180 秒)。目录里没有可用的 `Cargo.toml` 是用法错误;没带 feature 的构建以退出码 2 拒绝。
+  Relax 只运行策略,日志、锁、关口不经过它。
 - 单元值守(`remote watch`):状态文件增加 `picked`(每张未领取的卡,agent 开始工作的提醒次数)。
   某张卡已有 2 次这样的提醒、到了下一次该提醒的时间仍未领取,向 hub 上报一次
   `progress <N> undelivered`,说明为"agent 已 N 次开始工作,卡仍未领取(可能出错或额度用完)"。
@@ -40,9 +49,9 @@ hub 侧的"超时"原先的设计是按单张卡计时。借鉴 Antigravity Swar
 ## Boundaries
 
 ### Allowed Changes
-- src/olp/stall.rs、src/olp/client.rs、src/olp/mod.rs、src/cmd/olp.rs
+- src/olp/stall.rs、src/olp/policy.rs、src/olp/client.rs、src/olp/mod.rs、src/cmd/olp.rs、Cargo.toml
 - tests/olp_stall.rs、tests/olp_delivery.rs
-- docs/OLP_CLI.md、docs/ARCHITECTURE.md
+- docs/OLP_CLI.md、docs/OLP_POLICY.md、docs/ARCHITECTURE.md
 - specs/task-olp-stall.spec.md、specs/task-olp-delivery-wake.spec.md
 
 ### Forbidden
@@ -50,6 +59,8 @@ hub 侧的"超时"原先的设计是按单张卡计时。借鉴 Antigravity Swar
 
 ## Out of Scope
 
+- 把 Relax 嵌进 octoscode,或让 octoscode 自身运行在 JIT 上。
+- 其他判定(唤醒措辞、复验方选择等)接入外部策略。
 - 把静默提醒送到外环的窗格(外环事件收件箱与外环值守的任务)。
 - 外环自己是否在工作:本命令只看单元;等外环的卡照样列出,由读它的一方判断。
 - 把本命令注册成常驻定时任务(`olp keepalive`)。
@@ -82,3 +93,29 @@ Scenario: agent 每次都开始工作、卡却一直没领取的,也让 hub 知�
   Given 一张派给窗格的卡,agent 空闲、每次提醒都开始工作,但不领取
   When 以 --renudge 0 提醒两次;不到时间再跑一轮;到时间后再跑两轮;最后单元领取
   Then 前两次只是提醒;不到时间不上报;到时间后向 hub 上报一次 undelivered,说明里写明开始工作的次数,hub 收件箱显示送达失败;领取后消失
+
+Scenario: 判定可以交给外部策略,它看到事实并决定每张卡的原因(critical)
+  Tags: critical
+  Test: an_external_policy_decides_and_sees_the_facts
+  Given 一张派给单元的卡,该单元的内环处于 blocked
+  When 不带策略查;带一个回答"内环停在审批框上"的策略查;再用环境变量指一个回答不算静默的策略
+  Then 内置规则只说没有领取;带策略时原因是策略给的,单元与事件序号仍是工具填的;策略收到的事实里有这张卡的编号、单元、分区、是否领取和内环状态;环境变量指的策略同样生效
+
+Scenario: 策略失败或越界时退回内置规则并说明原因(critical)
+  Tags: critical
+  Test: a_policy_that_fails_or_oversteps_falls_back_to_the_builtin_rule
+  Given 一张没领取的卡
+  When 策略分别:非零退出、输出不是 JSON、缺 stalled、点了不存在的卡、waits_on 不在允许范围、cause 为空或超长、同一张卡出现两次、命令起不来
+  Then 每种情况命令都成功,stderr 写明原因和"改用内置规则",输出是内置规则的结果;--policy 缺值退出码 2
+
+Scenario: 没有带 relax feature 的构建拒绝 --policy-crate
+  Test: a_build_without_relax_refuses_a_policy_crate
+  Given 默认 feature 的构建
+  When 带 --policy-crate 运行
+  Then 退出码 2,提示用 --features relax 构建
+
+Scenario: 带 relax feature 时,策略包由 relax 在包目录里从源码运行
+  Test: a_policy_crate_is_run_by_relax_in_its_own_folder
+  Given 带 relax feature 的构建,一个策略包目录,OLP_RELAX 指向一个记录调用的替身
+  When 带 --policy-crate 运行;再把它指向一个没有 Cargo.toml 的目录
+  Then 替身在包目录里以 run --unattended --quiet <包名> 被调用,它的回答被采用;不是包的目录退出码 2

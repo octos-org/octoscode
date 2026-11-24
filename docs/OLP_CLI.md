@@ -90,11 +90,12 @@
 | `olp board watch <板> <token> [--harvest <repo>] …` | Rust(`src/olp/sentinel.rs`),原 `olp-watch-board.sh` | hub |
 | `olp board summary --board <板或日志目录> [--repo R] [--json]` | Rust(`src/olp/summary.rs`),原 `olp-summary.py` | hub |
 | `olp id alloc …` | Rust(`src/olp/append.rs`),原 `olp-id-alloc.sh` | 任意 |
-| `olp board stall <日志目录> [--quiet 秒] [--json]` | Rust(`src/olp/stall.rs`) | hub |
+| `olp board stall <日志目录> [--quiet 秒] [--policy 命令 \| --policy-crate 目录] [--json]` | Rust(`src/olp/stall.rs`) | hub |
 
 `board stall`(`specs/task-olp-stall.spec.md`)回答"是不是所有人都在等":有卡未了结、占着卡的
 单元上没有内环在工作、日志 `--quiet` 秒没有新事件,三条都成立才算。有人在工作就不算,做得久
-不是问题。静默时逐张卡给出原因、起始事件和谁能推动;同一段沉默最多报三次。
+不是问题。静默时逐张卡给出原因、起始事件和谁能推动;同一段沉默最多报三次。判定可以交给外部策略
+(`--policy`,或带 `relax` feature 时的 `--policy-crate`),见 `docs/OLP_POLICY.md`。
 
 ### 2.3 卡(card)——派发
 
