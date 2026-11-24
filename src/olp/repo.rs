@@ -530,7 +530,7 @@ fn pre_receive() -> i32 {
         }
         let Some(signer) = verified_by(new) else {
             errors.push(format!(
-                "{reference}:缺少本地复验记录。本地复验通过后用 scripts/olp-task-push.sh {n} --verified-by <复验署名> 推送(push option olp-verified 的 sha 必须等于分支头)"
+                "{reference}:缺少本地复验记录。本地复验通过后用 octoscode olp repo push {n} --verified-by <复验署名> 推送(push option olp-verified 的 sha 必须等于分支头)"
             ));
             continue;
         };

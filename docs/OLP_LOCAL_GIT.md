@@ -52,7 +52,7 @@ unit: m07
 olp/v3 起,单元主持在卡上指定的复验方全部通过后推送,署名写出各复验方:
 
 ```bash
-scripts/olp-task-push.sh 212 --verified-by m07-codex+claude
+octoscode olp repo push 212 --verified-by m07-codex+claude
 ```
 
 返工或 rebase 到新种子后覆盖先前推过的分支,加 `--force`。
