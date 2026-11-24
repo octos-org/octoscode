@@ -281,6 +281,10 @@ R2 诚实验证声明(verified/partially/unverified)。
    方的克隆里),再 `octoscode olp remote ack <N> done <说明>`:提交号、
    轮次、每个复验方跑了什么与结论。hub 凭这些收单,不会替你补做复验。
 
+等内环停下用 `herdr agent wait <窗格> --until idle --until done --until blocked`
+(阻塞到状态变化),不要隔一会儿重复执行同一条查看命令:有的 agent 会把连续
+几次完全相同的调用判为空转并中止这一轮(octoscode 是 3 次),卡就停在半路。
+
 单元复验板 `.octos/UNIT_BOARD.md` 不入库(`olp-init.sh` 已把它加进
 `.gitignore`),写入用 `octoscode olp board append <板>`。
 
