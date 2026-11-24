@@ -4787,10 +4787,10 @@ pub(crate) fn peer_activity_line(app: &AppState, session_id: &octos_core::Sessio
 /// Mirrors [`AGENT_STRIP_MIN_TERMINAL_ROWS`].
 const PEER_STRIP_MIN_TERMINAL_ROWS: u16 = 12;
 
-/// #407: max peer rows the dock may claim below its title row. Larger fleets
-/// stay fully reachable via `+N` on the title row + the session strip (Alt+S).
-/// Mirrors [`AGENT_STRIP_MAX_AGENT_ROWS`].
-const PEER_STRIP_MAX_PEER_ROWS: u16 = 4;
+/// #407: peer rows the dock claims below its title row whenever the terminal
+/// can spare them. It used to be the most the dock showed on any terminal; a
+/// taller terminal now shows more (see [`peer_strip_peer_rows`]).
+const PEER_STRIP_BASE_PEER_ROWS: u16 = 4;
 
 /// #407: rows the Peer Dock occupies under the composer — mirrors
 /// [`agent_strip_height`]: 0 when no peers / transcript pager active /
@@ -4811,14 +4811,18 @@ pub(crate) fn peer_strip_height(app: &AppState, terminal_height: u16) -> u16 {
     }
 }
 
-/// #407: visible peer rows — capped by [`PEER_STRIP_MAX_PEER_ROWS`] and by
-/// the rows the terminal can spare beyond [`PEER_STRIP_MIN_TERMINAL_ROWS`].
-/// Mirrors [`agent_strip_agent_rows`].
+/// #407: visible peer rows — one per peer for as long as they fit in half of
+/// the rows the terminal has beyond [`PEER_STRIP_MIN_TERMINAL_ROWS`], so the
+/// dock grows with the terminal and leaves the other half to the rest of the
+/// layout. Never fewer than [`PEER_STRIP_BASE_PEER_ROWS`] where the terminal
+/// can spare them. A fleet larger than that keeps `+N` on the title row and
+/// stays reachable through the session strip (Alt+S).
 fn peer_strip_peer_rows(app: &AppState, terminal_height: u16) -> u16 {
     let roster = peer_dock_roster(app).len().min(u16::MAX as usize) as u16;
+    let spare = terminal_height.saturating_sub(PEER_STRIP_MIN_TERMINAL_ROWS);
     roster
-        .min(PEER_STRIP_MAX_PEER_ROWS)
-        .min(terminal_height.saturating_sub(PEER_STRIP_MIN_TERMINAL_ROWS))
+        .min((spare / 2).max(PEER_STRIP_BASE_PEER_ROWS))
+        .min(spare)
 }
 
 /// The peer session keys whose rows the Peer Dock ACTUALLY DRAWS at
@@ -4826,7 +4830,7 @@ fn peer_strip_peer_rows(app: &AppState, terminal_height: u16) -> u16 {
 /// (`roster.iter().take(rows)`), or empty when the dock is collapsed (the pill
 /// shows no per-peer affordance) or height-0 (pager active / terminal too short
 /// / no peers). Used to gate the dock's approve/deny keys so a peer whose ⚠
-/// affordance is off-screen (below the row cap) or hidden can't be actioned.
+/// affordance is off-screen (below the drawn rows) or hidden can't be actioned.
 pub(crate) fn visible_peer_dock_keys(
     app: &AppState,
     terminal_height: u16,
@@ -4869,8 +4873,8 @@ pub(crate) fn peer_strip_lines(
     )];
     // #532 (defect 4): "3 of 5 landed" is derivable from the roster the dock
     // already draws, and was shown nowhere. It rides the title row so the
-    // fleet's progress reads without counting glyphs down the rows (which the
-    // PEER_STRIP_MAX_PEER_ROWS cap can hide anyway).
+    // fleet's progress reads without counting glyphs down the rows (which a
+    // fleet larger than the dock's rows hides anyway).
     if let Some(landed) = fleet_landed_segment(app) {
         title_spans.push(Span::styled(
             format!("{landed} "),

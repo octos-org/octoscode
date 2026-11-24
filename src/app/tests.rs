@@ -12398,6 +12398,56 @@ mod tests {
         key
     }
 
+    /// The expanded dock stopped at four peer rows on any terminal, so a fleet
+    /// of ten read as four peers and `+6`, and only those four could be
+    /// approved from the dock. Its rows follow the terminal: half of what the
+    /// terminal has beyond the minimum layout, and never fewer than the four it
+    /// always showed.
+    #[test]
+    fn peer_dock_rows_follow_the_terminal_instead_of_stopping_at_four() {
+        let mut app = autonomy_app_state();
+        let live_ui_without_peers = live_ui_height(&app, 200, 40);
+        for n in 0..10 {
+            stage_peer(&mut app, &format!("page-{n:02}"), false);
+        }
+        app.peer_dock_collapsed = false;
+        let palette = Palette::for_theme(app.theme);
+        let drawn = |height: u16| {
+            lines_text(&peer_strip_lines(
+                &app,
+                palette,
+                peer_strip_peer_rows(&app, height),
+            ))
+        };
+
+        // A tall terminal shows the whole fleet, and every row can be acted on.
+        assert_eq!(peer_strip_height(&app, 40), 11, "title row + ten peers");
+        assert_eq!(visible_peer_dock_keys(&app, 40).len(), 10);
+        let whole = drawn(40);
+        assert!(whole.contains("page-09"), "the last peer is drawn: {whole}");
+        assert!(!whole.contains(" +"), "nothing is left to count: {whole}");
+        assert_eq!(
+            live_ui_height(&app, 200, 40),
+            live_ui_without_peers + 11,
+            "the live viewport reserves every row the taller dock draws"
+        );
+
+        // A 24-row terminal gives the dock six rows and counts the rest.
+        assert_eq!(peer_strip_height(&app, 24), 7);
+        assert_eq!(visible_peer_dock_keys(&app, 24).len(), 6);
+        let some = drawn(24);
+        assert!(
+            some.contains("page-05") && !some.contains("page-06"),
+            "{some}"
+        );
+        assert!(some.contains(" +4 "), "the rest are counted: {some}");
+
+        // A short terminal keeps what it had: four rows, then what it can spare.
+        assert_eq!(peer_strip_height(&app, 16), 5);
+        assert_eq!(peer_strip_height(&app, 13), 2);
+        assert_eq!(peer_strip_height(&app, 11), 0);
+    }
+
     /// #532 (defect 4): "3 of 5 landed" appeared nowhere. Both dock surfaces —
     /// the expanded title row and the collapsed pill — now carry the fleet's
     /// landing progress, so a master waiting on the last peer is legible
