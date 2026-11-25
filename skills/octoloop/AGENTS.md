@@ -284,6 +284,12 @@ R2 诚实验证声明(verified/partially/unverified)。
 等内环停下用 `herdr agent wait <窗格> --until idle --until done --until blocked`
 (阻塞到状态变化),不要隔一会儿重复执行同一条查看命令:有的 agent 会把连续
 几次完全相同的调用判为空转并中止这一轮(octoscode 是 3 次),卡就停在半路。
+herdr 靠屏幕内容判断内环的状态,agent 升级后可能认不出(Kimi Code 2.7 工作时被报成
+`idle`,值守和停滞判定都会看错):单元装机时对用到的种类执行一次
+`herdr integration install <种类>`,让 agent 自己上报,见 `docs/OLP_INNER_AGENTS.md` §6。
+
+领了卡就要回执:已领取的卡长时间没有新事件、你的窗格又空闲时,单元值守会发一句请你
+接着办(`olp remote watch --follow-up`,默认 900 秒,最多两次)。
 
 单元复验板 `.octos/UNIT_BOARD.md` 不入库(`olp-init.sh` 已把它加进
 `.gitignore`),写入用 `octoscode olp board append <板>`。

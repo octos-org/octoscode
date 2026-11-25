@@ -213,6 +213,49 @@ pub fn pending_for(events: &[Event], unit: &str) -> Vec<Pending> {
     out
 }
 
+/// A card the unit claimed and still holds: no receipt yet, not voided.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct Held {
+    pub number: u64,
+    pub title: String,
+    pub pane: String,
+    /// The card's text as dispatched, for a host that has to read it again.
+    pub body: String,
+    /// The last event about the card, and how long ago it was written.
+    pub last_seq: u64,
+    pub quiet_seconds: i64,
+}
+
+/// The cards `unit` claimed and has not answered, in number order. The
+/// unit's watcher reads this to follow up on a host that stopped half-way.
+pub fn held_by(events: &[Event], unit: &str, now: chrono::DateTime<chrono::Utc>) -> Vec<Held> {
+    let mut scan = scan(events);
+    super::inbox::items(&mut scan, now.date_naive(), |e| {
+        e.unit.as_deref() == Some(unit)
+    })
+    .into_iter()
+    .filter(|item| matches!(item.partition, super::inbox::Partition::Working))
+    .filter_map(|item| {
+        let about = || events.iter().filter(|e| e.card == Some(item.number));
+        about().find(|e| e.kind == "progress" && text(e, "node") == "claimed")?;
+        let dispatched = about().find(|e| e.kind == "dispatched")?;
+        let pane = text(dispatched, "pane").to_string();
+        let last = about().next_back()?;
+        let quiet = chrono::DateTime::parse_from_rfc3339(&last.ts)
+            .map(|at| (now - at.with_timezone(&chrono::Utc)).num_seconds())
+            .unwrap_or(0);
+        (!pane.is_empty()).then_some(Held {
+            number: item.number,
+            title: item.title.clone(),
+            pane,
+            body: text(dispatched, "body").trim().to_string(),
+            last_seq: last.seq,
+            quiet_seconds: quiet,
+        })
+    })
+    .collect()
+}
+
 /// Questions asked through `ask_outer` that were neither answered nor
 /// timed out, in the order they were first asked.
 pub fn pending_questions(events: &[Event]) -> Vec<Question> {

@@ -487,6 +487,82 @@ fn a_card_the_agent_keeps_starting_on_but_never_claims_is_reported() {
     assert!(!hub_inbox(&site.log()).contains("送达失败"));
 }
 
+/// Scenario: 已领取而停在半路的卡,值守请主持接着办,最多两次(critical)
+#[test]
+fn a_claimed_card_left_idle_is_followed_up_twice_at_most() {
+    let site = Site::new();
+    assert!(
+        site.open("领了没办完", &["--unit", "m07", "--pane", "w1:p1"])
+            .status
+            .success()
+    );
+    assert!(site.unit(&["progress", "1", "claimed"]).status.success());
+    let held = |pane: &[&str]| -> serde_json::Value {
+        let mut args = vec!["inbox"];
+        args.extend_from_slice(pane);
+        serde_json::from_str(&stdout(&site.unit(&args))).unwrap()
+    };
+    assert_eq!(held(&["w1:p1"])["held"][0]["number"], 1);
+    assert!(
+        held(&["w1:p1"])["held"][0]["body"]
+            .as_str()
+            .unwrap()
+            .contains("卡的正文")
+    );
+    assert!(held(&["w1:p9"])["held"].as_array().unwrap().is_empty());
+    let round = |extra: &[&str]| {
+        let mut args = vec!["watch", "w1:p1", "--once"];
+        args.extend_from_slice(extra);
+        let out = site.unit(&args);
+        assert!(out.status.success(), "{}", stderr(&out));
+        stdout(&out)
+    };
+    // Just claimed: not long enough to say anything.
+    round(&[]);
+    assert!(site.prompts().is_empty(), "{:?}", site.herdr_calls());
+    // A working host is not interrupted.
+    std::fs::write(site.dir.path().join("busy"), "").unwrap();
+    round(&["--follow-up", "0"]);
+    assert!(site.prompts().is_empty(), "{:?}", site.herdr_calls());
+    std::fs::remove_file(site.dir.path().join("busy")).unwrap();
+    // Idle with the card silent: asked to go on, with the number only.
+    let said = round(&["--follow-up", "0"]);
+    assert!(said.contains("已请它接着办"), "{said}");
+    let prompts = site.prompts();
+    assert_eq!(prompts.len(), 1);
+    assert!(
+        prompts[0].contains("已领取的卡 #1 还没有回执"),
+        "{prompts:?}"
+    );
+    assert!(!prompts[0].contains("机密细节"), "{prompts:?}");
+    // Not due again yet; then a second time, and no third.
+    round(&[]);
+    assert_eq!(site.prompts().len(), 1);
+    for _ in 0..3 {
+        round(&["--follow-up", "0"]);
+    }
+    assert_eq!(site.prompts().len(), 2, "{:?}", site.herdr_calls());
+    // The card moved: a new silence is a new reason.
+    assert!(
+        site.unit(&["progress", "1", "review", "1"])
+            .status
+            .success()
+    );
+    round(&["--follow-up", "0"]);
+    assert_eq!(site.prompts().len(), 3);
+    // Answered: nothing left to follow up.
+    let mut cmd = Command::new(BIN);
+    cmd.args(["olp", "remote", "ack", "1", "done", "做完了"])
+        .env("OLP_UNIT_CONF", site.dir.path().join("unit.conf"))
+        .env("OLP_UNIT_ID", "m07")
+        .env("HOME", site.dir.path());
+    let out = site.run(cmd, "");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(held(&[])["held"].as_array().unwrap().is_empty());
+    round(&["--follow-up", "0"]);
+    assert_eq!(site.prompts().len(), 3);
+}
+
 /// Scenario: `olp remote --help` 列出本程序自己的动作
 #[test]
 fn remote_help_lists_the_actions_this_binary_has() {

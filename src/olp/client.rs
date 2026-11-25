@@ -423,6 +423,9 @@ struct WatchState {
     reported: std::collections::BTreeSet<String>,
     /// How many nudges the agent started working on, per card still unclaimed.
     picked: BTreeMap<String, u32>,
+    /// Follow-ups on claimed cards without a receipt: the card's last event
+    /// when it was followed up, how many times since, and when.
+    followed: BTreeMap<String, (u64, u32, u64)>,
 }
 
 /// What became of the wake sentence.
@@ -440,10 +443,10 @@ enum Prompted {
 /// start: `agent prompt --wait` fails with `agent_prompt_stalled` when no
 /// working or blocked state follows the submission, and with
 /// `agent_blocked` — before typing anything — when the agent is blocked.
-fn prompt(pane: &str) -> Prompted {
+fn prompt(pane: &str, sentence: &str) -> Prompted {
     let exe = std::env::var("OLP_HERDR").ok().filter(|v| !v.is_empty());
     let out = Command::new(exe.as_deref().unwrap_or("herdr"))
-        .args(["agent", "prompt", pane, &wake_sentence(pane)])
+        .args(["agent", "prompt", pane, sentence])
         .args(["--wait", "--until", "working", "--until", "blocked"])
         .args(["--timeout", "10000"])
         .stdin(Stdio::null())
@@ -489,7 +492,7 @@ fn agent_status(pane: &str) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 const INBOX_USAGE: &str = "用法: octoscode olp remote inbox [<窗格>]";
-const WATCH_USAGE: &str = "用法: octoscode olp remote watch <窗格> [--once] [--interval 秒] [--renudge 秒] [--retry 秒] [--idle-wait 秒]";
+const WATCH_USAGE: &str = "用法: octoscode olp remote watch <窗格> [--once] [--interval 秒] [--renudge 秒] [--retry 秒] [--follow-up 秒] [--idle-wait 秒]";
 
 fn needs_log(prog: &str) -> bool {
     if log_mode() {
@@ -626,6 +629,15 @@ pub fn wake_sentence(pane: &str) -> String {
     format!("有新派卡,请执行:octoscode olp remote inbox {pane},再按输出里的 next 领取、办理、回执")
 }
 
+/// What the watcher types into a pane that sits idle on claimed cards.
+/// Fixed but for the numbers: nothing of the cards' text.
+pub fn follow_up_sentence(pane: &str, cards: &[String]) -> String {
+    format!(
+        "已领取的卡 #{} 还没有回执,而这个窗格已经空闲:请接着办理(卡的全文在 octoscode olp remote inbox {pane} 输出的 held 里);办完或办不了都要回执(octoscode olp remote ack <N> done|blocked <说明>)",
+        cards.join("、#")
+    )
+}
+
 fn herdr(args: &[&str]) -> bool {
     let exe = std::env::var("OLP_HERDR").ok().filter(|v| !v.is_empty());
     Command::new(exe.as_deref().unwrap_or("herdr"))
@@ -661,7 +673,7 @@ fn now() -> u64 {
 pub fn watch(argv: &[String]) -> i32 {
     let prog = "olp remote watch";
     let (mut once, mut interval, mut renudge, mut idle_wait) = (false, 15u64, 900u64, 5u64);
-    let mut retry = 120u64;
+    let (mut retry, mut follow_up) = (120u64, 900u64);
     let mut rest = Vec::new();
     let mut it = argv.iter();
     while let Some(word) = it.next() {
@@ -675,7 +687,7 @@ pub fn watch(argv: &[String]) -> i32 {
         let ok = match word.as_str() {
             "-h" | "--help" => {
                 println!(
-                    "{WATCH_USAGE}\n\n单元值守:有新派卡且窗格里的 agent 空闲时,往窗格发一句固定短句。不读卡的内容。\n发话后 agent 没有开始工作(例如有对话框挡着)的,--retry 秒后再发一次;连续两次都没接住就不再追着发,\n改按 --renudge 的间隔。\n窗格持续 --retry 秒接不了卡(被对话框或审批挡住、里面没有 agent、发话没人接)时向 hub 报告送达失败,外环的收件箱里会看到。已开始工作而卡仍未领取的,--renudge 秒后再发。"
+                    "{WATCH_USAGE}\n\n单元值守:有新派卡且窗格里的 agent 空闲时,往窗格发一句固定短句。不读卡的内容。\n发话后 agent 没有开始工作(例如有对话框挡着)的,--retry 秒后再发一次;连续两次都没接住就不再追着发,\n改按 --renudge 的间隔。\n窗格持续 --retry 秒接不了卡(被对话框或审批挡住、里面没有 agent、发话没人接)时向 hub 报告送达失败,外环的收件箱里会看到。已开始工作而卡仍未领取的,--renudge 秒后再发。\n已领取的卡 --follow-up 秒没有新事件、窗格又空闲(主持停在半路)时,发一句请它接着办并回执;同一张卡在没有新事件期间最多发两次,\n之后由 hub 的停滞判定接手。"
                 );
                 return 0;
             }
@@ -686,6 +698,7 @@ pub fn watch(argv: &[String]) -> i32 {
             "--interval" => seconds(&mut interval),
             "--renudge" => seconds(&mut renudge),
             "--retry" => seconds(&mut retry),
+            "--follow-up" => seconds(&mut follow_up),
             "--idle-wait" => seconds(&mut idle_wait),
             other if other.starts_with("--") => false,
             other => {
@@ -822,7 +835,7 @@ pub fn watch(argv: &[String]) -> i32 {
                         "--timeout",
                         &timeout,
                     ]);
-                    match idle.then(|| prompt(pane)) {
+                    match idle.then(|| prompt(pane, &wake_sentence(pane))) {
                         Some(Prompted::Started) => {
                             let at = i64::try_from(now()).unwrap_or(i64::MAX);
                             // One sentence covers everything that waits.
@@ -894,6 +907,60 @@ pub fn watch(argv: &[String]) -> i32 {
                                 None => eprintln!("{prog}: 没有连上 hub,送达失败的报告下一轮再发"),
                             }
                         }
+                    }
+                }
+                // Claimed, no receipt, nothing new for `--follow-up` seconds
+                // and the pane idle: the host stopped half-way. Asked to go
+                // on, at most twice while the card stays silent.
+                let held: Vec<(String, u64)> = report["held"]
+                    .as_array()
+                    .map(|cards| {
+                        cards
+                            .iter()
+                            .filter(|c| {
+                                c["quiet_seconds"].as_i64().unwrap_or(0)
+                                    >= i64::try_from(follow_up).unwrap_or(i64::MAX)
+                            })
+                            .filter_map(|c| {
+                                Some((c["number"].as_u64()?.to_string(), c["last_seq"].as_u64()?))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                st.followed.retain(|card, (seq, _, _)| {
+                    report["held"].as_array().is_some_and(|cards| {
+                        cards.iter().any(|c| {
+                            c["number"].as_u64().map(|n| n.to_string()).as_ref() == Some(card)
+                                && c["last_seq"].as_u64() == Some(*seq)
+                        })
+                    })
+                });
+                let behind: Vec<(String, u64)> = held
+                    .into_iter()
+                    .filter(|(card, _)| {
+                        st.followed
+                            .get(card)
+                            .is_none_or(|(_, times, at)| *times < 2 && now() >= at + follow_up)
+                    })
+                    .collect();
+                if waiting.is_empty()
+                    && !behind.is_empty()
+                    && matches!(agent_status(pane).as_str(), "idle" | "done")
+                {
+                    let numbers: Vec<String> =
+                        behind.iter().map(|(card, _)| card.clone()).collect();
+                    if !matches!(
+                        prompt(pane, &follow_up_sentence(pane, &numbers)),
+                        Prompted::Refused
+                    ) {
+                        for (card, seq) in behind {
+                            let times = st.followed.get(&card).map_or(0, |(_, times, _)| *times);
+                            st.followed.insert(card, (seq, times + 1, now()));
+                        }
+                        println!(
+                            "窗格 {pane} 空闲,已领取的卡 #{} 还没有回执:已请它接着办",
+                            numbers.join("、#")
+                        );
                     }
                 }
                 let text = serde_json::to_string(&st).unwrap_or_else(|_| "{}".to_string());

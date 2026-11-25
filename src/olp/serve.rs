@@ -264,7 +264,11 @@ pub fn run(argv: &[String]) -> i32 {
                 .into_iter()
                 .filter(|item| pane.is_none_or(|p| p == item.pane))
                 .collect();
-            println!("{}", json!({ "unit": unit, "items": items }));
+            let held: Vec<cards::Held> = cards::held_by(&events, &unit, chrono::Utc::now())
+                .into_iter()
+                .filter(|card| pane.is_none_or(|p| p == card.pane))
+                .collect();
+            println!("{}", json!({ "unit": unit, "items": items, "held": held }));
             0
         }
         _ => refuse("这个密钥只能用于 ack、progress、events 与 inbox"),

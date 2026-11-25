@@ -30,7 +30,7 @@ agent 不轮询。
   hub 较旧、不返回 `body` 时,`next.read` 指向 `remote mirror`。
 - `olp remote --help` 先列出本程序自己的动作(ack、mirror、progress、inbox、watch、serve-log),
   再给出仍由脚本处理的动作的帮助。
-- 单元值守 `remote watch <窗格> [--once] [--interval 15] [--renudge 900] [--retry 120] [--idle-wait 5]`:每轮
+- 单元值守 `remote watch <窗格> [--once] [--interval 15] [--renudge 900] [--retry 120] [--follow-up 900] [--idle-wait 5]`:每轮
   向 hub 问该窗格的收件箱;有还没提醒过(或距上次提醒已过 `--renudge` 秒)的卡时,先
   `herdr agent wait <窗格> --until idle --until done --timeout <毫秒>`,agent 空闲才
   `herdr agent prompt <窗格> "有新派卡,请执行:octoscode olp remote inbox <窗格>,再按输出里的 next 领取、办理、回执" --wait --until working --until blocked --timeout 10000`。
@@ -53,7 +53,15 @@ agent 不轮询。
     把这样的卡从"进行中"提到"收件箱",理由是"送达失败:单元报告窗格没有接住提醒,请看一下
     该窗格";卡被领取(`claimed`)后恢复为"已派出,等内环 ACK"。一张卡要么被领取,要么 hub
     知道它卡住了,不会无声地等着。
-  - 状态文件现在是 `{nudged, misses, stuck, reported, picked}`;旧格式读不出时从空开始。
+  - **领了没办完的卡要有人追**:hub 的 `inbox` 回答里多一项 `held`——本单元已领取、还没有回执
+    也没作废的卡(`number`、`title`、`pane`、`body` 卡的全文、`last_seq`、`quiet_seconds`:这张卡最后一条事件及其距今秒数,
+    由 hub 的时钟算)。某张卡 `quiet_seconds` 达到 `--follow-up`、窗格的 agent 又是 `idle`/`done`,
+    而且没有待领取的卡时,值守发一句固定短句(只带编号)请主持接着办并回执。`working`、`blocked`
+    时不发:主持用 `herdr agent wait` 等内环时是 `working`。同一张卡在最后一条事件不变期间最多
+    发两次,间隔不小于 `--follow-up`;有了新事件重新计数。两次之后不再发,由 hub 的停滞判定接手。
+    起因是真实运行里主持的一轮被 agent 自己的防空转中止,卡已领取,没有任何东西再唤醒它
+    (2026-11-25,mini,#13)。
+  - 状态文件现在是 `{nudged, misses, stuck, reported, picked, followed}`;旧格式读不出时从空开始。
   - agent 每次都开始工作、卡却一直没领取的情况见 `specs/task-olp-stall.spec.md`:两次之后上报。
   - 已提醒的卡记在状态文件(`OLP_WATCH_STATE`,默认
     `~/.octos/outer/watch/<单元>-<窗格>.json`),重启不重复提醒;卡被领取或作废后从中去掉。
@@ -118,3 +126,10 @@ Scenario: 发了话而 agent 没有开始工作的,不算提醒过
   Given 一张待领取的卡,herdr 报 agent 空闲、收下了话,但 agent 没有开始工作
   When 跑一轮;紧接着再跑一轮;--retry 0 再跑两轮;对话框消失后 --renudge 0 跑一轮,再 --retry 0 跑一轮
   Then 第一轮发话并说明没有开始工作;未到重试时间不再发;到了再发一次并提示找人看窗格;连续两次未接住后不再按重试时间追发;到 --renudge 时被接住的那次算数,此后不再发
+
+Scenario: 已领取而停在半路的卡,值守请主持接着办,最多两次(critical)
+  Tags: critical
+  Test: a_claimed_card_left_idle_is_followed_up_twice_at_most
+  Given 一张派给窗格并已领取的卡,记录调用的 herdr
+  When 刚领取时跑一轮;agent 正忙时 --follow-up 0 跑一轮;空闲后 --follow-up 0 跑一轮;默认间隔再跑一轮;--follow-up 0 连跑三轮;单元报一个进度节点后再跑;回执后再跑
+  Then inbox 的 held 列出这张卡(带全文)且只对它的窗格;未到时间和正忙时不发;空闲且到时间发一句只带编号、不带卡内容的短句;未到间隔不重发;同一事件期间总共只发两次;有新事件后再发一次;回执后 held 为空、不再发
