@@ -120,6 +120,13 @@ herdr integration install kimi    # 写入 ~/.kimi-code/hooks/ 并在 config.tom
 报 `working`,做完报 `idle`。Claude Code、Codex、octoscode 在上面的版本里不装钩子也
 判得对;换了版本后状态不对时,同样先装对应的钩子。
 
+### Kimi Code 的启动与巡检
+
+`kimi -y` 是"需要时才问":日常的编辑和命令自动执行,有风险的操作、提问和计划仍然会问,这时
+herdr 报 `blocked`,单元值守会把接不了卡的情况报给 hub。Kimi Code 没有沙箱一说。它启动后把
+进程改名为 `kimi-code`、不带参数(omarchy 上实测),心跳读不到启动参数,权限记为"未知",
+所以有 Kimi Code 内环的单元过不了 `full` 巡检,心跳用 `--require agent`。
+
 ## 7. 实测记录(2026-11-14,单机)
 
 | 卡 | 内环 | 结果 |

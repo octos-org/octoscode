@@ -628,7 +628,7 @@ fn check_agent(agents: &Result<Vec<Agent>, String>) -> Check {
     }
 }
 
-/// From the launch flags of a Claude Code or Codex process; `None` when the
+/// From the launch flags of a Claude Code, Codex or Kimi Code process; `None` when the
 /// flags say nothing (the agent's config file decides).
 fn full_access_flags(kind: &str, argv: &[String]) -> Option<bool> {
     let has = |flag: &str| argv.iter().any(|a| a == flag);
@@ -654,16 +654,20 @@ fn full_access_flags(kind: &str, argv: &[String]) -> Option<bool> {
             }
             value_of(&["-s", "--sandbox"], "--sandbox").map(|v| v == "danger-full-access")
         }
+        // Kimi Code has no sandbox, only approval modes. It renames its
+        // process (`kimi-code`, no arguments) where the platform lets it, so
+        // the flags are often not there to read.
+        "kimi" => (has("-y") || has("--yolo") || has("--auto")).then_some(true),
         _ => None,
     }
 }
 
-/// Launch permission of each Claude Code / Codex inner loop, read from the
+/// Launch permission of each Claude Code / Codex / Kimi Code inner loop, read from the
 /// argv of the pane's foreground process.
 fn agent_permissions(agents: &[Agent]) -> Vec<(String, String, Option<bool>)> {
     agents
         .iter()
-        .filter(|a| matches!(a.kind.as_str(), "claude" | "codex") && !a.pane.is_empty())
+        .filter(|a| matches!(a.kind.as_str(), "claude" | "codex" | "kimi") && !a.pane.is_empty())
         .map(|a| {
             let result = herdr_json(&["pane", "process-info", "--pane", &a.pane]).ok();
             let argv = result
@@ -672,9 +676,11 @@ fn agent_permissions(agents: &[Agent]) -> Vec<(String, String, Option<bool>)> {
                 .and_then(Value::as_array)
                 .and_then(|procs| {
                     procs.iter().find(|p| {
-                        ["name", "argv0"]
-                            .iter()
-                            .any(|k| p.get(k).and_then(Value::as_str) == Some(a.kind.as_str()))
+                        ["name", "argv0"].iter().any(|k| {
+                            let name = p.get(k).and_then(Value::as_str);
+                            name == Some(a.kind.as_str())
+                                || (a.kind == "kimi" && name == Some("kimi-code"))
+                        })
                     })
                 })
                 .map(|p| {

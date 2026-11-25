@@ -489,7 +489,9 @@ fn olp_evo_retro_skill_step5_and_protected_sections_golden() {
     // Revised with the operator's approval (2026-11-16): the launch table
     // states that unsandboxed launch needs the operator's standing grant for
     // the unit first (protocol R8); registration alone is not the grant.
-    const INNER: &str = "3c1b85960e44aa28e8bec310ee398eb7550eeef7bfcd6af1d07890dd450e547e";
+    // Revised with the operator's approval (2026-11-25): the launch table
+    // gains a row for Kimi Code (`kimi -y`).
+    const INNER: &str = "eee7b8a4e5039f344b255b9e5edbb563e68c1ae6953035c041b5bd3b459ddc3c";
     // Revised with the operator's approval (2026-11-16): the restart
     // checklist's step 1 follows protocol R8 (authorized agents may launch
     // an inner loop without a sandbox) instead of "operator by hand".

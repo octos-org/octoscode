@@ -224,6 +224,7 @@ R2 诚实验证声明(verified/partially/unverified)。
 | octoscode | `octoscode` | `octoscode --stdio-command 'octos serve --stdio --solo --danger-full-access'` |
 | Claude Code | `claude` | `claude --dangerously-skip-permissions` |
 | Codex | `codex` | `codex --dangerously-bypass-approvals-and-sandbox` |
+| Kimi Code | `kimi` | `kimi -y` |
 
 在 herdr 窗格里启动:`herdr agent start <名字> --kind <种类> --pane <窗格> -- <参数>`。
 单元心跳的 `full` 巡检看的就是这些开关;少了它们单元判为降级、不派卡。挂提问

@@ -702,6 +702,8 @@ fn unit_heartbeat_recognises_any_kind_of_inner_loop() {
         ("codex", vec!["codex", "--yolo"], true),
         ("codex", vec!["codex", "-s", "danger-full-access"], true),
         ("codex", vec!["codex", "--sandbox=workspace-write"], false),
+        ("kimi", vec!["kimi", "-y"], true),
+        ("kimi", vec!["kimi-code", "--auto"], true),
     ] {
         hub.set_agents(&[("a", kind, "idle", "w9:p1")], &[("w9:p1", &argv)]);
         let b = heartbeat("agent");
@@ -709,6 +711,15 @@ fn unit_heartbeat_recognises_any_kind_of_inner_loop() {
         assert_eq!(b["permission"], want, "{kind} {argv:?}: {b}");
         assert_eq!(b["agent_permissions"][0]["full_access"], full);
     }
+    // Kimi Code as it really shows on Linux: renamed, its flags gone. It is
+    // an inner loop whose launch cannot be read, not a missing one.
+    hub.set_agents(
+        &[("a", "kimi", "idle", "w9:p1")],
+        &[("w9:p1", &["kimi-code"])],
+    );
+    let b = heartbeat("agent");
+    assert_eq!(b["permission"], "unknown", "{b}");
+    assert!(b["agent_permissions"][0]["full_access"].is_null(), "{b}");
     // Mixed with an octos backend that has full access.
     std::fs::write(
         &ps,

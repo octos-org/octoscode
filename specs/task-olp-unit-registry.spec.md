@@ -46,7 +46,9 @@ estimate: 1d
   拿不到权限档,是机器上别的常驻服务,照样列进 `backends`,但不算内环。Claude Code 与 Codex 内环的启动参数取自 `herdr pane
   process-info`(窗格前台进程的 argv):Claude Code 的 `--dangerously-skip-permissions`、
   `--permission-mode bypassPermissions`,Codex 的
-  `--dangerously-bypass-approvals-and-sandbox`、`--yolo`、`--sandbox danger-full-access`
+  `--dangerously-bypass-approvals-and-sandbox`、`--yolo`、`--sandbox danger-full-access`,
+  Kimi Code 的 `-y`、`--yolo`、`--auto`(它没有沙箱,只有审批档;进程常被它自己改名为
+  `kimi-code` 且不带参数,那时读不到,按看不出来算)
   算完全访问;明确给了别的模式算沙箱;什么都没给算看不出来(权限可能在它们的配置文件里,
   本工具不读),整机记为 `unknown`。`permission` 为 `full`(全带完全访问)、`sandboxed`
   (都不带)、`mixed`、`none`(没有内环)、`unknown`(读不到进程表或 herdr,或有看不出来
@@ -158,4 +160,4 @@ Scenario: 心跳经 herdr 认出任何一种内环(critical)
   Test: unit_heartbeat_recognises_any_kind_of_inner_loop
   Given 一个替身 herdr,依次报告:没有内环;一个 Claude Code 和一个 Codex 内环;带各种启动参数的单个内环;读不到
   When 运行心跳,并把一条 Claude Code 单元的心跳交给 hub
-  Then 没有内环时 agent 检查不过、权限为无内环;两种内环都让 agent 检查通过并列出 kind 与状态,没带完全访问参数时权限为未知;七组启动参数分别判为完全访问或沙箱,与 octos 后端混合时为混合;读不到 herdr 时检查不过并说明原因、权限为未知;hub 按默认检查把 Claude Code 单元判为正常,status 显示内环一列;伪造的 agents 项被丢弃,多余字段不落盘
+  Then 没有内环时 agent 检查不过、权限为无内环;两种内环都让 agent 检查通过并列出 kind 与状态,没带完全访问参数时权限为未知;九组启动参数分别判为完全访问或沙箱(含 Kimi Code 的两组),被改名成 `kimi-code`、不带参数的 Kimi Code 权限为未知,与 octos 后端混合时为混合;读不到 herdr 时检查不过并说明原因、权限为未知;hub 按默认检查把 Claude Code 单元判为正常,status 显示内环一列;伪造的 agents 项被丢弃,多余字段不落盘

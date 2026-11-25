@@ -105,9 +105,12 @@ scripts/olp-unit.py check m07       # 只有"正常"退出 0
 | octoscode | 后端 `octos serve` 带 `--danger-full-access` |
 | Claude Code | `--dangerously-skip-permissions`,或 `--permission-mode bypassPermissions` |
 | Codex | `--dangerously-bypass-approvals-and-sandbox`、`--yolo`,或 `--sandbox danger-full-access` |
+| Kimi Code | `-y`(`--yolo`)或 `--auto` |
 
 Claude Code 与 Codex 的权限也可以写在它们各自的配置文件里;本工具不读配置,所以没带
-上面这些参数时显示"未知",而不是"沙箱"。心跳只上报这几个开关,命令行的其余部分不离开单元。
+上面这些参数时显示"未知",而不是"沙箱"。Kimi Code 启动后会把自己的进程改名为 `kimi-code`、
+不带参数(Linux 上实测如此),这时启动参数读不到,同样显示"未知":有 Kimi Code 内环的单元
+过不了 `full` 巡检,心跳用 `--require agent`。心跳只上报这几个开关,命令行的其余部分不离开单元。
 这一项只是告知,不参与健康判定,也不是安全边界(它是单元自报的)。权限档 1–4 靠
 Linux 的 bwrap 沙箱实现,在 macOS 上不成立,所以 Mac mini 上要跑构建的内环通常都是
 完全访问;这一列让大外环一眼看到有没有哪台机器是例外。
