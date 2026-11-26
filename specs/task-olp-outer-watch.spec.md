@@ -19,8 +19,16 @@ estimate: 1d
 
 - 命令 `octoscode olp outer watch <日志目录> --pane <外环的窗格> [--once] [--interval 30]
   [--quiet 600] [--idle-wait 5] [--session <herdr 会话>]`,在 hub(外环所在机器)上跑。
+- `--label <工作区标签>` 代替 `--pane`(二者给且只给一个):每轮按标签找外环工作区的第一个
+  窗格,与 `olp outer supervise` 找外环窗格的办法相同;没有这个工作区时这一轮不提醒,游标不动。
+  `olp outer install` 在 `--board` 是事件日志时用它把值守注册成常驻任务(`<name>-watch`,
+  每 `--interval` 秒跑一次 `--once`)。来源:2026-11-26 实测,外环自己在后台启动的值守在外环
+  死后还活着,接班的外环再启动一个就成了两个。
 - 等外环处理的事件:`ack`、`pushed`、`asked`,以及节点为 `undelivered` 的 `progress`。派卡、
   领取(`claimed`)、复验轮次、外环自己的判词不算。
+- 已经了结的不算:卡已在"已了结"分区的事件、已有回答或已超时的提问不计入。值守第一次在一份
+  旧日志上跑时不会为历史发话(2026-11-26 实测:新注册的值守为 18 条早已了结的事件叫醒了外环,
+  外环在收件箱里什么也找不到)。
 - 每轮:读日志;序号大于游标的上述事件有几条;另问一次 `olp board stall --json --quiet <秒>`
   有没有新的静默提醒(它自己记着哪些已经报过)。两者有任何一项:
   先 `herdr agent wait <窗格> --until idle --until done --timeout <毫秒>`,空闲才
@@ -37,7 +45,7 @@ estimate: 1d
 ## Boundaries
 
 ### Allowed Changes
-- src/olp/outerwatch.rs、src/olp/outer.rs、src/olp/mod.rs
+- src/olp/outerwatch.rs、src/olp/outer.rs、src/olp/mod.rs、src/olp/cards.rs(2026-11-26:已了结的卡)
 - tests/olp_outer_watch.rs
 - docs/OLP_CLI.md、docs/ARCHITECTURE.md
 - specs/task-olp-outer-watch.spec.md
@@ -59,6 +67,18 @@ Scenario: 等外环处理的新事件唤醒外环一次,短句不带内容(criti
   Given 一张派出的卡,外环的 agent 空闲
   When 只有派卡时跑一轮;单元领取后跑一轮;单元 ACK(done) 后跑一轮;再跑一轮
   Then 派卡与领取都不唤醒;ACK 后发一句固定短句,指向 olp inbox,其中没有卡号、标题、正文、回执内容;同一条事件不再唤醒
+
+Scenario: 按工作区标签找外环的窗格;没有这个工作区时不提醒,事件留到下一轮
+  Test: the_watcher_finds_the_outer_pane_by_its_workspace_label
+  Given 日志里有一条等外环处理的回执,herdr 里只有标签为 my-outer 的工作区
+  When 先按不存在的标签跑一轮,再按 my-outer 跑一轮;另试同时给 --pane 与 --label、两个都不给
+  Then 第一轮不发话;第二轮往该工作区的窗格发话;后两种退出码 2
+
+Scenario: 已了结的卡、已有结局的提问不再叫醒外环
+  Test: what_is_already_over_does_not_wake_the_outer_loop
+  Given 一份日志:一张卡已回执并采认,一个提问已超时;值守从未跑过
+  When 跑一轮;再记一个新提问后跑一轮
+  Then 第一轮不发话;第二轮为这一个新提问发话
 
 Scenario: 外环在忙时不打扰,它空闲后补上,忙的时候到的事件不会被跳过(critical)
   Tags: critical

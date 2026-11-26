@@ -389,6 +389,24 @@ fn find_pane(c: &Common) -> Result<(String, bool), Fail> {
         .ok_or_else(|| Fail(1, format!("工作区 {} 里没有窗格", c.label)))
 }
 
+/// The first pane of the workspace labelled `label`, if there is one.
+pub(super) fn pane_of_label(label: &str, session: Option<&str>) -> Option<String> {
+    let workspaces = herdr(&["workspace", "list"], session).ok()?;
+    let workspace = workspaces["workspaces"]
+        .as_array()?
+        .iter()
+        .find(|w| w["label"].as_str() == Some(label))?["workspace_id"]
+        .as_str()?
+        .to_string();
+    let panes = herdr(&["pane", "list"], session).ok()?;
+    panes["panes"]
+        .as_array()?
+        .iter()
+        .find(|p| p["workspace_id"].as_str() == Some(workspace.as_str()))?["pane_id"]
+        .as_str()
+        .map(str::to_string)
+}
+
 /// Programs in the pane's foreground other than its shell and the helpers a
 /// shell runs while starting.
 fn busy_programs(pane: &str, session: Option<&str>) -> Result<Vec<String>, Fail> {
@@ -818,7 +836,7 @@ fn resume(c: Common) -> Result<i32, Fail> {
     let (watch, sign) = if is_log {
         (
             format!(
-                "确认外环值守在跑(日志有新事件时它往本窗格发一句短句):octoscode olp outer watch {quoted} --pane <本窗格>"
+                "确认外环值守已注册(日志有新事件时它往本窗格发一句短句):octoscode olp keepalive list 里应有 …-watch 任务(由 olp outer install 注册),有就不要自己再启动;没有时告诉 operator,临时可跑 octoscode olp outer watch {quoted} --pane <本窗格>"
             ),
             "接班不用另记一行:采认、打回、搁置各自写进事件日志".to_string(),
         )
@@ -916,15 +934,6 @@ fn install(c: Common) -> Result<i32, Fail> {
     job.push("--".to_string());
     job.extend(c.command.iter().cloned());
 
-    let mut tool = Command::new(this_exe()?);
-    tool.args([
-        "olp",
-        "keepalive",
-        "install",
-        &c.name,
-        "--interval",
-        &c.interval.to_string(),
-    ]);
     // A job's PATH is short: record where herdr is.
     let herdr_path = std::env::var_os("OLP_HERDR")
         .filter(|v| !v.is_empty())
@@ -933,31 +942,66 @@ fn install(c: Common) -> Result<i32, Fail> {
             std::env::split_paths(&std::env::var_os("PATH")?)
                 .map(|dir| dir.join("herdr"))
                 .find(|p| p.is_file())
-        });
-    match herdr_path {
-        Some(path) => {
-            let real = std::fs::canonicalize(&path).unwrap_or(path);
-            tool.args(["--env", &format!("OLP_HERDR={}", real.display())]);
+        })
+        .map(|path| std::fs::canonicalize(&path).unwrap_or(path));
+    if herdr_path.is_none() {
+        eprintln!("{PROG}: 提醒:PATH 上找不到 herdr;装好后重跑,或设 OLP_HERDR");
+    }
+    let register = |name: &str, job: &[String]| -> Result<i32, Fail> {
+        let mut tool = Command::new(this_exe()?);
+        tool.args([
+            "olp",
+            "keepalive",
+            "install",
+            name,
+            "--interval",
+            &c.interval.to_string(),
+        ]);
+        if let Some(path) = &herdr_path {
+            tool.args(["--env", &format!("OLP_HERDR={}", path.display())]);
         }
-        None => eprintln!("{PROG}: 提醒:PATH 上找不到 herdr;装好后重跑,或设 OLP_HERDR"),
+        if c.no_load {
+            tool.arg("--no-load");
+        }
+        if let Some(dir) = &c.dir {
+            tool.args(["--dir", dir]);
+        }
+        let status = tool
+            .arg("--")
+            .args(job)
+            .status()
+            .map_err(|e| Fail(1, format!("无法运行保活工具: {e}")))?;
+        Ok(status.code().unwrap_or(1))
+    };
+    let code = register(&c.name, &job)?;
+    // On an event log the outer's watcher is a job too: one the outer loop
+    // starts itself outlives it, and the next outer loop would start another.
+    let log = c.board.as_deref().filter(|b| Path::new(b).is_dir());
+    let (Some(log), 0) = (log, code) else {
+        return Ok(code);
+    };
+    let mut watch: Vec<String> = [
+        exe.as_str(),
+        "olp",
+        "outer",
+        "watch",
+        &absolute(log),
+        "--label",
+        &c.label,
+        "--once",
+    ]
+    .iter()
+    .map(|w| w.to_string())
+    .collect();
+    if let Some(session) = &c.session {
+        watch.extend(["--session".to_string(), session.clone()]);
     }
-    if c.no_load {
-        tool.arg("--no-load");
-    }
-    if let Some(dir) = &c.dir {
-        tool.args(["--dir", dir]);
-    }
-    let status = tool
-        .arg("--")
-        .args(&job)
-        .status()
-        .map_err(|e| Fail(1, format!("无法运行保活工具: {e}")))?;
-    Ok(status.code().unwrap_or(1))
+    register(&format!("{}-watch", c.name), &watch)
 }
 
 /// `argv` is what follows `olp outer`.
 pub fn run(argv: &[String]) -> i32 {
-    let usage = "用法: octoscode olp outer supervise --project P --signature S --duties D [--label olp-outer] [--cwd 目录] [--session 会话] [--board 黑板] [--max-restarts 3] [--window 1800] [--wait 20] [--settle 2] [--ready 90] [--prompt 话 | --no-prompt] [--reset] -- <外环命令…>\n      octoscode olp outer resume --board B --project P [--repo R] [--signature S] [--json]\n      octoscode olp outer watch <日志目录> --pane <窗格> [--once]   (外环值守,另见它的 --help)\n      octoscode olp outer install [--interval 60] [--name outer] [--no-load] [--dir 目录] <supervise 的参数> -- <外环命令…>\n退出码:0 锁 HELD(resume:本会话持锁);1 出错;2 用法;3 外环窗格里还有程序在跑(resume:不是持锁者);4 重启过于频繁,已暂停";
+    let usage = "用法: octoscode olp outer supervise --project P --signature S --duties D [--label olp-outer] [--cwd 目录] [--session 会话] [--board 黑板] [--max-restarts 3] [--window 1800] [--wait 20] [--settle 2] [--ready 90] [--prompt 话 | --no-prompt] [--reset] -- <外环命令…>\n      octoscode olp outer resume --board B --project P [--repo R] [--signature S] [--json]\n      octoscode olp outer watch <日志目录> --pane <窗格> | --label <工作区标签> [--once]   (外环值守,另见它的 --help)\n      octoscode olp outer install [--interval 60] [--name outer] [--no-load] [--dir 目录] <supervise 的参数> -- <外环命令…>   (--board 是事件日志时另注册 <name>-watch:外环值守)\n退出码:0 锁 HELD(resume:本会话持锁);1 出错;2 用法;3 外环窗格里还有程序在跑(resume:不是持锁者);4 重启过于频繁,已暂停";
     let (action, rest) = match argv.split_first() {
         Some((a, rest)) if !matches!(a.as_str(), "-h" | "--help") => (a.as_str(), rest),
         Some(_) => {

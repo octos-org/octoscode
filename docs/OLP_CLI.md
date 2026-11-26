@@ -172,7 +172,7 @@
 |---|---|---|
 | `olp duty hold\|check\|lease …` | `octoscode outer-duty` | hub |
 | `olp outer supervise\|resume\|install …` | Rust(`src/olp/outer.rs`),原 `olp-outer.py` | hub(外环所在机器) |
-| `olp outer watch <日志目录> --pane <窗格> [--once]` | Rust(`src/olp/outerwatch.rs`) | hub(外环所在机器) |
+| `olp outer watch <日志目录> --pane <窗格> \| --label <工作区标签> [--once]` | Rust(`src/olp/outerwatch.rs`) | hub(外环所在机器) |
 
 `olp outer supervise` 的留言(已自动重启、重启已暂停、接班提示未送达):`--board` 是 Markdown 黑板
 时追加一行;是事件日志目录时写成一条 `note` 事件,`olp board render` 与 `olp outer resume` 都会
@@ -181,6 +181,8 @@
 外环值守(`specs/task-olp-outer-watch.spec.md`)是"收件箱 + 唤醒"往上的那一半:日志里出现等外环处理
 的事件(单元的回执、推送登记、提问、送达失败)或集群整体静默时,在外环的 agent 空闲时往它的窗格
 发一句固定短句,指向 `olp inbox` 与 `olp board stall`。短句不带内容;外环不轮询。
+值守不由外环自己启动:`olp outer install` 在 `--board` 是事件日志时另注册一个常驻任务
+`<name>-watch`,每分钟按工作区标签找到外环的窗格跑一轮。外环死了它照常跑,接班的外环不用再启动。
 
 ### 2.11 进化环(evo)
 

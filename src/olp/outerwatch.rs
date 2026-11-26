@@ -22,10 +22,11 @@ use sha2::{Digest, Sha256};
 
 use super::log::{Event, Log};
 
-const USAGE: &str = "用法: octoscode olp outer watch <日志目录> --pane <外环的窗格> [--once] [--interval 30] [--quiet 600] [--idle-wait 5] [--session herdr 会话]
+const USAGE: &str = "用法: octoscode olp outer watch <日志目录> --pane <外环的窗格> | --label <外环工作区的标签> [--once] [--interval 30] [--quiet 600] [--idle-wait 5] [--session herdr 会话]
 
 外环值守:日志里有等外环处理的新事件(单元的回执、推送登记、提问、送达失败),或集群整体静默时,
 在外环的 agent 空闲时往它的窗格发一句固定短句。不带任何内容。
+--label:每轮按标签找外环的窗格(olp outer install 注册的值守任务这样用);没有这个工作区时这一轮不提醒。
 退出码:0;2 用法;4 日志读不了";
 
 #[derive(Serialize, Deserialize, Default)]
@@ -88,6 +89,7 @@ pub fn run(argv: &[String]) -> i32 {
     let prog = "olp outer watch";
     let (mut once, mut interval, mut quiet, mut idle_wait) = (false, 30u64, 600u64, 5u64);
     let (mut pane, mut session, mut rest) = (None, None, Vec::new());
+    let mut label: Option<String> = None;
     let mut words = argv.iter();
     while let Some(word) = words.next() {
         let mut number = |slot: &mut u64| match words.next().and_then(|v| v.parse::<u64>().ok()) {
@@ -113,6 +115,10 @@ pub fn run(argv: &[String]) -> i32 {
                 pane = words.next().cloned();
                 pane.is_some()
             }
+            "--label" => {
+                label = words.next().cloned();
+                label.as_deref().is_some_and(|l| !l.is_empty())
+            }
             "--session" => {
                 session = words.next().cloned();
                 session.is_some()
@@ -128,11 +134,15 @@ pub fn run(argv: &[String]) -> i32 {
             return 2;
         }
     }
-    let ([log], Some(pane)) = (rest.as_slice(), pane) else {
+    let [log] = rest.as_slice() else {
         eprintln!("{USAGE}");
         return 2;
     };
-    if !super::card::is_pane(&pane) || !Path::new(log).is_dir() {
+    if pane.is_some() == label.is_some() {
+        eprintln!("{prog}: --pane 与 --label 给且只给一个\n{USAGE}");
+        return 2;
+    }
+    if pane.as_deref().is_some_and(|p| !super::card::is_pane(p)) || !Path::new(log).is_dir() {
         eprintln!("{prog}: 窗格标识不合法,或日志目录不存在\n{USAGE}");
         return 2;
     }
@@ -160,12 +170,28 @@ pub fn run(argv: &[String]) -> i32 {
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
         let head = events.last().map(|e| e.seq).unwrap_or(0);
+        // What is already over does not wait for anyone: a watcher that
+        // starts on an old log says nothing about its history.
+        let settled = super::cards::settled(&events, chrono::Utc::now().date_naive());
+        let open_questions = super::cards::pending_questions(&events);
+        let still_open = |e: &Event| match e.kind.as_str() {
+            "asked" => {
+                let id = e.data.get("id").and_then(|v| v.as_str());
+                open_questions.iter().any(|q| Some(q.id.as_str()) == id)
+            }
+            _ => e.card.is_none_or(|n| !settled.contains(&n)),
+        };
         let waiting = events
             .iter()
-            .filter(|e| e.seq > cursor.seen && for_outer(e))
+            .filter(|e| e.seq > cursor.seen && for_outer(e) && still_open(e))
             .count();
         let stalled = stall_alerts(log, quiet);
-        if waiting > 0 || stalled > 0 {
+        let pane = match (&pane, &label) {
+            (Some(pane), _) => Some(pane.clone()),
+            (None, Some(label)) => super::outer::pane_of_label(label, session),
+            (None, None) => None,
+        };
+        if let (Some(pane), true) = (pane, waiting > 0 || stalled > 0) {
             let timeout = (idle_wait * 1000).to_string();
             let idle = herdr(
                 &[

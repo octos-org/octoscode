@@ -73,6 +73,7 @@ scripts/olp-launchd.py render demo --interval 60 -- /bin/echo hi   # 只看 plis
 # 一次性:注册监督任务(macOS launchd / Linux systemd,每 60 秒检查一次)
 octoscode olp outer install --project <项目> --signature <署名> --duties <职责> \
     --board <黑板> -- claude --continue
+# <黑板> 是事件日志目录时,上面这条命令另注册 outer-watch:外环值守(日志有新事件时叫醒外环)
 # 手工检查一次(与任务做的事相同)
 octoscode olp outer supervise --project <项目> --signature <署名> --duties <职责> \
     --board <黑板> -- claude --continue

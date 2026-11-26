@@ -30,6 +30,9 @@ estimate: 1d
     来源:2026-11-26 在 hub 上实测,原先对日志目录调用 `olp board append`,留言写不进去。
   - `install`:经保活工具(macOS launchd、Linux systemd)注册每 `--interval` 秒运行一次的
     `<octoscode 绝对路径> olp outer supervise …`,herdr 路径记进 `OLP_HERDR`。
+  - `--board` 是事件日志目录时,`install` 另注册 `<name>-watch`:每 `--interval` 秒运行
+    `olp outer watch <日志> --label <label> --once`(见 `specs/task-olp-outer-watch.spec.md`)。
+    Markdown 黑板不注册。
 - 外环命令由使用者给,需能接上次会话(`claude --continue`、`codex resume --last --no-daemon`)。
 - `docs/OLP_KEEPALIVE.md` 删去"不要把 hold 注册成常驻任务——自动重启等于自动抢锁",改为
   §4a;协议 R7 补一句锁空着时可由监督任务自动重新 hold。
@@ -75,6 +78,12 @@ Scenario: 黑板是事件日志时,监督的留言写成日志里的一条事件
   Given `--board` 指向一个事件日志目录
   When 运行 supervise,再看 `olp board render` 与 `olp outer resume`
   Then 日志里有一条 note 事件写着"外环已自动重启";Markdown 视图里有这一行;接班简报列出"监督任务的留言",检查单指向 `olp outer watch` 而不是 `olp board watch`
+
+Scenario: 黑板是事件日志时,install 另注册外环值守
+  Test: outer_install_registers_the_watcher_for_an_event_log
+  Given `--board` 分别指向事件日志目录与 Markdown 黑板,`--label my-outer`
+  When 各运行一次 install --no-load
+  Then 前者写出两个任务,其中 outer-watch 调用 `olp outer watch <日志> --label my-outer --once` 并记下 herdr 的位置;后者只有一个任务
 
 Scenario: 外环窗格里还有程序在跑而锁空着时不重启
   Test: outer_supervise_leaves_a_busy_pane_alone

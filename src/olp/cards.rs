@@ -226,6 +226,16 @@ pub struct Held {
     pub quiet_seconds: i64,
 }
 
+/// Cards that are over: accepted, voided, or otherwise settled.
+pub fn settled(events: &[Event], today: chrono::NaiveDate) -> std::collections::BTreeSet<u64> {
+    let mut scan = scan(events);
+    super::inbox::items(&mut scan, today, |_| true)
+        .into_iter()
+        .filter(|item| matches!(item.partition, super::inbox::Partition::Settled))
+        .map(|item| item.number)
+        .collect()
+}
+
 /// The cards `unit` claimed and has not answered, in number order. The
 /// unit's watcher reads this to follow up on a host that stopped half-way.
 pub fn held_by(events: &[Event], unit: &str, now: chrono::DateTime<chrono::Utc>) -> Vec<Held> {

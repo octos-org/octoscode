@@ -35,6 +35,12 @@ impl Hub {
         let script = r#"#!/bin/sh
 echo "$*" >> 'DIR/herdr.log'
 if [ "$1 $2" = 'agent wait' ] && [ -e 'DIR/busy' ]; then exit 1; fi
+if [ "$1 $2" = 'workspace list' ]; then
+  echo '{"result":{"workspaces":[{"workspace_id":"w4","label":"my-outer"}]}}'
+fi
+if [ "$1 $2" = 'pane list' ]; then
+  echo '{"result":{"panes":[{"pane_id":"w3:p1","workspace_id":"w3"},{"pane_id":"w4:p2","workspace_id":"w4"}]}}'
+fi
 exit 0
 "#
         .replace("DIR", &hub.dir.path().display().to_string());
@@ -167,6 +173,65 @@ fn events_for_the_outer_loop_wake_its_pane_once() {
     // Handed over once: the same event does not wake again.
     assert_eq!(hub.watch("99999"), "");
     assert_eq!(hub.prompts().len(), 1);
+}
+
+/// Scenario: 按工作区标签找外环的窗格;没有这个工作区时不提醒,事件留到下一轮
+#[test]
+fn the_watcher_finds_the_outer_pane_by_its_workspace_label() {
+    let hub = Hub::new();
+    hub.card("第一张");
+    hub.ok(&["remote", "ack", "1", "done", "测试通过"], "");
+    let log = hub.log();
+    let watch = |label: &str| {
+        hub.ok(
+            &[
+                "outer",
+                "watch",
+                &log,
+                "--label",
+                label,
+                "--once",
+                "--idle-wait",
+                "0",
+            ],
+            "",
+        )
+    };
+    assert_eq!(watch("nobody"), "");
+    assert!(hub.prompts().is_empty());
+    let said = watch("my-outer");
+    assert!(said.contains("w4:p2"), "{said}");
+    assert!(
+        hub.prompts()[0].starts_with("agent prompt w4:p2 "),
+        "{:?}",
+        hub.prompts()
+    );
+    // Both or neither is a usage error.
+    for extra in [&["--pane", "w1:p1", "--label", "x"][..], &[][..]] {
+        let out = hub
+            .cmd(&["outer", "watch", &log, "--once"])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{extra:?}");
+    }
+}
+
+/// Scenario: 已了结的卡、已有结局的提问不再叫醒外环
+#[test]
+fn what_is_already_over_does_not_wake_the_outer_loop() {
+    let hub = Hub::new();
+    hub.card("第一张");
+    hub.ok(&["remote", "ack", "1", "done", "测试通过"], "");
+    let log = hub.log();
+    hub.ok(&["card", "accept", "--log", &log, "1", "已复验"], "");
+    hub.ok(&["remote", "question", "ask", "q-1234", "用哪个版本"], "");
+    hub.ok(&["remote", "question", "timeout", "q-1234"], "");
+    // A watcher that has never run meets a log whose history is all settled.
+    assert_eq!(hub.watch("99999"), "");
+    assert!(hub.prompts().is_empty());
+    hub.ok(&["remote", "question", "ask", "q-5678", "第二问"], "");
+    assert!(hub.watch("99999").contains("1 条新事件"));
 }
 
 /// Scenario: 外环在忙时不打扰,它空闲后补上,忙的时候到的事件不会被跳过

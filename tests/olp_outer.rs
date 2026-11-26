@@ -333,6 +333,57 @@ fn outer_install_registers_supervise_as_a_keepalive_job() {
     );
 }
 
+/// Scenario: 黑板是事件日志时,install 另注册外环值守
+#[test]
+fn outer_install_registers_the_watcher_for_an_event_log() {
+    let sb = Sb::new();
+    std::fs::create_dir_all(sb.p("log")).unwrap();
+    let install = |board: &str, jobs: &str| {
+        let out = sb
+            .cmd()
+            .args(["olp", "outer", "install", "--project"])
+            .arg(sb.p("project"))
+            .args(["--signature", "hub-outer", "--duties", "primary-review"])
+            .args(["--label", "my-outer", "--board"])
+            .arg(sb.p(board))
+            .args(["--no-load", "--dir"])
+            .arg(sb.p(jobs))
+            .args(["--", "claude", "--continue"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
+        let mut found: Vec<(String, String)> = std::fs::read_dir(sb.p(jobs))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .map(|p| {
+                (
+                    p.file_name().unwrap().to_string_lossy().into_owned(),
+                    std::fs::read_to_string(&p).unwrap(),
+                )
+            })
+            .collect();
+        found.sort();
+        found
+    };
+    let on_log = install("log", "jobs-log");
+    assert_eq!(on_log.len(), 2, "{on_log:?}");
+    let watch = &on_log
+        .iter()
+        .find(|(name, _)| name.contains("outer-watch"))
+        .expect("a job named outer-watch")
+        .1;
+    for word in ["watch", "--label", "my-outer", "--once", "OLP_HERDR"] {
+        assert!(watch.contains(word), "missing {word}: {watch}");
+    }
+    assert!(
+        watch.contains(&sb.p("log").display().to_string()),
+        "{watch}"
+    );
+    assert!(!watch.contains("supervise"), "{watch}");
+    // A Markdown board has its own watch: one job only.
+    assert_eq!(install("board.md", "jobs-md").len(), 1);
+}
+
 /// Scenario: 重启后等 agent 就绪,把接班提示送进去;没送到在黑板上记一行;--no-prompt 不送
 #[test]
 fn outer_supervise_hands_the_restarted_outer_the_resume_prompt() {
@@ -426,6 +477,7 @@ fn outer_supervise_writes_its_notes_into_an_event_log() {
     let said = stdout(&brief);
     assert!(said.contains("监督任务的留言"), "{said}");
     assert!(said.contains("olp outer watch"), "{said}");
+    assert!(said.contains("keepalive list"), "{said}");
     assert!(!said.contains("board watch"), "{said}");
 }
 
