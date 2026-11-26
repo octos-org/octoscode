@@ -30,6 +30,31 @@
 
 use std::time::Duration;
 
+/// Maximum workers one `/agents spawn` command may request. This mirrors the
+/// backend's batch safety cap; the protocol currently has no limit-negotiation
+/// method, so rejecting above it here prevents a partially accepted batch.
+pub const MAX_AGENTS_PER_SPAWN: u32 = 200;
+
+/// The per-parent live-children cap, mirroring the server's
+/// `OCTOS_MAX_CHILDREN_PER_PARENT` (default [`MAX_AGENTS_PER_SPAWN`]). Read
+/// once at process start like the server does.
+pub fn max_children_per_parent() -> u32 {
+    static CACHE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| {
+        max_children_per_parent_from(
+            std::env::var("OCTOS_MAX_CHILDREN_PER_PARENT")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+fn max_children_per_parent_from(raw: Option<&str>) -> u32 {
+    raw.and_then(|raw| raw.parse::<u32>().ok())
+        .filter(|cap| *cap > 0)
+        .unwrap_or(MAX_AGENTS_PER_SPAWN)
+}
+
 /// Parsed `/agents` subcommand.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentsCommand {
@@ -59,7 +84,7 @@ pub enum AgentsCommand {
     Close(String),
     /// `/agents spawn <N> <prompt>` — request the LLM spawn N parallel agents.
     Spawn {
-        count: u32,
+        count: u64,
         prompt: String,
     },
 }
@@ -203,6 +228,8 @@ pub enum AutonomyParseError {
     InvalidInterval(String),
     /// `/agents spawn` where the count token is missing, non-numeric, or zero.
     InvalidSpawnCount(String),
+    /// `/agents spawn` where the count exceeds the per-command batch cap.
+    SpawnCountTooLarge { count: u64, max: u64 },
     /// `/agents spawn <N>` with no prompt text after the count.
     EmptySpawnPrompt,
 }
@@ -239,6 +266,12 @@ impl std::fmt::Display for AutonomyParseError {
             }
             Self::InvalidSpawnCount(raw) => {
                 write!(f, "spawn count must be a positive integer, got `{raw}`")
+            }
+            Self::SpawnCountTooLarge { count, max } => {
+                write!(
+                    f,
+                    "spawn count {count} exceeds the per-command limit of {max}"
+                )
             }
             Self::EmptySpawnPrompt => {
                 f.write_str("/agents spawn requires a prompt after the count")
@@ -338,13 +371,17 @@ fn parse_agents_spawn(args: &str) -> Result<AgentsCommand, AutonomyParseError> {
     if count_token.is_empty() {
         return Err(AutonomyParseError::InvalidSpawnCount(String::new()));
     }
-    let count: u32 = count_token
+    let count: u64 = count_token
         .parse()
         .map_err(|_| AutonomyParseError::InvalidSpawnCount(count_token.to_string()))?;
     if count == 0 {
         return Err(AutonomyParseError::InvalidSpawnCount(
             count_token.to_string(),
         ));
+    }
+    let max = u64::from(max_children_per_parent());
+    if count > max {
+        return Err(AutonomyParseError::SpawnCountTooLarge { count, max });
     }
     let prompt = prompt_rest.to_string();
     if prompt.is_empty() {
@@ -1199,6 +1236,69 @@ mod tests {
     }
 
     #[test]
+    fn agents_spawn_count_at_cap_is_valid() {
+        let input = format!("/agents spawn {MAX_AGENTS_PER_SPAWN} keep workers busy");
+        let command = parse_autonomy_slash(&input).unwrap();
+        assert!(matches!(
+            command,
+            Some(AutonomyCommand::Agents(AgentsCommand::Spawn {
+                count,
+                ..
+            })) if count == u64::from(MAX_AGENTS_PER_SPAWN)
+        ));
+    }
+
+    #[test]
+    fn agents_spawn_count_beyond_u32_reports_the_cap_not_invalid() {
+        let input = "/agents spawn 5000000000000 keep workers busy";
+        let error = parse_autonomy_slash(input).unwrap_err();
+        assert!(matches!(
+            error,
+            AutonomyParseError::SpawnCountTooLarge { count, .. } if count == 5_000_000_000_000
+        ));
+    }
+
+    #[test]
+    fn max_children_per_parent_follows_the_env_with_the_server_default() {
+        assert_eq!(max_children_per_parent_from(None), MAX_AGENTS_PER_SPAWN);
+        assert_eq!(max_children_per_parent_from(Some("50")), 50);
+        assert_eq!(max_children_per_parent_from(Some("1000")), 1000);
+        assert_eq!(
+            max_children_per_parent_from(Some("0")),
+            MAX_AGENTS_PER_SPAWN
+        );
+        assert_eq!(
+            max_children_per_parent_from(Some("nope")),
+            MAX_AGENTS_PER_SPAWN
+        );
+    }
+
+    #[test]
+    fn agents_spawn_count_above_cap_is_rejected() {
+        let input = format!(
+            "/agents spawn {} keep workers busy",
+            MAX_AGENTS_PER_SPAWN + 1
+        );
+        let error = parse_autonomy_slash(&input).unwrap_err();
+        assert_eq!(
+            error,
+            AutonomyParseError::SpawnCountTooLarge {
+                count: u64::from(MAX_AGENTS_PER_SPAWN) + 1,
+                max: u64::from(MAX_AGENTS_PER_SPAWN),
+            }
+        );
+    }
+
+    #[test]
+    fn agents_spawn_above_cap_without_prompt_reports_the_cap() {
+        let input = format!("/agents spawn {}", MAX_AGENTS_PER_SPAWN + 1);
+        assert!(matches!(
+            parse_autonomy_slash(&input),
+            Err(AutonomyParseError::SpawnCountTooLarge { .. })
+        ));
+    }
+
+    #[test]
     fn agents_spawn_zero_count_is_rejected() {
         assert_eq!(
             parse_autonomy_slash("/agents spawn 0 anything").unwrap_err(),
@@ -1232,9 +1332,16 @@ mod tests {
 
     #[test]
     fn agents_spawn_overflow_count_is_rejected() {
-        assert_eq!(
-            parse_autonomy_slash("/agents spawn 4294967296 prompt").unwrap_err(),
-            AutonomyParseError::InvalidSpawnCount("4294967296".into())
+        // #488 review: a count above u32 still names the cap, never the
+        // generic "positive integer" parse error.
+        let input = format!(
+            "/agents spawn {} keep workers busy",
+            u64::from(u32::MAX) + 1
         );
+        let error = parse_autonomy_slash(&input).unwrap_err();
+        assert!(matches!(
+            error,
+            AutonomyParseError::SpawnCountTooLarge { count, .. } if count == u64::from(u32::MAX) + 1
+        ));
     }
 }

@@ -1884,6 +1884,8 @@ status:
   file_picker_closed: "文件选择器已关闭（未插入内容）"
   cannot_start_review_active_turn: "轮次进行中，无法启动审查。"
   cannot_spawn_active_turn: "轮次进行中，无法派遣智能体。"
+  spawn_cap_exceeded: "已拒绝派遣：现有 {live} 个智能体，加上 {requested} 个超过每会话上限 {max}。"
+  spawn_count_too_large: "派遣数量 {count} 超过每会话上限 {max}"
   server_clamped_onboarding_choice: "服务器收紧或拒绝了暂存的引导设置选择。"
   goal_clear_requested: "已请求清除目标"
   submitted_staged_message: "已提交暂存的消息"

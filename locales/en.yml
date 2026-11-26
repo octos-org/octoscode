@@ -1080,6 +1080,8 @@ status:
   # Review / goal / staged-message status lines
   cannot_start_review_active_turn: "Cannot start review while a turn is active"
   cannot_spawn_active_turn: "Cannot spawn agents while a turn is active"
+  spawn_cap_exceeded: "Spawn refused: {live} live agents plus {requested} requested exceed the per-session limit of {max}."
+  spawn_count_too_large: "spawn count {count} exceeds the per-session limit of {max}"
   server_clamped_onboarding_choice: "Server clamped or rejected the staged onboarding choice."
   goal_clear_requested: "Goal clear requested"
   submitted_staged_message: "Submitted staged message"
