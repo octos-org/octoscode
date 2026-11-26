@@ -1691,10 +1691,10 @@ pub(crate) fn handle_key(store: &mut Store, key: KeyEvent) -> KeyAction {
             // home. `open_menu` already advanced the cursor to the first selectable
             // row; override it to the parent (which is selectable — it isn't the
             // focused peer). No-op when not on a peer.
-            if let Some(parent_idx) = store.state.parent_session_row_index() {
-                if let Some(frame) = store.state.menu_stack.active_mut() {
-                    frame.selected_index = parent_idx;
-                }
+            if let Some(parent_idx) = store.state.parent_session_row_index()
+                && let Some(frame) = store.state.menu_stack.active_mut()
+            {
+                frame.selected_index = parent_idx;
             }
             return KeyAction::Continue;
         }

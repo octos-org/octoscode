@@ -160,15 +160,15 @@ fn resolve_path_token(raw: &str) -> DataDirResolution {
 }
 
 fn expand_tilde(path: &str) -> PathBuf {
-    if path == "~" {
-        if let Some(home) = home_dir() {
-            return home;
-        }
+    if path == "~"
+        && let Some(home) = home_dir()
+    {
+        return home;
     }
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = home_dir() {
-            return home.join(rest);
-        }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = home_dir()
+    {
+        return home.join(rest);
     }
     PathBuf::from(path)
 }
