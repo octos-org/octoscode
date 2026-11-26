@@ -996,13 +996,25 @@ impl Store {
             }
             Ok(None) => return SlashDispatchOutcome::Rejected,
             Err(err) => {
-                self.state.status = err.to_string();
+                self.state.status = match err {
+                    crate::autonomy::AutonomyParseError::SpawnCountTooLarge { count, max } => {
+                        t!("status.spawn_count_too_large", count = count, max = max).into_owned()
+                    }
+                    other => other.to_string(),
+                };
+                // Keep the draft: one mistyped digit must not lose a long prompt.
+                self.state.set_composer_text(draft);
                 return SlashDispatchOutcome::Rejected;
             }
         };
         match produced {
             Some(command) => SlashDispatchOutcome::accepted(Some(command)),
-            None => SlashDispatchOutcome::Rejected,
+            None => {
+                // A refused command (read-only peer, cap, active turn, …)
+                // keeps the draft, like the plain-prompt peer guard does.
+                self.state.set_composer_text(draft);
+                SlashDispatchOutcome::Rejected
+            }
         }
     }
 
@@ -1808,7 +1820,7 @@ impl Store {
     /// read-only mode (the follow-up SubmitPrompt is blocked there like any
     /// other prompt, with the standard warning).
     pub(crate) fn dispatch_gather_slash(&mut self, draft: &str) -> SlashDispatchOutcome {
-        if !self.require_appui_method(crate::model::APPUI_METHOD_PEER_GATHER) {
+        if !self.require_mutating_appui_method(crate::model::APPUI_METHOD_PEER_GATHER) {
             return SlashDispatchOutcome::Rejected;
         }
         let rest = draft.trim();
@@ -2331,15 +2343,35 @@ impl Store {
                 }))
             }
             AgentsCommand::Spawn { count, prompt } => {
-                if self.state.focused_session_is_peer() {
-                    self.state.status = t!("status.peer_session_read_only").into_owned();
-                    return None;
-                }
                 if self.state.active_turn().is_some() {
                     self.state.status = t!("status.cannot_spawn_active_turn").into_owned();
                     return None;
                 }
                 if !self.require_mutating_appui_method(crate::model::APPUI_METHOD_AGENT_LIST) {
+                    return None;
+                }
+                // The server's cap is per PARENT and counts live children:
+                // check it here so a batch never poisons the parent.
+                let live = self
+                    .state
+                    .session_autonomy_for(&session_id)
+                    .map(|autonomy| {
+                        autonomy
+                            .agents
+                            .iter()
+                            .filter(|agent| !crate::model::agent_status_is_terminal(&agent.status))
+                            .count()
+                    })
+                    .unwrap_or(0);
+                let max = crate::autonomy::max_children_per_parent() as usize;
+                if live.saturating_add(count as usize) > max {
+                    self.state.status = t!(
+                        "status.spawn_cap_exceeded",
+                        live = live,
+                        requested = count,
+                        max = max
+                    )
+                    .into_owned();
                     return None;
                 }
                 let text =
@@ -5771,6 +5803,13 @@ impl Store {
     }
 
     fn require_mutating_appui_method(&mut self, method: &'static str) -> bool {
+        // #488: a focused peer is a read-only WATCH surface — every
+        // server-mutating command (`/agents spawn`, `/review`, `/goal`,
+        // `/loop`, `/gather`, …) is refused with the same message.
+        if self.state.focused_session_is_peer() {
+            self.state.status = t!("status.peer_session_read_only").into_owned();
+            return false;
+        }
         if self.state.readonly {
             self.state.status = t!("status.readonly_method_disabled", method = method).into_owned();
             return false;
@@ -20920,6 +20959,219 @@ mod tests {
             "spawn must use the peer read-only refusal: {}",
             store.state.status
         );
+        assert_eq!(
+            store.state.composer, "/agents spawn 1 inspect logs",
+            "the refusal keeps the draft"
+        );
+    }
+
+    /// #488 review: the read-only gate is central — every server-mutating
+    /// command on a focused peer is refused, with the draft kept.
+    #[test]
+    fn peer_focused_mutating_commands_are_read_only_and_keep_the_draft() {
+        let peer = SessionKey("local:main#peer-refactor".into());
+        for draft in [
+            "/agents spawn 2 do work",
+            "/review the last commit",
+            "/goal set ship it",
+            "/loop create 5m check the build",
+            "/gather",
+        ] {
+            let mut store = store_with_two_sessions("local:a", "local:main#peer-refactor");
+            store.state.opened_peer_sessions.insert(peer.clone());
+            store.state.selected_session = 1;
+            store.state.target = Some("ws://example.test/ui-protocol".into());
+            store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods_and_features(
+                [
+                    crate::model::APPUI_METHOD_AGENT_LIST,
+                    crate::model::APPUI_METHOD_REVIEW_START,
+                    crate::model::APPUI_METHOD_SESSION_GOAL_SET,
+                    crate::model::APPUI_METHOD_LOOP_CREATE,
+                    crate::model::APPUI_METHOD_PEER_GATHER,
+                ],
+                [
+                    crate::model::APPUI_FEATURE_CODING_AUTONOMY_V1,
+                    crate::model::APPUI_FEATURE_REVIEW_START_V1,
+                ],
+            ));
+            store.state.composer = draft.into();
+
+            let command = store.compose_command();
+            assert!(
+                command.is_none(),
+                "{draft} must not run on a read-only peer: {command:?}"
+            );
+            assert!(
+                store.state.status.contains("read-only"),
+                "{draft} must use the peer read-only refusal: {}",
+                store.state.status
+            );
+            if draft.starts_with("/agents")
+                || draft.starts_with("/goal")
+                || draft.starts_with("/loop")
+            {
+                assert_eq!(store.state.composer, draft, "{draft} keeps the draft");
+            }
+        }
+    }
+
+    /// #488 review: the cap is per parent session and counts live children,
+    /// so a batch can never poison the parent at the server.
+    #[test]
+    fn agents_spawn_refused_when_live_agents_hit_the_parent_cap() {
+        let session_id = SessionKey("local:a".into());
+        let mut store = store_with_two_sessions("local:a", "local:b");
+        store.state.target = Some("ws://example.test/ui-protocol".into());
+        store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods_and_features(
+            [crate::model::APPUI_METHOD_AGENT_LIST],
+            [crate::model::APPUI_FEATURE_CODING_AUTONOMY_V1],
+        ));
+        let live_agents = |n: usize| {
+            (0..n)
+                .map(|i| octos_core::ui_protocol::UiAgentRecord {
+                    agent_id: format!("a-{i}"),
+                    parent_agent_id: Some("master".into()),
+                    session_id: session_id.clone(),
+                    task_id: None,
+                    path: format!("master/a-{i}"),
+                    role: "worker".into(),
+                    nickname: "w".into(),
+                    title: None,
+                    backend_kind: "native".into(),
+                    status: "running".into(),
+                    last_task: None,
+                    summary: None,
+                    output_tail: None,
+                    cwd: None,
+                    profile_id: "coding".into(),
+                    runtime_policy_stamp: None,
+                    artifact_count: 0,
+                    artifacts: vec![],
+                    created_at_ms: 1,
+                    updated_at_ms: 2,
+                })
+                .collect::<Vec<_>>()
+        };
+        let cap = crate::autonomy::max_children_per_parent() as usize;
+        store
+            .state
+            .set_session_agents(&session_id, live_agents(cap));
+        store.state.composer = "/agents spawn 1 more work".into();
+        let command = store.compose_command();
+        assert!(
+            command.is_none(),
+            "live agents at the cap must refuse one more: {command:?}"
+        );
+        assert!(
+            store.state.status.contains("limit"),
+            "the refusal names the limit: {}",
+            store.state.status
+        );
+        assert_eq!(
+            store.state.composer, "/agents spawn 1 more work",
+            "the refusal keeps the draft"
+        );
+
+        // One seat free, and terminal agents do not count as live.
+        let mut agents = live_agents(cap - 1);
+        agents[0].status = "completed".into();
+        store.state.set_session_agents(&session_id, agents);
+        store.state.composer = "/agents spawn 2 more work".into();
+        assert!(
+            store.compose_command().is_some(),
+            "cap - 1 live (one terminal) plus 2 fits the cap"
+        );
+    }
+
+    /// #488 review: a `closed` agent record reconciles a stuck running task
+    /// to cancelled, case-insensitively.
+    #[test]
+    fn closed_agent_record_reconciles_a_stuck_task_to_cancelled() {
+        use octos_core::ui_protocol::{AgentUpdatedEvent, TaskRuntimeState};
+        let mut store = protocol_store_with_autonomy();
+        let session_id = SessionKey("local:test".into());
+        let task_id: TaskId = "01900000-0000-7000-8000-0000000000fd"
+            .parse()
+            .expect("valid task id");
+        if let Some(session) = store.find_session_mut(&session_id) {
+            session.tasks.push(TaskView {
+                id: task_id.clone(),
+                title: "stuck".into(),
+                state: TaskRuntimeState::Running,
+                runtime_detail: None,
+                output_tail: String::new(),
+                turn_id: None,
+            });
+        }
+        let agent = octos_core::ui_protocol::UiAgentRecord {
+            agent_id: format!("task-{task_id}"),
+            parent_agent_id: Some("master".into()),
+            session_id: session_id.clone(),
+            task_id: Some(task_id.to_string()),
+            path: "master/task-fd".into(),
+            role: "background_task".into(),
+            nickname: "spawn".into(),
+            title: None,
+            backend_kind: "task_supervisor:spawn".into(),
+            status: "Closed".into(),
+            last_task: None,
+            summary: None,
+            output_tail: None,
+            cwd: None,
+            profile_id: "coding".into(),
+            runtime_policy_stamp: None,
+            artifact_count: 0,
+            artifacts: vec![],
+            created_at_ms: 1,
+            updated_at_ms: 2,
+        };
+        store.apply_event(AppUiEvent::Protocol(UiNotification::AgentUpdated(
+            AgentUpdatedEvent {
+                session_id: session_id.clone(),
+                agent,
+            },
+        )));
+        let session = store
+            .state
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .expect("session present");
+        let task = session
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .expect("seeded task present");
+        assert_eq!(task.state, TaskRuntimeState::Cancelled);
+    }
+
+    /// #488 review: one terminal predicate — the strip and the reconcile
+    /// never count differently again.
+    #[test]
+    fn agent_status_terminal_predicates_agree() {
+        use crate::model::{agent_status_is_terminal, terminal_task_state_from_agent_status};
+        for status in [
+            "running",
+            "queued",
+            "completed",
+            "complete",
+            "done",
+            "ready",
+            "failed",
+            "error",
+            "cancelled",
+            "canceled",
+            "interrupted",
+            "closed",
+            "Closed",
+            "",
+        ] {
+            assert_eq!(
+                agent_status_is_terminal(status),
+                terminal_task_state_from_agent_status(status).is_some(),
+                "predicates disagree for {status:?}"
+            );
+        }
     }
 
     /// Peer operator console (BUG A): peer identity is DURABLE and unambiguous —
@@ -41802,9 +42054,9 @@ workspace_root: None,
         let mut store = protocol_store_with_autonomy();
         store.state.composer = "/agents output".into();
         assert!(store.compose_command().is_none());
-        // Registry hides the command on the missing-id error first; the
-        // composer is cleared either way.
-        assert!(store.state.composer.is_empty());
+        // #488 review: a refused command keeps the draft — one wrong or
+        // missing id must not lose what the operator typed.
+        assert_eq!(store.state.composer, "/agents output");
     }
 
     #[test]

@@ -771,22 +771,11 @@ impl SessionAutonomyState {
 }
 
 /// True when an agent status string is terminal — the agent can never emit
-/// again. Superset of the strip's glyph terminal set (`agent_status_glyph`)
-/// plus `closed` (set by `agent/close`); case-insensitive like the glyph map.
+/// again. One predicate with [`terminal_task_state_from_agent_status`] so the
+/// list count and the dock never count differently; case-insensitive.
+/// `ready`/`cleared`/`active` are LIVE (the agent-list count pins that).
 pub fn agent_status_is_terminal(status: &str) -> bool {
-    matches!(
-        status.to_ascii_lowercase().as_str(),
-        "completed"
-            | "complete"
-            | "done"
-            | "ready"
-            | "failed"
-            | "error"
-            | "cancelled"
-            | "canceled"
-            | "interrupted"
-            | "closed"
-    )
+    terminal_task_state_from_agent_status(status).is_some()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11645,9 +11634,9 @@ pub fn activity_status_is_running(status: &str) -> bool {
 /// once the durable terminal agent record lands.
 pub fn terminal_task_state_from_agent_status(status: &str) -> Option<TaskRuntimeState> {
     match status.to_ascii_lowercase().as_str() {
-        "completed" => Some(TaskRuntimeState::Completed),
-        "failed" => Some(TaskRuntimeState::Failed),
-        "interrupted" | "cancelled" | "closed" => Some(TaskRuntimeState::Cancelled),
+        "completed" | "complete" | "done" => Some(TaskRuntimeState::Completed),
+        "failed" | "error" => Some(TaskRuntimeState::Failed),
+        "interrupted" | "cancelled" | "canceled" | "closed" => Some(TaskRuntimeState::Cancelled),
         _ => None,
     }
 }
