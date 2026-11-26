@@ -69,6 +69,13 @@ scripts/olp-launchd.py render demo --interval 60 -- /bin/echo hi   # 只看 plis
 接管一把还活着的锁。不要直接把 `octoscode outer-duty hold` 注册成常驻任务:
 外环是交互式的,要有终端,所以在 herdr 窗格里跑,由监督任务负责拉起。
 
+herdr 自己重启时窗格里的进程全没了。监督任务拉起外环后,会把带 `hold` 的整条命令登记成
+这个窗格的 herdr 恢复命令(herdr 0.9.2 起),herdr 重启后回来的直接就是持锁的外环。外环启动时
+去掉了 `HERDR_ENV`,所以 agent 自带的 herdr 集成在外环窗格里不生效——有的集成会连状态一起报,
+那样 herdr 只认它登记的裸 agent 命令,回来的外环不持锁。锁空着、窗格里却一直有程序在跑时,监督任务不会重启它,
+会在黑板上留言一次。herdr 不恢复窗格创建时给的环境变量:外环依赖的变量要写进 shell 的启动
+文件,或写进外环命令本身。
+
 ```bash
 # 一次性:注册监督任务(macOS launchd / Linux systemd,每 60 秒检查一次)
 octoscode olp outer install --project <项目> --signature <署名> --duties <职责> \

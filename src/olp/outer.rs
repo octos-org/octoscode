@@ -460,6 +460,57 @@ fn resume_prompt(c: &Common) -> Option<String> {
     ))
 }
 
+/// Tell herdr how to bring this pane's program back after herdr itself
+/// restarts: the same `hold … -- <outer command>`, so what comes back holds
+/// the lock. Only the command is reported (`report-agent-session`), never
+/// the agent's state: herdr keeps reading that from the screen. Without
+/// this, an agent's own herdr integration would have herdr resume the bare
+/// agent, which holds nothing. A failure is a reminder, not an error.
+fn register_resume(c: &Common, pane: &str, hold: &[&str]) {
+    let session = c.session.as_deref();
+    // herdr takes a resume command only for a pane it sees an agent in.
+    let deadline = Instant::now() + Duration::from_secs_f64(c.ready.max(0.0));
+    let agent = loop {
+        let seen = herdr(&["pane", "get", pane], session).ok().and_then(|got| {
+            got.pointer("/pane/agent")
+                .and_then(Value::as_str)
+                .filter(|a| !a.is_empty())
+                .map(str::to_string)
+        });
+        match seen {
+            Some(agent) => break agent,
+            None if Instant::now() >= deadline => {
+                eprintln!(
+                    "{PROG}: 提醒:herdr 没认出窗格 {pane} 里的 agent,没有登记恢复命令(herdr 重启后要靠监督任务拉起)"
+                );
+                return;
+            }
+            None => std::thread::sleep(Duration::from_secs(1)),
+        }
+    };
+    let seq = (now() as u64).to_string();
+    // `hold` starts with `env`: herdr wants a plain command name first.
+    let mut args = vec![
+        "pane",
+        "report-agent-session",
+        pane,
+        "--source",
+        "olp-outer",
+        "--agent",
+        &agent,
+        "--seq",
+        &seq,
+        "--",
+    ];
+    args.extend(hold);
+    match herdr(&args, session) {
+        Ok(_) => println!("resume command registered for pane {pane}"),
+        Err(Fail(_, why)) => {
+            eprintln!("{PROG}: 提醒:没能登记恢复命令({why});herdr 重启后要靠监督任务拉起")
+        }
+    }
+}
+
 /// The prompt was typed but the agent did not start on it: an agent that
 /// has only just started can lose the Enter. While the agent is idle — never
 /// while it waits on a dialog of its own — press Enter again, a few times.
@@ -569,6 +620,13 @@ fn supervise(mut c: Common) -> Result<i32, Fail> {
     }
     match duty_state(&c.project).as_str() {
         "HELD" => {
+            let mut record = load_state(&c.project);
+            if record.get("busy_seen").is_some() {
+                if let Some(fields) = record.as_object_mut() {
+                    fields.remove("busy_seen");
+                }
+                save_state(&c.project, &record);
+            }
             println!("held");
             return Ok(0);
         }
@@ -610,10 +668,34 @@ fn supervise(mut c: Common) -> Result<i32, Fail> {
             "{PROG}: 外环窗格 {pane} 里还有程序在跑({}),锁却空着;未重启",
             busy.join(", ")
         );
+        // Seen twice in a row it is no passing moment: something runs in the
+        // outer's pane that did not come up through `hold` — an agent herdr
+        // resumed by itself, or one started by hand. Said once.
+        let seen = record["busy_seen"].as_u64().unwrap_or(0) + 1;
+        if seen == 2 {
+            board_note(
+                c.board.as_deref(),
+                &format!(
+                    "> 外环没有持锁({}):锁空着,窗格 {pane} 里却有程序在跑({}),它不是经 outer-duty hold 启动的;监督任务不会重启它,需要人看。{}\n",
+                    c.signature,
+                    busy.join(", "),
+                    stamp()
+                ),
+            );
+        }
+        record["busy_seen"] = json!(seen);
+        save_state(&c.project, &record);
         return Ok(3);
     }
     let exe = super::repo::self_exe();
+    // Without HERDR_ENV the agent's own herdr integration stays silent in
+    // this pane. An integration that reports the agent's state holds the
+    // pane in herdr's eyes; herdr then takes that integration's resume
+    // command — the bare agent, which holds no lock — and refuses ours.
     let mut hold = vec![
+        "env",
+        "-u",
+        "HERDR_ENV",
         exe.as_str(),
         "outer-duty",
         "hold",
@@ -647,6 +729,7 @@ fn supervise(mut c: Common) -> Result<i32, Fail> {
                 ),
             );
             println!("restarted in pane {pane}");
+            register_resume(&c, &pane, &hold);
             deliver_prompt(&c, &pane);
             return Ok(0);
         }

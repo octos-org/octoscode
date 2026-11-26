@@ -78,6 +78,14 @@ elif args[:2] == ["agent", "prompt"]:
         print(json.dumps({"error": {"message": "timeout"}}))
         sys.exit(1)
     out({})
+elif args[:2] == ["pane", "get"]:
+    state = os.path.join(here, "agent_state")
+    unseen = os.path.exists(state) and open(state).read().strip() == "never"
+    out({"pane": {"pane_id": args[2], "agent": None if unseen else "claude"}})
+elif args[:2] == ["pane", "report-agent-session"]:
+    with open(os.path.join(here, "resume.log"), "a") as f:
+        f.write(json.dumps(args[2:]) + "\n")
+    out({})
 elif args[:2] == ["pane", "send-keys"]:
     open(os.path.join(here, "entered"), "w").write(args[3])
     out({})
@@ -406,6 +414,78 @@ fn outer_supervise_hands_the_restarted_outer_the_resume_prompt() {
         "{prompts}"
     );
     assert!(prompts.contains("board.md"), "{prompts}");
+}
+
+/// Scenario: 重启后把带 hold 的完整命令登记成 herdr 的恢复命令,不报状态
+#[test]
+fn outer_supervise_registers_the_hold_command_as_herdrs_resume_command() {
+    let sb = Sb::new();
+    let out = sb.supervise(&["--no-prompt"], "while true; do sleep 0.1; done");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("resume command registered"),
+        "{}",
+        stdout(&out)
+    );
+    let log = std::fs::read_to_string(sb.p("herdr/resume.log")).unwrap();
+    let args: Vec<String> = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+    let at = args
+        .iter()
+        .position(|w| w == "--")
+        .expect("a resume command");
+    let (flags, resume) = (&args[..at], &args[at + 1..]);
+    assert_eq!(flags[0], "w1:p1");
+    assert!(
+        flags.windows(2).any(|w| w == ["--source", "olp-outer"]),
+        "{flags:?}"
+    );
+    assert!(
+        flags.windows(2).any(|w| w == ["--agent", "claude"]),
+        "{flags:?}"
+    );
+    assert!(
+        !flags.iter().any(|w| w == "--state"),
+        "the agent's state is herdr's to read"
+    );
+    // A plain command name first, and the agent's own herdr integration off.
+    assert_eq!(resume[..3], ["env", "-u", "HERDR_ENV"]);
+    assert_eq!(resume[3], env!("CARGO_BIN_EXE_octoscode"));
+    assert_eq!(resume[4..6], ["outer-duty", "hold"]);
+    let tail: Vec<&str> = resume
+        .iter()
+        .rev()
+        .take(3)
+        .rev()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(tail, ["/bin/sh", "-c", "while true; do sleep 0.1; done"]);
+    assert_eq!(sb.calls("pane report-agent "), 0);
+}
+
+/// Scenario: 锁空着而窗格里一直有程序在跑时,第二次看到就留言一次
+#[test]
+fn outer_supervise_notes_a_pane_that_stays_busy_without_the_lock() {
+    let sb = Sb::new();
+    std::fs::write(
+        sb.p("herdr/workspaces.json"),
+        r#"[{"workspace_id":"w1","label":"olp-outer"}]"#,
+    )
+    .unwrap();
+    std::fs::write(sb.p("herdr/busy"), "claude\n").unwrap();
+    for round in 1..=3 {
+        let out = sb.supervise(&[], "true");
+        assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+        if has_flock() {
+            let notes = sb.board().matches("外环没有持锁").count();
+            assert_eq!(
+                notes,
+                usize::from(round >= 2),
+                "round {round}: {}",
+                sb.board()
+            );
+        }
+    }
+    assert_eq!(sb.calls("pane run"), 0);
 }
 
 #[test]

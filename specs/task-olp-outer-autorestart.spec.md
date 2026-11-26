@@ -28,6 +28,19 @@ estimate: 1d
   - `--board` 是事件日志目录时,留言写成日志里的一条事件(`kind: note`,`actor: 外环监督`,
     `data.text` 是留言,不属于任何卡);`olp board render` 把它显示成 `> 外环监督: …`。
     来源:2026-11-26 在 hub 上实测,原先对日志目录调用 `olp board append`,留言写不进去。
+  - herdr 自己重启时(2026-11-26,operator 定:恢复命令按我们的来):窗格里的进程全没了,herdr
+    0.9.2 起会重新运行窗格登记过的"恢复命令"。重启成功后 supervise 等 herdr 认出窗格里的
+    agent(`pane get`,最多 `--ready` 秒),再用
+    `herdr pane report-agent-session <窗格> --source olp-outer --agent <认出的名字> --seq <秒> -- <命令>`
+    把带 hold 的整条命令登记进去;只登记命令,不报状态(状态仍由 herdr 从屏幕读)。登记不上
+    只提醒,不算失败。
+  - 外环一律以 `env -u HERDR_ENV <octoscode 绝对路径> outer-duty hold … -- <外环命令>` 启动,登记
+    的恢复命令也是这一条:去掉 `HERDR_ENV` 后 agent 自带的 herdr 集成不出声。实测(herdr 0.9.5,
+    hagency 分支 8d6f3a11):Claude Code 的集成(v11)只登记会话 id,与我们的恢复命令并存时 herdr
+    运行我们的;但连状态一起报的来源会"占住"窗格,此后我们的登记被拒(`resume_not_accepted`,
+    手工模拟所见)。去掉变量对哪种集成都有效。窗格创建时的 `--env` 变量 herdr 不恢复。
+  - 锁空着而外环窗格里有程序在跑(退出码 3):连续第二次看到时在黑板上留言一次"外环没有持锁";
+    计数记在重启记录里,锁被占着或重启成功后清零。
   - `install`:经保活工具(macOS launchd、Linux systemd)注册每 `--interval` 秒运行一次的
     `<octoscode 绝对路径> olp outer supervise …`,herdr 路径记进 `OLP_HERDR`。
   - `--board` 是事件日志目录时,`install` 另注册 `<name>-watch`:每 `--interval` 秒运行
@@ -84,6 +97,18 @@ Scenario: 黑板是事件日志时,install 另注册外环值守
   Given `--board` 分别指向事件日志目录与 Markdown 黑板,`--label my-outer`
   When 各运行一次 install --no-load
   Then 前者写出两个任务,其中 outer-watch 调用 `olp outer watch <日志> --label my-outer --once` 并记下 herdr 的位置;后者只有一个任务
+
+Scenario: 重启后把带 hold 的完整命令登记成 herdr 的恢复命令,不报状态
+  Test: outer_supervise_registers_the_hold_command_as_herdrs_resume_command
+  Given 一个假 herdr 与空着的锁
+  When 运行 supervise
+  Then herdr 收到一次 report-agent-session:来源 olp-outer,agent 是 herdr 认出的名字,不带 --state;命令以 `env -u HERDR_ENV <octoscode 绝对路径> outer-duty hold` 开头、以外环命令结尾;没有调用 report-agent
+
+Scenario: 锁空着而窗格里一直有程序在跑时,第二次看到就留言一次
+  Test: outer_supervise_notes_a_pane_that_stays_busy_without_the_lock
+  Given 外环窗格里有程序在跑,锁空着
+  When 连续运行 supervise 三次
+  Then 三次都退出码 3、不执行命令;黑板上第一次没有留言,第二次起恰有一行"外环没有持锁"
 
 Scenario: 外环窗格里还有程序在跑而锁空着时不重启
   Test: outer_supervise_leaves_a_busy_pane_alone
