@@ -753,27 +753,31 @@ fn install_octos_bundle() -> Result<()> {
          (set {OPT_OUT_ENV}=1 to skip)..."
     );
 
-    let bytes =
-        http_get_bytes(&bundle_url).wrap_err("failed to download the octos server bundle")?;
-
-    // Integrity-check before extracting an executable we're about to run. A
-    // missing checksum (older releases) warns but doesn't hard-fail; a mismatch
-    // does.
-    match http_get_string(&sha_url) {
-        Ok(published) => verify_sha256(&bytes, &published)?,
-        Err(err) => eprintln!(
-            "octoscode: could not fetch the bundle checksum ({err}); skipping verification"
-        ),
-    }
-
-    extract_octos_bundle(&bytes, asset, &install_dir)
-        .wrap_err("failed to extract the octos server bundle")?;
+    install_verified_octos_bundle(&bundle_url, &sha_url, asset, &install_dir)?;
 
     eprintln!(
         "octoscode: installed the octos server to {}",
         install_dir.display()
     );
     Ok(())
+}
+
+/// A checksum is required for every pinned bundle, including release overrides.
+/// Fetch it first so an unavailable checksum cannot waste a large download or
+/// publish any files. Current supported releases ship checksums on all targets.
+fn install_verified_octos_bundle(
+    bundle_url: &str,
+    sha_url: &str,
+    asset: &str,
+    install_dir: &Path,
+) -> Result<()> {
+    let published = http_get_string(sha_url)
+        .wrap_err_with(|| t!("backend_install.checksum_required").into_owned())?;
+    let bytes =
+        http_get_bytes(bundle_url).wrap_err("failed to download the octos server bundle")?;
+    verify_sha256(&bytes, &published)?;
+    extract_octos_bundle(&bytes, asset, install_dir)
+        .wrap_err("failed to extract the octos server bundle")
 }
 
 /// Blocking GET returning the response body bytes, erroring on non-2xx. Follows
@@ -1108,6 +1112,142 @@ mod tests {
             w.finish().unwrap();
         }
         buf
+    }
+
+    fn with_bundle_http_fixture(
+        checksum: Option<(u16, Vec<u8>)>,
+        bundle: Vec<u8>,
+        check: impl FnOnce(&str, &str),
+    ) {
+        use std::io::{Read, Write};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+        let server_done = Arc::clone(&done);
+        let server = std::thread::spawn(move || {
+            while !server_done.load(Ordering::SeqCst) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    Err(error) => panic!("fixture accept: {error}"),
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") && request.len() < 16_384 {
+                    if stream.read(&mut byte).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    request.push(byte[0]);
+                }
+                let request = String::from_utf8_lossy(&request);
+                let (status, body) = if request.starts_with("GET /checksum ") {
+                    match &checksum {
+                        Some((status, body)) => (*status, body.as_slice()),
+                        None => continue,
+                    }
+                } else {
+                    (200, bundle.as_slice())
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} fixture\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                if stream.write_all(body).is_ok() {
+                    let _ = stream.shutdown(std::net::Shutdown::Write);
+                    // Let the client consume the response before dropping its
+                    // socket; Windows otherwise may reset an unread peer.
+                    let _ = stream.read_to_end(&mut Vec::new());
+                }
+            }
+        });
+        check(
+            &format!("http://{address}/bundle"),
+            &format!("http://{address}/checksum"),
+        );
+        done.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn bundle_checksum_fetch_failures_preserve_existing_installation() {
+        for checksum in [
+            Some((404, b"missing".to_vec())),
+            Some((500, b"unavailable".to_vec())),
+            None,
+        ] {
+            let destination = tempfile::tempdir().unwrap();
+            let binary = destination.path().join(octos_binary_name());
+            std::fs::write(&binary, b"original binary").unwrap();
+            let bundle = zip_with(&[(octos_binary_name(), b"replacement")]);
+            with_bundle_http_fixture(checksum, bundle, |bundle_url, sha_url| {
+                let error = install_verified_octos_bundle(
+                    bundle_url,
+                    sha_url,
+                    "bundle.zip",
+                    destination.path(),
+                )
+                .unwrap_err();
+                assert!(format!("{error:#}").contains("checksum"));
+            });
+            assert_eq!(std::fs::read(&binary).unwrap(), b"original binary");
+        }
+    }
+
+    #[test]
+    fn bundle_checksum_mismatch_never_creates_installation() {
+        let parent = tempfile::tempdir().unwrap();
+        let destination = parent.path().join("not-installed");
+        let bundle = zip_with(&[(octos_binary_name(), b"replacement")]);
+        with_bundle_http_fixture(
+            Some((200, "0".repeat(64).into_bytes())),
+            bundle,
+            |bundle_url, sha_url| {
+                assert!(
+                    install_verified_octos_bundle(bundle_url, sha_url, "bundle.zip", &destination)
+                        .is_err()
+                );
+            },
+        );
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn bundle_checksum_verified_download_installs_binary() {
+        use sha2::{Digest, Sha256};
+        let destination = tempfile::tempdir().unwrap();
+        let bundle = zip_with(&[(octos_binary_name(), b"verified replacement")]);
+        let published = format!("{}  bundle.zip\n", hex_lower(&Sha256::digest(&bundle)));
+        with_bundle_http_fixture(
+            Some((200, published.into_bytes())),
+            bundle,
+            |bundle_url, sha_url| {
+                install_verified_octos_bundle(
+                    bundle_url,
+                    sha_url,
+                    "bundle.zip",
+                    destination.path(),
+                )
+                .unwrap();
+            },
+        );
+        assert_eq!(
+            std::fs::read(destination.path().join(octos_binary_name())).unwrap(),
+            b"verified replacement"
+        );
     }
 
     #[test]

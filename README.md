@@ -60,6 +60,7 @@ provider, paste its API key, and open your first coding chat. The
 | Symptom | Fix |
 |---|---|
 | First launch can't fetch the server | Auto-install needs network. Offline / behind a proxy? Install octos yourself (`npm i -g @octos-org/octos`, or the [server guide](https://github.com/octos-org/octos#start-here)) — the TUI then finds it. Set `OCTOSCODE_NO_AUTO_INSTALL=1` to disable auto-install. |
+| Backend checksum is unavailable | Auto-install requires the release bundle's `.sha256` file, including when overriding the release tag. Retry the download or install the backend manually; unverified bundles are not installed. |
 | Replies are instant and feel canned | You launched with `--mode mock`. Run plain `octoscode` for the real backend. |
 | "Test provider" fails during onboarding | Re-check the API key and the provider choice; you can redo it anytime with `/onboard` or `/setup`. |
 
