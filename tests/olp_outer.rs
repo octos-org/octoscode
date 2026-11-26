@@ -373,11 +373,13 @@ fn outer_install_registers_the_watcher_for_an_event_log() {
         found.sort();
         found
     };
+    // launchd writes one file per job, systemd a service and a timer.
+    let is_watch = |name: &str| name.contains("outer-watch");
     let on_log = install("log", "jobs-log");
-    assert_eq!(on_log.len(), 2, "{on_log:?}");
+    assert!(on_log.iter().any(|(name, _)| !is_watch(name)), "{on_log:?}");
     let watch = &on_log
         .iter()
-        .find(|(name, _)| name.contains("outer-watch"))
+        .find(|(name, text)| is_watch(name) && text.contains("--label"))
         .expect("a job named outer-watch")
         .1;
     for word in ["watch", "--label", "my-outer", "--once", "OLP_HERDR"] {
@@ -389,7 +391,12 @@ fn outer_install_registers_the_watcher_for_an_event_log() {
     );
     assert!(!watch.contains("supervise"), "{watch}");
     // A Markdown board has its own watch: one job only.
-    assert_eq!(install("board.md", "jobs-md").len(), 1);
+    let on_board = install("board.md", "jobs-md");
+    assert!(!on_board.is_empty(), "the supervisor's own job");
+    assert!(
+        !on_board.iter().any(|(name, _)| is_watch(name)),
+        "{on_board:?}"
+    );
 }
 
 /// Scenario: 重启后等 agent 就绪,把接班提示送进去;没送到在黑板上记一行;--no-prompt 不送
