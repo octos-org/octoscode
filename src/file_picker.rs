@@ -7,12 +7,15 @@
 //!
 //! The walk is breadth-first (shallow paths surface first, which is what a
 //! picker wants), sorted per directory for deterministic ordering, and bounded
-//! by [`FILE_PICKER_MAX_FILES`] / [`FILE_PICKER_MAX_DEPTH`] plus a directory
-//! visit budget so a pathological tree can never stall the render loop. `.git`
-//! and the ubiquitous dependency/build trees (`target`, `node_modules`) are
-//! skipped — with a ~2000-entry cap they would otherwise flood out the source
-//! files the picker exists to find. Symlinks are skipped entirely (no cycle
-//! chasing, no walking out of the workspace).
+//! by [`FILE_PICKER_MAX_FILES`] / [`FILE_PICKER_MAX_DEPTH`] plus directory and
+//! entry budgets. The scan remains synchronous, so individual filesystem I/O
+//! may still be slow, but a wide directory cannot cause unbounded enumeration,
+//! sorting, or queued work. When the entry budget truncates a directory, the
+//! scan stops after processing its retained entries; its subdirectories are
+//! not visited. `.git` and the ubiquitous dependency/build trees (`target`,
+//! `node_modules`) are skipped — with a ~2000-entry cap they would otherwise
+//! flood out the source files the picker exists to find. Symlinks are skipped
+//! entirely (no cycle chasing, no walking out of the workspace).
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -24,6 +27,9 @@ pub const FILE_PICKER_MAX_DEPTH: usize = 16;
 /// Budget of directories visited per scan, so a wide tree of empty/filtered
 /// directories still terminates promptly even before the file cap is hit.
 const FILE_PICKER_MAX_DIRS: usize = 2000;
+/// Includes filtered, unreadable and symlink entries: bounding only accepted
+/// files would still enumerate an arbitrarily large excluded directory.
+const FILE_PICKER_MAX_ENTRIES: usize = 16_000;
 
 /// Directory names that are never descended into. `.git` per the picker spec;
 /// `target` / `node_modules` because either one routinely holds tens of
@@ -41,7 +47,7 @@ pub struct FilePickerState {
     /// Relative paths (always `/`-separated) in breadth-first, per-directory
     /// alphabetical order.
     pub files: Vec<String>,
-    /// Whether any cap (files / depth / directory budget) truncated the scan.
+    /// Whether any cap (files / depth / directory / entry budget) truncated it.
     pub truncated: bool,
 }
 
@@ -63,14 +69,35 @@ impl FilePickerState {
 /// inserted prompt text is stable. Entries within each directory are sorted by
 /// name; directories in [`SKIPPED_DIRS`] and all symlinks are skipped.
 pub fn scan_workspace_files(root: &Path) -> (Vec<String>, bool) {
+    scan_workspace_files_with_budget(root, FILE_PICKER_MAX_ENTRIES, FILE_PICKER_MAX_DIRS)
+}
+
+/// Collect at most the remaining entry budget, plus one lookahead to tell an
+/// exactly-full directory from a truncated one. Counting before filtering also
+/// bounds directory-entry errors and metadata reads.
+fn bounded_entries<T>(entries: impl Iterator<Item = T>, remaining: &mut usize) -> (Vec<T>, bool) {
+    let mut entries: Vec<T> = entries.take(remaining.saturating_add(1)).collect();
+    let truncated = entries.len() > *remaining;
+    entries.truncate(*remaining);
+    *remaining -= entries.len();
+    (entries, truncated)
+}
+
+fn scan_workspace_files_with_budget(
+    root: &Path,
+    entry_budget: usize,
+    directory_budget: usize,
+) -> (Vec<String>, bool) {
     let mut files = Vec::new();
     let mut truncated = false;
     let mut dirs_visited = 0usize;
+    let mut entries_remaining = entry_budget;
+    let mut dirs_admitted = 1usize;
     // Queue of (absolute dir, relative prefix, depth). Depth 0 = root itself.
     let mut queue = VecDeque::from([(root.to_path_buf(), String::new(), 0usize)]);
 
     'walk: while let Some((dir, rel_prefix, depth)) = queue.pop_front() {
-        if dirs_visited >= FILE_PICKER_MAX_DIRS {
+        if dirs_visited >= directory_budget {
             truncated = true;
             break;
         }
@@ -80,7 +107,10 @@ pub fn scan_workspace_files(root: &Path) -> (Vec<String>, bool) {
             // Unreadable directory (permissions, raced deletion): skip quietly.
             continue;
         };
+        let (entries, entries_truncated) = bounded_entries(entries, &mut entries_remaining);
+        truncated |= entries_truncated;
         let mut children: Vec<(String, bool)> = entries
+            .into_iter()
             .filter_map(|entry| {
                 let entry = entry.ok()?;
                 let file_type = entry.file_type().ok()?;
@@ -109,6 +139,13 @@ pub fn scan_workspace_files(root: &Path) -> (Vec<String>, bool) {
                     truncated = true;
                     continue;
                 }
+                // Reserve a visit when admitting work, rather than allowing a
+                // huge root directory to fill the queue before visits begin.
+                if dirs_admitted >= directory_budget {
+                    truncated = true;
+                    continue;
+                }
+                dirs_admitted += 1;
                 queue.push_back((dir.join(&name), rel, depth + 1));
             } else {
                 if files.len() >= FILE_PICKER_MAX_FILES {
@@ -117,6 +154,9 @@ pub fn scan_workspace_files(root: &Path) -> (Vec<String>, bool) {
                 }
                 files.push(rel);
             }
+        }
+        if entries_truncated {
+            break;
         }
     }
 
@@ -227,6 +267,53 @@ mod tests {
 
         assert_eq!(files.len(), FILE_PICKER_MAX_FILES);
         assert!(truncated);
+    }
+
+    #[test]
+    fn directory_entry_budget_stops_before_enumerating_the_remainder() {
+        let examined = std::cell::Cell::new(0);
+        let entries = (0..).inspect(|_| examined.set(examined.get() + 1));
+        let mut remaining = 7;
+        let (entries, truncated) = bounded_entries(entries, &mut remaining);
+        assert_eq!(entries, (0..7).collect::<Vec<_>>());
+        assert!(truncated);
+        assert_eq!(remaining, 0);
+        assert_eq!(examined.get(), 8, "only one lookahead beyond the budget");
+    }
+
+    #[test]
+    fn directory_entry_budget_is_shared_across_directories() {
+        let dir = TempDir::new("entry-budget");
+        for child in ["a", "b"] {
+            for index in 0..5 {
+                touch(dir.path(), &format!("{child}/f{index}.txt"));
+            }
+        }
+        let (files, truncated) = scan_workspace_files_with_budget(dir.path(), 7, 20);
+        assert_eq!(files.len(), 5, "two root entries leave five file entries");
+        assert!(files.iter().all(|file| file.starts_with("a/")));
+        assert!(truncated);
+    }
+
+    #[test]
+    fn wide_directory_tree_bounds_admitted_work() {
+        let dir = TempDir::new("directory-budget");
+        for index in 0..12 {
+            touch(dir.path(), &format!("d{index:02}/file.txt"));
+        }
+        let (files, truncated) = scan_workspace_files_with_budget(dir.path(), 100, 3);
+        assert_eq!(files, vec!["d00/file.txt", "d01/file.txt"]);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn entry_budget_exactly_filled_does_not_claim_truncation() {
+        let dir = TempDir::new("exact-budget");
+        touch(dir.path(), "a.txt");
+        touch(dir.path(), "b.txt");
+        let (files, truncated) = scan_workspace_files_with_budget(dir.path(), 2, 3);
+        assert_eq!(files, vec!["a.txt", "b.txt"]);
+        assert!(!truncated);
     }
 
     #[test]
