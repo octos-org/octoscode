@@ -63,13 +63,23 @@ elif args[:2] == ["pane", "process-info"]:
     out({"process_info": {"foreground_processes": procs}})
 elif args[:2] == ["agent", "wait"]:
     state = os.path.join(here, "agent_state")
-    if os.path.exists(state) and open(state).read().strip() == "never":
+    state = open(state).read().strip() if os.path.exists(state) else ""
+    lost = state == "enter_lost" and "working" in args and not os.path.exists(os.path.join(here, "entered"))
+    if state == "never" or lost:
         print(json.dumps({"error": {"message": "timeout"}}))
         sys.exit(1)
     out({"status": "idle"})
 elif args[:2] == ["agent", "prompt"]:
     with open(os.path.join(here, "prompts.log"), "a") as f:
         f.write(args[3] + "\n")
+    state = os.path.join(here, "agent_state")
+    if os.path.exists(state) and open(state).read().strip() == "enter_lost":
+        # Typed, but the Enter was lost: the agent never starts on it.
+        print(json.dumps({"error": {"message": "timeout"}}))
+        sys.exit(1)
+    out({})
+elif args[:2] == ["pane", "send-keys"]:
+    open(os.path.join(here, "entered"), "w").write(args[3])
     out({})
 elif args[:2] == ["pane", "run"]:
     p = subprocess.Popen(["/bin/sh", "-c", args[3]], start_new_session=True,
@@ -117,12 +127,16 @@ impl Sb {
     }
 
     fn supervise(&self, extra: &[&str], agent: &str) -> Output {
+        self.supervise_on("board.md", extra, agent)
+    }
+
+    fn supervise_on(&self, board: &str, extra: &[&str], agent: &str) -> Output {
         self.cmd()
             .args(["olp", "outer", "supervise", "--project"])
             .arg(self.p("project"))
             .args(["--signature", "hub-outer", "--duties", "primary-review"])
             .arg("--board")
-            .arg(self.p("board.md"))
+            .arg(self.p(board))
             .args(extra)
             .args(["--", "/bin/sh", "-c", agent])
             .output()
@@ -354,6 +368,65 @@ fn outer_supervise_notes_a_prompt_that_was_not_delivered() {
         assert!(sb.board().contains("接班提示未送达"), "{}", sb.board());
     }
     assert_eq!(sb.calls("agent prompt"), 0);
+}
+
+/// Scenario: 提示打进去了但 agent 没有开始办时,在它空闲时再按回车
+#[test]
+fn outer_supervise_presses_enter_again_when_the_prompt_was_not_taken() {
+    let sb = Sb::new();
+    std::fs::write(sb.p("herdr/agent_state"), "enter_lost").unwrap();
+    let out = sb.supervise(&[], "while true; do sleep 0.1; done");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("prompted pane w1:p1"),
+        "{}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert_eq!(sb.calls("agent prompt"), 1, "the prompt is typed once");
+    assert_eq!(sb.calls("pane send-keys"), 1);
+    let key = std::fs::read_to_string(sb.p("herdr/entered")).unwrap();
+    assert_eq!(key, "Enter");
+}
+
+/// Scenario: 黑板是事件日志时,监督的留言写成日志里的一条事件
+#[test]
+fn outer_supervise_writes_its_notes_into_an_event_log() {
+    let sb = Sb::new();
+    std::fs::create_dir_all(sb.p("log")).unwrap();
+    let out = sb.supervise_on("log", &["--no-prompt"], "while true; do sleep 0.1; done");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(!stderr(&out).contains("没写进"), "{}", stderr(&out));
+    let events = std::fs::read_to_string(sb.p("log/events-000001.jsonl")).unwrap();
+    let note: serde_json::Value = serde_json::from_str(events.lines().next().unwrap()).unwrap();
+    assert_eq!(note["kind"], "note");
+    assert_eq!(note["actor"], "外环监督");
+    let text = note["data"]["text"].as_str().unwrap();
+    assert!(text.starts_with("外环已自动重启(hub-outer)"), "{text}");
+
+    let view = sb
+        .cmd()
+        .args(["olp", "board", "render"])
+        .arg(sb.p("log"))
+        .output()
+        .unwrap();
+    assert!(
+        stdout(&view).contains("> 外环监督: 外环已自动重启"),
+        "{}",
+        stdout(&view)
+    );
+    let brief = sb
+        .cmd()
+        .args(["olp", "outer", "resume", "--project"])
+        .arg(sb.p("project"))
+        .arg("--board")
+        .arg(sb.p("log"))
+        .output()
+        .unwrap();
+    let said = stdout(&brief);
+    assert!(said.contains("监督任务的留言"), "{said}");
+    assert!(said.contains("olp outer watch"), "{said}");
+    assert!(!said.contains("board watch"), "{said}");
 }
 
 #[test]

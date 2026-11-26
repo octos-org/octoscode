@@ -306,6 +306,52 @@ pub fn progress(argv: &[String]) -> i32 {
     deliver(prog, &link, &full, &text)
 }
 
+const QUESTION_USAGE: &str = "用法: octoscode olp remote question ask <提问id> <问题…> | answer <提问id> | timeout <提问id>\n      (内环用 ask_outer 提问时由提问服务自动上报,一般不用手工发)";
+
+/// `olp remote question`: tell the hub's log that an inner loop asked the
+/// outer loop something, or how that question ended.
+pub fn question(argv: &[String]) -> i32 {
+    let prog = "olp remote question";
+    let w = match words(argv) {
+        Ok(w) if w.help => {
+            println!("{QUESTION_USAGE}");
+            return 0;
+        }
+        Ok(w) => w,
+        Err(why) => {
+            eprintln!("{prog}: {why}\n{QUESTION_USAGE}");
+            return 2;
+        }
+    };
+    if !needs_log(prog) {
+        return 2;
+    }
+    let (request, text) = match w.rest.as_slice() {
+        [kind, id, text @ ..] if kind == "ask" && !text.is_empty() => {
+            (vec![kind.clone(), id.clone()], text.join(" "))
+        }
+        [kind, id] if kind == "answer" || kind == "timeout" => {
+            (vec![kind.clone(), id.clone()], String::new())
+        }
+        _ => {
+            eprintln!("{QUESTION_USAGE}");
+            return 2;
+        }
+    };
+    let link = match link(w.hub.as_ref(), w.unit.as_ref()) {
+        Ok(link) => link,
+        Err(why) => {
+            eprintln!("{prog}: {why}");
+            return 2;
+        }
+    };
+    let mut full = vec!["question".to_string()];
+    full.extend(request);
+    // One line travels: a question's line breaks become spaces.
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    deliver(prog, &link, &full, &text)
+}
+
 /// `olp remote mirror` on the event-log channel: fetch what is new about
 /// this unit's cards and rewrite the Markdown file agents read. The events
 /// are kept beside it (`<file>.events.jsonl`), so each run asks only for

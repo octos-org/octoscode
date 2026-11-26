@@ -170,6 +170,20 @@ fn save_state(project: &str, data: &Value) {
 /// write does not carry the outer's lease.
 fn board_note(board: Option<&str>, text: &str) {
     let Some(board) = board else { return };
+    if Path::new(board).is_dir() {
+        // An event log: the note is an event of its own, tied to no card.
+        let note = text.trim().trim_start_matches('>').trim();
+        let written = super::log::Log::at(board).append(super::log::Draft {
+            kind: "note".to_string(),
+            actor: "外环监督".to_string(),
+            data: json!({ "text": note }),
+            ..Default::default()
+        });
+        if let Err(e) = written {
+            eprintln!("{PROG}: 提醒:没写进事件日志: {e}");
+        }
+        return;
+    }
     let Ok(exe) = this_exe() else { return };
     let mut cmd = Command::new(exe);
     cmd.args(["olp", "board", "append", board]);
@@ -428,6 +442,47 @@ fn resume_prompt(c: &Common) -> Option<String> {
     ))
 }
 
+/// The prompt was typed but the agent did not start on it: an agent that
+/// has only just started can lose the Enter. While the agent is idle — never
+/// while it waits on a dialog of its own — press Enter again, a few times.
+fn submit_again(pane: &str, session: Option<&str>) -> Option<Value> {
+    for _ in 0..4 {
+        std::thread::sleep(Duration::from_secs(3));
+        herdr(
+            &[
+                "agent",
+                "wait",
+                pane,
+                "--until",
+                "idle",
+                "--timeout",
+                "1000",
+            ],
+            session,
+        )
+        .ok()?;
+        herdr(&["pane", "send-keys", pane, "Enter"], session).ok()?;
+        let taken = herdr(
+            &[
+                "agent",
+                "wait",
+                pane,
+                "--until",
+                "working",
+                "--until",
+                "blocked",
+                "--timeout",
+                "10000",
+            ],
+            session,
+        );
+        if let Ok(taken) = taken {
+            return Some(taken);
+        }
+    }
+    None
+}
+
 /// Wait until herdr sees the restarted agent ready, then hand it the resume
 /// prompt. A failure is noted, not fatal: the outer loop is running.
 fn deliver_prompt(c: &Common, pane: &str) {
@@ -448,7 +503,25 @@ fn deliver_prompt(c: &Common, pane: &str) {
         ],
         session,
     )
-    .and_then(|_| herdr(&["agent", "prompt", pane, &text], session));
+    .and_then(|_| {
+        herdr(
+            &[
+                "agent",
+                "prompt",
+                pane,
+                &text,
+                "--wait",
+                "--until",
+                "working",
+                "--until",
+                "blocked",
+                "--timeout",
+                "10000",
+            ],
+            session,
+        )
+    })
+    .or_else(|first| submit_again(pane, session).ok_or(first));
     match sent {
         Ok(_) => println!("prompted pane {pane}"),
         Err(Fail(_, why)) => {
@@ -596,6 +669,16 @@ fn render_brief(b: &Value) -> String {
     if !restarts.is_empty() {
         out.push(format!("最近的自动重启:{}", restarts.join(", ")));
     }
+    let notes: Vec<String> = b["notes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(word)
+        .collect();
+    if !notes.is_empty() {
+        out.push("监督任务的留言:".to_string());
+        out.extend(notes.iter().map(|n| format!("  {n}")));
+    }
     let s = &b["summary"];
     if let Some(why) = s.get("unavailable").and_then(Value::as_str) {
         out.push(format!("汇总读不到:{why}"));
@@ -713,6 +796,40 @@ fn resume(c: Common) -> Result<i32, Fail> {
         &c.signature
     };
     let quoted = quote(&board);
+    let is_log = Path::new(&board).is_dir();
+    // What the supervisor left on an event log, newest last.
+    let notes: Vec<String> = if is_log {
+        let all = super::log::Log::at(&board).read().unwrap_or_default();
+        let notes: Vec<String> = all
+            .iter()
+            .filter(|e| e.kind == "note")
+            .map(|e| {
+                format!(
+                    "{} {}",
+                    e.ts,
+                    e.data.get("text").and_then(Value::as_str).unwrap_or("")
+                )
+            })
+            .collect();
+        notes[notes.len().saturating_sub(5)..].to_vec()
+    } else {
+        Vec::new()
+    };
+    let (watch, sign) = if is_log {
+        (
+            format!(
+                "确认外环值守在跑(日志有新事件时它往本窗格发一句短句):octoscode olp outer watch {quoted} --pane <本窗格>"
+            ),
+            "接班不用另记一行:采认、打回、搁置各自写进事件日志".to_string(),
+        )
+    } else {
+        (
+            format!(
+                "重新挂正哨(基线从现在起):octoscode olp board watch {quoted} 'ACK(' --skip-signature '{sig}'"
+            ),
+            format!("在黑板上署名记一行接班:> 外环({sig})·接班:<时间>,收件箱 N 张已处理"),
+        )
+    };
     let brief = json!({
         "time": stamp(),
         "board": board,
@@ -725,11 +842,12 @@ fn resume(c: Common) -> Result<i32, Fail> {
         "checklist": [
             format!("处理收件箱(停机期间到的回执都在这里):octoscode olp inbox {quoted};逐张写采认/打回/搁置"),
             "回答积压的提问:octoscode olp ask list <单元> → octoscode olp ask answer <单元> <id>",
-            format!("重新挂正哨(基线从现在起):octoscode olp board watch {quoted} 'ACK(' --skip-signature '{sig}'"),
+            watch,
             "负哨:单元上的守护各自在跑;hub 上看本简报的负哨与 octoscode olp summary",
             "恢复循环:/loop list 取 id,再 /loop resume <id>(用 /loop 时)",
-            format!("在黑板上署名记一行接班:> 外环({sig})·接班:<时间>,收件箱 N 张已处理"),
+            sign,
         ],
+        "notes": notes,
     });
     if c.json {
         println!(

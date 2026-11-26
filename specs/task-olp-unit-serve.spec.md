@@ -24,6 +24,13 @@ hub 一侧:单元能做什么、能看到什么,由 hub 决定。两个目的:�
     `progress <N> claimed`、`progress <N> review <轮次>`、`progress <N> rework <轮次>`(轮次
     1–999),说明从 stdin(可空)→ `progress` 事件,署名 `单元(<单元号>)`,带幂等键
     `<单元>:progress:<N>:<节点>:<轮次>`:同一节点同一轮只记一次。
+  - `question ask <提问id>`(问题从 stdin,单行、非空)、`question answer <提问id>`、
+    `question timeout <提问id>` → `asked` / `answered` / `timed_out` 事件,不带卡号,署名
+    `单元(<单元号>)`,`data.id` 是提问 id(4–64 位字母数字、`_`、`-`),幂等键
+    `<单元>:question:<id>:<动作>`。结局只能记给本单元问过的提问,且只记一次(先到的算)。
+    单元一侧是 `olp remote question …`(`src/olp/client.rs`),由提问服务自动调用。
+    来源:2026-11-26 实测发现,hub 用事件日志时单元的提问没有任何途径进日志,外环值守
+    (`olp outer watch`)等的 `asked` 事件永远不会出现,外环只有主动去查才知道有人在问。
   - `events [<序号>]`→ 以 JSON Lines 输出该单元可见、序号大于给定值的事件。
 - 写入规则(锁内判断):卡必须存在、未作废、**当前派给这台单元**(最近一次派卡或改派的单元);
   否则拒收并说明派给了谁。
@@ -38,6 +45,7 @@ hub 一侧:单元能做什么、能看到什么,由 hub 决定。两个目的:�
 
 ### Allowed Changes
 - src/olp/serve.rs、src/olp/cards.rs、src/olp/render.rs、src/olp/mod.rs、src/cmd/olp.rs
+- src/olp/client.rs(`olp remote question`)
 - tests/olp_unit_serve.rs
 - docs/OLP_CLI.md、docs/ARCHITECTURE.md
 - specs/task-olp-unit-serve.spec.md
@@ -60,6 +68,12 @@ Scenario: 单元只能对派给自己的卡回执(critical)
   Given 三张卡:#1 派给 m07,#2 派给 m08,#3 没有单元
   When m07 对 #1、#2、#3、不存在的 #9 回执,在请求里冒充 m08,以及对已作废的 #1 回执
   Then 只有对 #1 的回执写入(署名 内环(m07));其余退出码 3 并说明派给了谁或没有这张卡,日志不变
+
+Scenario: 单元的提问与它的结局各记一次,别的单元不能替它了结
+  Test: a_units_question_and_its_end_are_recorded_once
+  Given m07 记下一个提问
+  When 重发同一个提问;m08 来了结它;了结一个没问过的;问题为空;id 不合法;动作不认识;m07 记超时后再记回答
+  Then 重发不重复写入;五种错误请求退出码 3 且不写入;超时记一次后 `olp summary` 里不再有待答提问,后到的回答不再写入
 
 Scenario: 其他请求一律拒收,不写入
   Test: anything_else_is_refused

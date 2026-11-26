@@ -72,6 +72,8 @@ fn signed_line(event: &Event) -> Option<String> {
             event.actor,
             text(event, "id")
         ),
+        // Left by a job that is no card's party, e.g. the outer's supervisor.
+        ("note", _) => format!("> {}{}", event.actor, colon(say)),
         _ => return None,
     })
 }

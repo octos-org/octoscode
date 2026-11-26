@@ -15,6 +15,8 @@
 //!   text on stdin) — a progress node, written once per node and round;
 //!   `progress <N> undelivered` is the unit's watcher saying the pane did
 //!   not take the card;
+//! - `question ask|answer|timeout <id>` (the question on stdin for `ask`) —
+//!   a question an inner loop asked with `ask_outer`, and how it ended;
 //! - `inbox [<窗格>]` — this unit's cards that were dispatched to a pane and
 //!   not claimed yet (`progress <N> claimed` claims one);
 //! - `events [<之后的序号>]` — the events about this unit's cards, as JSON
@@ -119,7 +121,7 @@ pub fn run(argv: &[String]) -> i32 {
             "--log" => dir = words.next().cloned(),
             "-h" | "--help" => {
                 println!(
-                    "用法(ssh 强制命令): octoscode olp remote serve-log --unit <单元号> --log <日志目录>\n\n单元的请求来自 SSH_ORIGINAL_COMMAND:ack <N> <结果>、progress <N> <节点> [轮次]、events [序号]。"
+                    "用法(ssh 强制命令): octoscode olp remote serve-log --unit <单元号> --log <日志目录>\n\n单元的请求来自 SSH_ORIGINAL_COMMAND:ack <N> <结果>、progress <N> <节点> [轮次]、question <ask|answer|timeout> <提问id>、inbox [窗格]、events [序号]。"
                 );
                 return 0;
             }
@@ -219,6 +221,72 @@ pub fn run(argv: &[String]) -> i32 {
                 data: json!({ "node": node, "round": round, "text": text }),
             };
             write(&log, &unit, n, draft)
+        }
+        ["question", kind @ ("ask" | "answer" | "timeout"), id] => {
+            // A question an inner loop asked with `ask_outer`, and how it
+            // ended. It is the unit's own and belongs to no card.
+            let valid = (4..=64).contains(&id.len())
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+            if !valid {
+                return refuse("提问 id 不合法");
+            }
+            let question = match one_line() {
+                Ok(text) => text,
+                Err(why) => return refuse(&why),
+            };
+            let (event_kind, data) = match *kind {
+                "ask" if question.is_empty() => return refuse("提问的内容为空"),
+                "ask" => ("asked", json!({ "id": id, "question": question })),
+                "answer" => ("answered", json!({ "id": id })),
+                _ => ("timed_out", json!({ "id": id })),
+            };
+            let draft = Draft {
+                kind: event_kind.to_string(),
+                card: None,
+                actor: format!("单元({unit})"),
+                unit: Some(unit.clone()),
+                key: Some(format!("{unit}:question:{id}:{kind}")),
+                data,
+            };
+            let result = log.append_with(|events| {
+                let about = |e: &&Event| {
+                    e.unit.as_deref() == Some(unit.as_str())
+                        && e.data.get("id").and_then(|v| v.as_str()) == Some(*id)
+                };
+                if events.iter().any(|e| e.key == draft.key) {
+                    return Ok(Vec::new());
+                }
+                if *kind != "ask" {
+                    if !events.iter().filter(about).any(|e| e.kind == "asked") {
+                        return Err(format!("没有 {id} 这个提问"));
+                    }
+                    if events
+                        .iter()
+                        .filter(about)
+                        .any(|e| e.kind == "answered" || e.kind == "timed_out")
+                    {
+                        return Ok(Vec::new());
+                    }
+                }
+                Ok::<_, String>(vec![draft.clone()])
+            });
+            match result {
+                Ok(written) if written.is_empty() => {
+                    println!("提问 {id}:已经记录过,没有重复写入");
+                    0
+                }
+                Ok(_) => {
+                    println!("提问 {id}:已记录");
+                    0
+                }
+                Err(AppendError::Refused(why)) => refuse(&why),
+                Err(AppendError::Log(e)) => {
+                    eprintln!("olp-hub: {e}");
+                    LOG_FAILED
+                }
+            }
         }
         ["events"] | ["events", _] => {
             let since = match request.get(1) {

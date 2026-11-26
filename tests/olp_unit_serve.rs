@@ -108,6 +108,55 @@ impl Hub {
     }
 }
 
+/// Scenario: 单元的提问与它的结局各记一次,别的单元不能替它了结
+#[test]
+fn a_units_question_and_its_end_are_recorded_once() {
+    let hub = Hub::new();
+    let before = hub.events().len();
+    let asked = hub.unit("m07", "question ask q-1234", "接口用哪个版本\n");
+    assert!(asked.status.success(), "{}", stderr(&asked));
+    let again = hub.unit("m07", "question ask q-1234", "接口用哪个版本\n");
+    assert!(stdout(&again).contains("已经记录过"), "{}", stdout(&again));
+    for (unit, request, text) in [
+        ("m08", "question answer q-1234", ""),
+        ("m07", "question answer q-9999", ""),
+        ("m07", "question ask q-5678", ""),
+        ("m07", "question ask a/b", "问题"),
+        ("m07", "question closed q-1234", ""),
+    ] {
+        let out = hub.unit(unit, request, text);
+        assert_eq!(
+            out.status.code(),
+            Some(3),
+            "{unit} {request}: {}",
+            stderr(&out)
+        );
+    }
+    assert_eq!(hub.events().len(), before + 1);
+    let pending = || {
+        let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+            .args(["olp", "board", "summary", "--board", &hub.log(), "--json"])
+            .output()
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+        report["questions"].as_array().unwrap().len()
+    };
+    assert_eq!(pending(), 1);
+    assert!(
+        hub.unit("m07", "question timeout q-1234", "")
+            .status
+            .success()
+    );
+    let late = hub.unit("m07", "question answer q-1234", "");
+    assert!(stdout(&late).contains("已经记录过"), "{}", stdout(&late));
+    let events = hub.events();
+    assert_eq!(events.len(), before + 2);
+    assert_eq!(events[before]["kind"], "asked");
+    assert_eq!(events[before]["data"]["question"], "接口用哪个版本");
+    assert_eq!(events[before + 1]["kind"], "timed_out");
+    assert_eq!(pending(), 0);
+}
+
 /// Scenario: 单元只能对派给自己的卡回执(critical)
 #[test]
 fn a_unit_acks_only_its_own_cards() {

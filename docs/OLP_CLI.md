@@ -69,6 +69,9 @@
 已领取的卡 `--follow-up` 秒(默认 900)没有新事件、窗格又空闲时,说明主持停在了半路:值守发一句
 "已领取的卡 #N 还没有回执,而这个窗格已经空闲:请接着办理…",同一张卡在没有新事件期间最多发两次,
 之后由 hub 的停滞判定(`board stall`)接手。`remote inbox` 的输出里 `held` 列出这些已领取未回执的卡。
+内环用 `ask_outer` 提问时,提问服务(`olp ask mcp`)在 `store = log` 的单元上自动运行
+`remote question ask|answer|timeout <提问id>`,把提问和它的结局记进 hub 的日志:外环值守看到
+`asked` 事件就叫醒外环,外环用 `olp ask list|show|answer <单元>` 作答。
 
 迁到 Rust 的命令(`src/olp/`):`board inbox`。迁过去的命令不再经过打包的脚本;
 `OCTOSCODE_OLP_LEGACY=1` 让它改跑原脚本,保留一个版本作退路。
@@ -170,6 +173,10 @@
 | `olp duty hold\|check\|lease …` | `octoscode outer-duty` | hub |
 | `olp outer supervise\|resume\|install …` | Rust(`src/olp/outer.rs`),原 `olp-outer.py` | hub(外环所在机器) |
 | `olp outer watch <日志目录> --pane <窗格> [--once]` | Rust(`src/olp/outerwatch.rs`) | hub(外环所在机器) |
+
+`olp outer supervise` 的留言(已自动重启、重启已暂停、接班提示未送达):`--board` 是 Markdown 黑板
+时追加一行;是事件日志目录时写成一条 `note` 事件,`olp board render` 与 `olp outer resume` 都会
+显示。接班提示打进窗格后要看到 agent 开始办才算送到;没看到且 agent 空闲时补按回车,最多四次。
 
 外环值守(`specs/task-olp-outer-watch.spec.md`)是"收件箱 + 唤醒"往上的那一半:日志里出现等外环处理
 的事件(单元的回执、推送登记、提问、送达失败)或集群整体静默时,在外环的 agent 空闲时往它的窗格
