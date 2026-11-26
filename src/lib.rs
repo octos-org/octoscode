@@ -511,11 +511,13 @@ mod i18n_tests {
     /// #362: the side-by-side diff view toggle strings (footer hints + status
     /// feedback) resolve in BOTH locales.
     #[test]
-    fn diff_view_toggle_keys_resolve_in_en_and_zh() {
+    fn changes_browser_keys_resolve_in_en_and_zh() {
         let keys = [
-            "app.diff.toggle_side_by_side_hint",
-            "app.diff.toggle_unified_hint",
-            "app.diff.side_by_side_too_narrow",
+            "app.hint.diff_files",
+            "app.diff.workspace",
+            "app.diff.turn",
+            "command.diff.desc",
+            "status.workspace_diff_unavailable",
             "status.diff_view_side_by_side",
             "status.diff_view_unified",
             "status.diff_view_too_narrow",

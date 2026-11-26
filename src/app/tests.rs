@@ -3145,8 +3145,8 @@ mod tests {
             "surplus removed line keeps a blank right column: {left_only:?}"
         );
         assert!(
-            rows.iter().any(|row| row.contains("Alt+V/Ctrl+V unified")),
-            "footer hint advertises the toggle back to unified"
+            !rows.iter().any(|row| row.contains("Alt+V/Ctrl+V unified")),
+            "inline preview has no persistent shortcut toolbar"
         );
     }
 
@@ -3168,10 +3168,10 @@ mod tests {
             "narrow render must fall back to unified rows: {removed_row:?}"
         );
         assert!(
-            narrow_rows
+            !narrow_rows
                 .iter()
                 .any(|row| row.contains("needs 100+ cols")),
-            "narrow render explains why side-by-side is unavailable"
+            "narrow fallback is silent"
         );
 
         // Terminal width 102 -> wrap width 100: exactly at the threshold, the
@@ -3189,7 +3189,7 @@ mod tests {
     }
 
     #[test]
-    fn render_unified_diff_advertises_side_by_side_toggle_when_wide() {
+    fn render_unified_diff_has_no_persistent_shortcut_toolbar() {
         let app = app_with_diff(mixed_hunk_diff_result());
 
         let buffer = rendered_buffer_with_size(&app, Palette::for_theme(ThemeName::Codex), 150, 42);
@@ -3204,9 +3204,10 @@ mod tests {
             "default mode stays unified: {removed_row:?}"
         );
         assert!(
-            rows.iter()
+            !rows
+                .iter()
                 .any(|row| row.contains("Alt+V/Ctrl+V side-by-side")),
-            "footer hint advertises the side-by-side toggle and its portable Ctrl twin"
+            "inline preview has no persistent shortcut toolbar"
         );
     }
 
@@ -8825,7 +8826,7 @@ mod tests {
         // the hint line that immediately follows it) so the word "ready" in the
         // unrelated bottom status bar can't mask a regression.
         let title = text.find("Roman numeral patch").expect("title in header");
-        let hint = text.find("next hunk").expect("hint after header");
+        let hint = text.find("modified").expect("file row after header");
         let header_region = &text[title..hint];
         assert!(
             !header_region.contains("ready"),

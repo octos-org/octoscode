@@ -34,6 +34,10 @@ pub enum ClientEvent {
     ContextLifecycle(ContextLifecycleClientEvent),
     Capabilities(CapabilitiesClientEvent),
     DiffPreview(DiffPreviewGetResult),
+    WorkspaceDiff {
+        request_id: String,
+        result: DiffPreviewGetResult,
+    },
     ModelList(ModelListClientEvent),
     ModelSelect(ModelSelectClientEvent),
     McpStatus(McpStatusClientEvent),
