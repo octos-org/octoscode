@@ -9018,6 +9018,9 @@ impl Store {
                 )
                 .into_owned();
             }
+            AutonomyResult::TurnInterruptAck(ack) => {
+                return self.apply_turn_interrupt_ack(ack);
+            }
             AutonomyResult::AgentInterrupt(result) => {
                 if let Some(agent) = result.agent.clone() {
                     self.state.upsert_session_agent(&result.session_id, agent);
@@ -14892,6 +14895,65 @@ impl Store {
         self.drain_after_terminal(steer_restaged)
     }
 
+    /// The `turn/interrupt` RPC result (#526): the server DID finish the
+    /// interrupt when `interrupted` or `terminal_state` is set — even when
+    /// the wire-side `TurnError` never arrives (`ack_timeout`). Settle the
+    /// turn through the ordinary interrupted-terminal path so the partial
+    /// answer is committed, the deferred prompt restore applies, and the
+    /// ordinary drain serves Esc, Ctrl+C, Ctrl+X and `/stop` alike, in
+    /// order, without racing the server's own turn slot.
+    fn apply_turn_interrupt_ack(
+        &mut self,
+        ack: crate::model::TurnInterruptAckResult,
+    ) -> Option<AppUiCommand> {
+        let server_finished = ack.interrupted || ack.terminal_state.is_some();
+        if !server_finished {
+            self.state.status = match ack.reason.as_deref() {
+                Some(reason) => format!("Interrupt refused: {reason}"),
+                None => "Interrupt refused: the turn was not running".into(),
+            };
+            return None;
+        }
+        // The turn still unsettled? Settle it as its interrupted terminal.
+        // (The wire `TurnError` may beat the ack; the settled-turn set then
+        // keeps the late event from pushing a duplicate note.)
+        let unsettled = self
+            .find_session(&ack.session_id)
+            .and_then(|session| session.live_reply.as_ref())
+            .is_some_and(|live| live.turn_id == ack.turn_id);
+        if !unsettled {
+            return None;
+        }
+        // Mirror the request-time optimistic idle (an ack can arrive for a
+        // turn interrupted without it): a settled turn never stays
+        // InProgress, or the drain below would see a phantom live turn.
+        if matches!(
+            self.state.run_state,
+            crate::model::SessionRunState::InProgress
+        ) {
+            self.state.set_run_state_idle();
+        }
+        let settled = self.fail_live_reply(TurnErrorEvent {
+            session_id: ack.session_id.clone(),
+            topic: None,
+            turn_id: ack.turn_id.clone(),
+            code: "interrupted".into(),
+            message: if ack.ack_timeout {
+                "turn interrupted (terminal event not confirmed)".into()
+            } else {
+                "turn interrupted".into()
+            },
+            token_usage: None,
+            partial_result: None,
+        });
+        // Mark AFTER the settle: the ack's own synthesized terminal must run
+        // the full path; only the late wire `TurnError` is a duplicate.
+        self.state
+            .interrupt_ack_settled
+            .insert((ack.session_id.clone(), ack.turn_id.clone()));
+        settled
+    }
+
     fn fail_live_reply(&mut self, event: TurnErrorEvent) -> Option<AppUiCommand> {
         // Spec task-quota-exhausted-card: mark quota terminals so the status
         // bar renders the amber Quota state instead of the generic Error.
@@ -15032,6 +15094,17 @@ impl Store {
                 .mark_turn_errored(&event.session_id, &event.turn_id);
         }
         let turn_interrupted_note = t!("status.turn_interrupted").into_owned();
+        // #526: the interrupt's RPC ack already settled this turn through
+        // this same path — its late wire `TurnError` is a duplicate: drain
+        // only, no second note.
+        if event.code == "interrupted"
+            && self
+                .state
+                .interrupt_ack_settled
+                .remove(&(event.session_id.clone(), event.turn_id.clone()))
+        {
+            return self.drain_after_terminal(false);
+        }
         let session = self.find_session_mut(&event.session_id)?;
         let title = session.title.clone();
         // `failed_current_turn`: this error terminates the LIVE turn — it owns
@@ -17628,7 +17701,7 @@ mod tests {
     #[test]
     fn thinking_display_toggle_flips_per_session_and_reports() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         assert!(!store.state.reasoning_display_enabled(&session_id));
 
         store.dispatch_local_action(LocalAction::ToggleReasoningDisplay, None);
@@ -17868,7 +17941,7 @@ mod tests {
         // the peer to `✓ done` or corrupt its frozen elapsed.
         let live_turn = TurnId::new();
         let mut store = store_with_live_reply(live_turn.clone(), "streaming B");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.opened_peer_sessions.insert(session_id.clone());
         store.state.peer_session_meta.insert(
             session_id.clone(),
@@ -19408,7 +19481,7 @@ mod tests {
     /// Start a turn and deliver its `TurnStarted` so the turn is LIVE
     /// (`live_reply` bound — the state `try_steer_live_turn` requires).
     fn start_live_turn(store: &mut Store, prompt: &str) -> TurnId {
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let started = store.queue_or_start_prompt_turn(prompt.into(), "sent".into());
         let Some(AppUiCommand::SubmitPrompt(params)) = started else {
             panic!("idle session starts the first turn, got {started:?}");
@@ -19433,7 +19506,7 @@ mod tests {
         store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods([
             crate::model::APPUI_METHOD_TURN_STEER,
         ]));
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let first_turn = start_live_turn(&mut store, "review the design");
 
         // Two prompts typed while the turn streams: neither may steer or
@@ -19543,7 +19616,7 @@ mod tests {
     #[test]
     fn steer_sends_turn_steer_for_live_turn_instead_of_staging() {
         let mut store = steer_capable_store();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "first prompt");
 
         let command =
@@ -19638,7 +19711,7 @@ mod tests {
     fn steered_true_sets_status_and_echo_does_not_duplicate_row() {
         use octos_core::ui_protocol::PayloadV2;
         let mut store = steer_capable_store();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "first prompt");
         let command = store.queue_or_start_prompt_turn("also do X".into(), "queued".into());
         assert!(matches!(command, Some(AppUiCommand::TurnSteer(_))));
@@ -19746,7 +19819,7 @@ mod tests {
     fn steered_true_retains_prompt_until_echo() {
         use octos_core::ui_protocol::PayloadV2;
         let mut store = steer_capable_store();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "first prompt");
         steer_into_live_turn(&mut store, &live_turn, "also do X");
 
@@ -19797,7 +19870,7 @@ mod tests {
     #[test]
     fn unechoed_steer_is_restaged_on_interrupt_terminal() {
         let mut store = steer_capable_store();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "first prompt");
         steer_into_live_turn(&mut store, &live_turn, "also do X");
         assert_eq!(
@@ -19829,7 +19902,7 @@ mod tests {
     #[test]
     fn unechoed_steer_is_restaged_on_completed_terminal() {
         let mut store = steer_capable_store();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "first prompt");
         steer_into_live_turn(&mut store, &live_turn, "also do X");
 
@@ -19847,7 +19920,7 @@ mod tests {
     fn echoed_steer_is_not_restaged_on_terminal() {
         use octos_core::ui_protocol::PayloadV2;
         let mut store = steer_capable_store();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "first prompt");
         steer_into_live_turn(&mut store, &live_turn, "also do X");
         store.apply_event(AppUiEvent::Protocol(envelope_v2_notification(
@@ -19873,7 +19946,7 @@ mod tests {
     #[test]
     fn restaged_steer_precedes_messages_staged_after_it() {
         let mut store = steer_capable_store();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "first prompt");
         steer_into_live_turn(&mut store, &live_turn, "steered first");
         // A later message that stages (steer disabled after the first, to
@@ -19902,7 +19975,7 @@ mod tests {
     #[test]
     fn duplicate_terminal_does_not_restage_steer_twice() {
         let mut store = steer_capable_store();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "first prompt");
         steer_into_live_turn(&mut store, &live_turn, "also do X");
 
@@ -19925,7 +19998,7 @@ mod tests {
     #[test]
     fn same_content_steer_is_restaged_without_touching_original_row() {
         let mut store = steer_capable_store();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "same text");
         assert_eq!(user_rows_with(&store, "same text"), 1);
         steer_into_live_turn(&mut store, &live_turn, "same text");
@@ -19987,7 +20060,7 @@ mod tests {
     #[test]
     fn snapshot_with_persisted_steer_row_reaps_retained_steer() {
         let mut store = steer_capable_store();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "first prompt");
         steer_into_live_turn(&mut store, &live_turn, "also do X");
         assert_eq!(store.state.retained_steers.len(), 1);
@@ -20021,7 +20094,7 @@ mod tests {
     #[test]
     fn snapshot_without_steer_row_keeps_retained_steer() {
         let mut store = steer_capable_store();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "first prompt");
         steer_into_live_turn(&mut store, &live_turn, "also do X");
 
@@ -20050,7 +20123,7 @@ mod tests {
     fn hydrate_with_persisted_steer_row_reaps_retained_steer() {
         use crate::client_event::ClientEvent;
         let mut store = steer_capable_store();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "first prompt");
         steer_into_live_turn(&mut store, &live_turn, "also do X");
 
@@ -20087,7 +20160,7 @@ mod tests {
     #[test]
     fn steer_dropped_before_terminal_restages_once_and_terminal_does_not_resubmit() {
         let mut store = steer_dropped_capable_store();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "first prompt");
         steer_into_live_turn(&mut store, &live_turn, "also do X");
 
@@ -20133,7 +20206,7 @@ mod tests {
     #[test]
     fn late_steer_dropped_after_terminal_is_a_noop() {
         let mut store = steer_capable_store();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "first prompt");
         steer_into_live_turn(&mut store, &live_turn, "also do X");
         // F5 fallback: the terminal already re-staged and submitted it.
@@ -20161,7 +20234,7 @@ mod tests {
     #[test]
     fn duplicate_steer_dropped_is_idempotent() {
         let mut store = steer_capable_store();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "first prompt");
         steer_into_live_turn(&mut store, &live_turn, "also do X");
         store.apply_event(steer_dropped(
@@ -20186,7 +20259,7 @@ mod tests {
     #[test]
     fn same_text_steers_are_consumed_by_count_not_by_set() {
         let mut store = steer_capable_store();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "first prompt");
         for _ in 0..3 {
             steer_into_live_turn(&mut store, &live_turn, "same");
@@ -20214,7 +20287,7 @@ mod tests {
     #[test]
     fn steer_dropped_preserves_input_order_in_queue() {
         let mut store = steer_capable_store();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "first prompt");
         steer_into_live_turn(&mut store, &live_turn, "A");
         steer_into_live_turn(&mut store, &live_turn, "B");
@@ -20235,7 +20308,7 @@ mod tests {
     #[test]
     fn steer_dropped_for_background_session_stays_in_its_own_queue() {
         let mut store = steer_capable_store();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "first prompt");
         steer_into_live_turn(&mut store, &live_turn, "background steer");
         // Switch the user to another session; the steer's session is now background.
@@ -20268,7 +20341,7 @@ mod tests {
     #[test]
     fn unmatched_steer_dropped_text_is_never_injected() {
         let mut store = steer_capable_store();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "first prompt");
         assert!(store.state.retained_steers.is_empty());
         let rows_before = store.state.sessions[0].messages.len();
@@ -20294,7 +20367,7 @@ mod tests {
     fn steer_dropped_reason_is_surfaced_but_does_not_change_behavior() {
         for reason in ["interrupted", "turn_ended"] {
             let mut store = steer_capable_store();
-            let session_id = store.state.sessions[0].id.clone();
+            let session_id = SessionKey("local:test".into());
             let live_turn = start_live_turn(&mut store, "first prompt");
             steer_into_live_turn(&mut store, &live_turn, "also do X");
 
@@ -20378,7 +20451,7 @@ mod tests {
         // have sent turn/steer_dropped BEFORE the terminal had the steer been
         // unconsumed — it did not, so the terminal must NOT resubmit.
         let mut store = steer_dropped_capable_store();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "first prompt");
         steer_into_live_turn(&mut store, &live_turn, "also do X");
         assert_eq!(store.state.retained_steers.len(), 1);
@@ -20404,7 +20477,7 @@ mod tests {
     #[test]
     fn legacy_server_without_steer_dropped_feature_keeps_terminal_restage() {
         let mut store = steer_capable_store(); // no event.turn_steer_dropped.v1
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "first prompt");
         steer_into_live_turn(&mut store, &live_turn, "also do X");
 
@@ -20420,7 +20493,7 @@ mod tests {
     fn unconsumed_steer_is_recovered_exactly_once_in_real_server_order() {
         use octos_core::ui_protocol::PayloadV2;
         let mut store = steer_dropped_capable_store();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "first prompt");
         steer_into_live_turn(&mut store, &live_turn, "consumed one");
         steer_into_live_turn(&mut store, &live_turn, "unconsumed one");
@@ -20474,7 +20547,7 @@ mod tests {
     #[test]
     fn replayed_connection_closed_terminal_after_dropped_recovers_exactly_once() {
         let mut store = steer_dropped_capable_store();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "first prompt");
         steer_into_live_turn(&mut store, &live_turn, "typed just before the socket died");
 
@@ -20554,7 +20627,7 @@ mod tests {
     fn user_row_echo_reconciles_optimistic_row_on_normal_submit() {
         use octos_core::ui_protocol::PayloadV2;
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.composer = "hello world".into();
         let command = store.compose_command();
         let Some(AppUiCommand::SubmitPrompt(params)) = command else {
@@ -20591,7 +20664,7 @@ mod tests {
     #[test]
     fn steered_false_arms_client_like_a_normal_submit() {
         let mut store = steer_capable_store();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let live_turn = start_live_turn(&mut store, "first prompt");
         let command = store.queue_or_start_prompt_turn("also do X".into(), "queued".into());
         assert!(matches!(command, Some(AppUiCommand::TurnSteer(_))));
@@ -23227,7 +23300,7 @@ workspace_root: None,
     #[test]
     fn stashed_staged_queues_survive_snapshot_replay() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store
             .state
             .pending_messages_by_session
@@ -23670,7 +23743,7 @@ workspace_root: None,
         use crate::client_event::ClientEvent;
 
         let mut store = store_with_user_turns(&["first question", "second question"]);
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         // Simulate the pending pick: RewindToTurn stashed the chosen message.
         store.state.pending_rewind_prefill =
             Some((SessionKey("local:test".into()), "second question".into()));
@@ -23739,7 +23812,7 @@ workspace_root: None,
         // rows (drop 1 / 2 / 3) while the menu stays open.
         let mut store =
             store_with_user_turns(&["first question", "second question", "third question"]);
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.dispatch_local_action(LocalAction::OpenRewindPicker, None);
         assert_eq!(
             store.state.rewind_turns.len(),
@@ -24565,7 +24638,7 @@ workspace_root: None,
     fn reflush_scope_survives_a_turn_settling_before_the_draw() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "streamed prefix…");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.set_btw_answering(&session_id, "q?".into());
         assert!(store.state.resolve_btw_answer(&session_id, "a".into()));
 
@@ -24614,7 +24687,7 @@ workspace_root: None,
     fn snapshot_replay_preserves_the_transcript_reflush_request() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id, "streaming…");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.set_btw_answering(&session_id, "q?".into());
         assert!(store.state.resolve_btw_answer(&session_id, "a".into()));
         assert!(store.state.dismiss_btw_aside(&session_id));
@@ -31998,7 +32071,7 @@ workspace_root: None,
     #[test]
     fn unhealthy_status_cursor_warns_that_the_stream_may_drop_events() {
         let mut store = protocol_store_with_methods(&[methods::APPROVAL_SCOPES_LIST]);
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let mut result = session_status_result(&session_id);
         result.cursor = Some(SessionCursorStatus {
             cursor: None,
@@ -32028,7 +32101,7 @@ workspace_root: None,
     #[test]
     fn a_still_unhealthy_cursor_does_not_re_warn_on_every_poll() {
         let mut store = protocol_store_with_methods(&[methods::APPROVAL_SCOPES_LIST]);
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let unhealthy = |session_id: &SessionKey| {
             let mut result = session_status_result(session_id);
             result.cursor = Some(SessionCursorStatus {
@@ -32061,7 +32134,7 @@ workspace_root: None,
     #[test]
     fn session_status_client_event_updates_cached_runtime_status() {
         let mut store = protocol_store_with_methods(&[methods::APPROVAL_SCOPES_LIST]);
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.apply_client_event(ClientEvent::SessionStatus(SessionStatusClientEvent {
             result: session_status_result(&session_id),
@@ -32099,7 +32172,7 @@ workspace_root: None,
     fn turn_completed_commits_live_reply_into_messages() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "hello");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
@@ -32290,7 +32363,7 @@ workspace_root: None,
     #[test]
     fn restart_required_model_selection_keeps_effective_model_until_reconnect() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store
             .state
             .set_runtime_status(SessionRuntimeStatus::from(session_status_result(
@@ -32508,7 +32581,7 @@ workspace_root: None,
     fn btw_dispatches_mid_turn_without_staging() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id, "streaming…");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.target = Some("ws://example.test/ui-protocol".into());
         store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods([
             octos_core::ui_protocol::methods::SESSION_BTW,
@@ -32538,7 +32611,7 @@ workspace_root: None,
     fn btw_rejects_empty_question_and_busy_aside() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id, "streaming…");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.target = Some("ws://example.test/ui-protocol".into());
         store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods([
             octos_core::ui_protocol::methods::SESSION_BTW,
@@ -32568,7 +32641,7 @@ workspace_root: None,
     fn btw_command_hidden_without_capability() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id, "streaming…");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         // No capabilities at all → the registry hides /btw as unavailable.
         store.state.composer = "/btw hello?".into();
         assert!(store.compose_command().is_none());
@@ -32582,7 +32655,7 @@ workspace_root: None,
     fn btw_answer_resolves_the_answering_aside() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id, "streaming…");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store
             .state
             .set_btw_answering(&session_id, "what are you doing?".into());
@@ -32607,7 +32680,7 @@ workspace_root: None,
     fn btw_error_fails_the_answering_aside() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id, "streaming…");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store
             .state
             .set_btw_answering(&session_id, "still there?".into());
@@ -32638,7 +32711,7 @@ workspace_root: None,
     fn unrelated_error_echoing_btw_text_does_not_fail_the_aside() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id, "streaming…");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store
             .state
             .set_btw_answering(&session_id, "still there?".into());
@@ -32757,7 +32830,7 @@ workspace_root: None,
     fn next_prompt_submit_dismisses_settled_aside_only() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id, "streaming…");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         // Settled (answered) aside → the next prompt dismisses it.
         store.state.set_btw_answering(&session_id, "q1?".into());
@@ -32789,7 +32862,7 @@ workspace_root: None,
     fn dismissing_a_btw_aside_requests_a_transcript_reflush() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id, "streaming…");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         // Explicit dismissal (Enter on the empty composer).
         store.state.set_btw_answering(&session_id, "q1?".into());
@@ -32840,7 +32913,7 @@ workspace_root: None,
     fn completed_turn_records_a_status_summary_with_running_task_count() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "done");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         // Two background tasks still running when the turn completes.
         store.state.sessions[0].tasks = vec![
             TaskView {
@@ -32955,7 +33028,7 @@ workspace_root: None,
     #[test]
     fn capabilities_arriving_after_session_open_requeue_status_read() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         assert!(
             store.state.capabilities.is_none(),
             "test premise: open-before-caps"
@@ -33205,7 +33278,7 @@ workspace_root: None,
         let turn_id = TurnId::new();
         let text = "### Step 1\n\nBody one.";
         let mut store = store_with_live_reply(turn_id.clone(), text);
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::ToolStarted(
             ToolStartedEvent {
@@ -33240,7 +33313,7 @@ workspace_root: None,
         let original_turn = TurnId::new();
         let continuation = TurnId::new();
         let mut store = store_with_live_reply(original_turn.clone(), "original answer");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         // Original user turn completes first and clears live_reply.
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
@@ -33311,7 +33384,7 @@ workspace_root: None,
             MessageDeltaEvent, ReasoningDeltaEvent, TurnCompletedEvent, TurnStartedEvent,
         };
         let mut store = protocol_store_with_autonomy();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let turn_id = TurnId::new();
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnStarted(
             TurnStartedEvent {
@@ -33367,7 +33440,7 @@ workspace_root: None,
     fn reasoning_without_answer_is_preserved_without_fabricating_answer() {
         use octos_core::ui_protocol::{ReasoningDeltaEvent, TurnCompletedEvent};
         let mut store = protocol_store_with_autonomy();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let turn_id = TurnId::new();
         // Reasoning streams but no answer text arrives — the terminal hits the
         // None arm of commit_live_reply (codex review: reasoning must not be lost).
@@ -33417,7 +33490,7 @@ workspace_root: None,
     #[test]
     fn turn_lifecycle_guards_survive_snapshot_replay() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let turn_id = TurnId::new();
         let switched_turn = TurnId::new();
         store.state.mark_turn_completed(&session_id, &turn_id);
@@ -33491,7 +33564,7 @@ workspace_root: None,
     fn turn_error_drains_live_reasoning_onto_failure_card() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "partial answer");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.live_reasoning.insert(
             (session_id.clone(), turn_id.clone()),
             "weighing the options".into(),
@@ -33533,7 +33606,7 @@ workspace_root: None,
     fn turn_error_without_live_reply_attaches_reasoning_to_fallback_card() {
         let turn_id = TurnId::new();
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.live_reasoning.insert(
             (session_id.clone(), turn_id.clone()),
             "no answer came".into(),
@@ -33574,7 +33647,7 @@ workspace_root: None,
         let live_turn = TurnId::new();
         let errored_turn = TurnId::new();
         let mut store = store_with_live_reply(live_turn.clone(), "still streaming");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store
             .state
             .live_reasoning
@@ -33611,7 +33684,7 @@ workspace_root: None,
     fn duplicate_turn_completed_is_a_noop() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "the answer");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let completed = TurnCompletedEvent {
             token_usage: None,
             session_id: session_id.clone(),
@@ -33652,7 +33725,7 @@ workspace_root: None,
     fn turn_error_after_completed_terminal_is_a_noop() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "the answer");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
@@ -33701,7 +33774,7 @@ workspace_root: None,
         let original_turn = TurnId::new();
         let continuation = TurnId::new();
         let mut store = store_with_live_reply(original_turn.clone(), "original answer");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
@@ -33762,7 +33835,7 @@ workspace_root: None,
     fn continuation_turn_with_no_deltas_reports_missing_answer_without_fabrication() {
         let continuation = TurnId::new();
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnStarted(
             TurnStartedEvent {
@@ -33798,7 +33871,7 @@ workspace_root: None,
         let first = TurnId::new();
         let second = TurnId::new();
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         for (turn, body) in [(&first, "first reply"), (&second, "second reply")] {
             store.apply_event(AppUiEvent::Protocol(UiNotification::MessageDelta(
@@ -33848,7 +33921,7 @@ workspace_root: None,
     fn turn_completed_captures_activity_log_for_transcript_and_clears_live_buffer() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "done");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.record_submitted_user_prompt(
             session_id.clone(),
             turn_id.clone(),
@@ -33895,7 +33968,7 @@ workspace_root: None,
     fn turn_activity_logs_keep_prompt_anchor_after_optimistic_prompt_confirms() {
         let turn_a = TurnId::new();
         let mut store = store_with_live_reply(turn_a.clone(), "first answer");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.state.record_submitted_user_prompt(
             session_id.clone(),
@@ -33985,7 +34058,7 @@ workspace_root: None,
         // can no longer count as in-flight ("Orchestrating…").
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "done");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.record_submitted_user_prompt(
             session_id.clone(),
             turn_id.clone(),
@@ -34035,7 +34108,7 @@ workspace_root: None,
         // must be reconciled when the turn fails too.
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "partial");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.record_submitted_user_prompt(
             session_id.clone(),
             turn_id.clone(),
@@ -34082,7 +34155,7 @@ workspace_root: None,
     fn turn_completed_without_model_answer_reports_diagnostic_without_fabricating_reply() {
         let turn_id = TurnId::new();
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.push_activity(
             ActivityItem::new(ActivityKind::Tool, "shell", "complete")
                 .with_turn(turn_id.clone())
@@ -34114,7 +34187,7 @@ workspace_root: None,
             let turn = TurnId::new();
             let other = TurnId::new();
             let mut store = store_with_empty_session();
-            let session_id = store.state.sessions[0].id.clone();
+            let session_id = SessionKey("local:test".into());
             store.state.sessions[0]
                 .messages
                 .push(Message::assistant_with_thread(
@@ -34167,7 +34240,7 @@ workspace_root: None,
     fn turn_completed_while_the_peer_fleet_runs_reports_the_wait_not_a_void_summary() {
         let turn_id = TurnId::new();
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         for slug in ["dsh-arch", "dsh-sec", "dsh-agent"] {
             stage_fleet_peer(&mut store, slug, true);
         }
@@ -34199,7 +34272,7 @@ workspace_root: None,
     fn turn_completed_with_a_landed_fleet_reports_missing_answer_status() {
         let turn_id = TurnId::new();
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         stage_fleet_peer(&mut store, "dsh-arch", true);
         stage_fleet_peer(&mut store, "dsh-sec", true);
 
@@ -34268,7 +34341,7 @@ workspace_root: None,
     fn turn_completed_with_empty_live_reply_reports_missing_answer_status() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
@@ -34294,7 +34367,7 @@ workspace_root: None,
         let turn_id = TurnId::new();
         let mut store =
             store_with_live_reply(turn_id.clone(), "The JWST site is complete and ready in");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.push_activity(
             ActivityItem::new(ActivityKind::Tool, "list_dir", "complete")
                 .with_turn(turn_id.clone())
@@ -34331,7 +34404,7 @@ workspace_root: None,
 
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), String::new());
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.apply_event(AppUiEvent::Protocol(UiNotification::ToolStarted(
             ToolStartedEvent {
                 session_id: session_id.clone(),
@@ -34428,7 +34501,7 @@ workspace_root: None,
     fn turn_completed_ignores_mismatched_live_reply() {
         let live_turn_id = TurnId::new();
         let mut store = store_with_live_reply(live_turn_id.clone(), "do not commit");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnCompleted(
             TurnCompletedEvent {
@@ -34464,7 +34537,7 @@ workspace_root: None,
         let live_turn_id = TurnId::new();
         let next_turn_id = TurnId::new();
         let mut store = store_with_live_reply(live_turn_id, "hello");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::MessageDelta(
             MessageDeltaEvent {
@@ -34503,7 +34576,7 @@ workspace_root: None,
         let turn_a = TurnId::new();
         let turn_b = TurnId::new();
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         // Deltas lazy-bind turn A (non-empty).
         store.apply_event(AppUiEvent::Protocol(UiNotification::MessageDelta(
@@ -34594,7 +34667,7 @@ workspace_root: None,
         let turn_a = TurnId::new();
         let turn_b = TurnId::new();
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         // Empty turn A: TurnStarted, no deltas.
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnStarted(
@@ -34691,7 +34764,7 @@ workspace_root: None,
         let turn_a = TurnId::new();
         let turn_b = TurnId::new();
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         // Turn A streams then completes → live_reply cleared, A marked terminal.
         store.apply_event(AppUiEvent::Protocol(UiNotification::MessageDelta(
@@ -34777,7 +34850,7 @@ workspace_root: None,
         let turn_a = TurnId::new();
         let turn_b = TurnId::new();
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         // Deltas lazy-bind turn A (non-empty).
         store.apply_event(AppUiEvent::Protocol(UiNotification::MessageDelta(
@@ -34873,7 +34946,7 @@ workspace_root: None,
         let turn_a = TurnId::new();
         let turn_b = TurnId::new();
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::MessageDelta(
             MessageDeltaEvent {
@@ -34946,7 +35019,7 @@ workspace_root: None,
         let turn_a = TurnId::new();
         let turn_b = TurnId::new();
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         // Turn A starts and runs a tool, but streams NO assistant deltas.
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnStarted(
@@ -35065,7 +35138,7 @@ workspace_root: None,
         let turn_a = TurnId::new();
         let turn_b = TurnId::new();
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         // Turn A starts and runs N completed tools (no assistant deltas).
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnStarted(
@@ -35174,7 +35247,7 @@ workspace_root: None,
         // appends and the committed assistant message is the full "partial rest".
         let turn_a = TurnId::new();
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::MessageDelta(
             MessageDeltaEvent {
@@ -35295,7 +35368,7 @@ workspace_root: None,
         use octos_core::ui_protocol::{MessageMeta, PayloadV2, TurnTerminalOutcome};
 
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let turn_id = "turn-v2-segments";
 
         store.apply_event(AppUiEvent::Protocol(envelope_v2_notification(
@@ -35412,7 +35485,7 @@ workspace_root: None,
         use octos_core::ui_protocol::{MessageMeta, PayloadV2, TurnTerminalOutcome};
 
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let compatibility_thread_id = "legacy-envelope-thread";
         let canonical_terminal_turn_id = TurnId::new().0.to_string();
 
@@ -35488,7 +35561,7 @@ workspace_root: None,
 
         let live_turn_id = TurnId::new();
         let mut store = store_with_live_reply(live_turn_id.clone(), "peer answer");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         assert!(store.state.session_turn_live(&session_id));
 
         let canonical_terminal_turn_id = TurnId::new().0.to_string();
@@ -35536,7 +35609,7 @@ workspace_root: None,
             ),
         ] {
             let mut store = store_with_empty_session();
-            let session_id = store.state.sessions[0].id.clone();
+            let session_id = SessionKey("local:test".into());
             store.apply_event(AppUiEvent::Protocol(envelope_v2_notification(
                 session_id.clone(),
                 1,
@@ -35582,7 +35655,7 @@ workspace_root: None,
         use octos_core::ui_protocol::{AttachmentOwnerV2, PayloadV2};
 
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let turn_id = "turn-v2-attachment";
         store.apply_event(AppUiEvent::Protocol(envelope_v2_notification(
             session_id.clone(),
@@ -35727,7 +35800,7 @@ workspace_root: None,
     fn interrupt_command_targets_active_turn() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "streaming");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         let command = store.interrupt_command().expect("active turn interrupts");
 
@@ -35810,7 +35883,7 @@ workspace_root: None,
     #[test]
     fn snapshot_replay_keeps_submitted_prompt_before_approval_output() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.composer = "complete m9 contract".into();
 
         let command = store
@@ -35857,7 +35930,7 @@ workspace_root: None,
     fn completed_turn_submits_next_staged_message() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "done");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.pending_messages.push("continue now".into());
 
         let command = store
@@ -35895,7 +35968,7 @@ workspace_root: None,
     fn completed_turn_submits_one_duplicate_staged_message_and_keeps_next_pending() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "done");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.pending_messages = vec!["repeat".into(), "repeat".into()];
 
         let command = store
@@ -35938,7 +36011,7 @@ workspace_root: None,
     fn queued_prompt_survives_snapshot_without_entering_old_chat_history() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "working");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.sessions[0].messages = vec![
             Message::user("old prompt"),
             Message::assistant("old answer"),
@@ -36020,7 +36093,7 @@ workspace_root: None,
     }
 
     fn open_generic_approval(store: &mut Store) -> (SessionKey, ApprovalId) {
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let approval_id = ApprovalId::new();
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::ApprovalRequested(
@@ -36176,7 +36249,7 @@ workspace_root: None,
     #[test]
     fn approval_auto_resolved_notification_records_policy_decision() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::ApprovalAutoResolved(
             ApprovalAutoResolvedEvent {
@@ -36247,7 +36320,7 @@ workspace_root: None,
         store: &mut Store,
         questions: Vec<UserQuestion>,
     ) -> (SessionKey, QuestionId, TurnId) {
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let question_id = QuestionId::new();
         let turn_id = TurnId::new();
         store.apply_event(AppUiEvent::Protocol(UiNotification::UserQuestionRequested(
@@ -36296,7 +36369,7 @@ workspace_root: None,
     #[test]
     fn hydrated_visible_question_collapses_the_expanded_diff_overlay() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.diff_preview.open_loading(PreviewId::new());
         store.state.diff_preview.expanded = true;
         assert!(store.state.diff_preview.overlay_active());
@@ -36666,7 +36739,7 @@ workspace_root: None,
     #[test]
     fn replay_lossy_notification_surfaces_rehydrate_status() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::ReplayLossy(
             ReplayLossyEvent {
@@ -36691,7 +36764,7 @@ workspace_root: None,
     #[test]
     fn diff_approval_request_drives_preview_command() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let preview_id = PreviewId::new();
         let mut event = ApprovalRequestedEvent::generic(
             session_id.clone(),
@@ -36753,7 +36826,7 @@ workspace_root: None,
             turn_id.clone(),
             "Plan:\n1. [ ] Fix store/model progress handling\n2. [ ] Run tests",
         );
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::ToolStarted(
             ToolStartedEvent {
@@ -36798,7 +36871,7 @@ workspace_root: None,
     #[test]
     fn judge_marker_cleared_when_next_turn_starts() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         // A verdict arrives for this round and latches.
         store.apply_client_event(ClientEvent::JudgeDecision(
@@ -36847,7 +36920,7 @@ workspace_root: None,
     #[test]
     fn tool_notifications_update_activity_card_state() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let turn_id = TurnId::new();
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::ToolStarted(
@@ -36904,7 +36977,7 @@ workspace_root: None,
     #[test]
     fn bash_tool_projects_command_detail_not_json_args() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let turn_id = TurnId::new();
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::ToolStarted(
@@ -36969,7 +37042,7 @@ workspace_root: None,
     #[test]
     fn failed_tool_surfaces_recovery_suggestion() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let turn_id = TurnId::new();
         let tool_call_id = "call-1".to_string();
 
@@ -37026,7 +37099,7 @@ workspace_root: None,
     #[test]
     fn close_modal_hides_pending_approval_without_responding() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::ApprovalRequested(
             ApprovalRequestedEvent::generic(
@@ -37061,7 +37134,7 @@ workspace_root: None,
         // auto-interrupts (it only flips `visible`).
         let mut store = store_with_empty_session();
         store.state.approval_auto_open = false;
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.apply_event(AppUiEvent::Protocol(UiNotification::ApprovalRequested(
             ApprovalRequestedEvent::generic(
                 session_id,
@@ -37103,7 +37176,7 @@ workspace_root: None,
         let mut store = store_with_empty_session();
         store.state.approval_auto_open = false;
         store.state.focus = FocusPane::Git;
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::ApprovalRequested(
             ApprovalRequestedEvent::generic(
@@ -37126,7 +37199,7 @@ workspace_root: None,
     fn task_output_read_command_targets_selected_task_cursor() {
         let task_id = TaskId::new();
         let mut store = store_with_task(task_id.clone());
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TaskOutputDelta(
             TaskOutputDeltaEvent {
@@ -37164,7 +37237,7 @@ workspace_root: None,
         // The delta must materialize a Running row so its output accumulates.
         let present = TaskId::new();
         let mut store = store_with_task(present);
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let streaming = TaskId::new();
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TaskOutputDelta(
@@ -37193,7 +37266,7 @@ workspace_root: None,
         store
             .state
             .set_capabilities(UiProtocolCapabilities::new(&[methods::TASK_CANCEL], &[]));
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         let command = store
             .cancel_task_command()
@@ -37272,7 +37345,7 @@ workspace_root: None,
         let task_id = TaskId::new();
         let preview_id = PreviewId::new();
         let mut store = store_with_task(task_id);
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.sessions[0].tasks[0].runtime_detail =
             Some(format!("pending diff preview_id: {}", preview_id.0));
 
@@ -37402,7 +37475,7 @@ workspace_root: None,
     fn interrupted_turn_error_clears_live_reply_and_reports_cancel_status() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "streaming");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         // A user interrupt arrives while the whole-job "Working"/octopus
         // indicator is active and the run reads in-progress.
         store.state.orchestration.insert(
@@ -37461,7 +37534,7 @@ workspace_root: None,
     fn interrupt_with_no_partial_text_pushes_terse_note_not_summary_card() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnError(
             TurnErrorEvent {
@@ -37494,7 +37567,7 @@ workspace_root: None,
     fn non_interrupt_turn_error_keeps_full_summary_card_and_error_state() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "streaming");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.orchestration.insert(
             session_id.clone(),
             octos_core::ui_protocol::SessionOrchestrationEvent {
@@ -37547,7 +37620,7 @@ workspace_root: None,
         // newer turn's marker (which would resurrect the killed turn).
         let turn_a = TurnId::new();
         let mut store = store_with_live_reply(turn_a.clone(), "A partial");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.interrupt_command().expect("interrupt A");
         // B supersedes A as the interrupted turn on the same session.
         let turn_b = TurnId::new();
@@ -37581,7 +37654,7 @@ workspace_root: None,
         // the freeze, so clear-then-reseed = wipe).
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "streamed partial");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.interrupt_command().expect("interrupt");
 
         store.apply_v2_assistant_persisted(
@@ -37616,7 +37689,7 @@ workspace_root: None,
             matches!(store.state.run_state, SessionRunState::Blocked { .. }),
             "interrupting a parked/blocked turn must not flatten it to Idle"
         );
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         assert!(
             store.state.turn_locally_interrupted(&session_id, &turn_id),
             "the freeze marker still applies to a blocked interrupted turn"
@@ -37658,7 +37731,7 @@ workspace_root: None,
     fn submit_after_interrupt_stages_instead_of_steering_into_the_killed_turn() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "streaming");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.steer_mid_turn = true;
         store.state.capabilities = Some(crate::menu::CapabilitySet::from_methods([
             crate::model::APPUI_METHOD_TURN_STEER,
@@ -37713,7 +37786,7 @@ workspace_root: None,
     fn interrupt_clears_the_orchestration_working_indicator() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id, "streaming");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.orchestration.insert(
             session_id.clone(),
             octos_core::ui_protocol::SessionOrchestrationEvent {
@@ -37748,7 +37821,7 @@ workspace_root: None,
     fn natural_completion_after_interrupt_flags_the_truncated_answer() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "first half");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.set_run_state_in_progress();
         store.interrupt_command().expect("interrupt");
 
@@ -37807,7 +37880,7 @@ workspace_root: None,
     fn interrupt_after_the_last_token_commits_clean_without_a_false_warning() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "the whole answer");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.set_run_state_in_progress();
         store.interrupt_command().expect("interrupt");
         // No further delta — nothing was dropped.
@@ -37850,7 +37923,7 @@ workspace_root: None,
     fn approval_requested_after_interrupt_does_not_reblock_the_killed_turn() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id, "streaming");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.set_run_state_in_progress();
         store.interrupt_command().expect("interrupt");
         assert!(!store.state.run_state.is_active(), "Esc idles the chip");
@@ -37875,7 +37948,7 @@ workspace_root: None,
     fn approval_cancelled_after_interrupt_settles_idle_not_blocked() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "streamed, then parked");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         // Parked on an approval, THEN interrupted (P3 keeps it Blocked).
         let approval_id = octos_core::ui_protocol::ApprovalId::new();
         let mut approval = approval_for("test", "rm -rf target");
@@ -37931,7 +38004,7 @@ workspace_root: None,
             store.state.run_state.is_active(),
             "a live turn starts in progress"
         );
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.interrupt_command().expect("active turn interrupts");
 
@@ -37952,7 +38025,7 @@ workspace_root: None,
     fn post_interrupt_deltas_are_frozen_and_keep_the_turn_idle() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "partial");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.interrupt_command().expect("interrupts");
 
         // A trailing delta arrives before the cooperative server cancel lands.
@@ -37985,7 +38058,7 @@ workspace_root: None,
     fn tool_events_after_interrupt_terminal_do_not_resurrect_the_turn() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "partial");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.set_run_state_in_progress();
 
         store.interrupt_command().expect("interrupts");
@@ -38055,7 +38128,7 @@ workspace_root: None,
     fn interrupted_terminal_store() -> (Store, SessionKey, TurnId, usize) {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "partial");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.set_run_state_in_progress();
         store.interrupt_command().expect("interrupts");
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnError(
@@ -38257,7 +38330,7 @@ workspace_root: None,
     fn terminal_clears_the_interrupt_marker_and_a_new_turn_streams() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "partial");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.interrupt_command().expect("interrupts");
 
         // The interrupt's terminal lands and reconciles.
@@ -38307,7 +38380,7 @@ workspace_root: None,
     fn interrupt_defers_prompt_restore_until_the_turn_settles() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "streaming");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.record_submitted_user_prompt(
             session_id.clone(),
             turn_id.clone(),
@@ -38364,7 +38437,7 @@ workspace_root: None,
     fn interrupt_restore_applies_on_turn_completed_terminal_too() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "streaming");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.record_submitted_user_prompt(
             session_id.clone(),
             turn_id.clone(),
@@ -38394,7 +38467,7 @@ workspace_root: None,
     fn interrupt_restore_skips_when_user_typed_meanwhile() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "streaming");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.record_submitted_user_prompt(
             session_id.clone(),
             turn_id.clone(),
@@ -38428,7 +38501,7 @@ workspace_root: None,
     fn interrupt_restore_yields_to_staged_messages() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "streaming");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.record_submitted_user_prompt(
             session_id.clone(),
             turn_id.clone(),
@@ -38464,7 +38537,7 @@ workspace_root: None,
     fn interrupt_restore_dropped_when_a_new_turn_starts() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "streaming");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.record_submitted_user_prompt(
             session_id.clone(),
             turn_id.clone(),
@@ -38572,7 +38645,7 @@ workspace_root: None,
         // composer while the successor streams.
         let turn_a = TurnId::new();
         let mut store = store_with_live_reply(turn_a.clone(), "streaming a");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.record_submitted_user_prompt(
             session_id.clone(),
             turn_a.clone(),
@@ -38616,7 +38689,7 @@ workspace_root: None,
         // more and applies when the menu closes.
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "streaming");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.record_submitted_user_prompt(
             session_id.clone(),
             turn_id.clone(),
@@ -38658,7 +38731,7 @@ workspace_root: None,
         // the composer with A's prompt while B streamed.
         let turn_a = TurnId::new();
         let mut store = store_with_live_reply(turn_a.clone(), "streaming a");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.record_submitted_user_prompt(
             session_id.clone(),
             turn_a.clone(),
@@ -38941,7 +39014,7 @@ workspace_root: None,
         // must apply there too, or the prompt is silently lost.
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "streaming");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.record_submitted_user_prompt(
             session_id.clone(),
             turn_id.clone(),
@@ -39026,7 +39099,7 @@ workspace_root: None,
     fn slash_popup_survives_stream_deltas_with_selection() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "streaming");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.open_menu(MenuId::from(crate::menu::registry::MENU_HELP));
         store.select_next_menu_item();
         store.select_next_menu_item();
@@ -39067,7 +39140,7 @@ workspace_root: None,
     fn interrupt_restore_skips_while_a_menu_is_open() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "streaming");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.record_submitted_user_prompt(
             session_id.clone(),
             turn_id.clone(),
@@ -39101,7 +39174,7 @@ workspace_root: None,
     fn interrupt_does_not_clobber_a_nonempty_composer() {
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "streaming");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store
             .state
             .record_submitted_user_prompt(session_id, turn_id, "fix the flaky test".into());
@@ -39118,7 +39191,7 @@ workspace_root: None,
     #[test]
     fn progress_event_updates_status_without_becoming_protocol_unknown() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.apply_event(AppUiEvent::Progress(UiProgressEvent::new(
             session_id,
@@ -39132,7 +39205,7 @@ workspace_root: None,
     #[test]
     fn file_mutation_progress_with_preview_id_requests_and_opens_diff_preview() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let preview_id = PreviewId::new();
         let mut notice = UiFileMutationNotice::new("src/lib.rs", "modify");
         notice.preview_id = Some(preview_id.clone());
@@ -39326,7 +39399,7 @@ workspace_root: None,
         // turn is live, that turn — the same attachment the compaction
         // notice uses for the same reason.
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let turn = TurnId::new();
         store.state.sessions[0].live_reply = Some(LiveReply {
             turn_id: turn.clone(),
@@ -39488,7 +39561,7 @@ workspace_root: None,
         // bare-kind — it must still never land in `state.status`, or the same
         // word renders on two lines at once.
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let turn = TurnId::new();
         store.state.sessions[0].live_reply = Some(LiveReply {
             turn_id: turn.clone(),
@@ -39528,7 +39601,7 @@ workspace_root: None,
         // overwrite the status line (the bare-kind string still titles
         // activity-log rows for kinds that record activity).
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.status = "ready".into();
 
         store.apply_event(AppUiEvent::Progress(UiProgressEvent::new(
@@ -39546,7 +39619,7 @@ workspace_root: None,
     #[test]
     fn progress_event_prefers_user_facing_message() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.apply_event(AppUiEvent::Progress(UiProgressEvent::new(
             session_id,
@@ -39563,7 +39636,7 @@ workspace_root: None,
         // session for the harness gradient line, and a new turn drops the
         // prior word so it can't flash before the fresh one arrives.
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         // The word attributes to the session's CURRENT turn — give it a
         // live_reply on `turn`.
@@ -39656,7 +39729,7 @@ workspace_root: None,
     #[test]
     fn status_word_persona_spinner_touches_neither_status_nor_activity() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.status = "ready".into();
         // Persona spinner: kind="status_word", dynamic word (LLM-generated).
         // Its home is the HARNESS line via `session_status_word`; it must not
@@ -39684,7 +39757,7 @@ workspace_root: None,
     #[test]
     fn low_value_progress_updates_status_without_activity() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.status = "Working".into();
         let mut token_cost = UiTokenCostUpdate::new();
         token_cost.total_tokens = Some(123);
@@ -39721,7 +39794,7 @@ workspace_root: None,
     #[test]
     fn agent_step_token_time_telemetry_stays_in_status_line() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         for message in [
             "Step 21 · 18432 tokens · 5m07s · 1 reflection",
@@ -39744,7 +39817,7 @@ workspace_root: None,
     #[test]
     fn important_progress_still_records_activity() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.apply_event(AppUiEvent::Progress(UiProgressEvent::new(
             session_id,
@@ -39763,7 +39836,7 @@ workspace_root: None,
     fn turn_error_ignores_mismatched_live_reply() {
         let live_turn_id = TurnId::new();
         let mut store = store_with_live_reply(live_turn_id.clone(), "still streaming");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.apply_event(AppUiEvent::Protocol(UiNotification::TurnError(
             TurnErrorEvent {
@@ -39813,7 +39886,7 @@ workspace_root: None,
     fn task_output_tail_truncates_on_utf8_boundary() {
         let task_id = TaskId::new();
         let mut store = store_with_task(task_id.clone());
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let retained_tail = "é".repeat(299);
         let text = format!("界{retained_tail}");
 
@@ -40027,7 +40100,7 @@ workspace_root: None,
         };
 
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.set_capabilities(
             octos_core::ui_protocol::UiProtocolCapabilities::new(&[], &[])
                 .with_supported_features([crate::model::APPUI_FEATURE_CONTEXT_SEMANTIC_CACHE_V1]),
@@ -40108,7 +40181,7 @@ workspace_root: None,
         };
 
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let event = AppUiEvent::Protocol(UiNotification::ContextNormalizationReported(
             ContextNormalizationReportedEvent {
                 session_id: session_id.clone(),
@@ -40166,7 +40239,7 @@ workspace_root: None,
     #[test]
     fn hydrate_snapshot_clears_previous_cache_epoch_atomically_with_new_generation() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.set_capabilities(
             UiProtocolCapabilities::new(&[], &[])
                 .with_supported_features([crate::model::APPUI_FEATURE_CONTEXT_SEMANTIC_CACHE_V1]),
@@ -40216,7 +40289,7 @@ workspace_root: None,
     #[test]
     fn capability_downgrade_clears_cached_semantic_diagnostics() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.set_capabilities(
             UiProtocolCapabilities::new(&[], &[])
                 .with_supported_features([crate::model::APPUI_FEATURE_CONTEXT_SEMANTIC_CACHE_V1]),
@@ -40269,7 +40342,7 @@ workspace_root: None,
     #[test]
     fn runtime_status_reconciles_or_invalidates_stale_model_catalog() {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let old = ModelStatus {
             model: "old-model".into(),
             provider: "old-provider".into(),
@@ -40932,7 +41005,7 @@ workspace_root: None,
         use octos_core::ui_protocol::UiRetryBackoff;
 
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         let mut retry = UiRetryBackoff::new();
         retry.attempt = Some(2);
@@ -40977,7 +41050,7 @@ workspace_root: None,
 
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "hello");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         let mut retry = UiRetryBackoff::new();
         retry.attempt = Some(2);
@@ -41011,7 +41084,7 @@ workspace_root: None,
 
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "hello");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         let mut retry = UiRetryBackoff::new();
         retry.attempt = Some(1);
@@ -41047,7 +41120,7 @@ workspace_root: None,
         let live_turn = TurnId::new();
         let stale_turn = TurnId::new();
         let mut store = store_with_live_reply(live_turn.clone(), "hello");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         let mut retry = UiRetryBackoff::new();
         retry.attempt = Some(2);
@@ -41088,7 +41161,7 @@ workspace_root: None,
         let live_turn = TurnId::new();
         let stale_turn = TurnId::new();
         let mut store = store_with_live_reply(live_turn.clone(), "hello");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         let mut retry = UiRetryBackoff::new();
         retry.attempt = Some(1);
@@ -42899,13 +42972,184 @@ workspace_root: None,
     }
 
     /// Stuck-chip safety net: a spawn_only background task that outlives its
-    /// spawning turn only goes terminal AFTER the per-turn task-progress
-    /// channel was torn down, so the terminal `task/updated` never reaches the
-    /// client and `session.tasks` stays "running" — pinning the chip on
-    /// "Orchestrating…". The DURABLE terminal `agent/updated` (which now does
-    /// reach the client via the ledger) carries `task_id` + a terminal
-    /// `status`; the store reconciles the matching task to its terminal state
-    /// so the chip flips. This pins that reconcile.
+    /// #526: the interrupted turn settles from the `turn/interrupt` RPC
+    /// result — partial answer committed, queue drained in order — even when
+    /// the wire `TurnError` never arrives.
+    #[test]
+    fn interrupt_ack_settles_the_turn_and_drains_the_staged_prompt() {
+        let mut store = store_with_two_sessions("local:test", "local:other");
+        let session_id = SessionKey("local:test".into());
+        let turn_id = TurnId::new();
+        store.state.sessions[0].live_reply = Some(LiveReply {
+            turn_id: turn_id.clone(),
+            text: "partial answer".into(),
+        });
+        store.state.set_run_state_in_progress();
+        store.state.pending_messages.push("follow-up".into());
+        store.state.set_composer_text("");
+        let outcome = store.apply_autonomy_result(crate::client_event::AutonomyClientEvent {
+            result: crate::client_event::AutonomyResult::TurnInterruptAck(
+                crate::model::TurnInterruptAckResult {
+                    session_id: session_id.clone(),
+                    turn_id: turn_id.clone(),
+                    interrupted: true,
+                    reason: None,
+                    terminal_state: None,
+                    ack_timeout: false,
+                },
+            ),
+        });
+        assert!(outcome.is_some(), "the staged prompt drains at the ack");
+        assert!(
+            store.state.sessions[0].live_reply.is_none(),
+            "the interrupted turn is settled"
+        );
+        assert!(
+            store.state.sessions[0]
+                .messages
+                .iter()
+                .any(|message| message.content.contains("partial answer")),
+            "the partial answer is committed, not lost"
+        );
+        assert!(store.state.pending_messages.is_empty(), "queue drained");
+        assert!(
+            matches!(
+                store.state.run_state,
+                crate::model::SessionRunState::InProgress
+            ),
+            "the drained prompt's turn is starting, got {:?}",
+            store.state.run_state
+        );
+        assert!(
+            store.state.composer.is_empty(),
+            "the staged prompt owns the turn slot; the old prompt is not restored over it"
+        );
+    }
+
+    /// #526: every settled ack form serves the drain — an ack-timeout (the
+    /// wire terminal is lost) and an already-terminal report.
+    #[test]
+    fn interrupt_ack_timeout_and_terminal_state_also_settle() {
+        for (interrupted, terminal_state, ack_timeout) in [
+            (true, None, true),
+            (false, Some("interrupted".to_string()), false),
+        ] {
+            let mut store = store_with_two_sessions("local:test", "local:other");
+            let session_id = SessionKey("local:test".into());
+            let turn_id = TurnId::new();
+            store.state.sessions[0].live_reply = Some(LiveReply {
+                turn_id: turn_id.clone(),
+                text: "partial".into(),
+            });
+            store.state.set_run_state_in_progress();
+            store.state.pending_messages.push("follow-up".into());
+            let outcome = store.apply_autonomy_result(crate::client_event::AutonomyClientEvent {
+                result: crate::client_event::AutonomyResult::TurnInterruptAck(
+                    crate::model::TurnInterruptAckResult {
+                        session_id,
+                        turn_id,
+                        interrupted,
+                        reason: None,
+                        terminal_state,
+                        ack_timeout,
+                    },
+                ),
+            });
+            assert!(outcome.is_some(), "the staged prompt drains");
+            assert!(store.state.sessions[0].live_reply.is_none());
+        }
+    }
+
+    /// #526: a refused interrupt (the turn was not running) settles nothing
+    /// and drains nothing.
+    #[test]
+    fn a_refused_interrupt_ack_settles_nothing() {
+        let mut store = store_with_two_sessions("local:test", "local:other");
+        let session_id = SessionKey("local:test".into());
+        let turn_id = TurnId::new();
+        store.state.sessions[0].live_reply = Some(LiveReply {
+            turn_id: turn_id.clone(),
+            text: "partial".into(),
+        });
+        store.state.pending_messages.push("follow-up".into());
+        let outcome = store.apply_autonomy_result(crate::client_event::AutonomyClientEvent {
+            result: crate::client_event::AutonomyResult::TurnInterruptAck(
+                crate::model::TurnInterruptAckResult {
+                    session_id,
+                    turn_id: turn_id.clone(),
+                    interrupted: false,
+                    reason: Some("turn_id_mismatch".into()),
+                    terminal_state: None,
+                    ack_timeout: false,
+                },
+            ),
+        });
+        assert!(outcome.is_none());
+        assert!(store.state.sessions[0].live_reply.is_some());
+        assert_eq!(store.state.pending_messages, vec!["follow-up"]);
+        assert!(store.state.status.contains("refused"));
+    }
+
+    /// #526: whichever settle arrives second — the wire `TurnError` after the
+    /// ack, or the ack after the wire event — pushes no duplicate note.
+    #[test]
+    fn interrupt_ack_and_wire_terminal_never_settle_twice() {
+        use octos_core::ui_protocol::UiNotification;
+        let interrupted_note = || {
+            let note = t!("status.turn_interrupted").into_owned();
+            move |store: &Store| {
+                store.state.sessions[0]
+                    .messages
+                    .iter()
+                    .filter(|message| message.content.contains(&note))
+                    .count()
+            }
+        };
+        // Ack first, wire second.
+        let mut store = store_with_two_sessions("local:test", "local:other");
+        let session_id = SessionKey("local:test".into());
+        let turn_id = TurnId::new();
+        store.state.sessions[0].live_reply = Some(LiveReply {
+            turn_id: turn_id.clone(),
+            text: "partial".into(),
+        });
+        store.state.set_run_state_in_progress();
+        store.apply_autonomy_result(crate::client_event::AutonomyClientEvent {
+            result: crate::client_event::AutonomyResult::TurnInterruptAck(
+                crate::model::TurnInterruptAckResult {
+                    session_id: session_id.clone(),
+                    turn_id: turn_id.clone(),
+                    interrupted: true,
+                    reason: None,
+                    terminal_state: None,
+                    ack_timeout: false,
+                },
+            ),
+        });
+        let notes_after_ack = interrupted_note()(&store);
+        store.apply_event(AppUiEvent::Protocol(UiNotification::TurnError(
+            TurnErrorEvent {
+                session_id: session_id.clone(),
+                topic: None,
+                turn_id: turn_id.clone(),
+                code: "interrupted".into(),
+                message: "interrupted".into(),
+                token_usage: None,
+                partial_result: None,
+            },
+        )));
+        assert_eq!(
+            interrupted_note()(&store),
+            notes_after_ack,
+            "the late wire terminal must not push a second interrupted note"
+        );
+    }
+
+    /// A spawn_only background task is usually reported terminal through its
+    /// turn, but a reload mid-flight tears the per-turn channel down first:
+    /// the DURABLE terminal `agent/updated` carries `task_id` + a terminal
+    /// `status` and reconciles the stuck chip (see the note above the
+    /// `AgentList` arm). This pins that reconcile.
     #[test]
     fn terminal_agent_update_reconciles_stuck_running_task() {
         use octos_core::ui_protocol::{AgentUpdatedEvent, TaskRuntimeState, UiAgentRecord};
@@ -44069,7 +44313,7 @@ workspace_root: None,
         // so its remaining deltas keep appending instead of freezing.
         let turn_id = TurnId::new();
         let mut store = store_with_live_reply(turn_id.clone(), "streaming so far");
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         let result = SessionHydrateResult {
             replayed_projection_envelopes: None,
@@ -44129,7 +44373,7 @@ workspace_root: None,
     fn hydrate_refreshes_status_so_stream_health_is_re_reported_after_a_reconnect() {
         use crate::client_event::ClientEvent;
         let mut store = protocol_store_with_methods(&[methods::SESSION_STATUS_READ]);
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         // A cached status makes `probe_active_session_status_if_missing` — the
         // only pre-existing probe on this path — a no-op, which is exactly the
         // post-reconnect situation.
@@ -46195,7 +46439,7 @@ workspace_root: None,
             octos_core::ui_protocol::UiProtocolCapabilities::new(&[], &[])
                 .with_supported_features([UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2]),
         );
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let palette = Palette::for_theme(ThemeName::Codex);
         let mut tracker = ScrollbackTracker::new();
         let mut visible = String::new();
@@ -46483,7 +46727,7 @@ workspace_root: None,
         // reconcile, so the chip pinned "Orchestrating…" forever after reconnect.
         let turn_id = TurnId::new();
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         // Leaked running item bound to the (about-to-be-terminal) turn.
         store.state.push_activity(
             ActivityItem::new(ActivityKind::Tool, "run_pipeline", "running")
@@ -46542,7 +46786,7 @@ workspace_root: None,
         // now surfaces it; mapping it onto Message.reasoning_content is what
         // makes the "· reasoning" block survive a client restart.
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let result = SessionHydrateResult {
             replayed_projection_envelopes: None,
             projection_thread_sequences: None,
@@ -46864,7 +47108,7 @@ workspace_root: None,
         // not read "1 action(s) · 1 failed" with no children.
         let turn_id = TurnId::new();
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         let envelope = |seq: u64, payload: PayloadV2| EnvelopeV2 {
             thread_id: "thread-replay-1".into(),
@@ -46974,7 +47218,7 @@ workspace_root: None,
         // ledger must make the replay apply-once.
         let turn_id = TurnId::new();
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let envelope = |seq: u64, payload: PayloadV2| EnvelopeV2 {
             thread_id: "thread-replay-2".into(),
             seq,
@@ -47067,7 +47311,7 @@ workspace_root: None,
         // must stay running.
         let turn_id = TurnId::new();
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.push_activity(
             ActivityItem::new(ActivityKind::Tool, "run_pipeline", "running")
                 .with_turn(turn_id.clone())
@@ -47122,7 +47366,7 @@ workspace_root: None,
         for terminal in [TurnLifecycleState::Errored, TurnLifecycleState::Interrupted] {
             let turn_id = TurnId::new();
             let mut store = store_with_empty_session();
-            let session_id = store.state.sessions[0].id.clone();
+            let session_id = SessionKey("local:test".into());
             store.state.push_activity(
                 ActivityItem::new(ActivityKind::Tool, "run_pipeline", "running")
                     .with_turn(turn_id.clone())
@@ -47177,7 +47421,7 @@ workspace_root: None,
     /// run-state clock already past the probe threshold.
     fn phantom_in_progress_store() -> (Store, SessionKey) {
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         store.state.set_run_state_in_progress();
         store.state.run_state_started_at = Some(
             std::time::Instant::now()
@@ -47677,7 +47921,7 @@ workspace_root: None,
         ] {
             let turn_id = TurnId::new();
             let mut store = store_with_empty_session();
-            let session_id = store.state.sessions[0].id.clone();
+            let session_id = SessionKey("local:test".into());
             store.state.sessions[0].live_reply = Some(LiveReply {
                 turn_id: turn_id.clone(),
                 text: "partial streamed answer".into(),
@@ -47947,7 +48191,7 @@ workspace_root: None,
             [crate::model::APPUI_METHOD_SESSION_HYDRATE],
             [crate::model::APPUI_FEATURE_SESSION_HYDRATE_V1],
         ));
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         let first = store.resume_session_command(session_id.0.clone());
         assert!(matches!(first, Some(AppUiCommand::HydrateSession(_))));
@@ -47970,7 +48214,7 @@ workspace_root: None,
             [crate::model::APPUI_METHOD_SESSION_HYDRATE],
             [crate::model::APPUI_FEATURE_SESSION_HYDRATE_V1],
         ));
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         let Some(AppUiCommand::HydrateSession(resume)) =
             store.resume_session_command(session_id.0.clone())
@@ -48632,7 +48876,7 @@ workspace_root: None,
         const CANONICAL: &str = "T03 OK prior=POSTFIX-NONCE-9174520";
 
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let mut seq = 0u64;
         let mut send = |store: &mut Store, payload: PayloadV2| {
             seq += 1;
@@ -48699,7 +48943,7 @@ workspace_root: None,
         const SECOND: &str = "Still running (the 15-second sleep is in progress). Waiting a moment, then gathering again:";
         const FINAL: &str = "The peer completed and reported the stable marker from the actual README.md file. Peer `audit-open` is left open (no `peer_close`) for the next round.\n\nAUDIT1 OPEN=PROOF-README-1788422955";
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let mut tracker = ScrollbackTracker::new();
         let palette = Palette::for_theme(ThemeName::Codex);
         let mut visible = String::new();
@@ -48835,7 +49079,7 @@ workspace_root: None,
             "SOURCE CHECK COMPLETE:\n\nSOAK-ANSWER-BEGIN\n\nprovisional answer\n\nSOAK-ANSWER-END";
 
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let mut tracker = ScrollbackTracker::new();
         let palette = Palette::for_theme(ThemeName::Codex);
         let mut emitted = String::new();
@@ -48949,7 +49193,7 @@ workspace_root: None,
                 [octos_core::ui_protocol::UI_PROTOCOL_FEATURE_PROJECTION_ENVELOPE_V2],
             ),
         );
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let mut tracker = ScrollbackTracker::new();
         let palette = Palette::for_theme(ThemeName::Codex);
         let mut emitted = String::new();
@@ -49063,7 +49307,7 @@ workspace_root: None,
             store.state.capabilities.is_none(),
             "precondition: capabilities not negotiated yet"
         );
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
         let mut tracker = ScrollbackTracker::new();
         let palette = Palette::for_theme(ThemeName::Codex);
         let mut emitted = String::new();
@@ -49158,7 +49402,7 @@ workspace_root: None,
         const WIRE_TURN: &str = "01a032e7-e056-7f70-88f0-020d51512bd2";
         const CANONICAL: &str = "canonical v2 answer";
         let mut store = store_with_empty_session();
-        let session_id = store.state.sessions[0].id.clone();
+        let session_id = SessionKey("local:test".into());
 
         store.apply_event(AppUiEvent::Protocol(envelope_v2_notification(
             session_id.clone(),
