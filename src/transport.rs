@@ -15,9 +15,9 @@ use octos_core::ui_protocol::{
     SessionListResult, SessionOpenParams, SessionOpenResult, SessionOpened, SessionRollbackResult,
     TaskArtifactReadResult, TaskOutputDeltaEvent, TaskOutputReadResult, TaskRuntimeState,
     TaskUpdatedEvent, ThreadGraphGetResult, ToolCompletedEvent, ToolProgressEvent,
-    ToolStartedEvent, TurnCompletedEvent, TurnId, TurnStartedEvent, TurnStateGetResult, UiCursor,
-    UiNotification, UiPaneSnapshot, UiProtocolCapabilities, WarningEvent, approval_kinds, methods,
-    rpc_error_codes,
+    ToolStartedEvent, TurnCompletedEvent, TurnId, TurnInterruptResult, TurnStartedEvent,
+    TurnStateGetResult, UiCursor, UiNotification, UiPaneSnapshot, UiProtocolCapabilities,
+    WarningEvent, approval_kinds, methods, rpc_error_codes,
 };
 use octos_core::ui_protocol::{
     JSON_RPC_VERSION, MAX_TEXT_FRAME_BYTES, RpcRequest, UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1,
@@ -573,6 +573,9 @@ struct PendingRequest {
     /// local-attribution mechanism as `select_session`; the wire schema is
     /// unchanged.
     hydrate_session: Option<SessionKey>,
+    /// For `turn/interrupt`: the turn the request interrupts (#526), so its
+    /// result settles exactly that turn.
+    interrupt_target: Option<(SessionKey, TurnId)>,
 }
 
 #[derive(Debug, Default)]
@@ -693,6 +696,12 @@ impl ProtocolExchange {
             AppUiCommand::HydrateSession(params) => Some(params.session_id.clone()),
             _ => None,
         };
+        let interrupt_target = match &command {
+            AppUiCommand::InterruptTurn(params) => {
+                Some((params.session_id.clone(), params.turn_id.clone()))
+            }
+            _ => None,
+        };
         let request_id = self.next_request_id();
         let request = rpc_request_from_command(request_id.clone(), command)?;
 
@@ -702,6 +711,7 @@ impl ProtocolExchange {
                 method,
                 select_session,
                 hydrate_session,
+                interrupt_target,
             },
         );
 
@@ -719,6 +729,7 @@ impl ProtocolExchange {
                 method: APPUI_METHOD_CLIENT_HELLO.to_owned(),
                 select_session: None,
                 hydrate_session: None,
+                interrupt_target: None,
             },
         );
         RpcRequest::new(
@@ -4277,12 +4288,32 @@ fn success_response_to_app_event(
             Ok(result) => Ok(Some(ClientEvent::ReviewStart(result))),
             Err(err) => Ok(Some(autonomy_decode_error(methods::REVIEW_START, err))),
         },
-        methods::TURN_INTERRUPT => Ok(Some(
-            AppUiEvent::Status(AppUiStatus {
-                message: interrupt_ack_status(&result),
-            })
-            .into(),
-        )),
+        methods::TURN_INTERRUPT => match serde_json::from_value::<TurnInterruptResult>(result) {
+            Ok(result) => {
+                let Some((session_id, turn_id)) = pending_request.interrupt_target else {
+                    return Ok(Some(
+                        AppUiEvent::Status(AppUiStatus {
+                            message: match result.interrupted {
+                                true => "Interrupt acknowledged; active turn cancelled".into(),
+                                false => "Interrupt acknowledged; turn was already idle".into(),
+                            },
+                        })
+                        .into(),
+                    ));
+                };
+                Ok(Some(autonomy_event(AutonomyResult::TurnInterruptAck(
+                    crate::model::TurnInterruptAckResult {
+                        session_id,
+                        turn_id,
+                        interrupted: result.interrupted,
+                        reason: result.reason,
+                        terminal_state: result.terminal_state,
+                        ack_timeout: result.ack_timeout.unwrap_or(false),
+                    },
+                ))))
+            }
+            Err(err) => Ok(Some(autonomy_decode_error(methods::TURN_INTERRUPT, err))),
+        },
         methods::APPROVAL_RESPOND => Ok(Some(
             AppUiEvent::Status(AppUiStatus {
                 message: "Approval response acknowledged".into(),
@@ -5111,14 +5142,6 @@ fn append_metadata_section<'a>(
         text.push_str("- ");
         text.push_str(item);
         text.push('\n');
-    }
-}
-
-fn interrupt_ack_status(result: &Value) -> String {
-    match result.get("interrupted").and_then(Value::as_bool) {
-        Some(false) => "Interrupt acknowledged; turn was already idle".into(),
-        Some(true) => "Interrupt acknowledged; active turn cancelled".into(),
-        None => "Interrupt acknowledged".into(),
     }
 }
 
@@ -8839,6 +8862,7 @@ mod tests {
                 select_session: None,
                 method: crate::model::APPUI_METHOD_PROFILE_SKILLS_LIST.into(),
                 hydrate_session: None,
+                interrupt_target: None,
             },
         );
         let frame = json!({
@@ -8908,6 +8932,7 @@ mod tests {
                 method: crate::model::APPUI_METHOD_PEER_PREPARE.into(),
                 select_session: None,
                 hydrate_session: None,
+                interrupt_target: None,
             },
         );
         let frame = json!({
@@ -8975,6 +9000,7 @@ mod tests {
                 method: crate::model::APPUI_METHOD_PEER_PREPARE.into(),
                 select_session: None,
                 hydrate_session: None,
+                interrupt_target: None,
             },
         );
         let frame = json!({
@@ -9068,6 +9094,7 @@ mod tests {
                 method: crate::model::APPUI_METHOD_TURN_STEER.into(),
                 select_session: None,
                 hydrate_session: None,
+                interrupt_target: None,
             },
         );
         let frame = json!({
@@ -9094,6 +9121,7 @@ mod tests {
                 method: crate::model::APPUI_METHOD_TURN_STEER.into(),
                 select_session: None,
                 hydrate_session: None,
+                interrupt_target: None,
             },
         );
         let frame = json!({
@@ -9477,6 +9505,7 @@ mod tests {
                 method: crate::model::APPUI_METHOD_PEER_GATHER.into(),
                 select_session: None,
                 hydrate_session: None,
+                interrupt_target: None,
             },
         );
         let frame = json!({
@@ -9584,6 +9613,7 @@ mod tests {
                 method: crate::model::APPUI_METHOD_SESSION_STATUS_READ.into(),
                 select_session: None,
                 hydrate_session: None,
+                interrupt_target: None,
             },
         );
         let frame = json!({
@@ -11228,6 +11258,7 @@ mod tests {
                 select_session: None,
                 method: methods::APPROVAL_SCOPES_LIST.into(),
                 hydrate_session: None,
+                interrupt_target: None,
             })
         );
 
@@ -11652,6 +11683,7 @@ mod tests {
                     select_session: None,
                     method: methods::APPROVAL_SCOPES_LIST.into(),
                     hydrate_session: None,
+                    interrupt_target: None,
                 },
             );
         }
@@ -11817,6 +11849,7 @@ mod tests {
                 method: crate::model::APPUI_METHOD_SESSION_HYDRATE.into(),
                 select_session: None,
                 hydrate_session: Some(SessionKey("local:hydrate-b".into())),
+                interrupt_target: None,
             },
         );
         let frame = serde_json::json!({
@@ -11844,6 +11877,7 @@ mod tests {
                 method: crate::model::APPUI_METHOD_SESSION_HYDRATE.into(),
                 select_session: None,
                 hydrate_session: None,
+                interrupt_target: None,
             },
         );
         let frame = serde_json::json!({
@@ -12040,6 +12074,7 @@ mod tests {
                     select_session: None,
                     method: methods::APPROVAL_SCOPES_LIST.into(),
                     hydrate_session: None,
+                    interrupt_target: None,
                 },
             );
         }
@@ -12122,6 +12157,7 @@ mod tests {
                 select_session: None,
                 method: methods::TURN_START.into(),
                 hydrate_session: None,
+                interrupt_target: None,
             })
         );
 
@@ -12810,15 +12846,19 @@ mod tests {
             .decode_rpc_text(&frame)
             .expect("interrupt response decodes")
             .expect("status event");
-        let event = unwrap_app_event(event);
-
-        let AppUiEvent::Status(status) = event else {
-            panic!("expected interrupt status event");
-        };
-        assert_eq!(
-            status.message,
-            "Interrupt acknowledged; active turn cancelled"
-        );
+        // #526: the interrupt result is correlated to its turn and handed to
+        // the store as a typed ack, not flattened to a status line.
+        match &event {
+            crate::client_event::ClientEvent::Autonomy(
+                crate::client_event::AutonomyClientEvent {
+                    result: crate::client_event::AutonomyResult::TurnInterruptAck(ack),
+                },
+            ) => {
+                assert_eq!(ack.session_id, SessionKey("local:test".into()));
+                assert!(ack.interrupted);
+            }
+            other => panic!("expected a typed interrupt ack, got {other:?}"),
+        }
         assert!(backend.protocol.pending_requests.is_empty());
     }
 

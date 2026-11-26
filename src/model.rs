@@ -700,6 +700,22 @@ pub struct LoopMutationResult {
     pub fire: Option<octos_core::ui_protocol::UiLoopFire>,
 }
 
+/// A `turn/interrupt` RPC result, correlated to its request (#526). The
+/// server DID finish the interrupt when `interrupted` or `terminal_state`
+/// is set — even when the wire-side `TurnError` never arrives
+/// (`ack_timeout`), so the client settles the turn from this and lets the
+/// ordinary terminal drain serve the staged queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnInterruptAckResult {
+    pub session_id: SessionKey,
+    pub turn_id: TurnId,
+    pub interrupted: bool,
+    pub reason: Option<String>,
+    pub terminal_state: Option<String>,
+    pub ack_timeout: bool,
+}
+
+/// Per-session autonomy mirror state. Populated by `agent/list`,
 /// Per-session autonomy mirror state. Populated by `agent/list`,
 /// `session/goal/get`, `loop/list` responses and by the matching
 /// notifications. The TUI re-fetches this on session open and on
@@ -5434,6 +5450,9 @@ pub struct AppState {
     /// slot or a newer turn/submit supersedes it. Local-only, preserved
     /// across snapshot replays.
     pub pending_interrupt_restores: Vec<PendingInterruptRestore>,
+    /// Turns settled from the `turn/interrupt` RPC result (#526): their late
+    /// wire `TurnError` is drained without a duplicate note, once.
+    pub interrupt_ack_settled: std::collections::HashSet<(SessionKey, TurnId)>,
 }
 
 /// See [`AppState::pending_interrupt_restores`].
@@ -7365,6 +7384,7 @@ impl AppState {
             rewind_turns: Vec::new(),
             pending_rewind_prefill: None,
             pending_interrupt_restores: Vec::new(),
+            interrupt_ack_settled: std::collections::HashSet::new(),
         }
     }
 
