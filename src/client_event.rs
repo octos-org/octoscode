@@ -400,6 +400,7 @@ pub enum AutonomyResult {
     ThreadGraph(ThreadGraphGetResult),
     TurnState(TurnStateGetResult),
     AgentInterrupt(AgentInterruptResult),
+    TurnInterruptAck(crate::model::TurnInterruptAckResult),
     AgentClose(AgentCloseResult),
     GoalGet(SessionGoalGetResult),
     GoalSet(SessionGoalSetResult),
