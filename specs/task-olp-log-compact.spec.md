@@ -48,6 +48,9 @@ estimate: 2d
   (默认 32,0 为不压缩)且达到上次压缩留下的两倍就压缩(保留 14 天、最近 10 张);试过之后
   要再长四分之一才再试,不会每轮重读。
 - `board import` 对压缩过的日志同样拒绝(归档里有事件)。
+- 外环值守自动压缩时保留的天数与张数可用 `OLP_LOG_COMPACT_KEEP_DAYS`(默认 14)、
+  `OLP_LOG_COMPACT_KEEP`(默认 10)改。`tuned` 事件(旋钮的值,`task-olp-log-evolve`)不随
+  旧事件移走。
 
 ## Boundaries
 
@@ -64,7 +67,8 @@ estimate: 2d
 
 ## Out of Scope
 
-- 单元一侧的事件缓存(`<镜像>.events.jsonl`)不压缩:它只有本单元的卡,仍只增。
+- 单元一侧的事件缓存(`<镜像>.events.jsonl`)不单独压缩;hub 归档了缓存里最后一条事件时,
+  下次同步按 hub 现有的内容重建(`task-olp-unit-client`)。
 - 归档的压缩存放(gzip/zstd)与归档的过期删除。
 - 派到窗格却从未被领取的卡了结后仍留在单元的投递收件箱里(`cards::pending_for` 的现状),
   所以这类卡不归档;要不要改投递收件箱的规则另议。

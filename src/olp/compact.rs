@@ -127,7 +127,8 @@ pub fn plan(events: &[Event], now: DateTime<Utc>, keep_days: i64, keep_recent: u
                     .get("id")
                     .and_then(|v| v.as_str())
                     .is_some_and(|id| open_questions.contains(id));
-            asks_open || !old(event)
+            // A knob's value is its last change, however old.
+            asks_open || event.kind == "tuned" || !old(event)
         }
     };
     let gone = going
@@ -200,6 +201,9 @@ pub fn same_reading(events: &[Event], plan: &Plan, now: DateTime<Utc>) -> Result
         if cards::held_by(events, unit, now) != cards::held_by(&plan.keep, unit, now) {
             return Err(format!("单元 {unit} 在办的卡不一致"));
         }
+    }
+    if super::tune::values(events) != super::tune::values(&plan.keep) {
+        return Err("旋钮的值不一致".to_string());
     }
     let ever = |events: &[Event]| {
         events
@@ -318,6 +322,20 @@ pub fn auto_threshold() -> Option<u64> {
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(32);
     (mib > 0).then_some(mib * 1024 * 1024)
+}
+
+/// What the watcher's compaction keeps: cards quiet for fewer than
+/// `OLP_LOG_COMPACT_KEEP_DAYS` days (14) and the `OLP_LOG_COMPACT_KEEP`
+/// most recently settled (10).
+pub fn auto_keep() -> (i64, usize) {
+    let read = |name: &str| std::env::var(name).ok().and_then(|v| v.trim().parse().ok());
+    (
+        read("OLP_LOG_COMPACT_KEEP_DAYS").unwrap_or(14),
+        std::env::var("OLP_LOG_COMPACT_KEEP")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(10),
+    )
 }
 
 /// `argv` is what follows `olp log compact`.

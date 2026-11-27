@@ -420,7 +420,14 @@ pub fn run(argv: &[String]) -> i32 {
                 .into_iter()
                 .filter(|card| pane.is_none_or(|p| p == card.pane))
                 .collect();
-            println!("{}", json!({ "unit": unit, "items": items, "held": held }));
+            // The thresholds the unit's watcher works by are the hub's to set.
+            let tuning = json!({
+                "follow_up_after": super::tune::value(&events, "follow_up_after"),
+            });
+            println!(
+                "{}",
+                json!({ "unit": unit, "items": items, "held": held, "tuning": tuning })
+            );
             0
         }
         _ => refuse("这个密钥只能用于 ack、progress、question、alert、events 与 inbox"),

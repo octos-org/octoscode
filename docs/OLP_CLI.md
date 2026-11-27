@@ -103,6 +103,9 @@
 | `olp board stall <日志目录> [--quiet 秒] [--policy 命令 \| --policy-crate 目录] [--json]` | Rust(`src/olp/stall.rs`) | hub |
 | `olp log compact <日志目录> [--keep-days 14] [--keep 10] [--if-over MiB] [--dry-run] [--json]` | Rust(`src/olp/compact.rs`) | hub |
 | `olp log history <日志目录> [--card N] [--json]` | Rust(`src/olp/compact.rs`) | hub |
+| `olp log metrics <日志目录> [--since 日期] [--until 日期] [--by unit\|impl\|week] [--cards] [--json]` | Rust(`src/olp/metrics.rs`) | hub |
+| `olp log symptoms <日志目录> [--window 7] [--min-cards 5] [--now 时刻] [--record] [--json]` | Rust(`src/olp/symptom.rs`) | hub |
+| `olp tune list\|set\|revert\|replay\|auto <日志目录> …` | Rust(`src/olp/tune.rs`) | hub |
 
 `log compact`(`specs/task-olp-log-compact.spec.md`)让日常命令不必重读已了结的卡:已了结、
 最后一条事件早于 `--keep-days` 天、不在最近了结的 `--keep` 张之内、单元已领取、也不是某张
@@ -110,6 +113,19 @@
 归档的卡保留卡号与立卡的键,之后再写它会被拒收;全过程用 `log history --card N` 看。替换前
 先核对留下的事件与完整日志读起来一致,不一致不写(退出码 5)。外环值守(`outer watch`)在
 在用的日志超过 `OLP_LOG_COMPACT_MIB`(默认 32,0 为关)时自己压缩。
+
+`log metrics`(`specs/task-olp-log-metrics.spec.md`)从完整历史算交付指标:每张卡一行(`--cards`),
+时间按事件切成等认领、单元在做、等外环裁决三段,另数打回、阻塞、告警与单元提问;时长给中位数
+与 90 分位。只读,是诊断不是考核;日志还没有记一步是 agent 还是人做的,所以没有人工介入量。
+
+`log symptoms` 与 `tune`(`specs/task-olp-log-evolve.spec.md`)把指标接成闭环:一个指标连续两个
+窗口都比基线差、且有足够的卡,才是症状,带着说明它的卡;`--record` 记进日志(外环值守每天自己
+记一次,并唤醒外环)。`tune` 管随使用调整的阈值——`review_backlog_max`(等外环裁决的卡到这么多
+张就不再派新卡,默认不限,`card dispatch --allow-backlog` 放行)与 `follow_up_after`(单元认领后
+静默多久提醒主持,默认 900 秒,随收件箱下发给单元值守)——值是日志里最后一条 `tuned` 事件:
+`set` 要写原因,`revert` 撤回,`replay` 回放换一个值历史会怎样,`auto --apply` 按症状一次试改
+一处,之后派出的卡够数时对冲指标变差就自动撤回、否则保留。外环值守只在 `OLP_TUNE_AUTO=1` 时
+自动调;默认关。
 
 `board stall`(`specs/task-olp-stall.spec.md`)回答"是不是所有人都在等":有卡未了结、占着卡的
 单元上没有内环在工作、日志 `--quiet` 秒没有新事件,三条都成立才算。有人在工作就不算,做得久

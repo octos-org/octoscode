@@ -51,6 +51,8 @@ struct Cursor {
     /// The log's size in use when it was last compacted, or was found to
     /// have nothing to archive.
     compacted_at: u64,
+    /// The day (UTC) symptoms were last looked for.
+    evolved_on: String,
 }
 
 /// One stall the outer loop's pane was told about.
@@ -74,6 +76,30 @@ pub fn sentence(log: &str) -> String {
     )
 }
 
+/// The daily look at the log's own numbers.
+fn evolve(prog: &str, log: &str) {
+    let store = Log::at(log);
+    let now = chrono::Utc::now();
+    match store.history() {
+        Ok(events) => {
+            let found = super::symptom::find(&super::metrics::rows(&events), now, 7, 5);
+            match super::symptom::record(&store, &found) {
+                Ok(new) if !new.is_empty() => println!("记下 {} 条交付变差的症状", new.len()),
+                Ok(_) => {}
+                Err(e) => eprintln!("{prog}: 症状没有记下: {e}"),
+            }
+        }
+        Err(e) => eprintln!("{prog}: 症状没有算: {e}"),
+    }
+    if std::env::var("OLP_TUNE_AUTO").is_ok_and(|v| v == "1") {
+        match super::tune::auto_apply(&store, now, 7, 5) {
+            Ok(decision) if decision.change.is_some() => println!("{}", decision.said),
+            Ok(_) => {}
+            Err(why) => eprintln!("{prog}: 阈值没有自动调: {why}"),
+        }
+    }
+}
+
 /// Does this event wait for the outer loop?
 fn for_outer(event: &Event) -> bool {
     match event.kind.as_str() {
@@ -82,6 +108,10 @@ fn for_outer(event: &Event) -> bool {
         // What the unit's guard saw on a card; one tied to no card has
         // nothing the outer loop could decide.
         "alert" => event.card.is_some(),
+        // Delivery got worse, or a threshold was changed for it: for the
+        // outer loop to read.
+        "symptom" => true,
+        "tuned" => event.data.get("source").and_then(|s| s.as_str()) == Some("auto"),
         _ => false,
     }
 }
@@ -230,7 +260,8 @@ pub fn run(argv: &[String]) -> i32 {
             let size = base + segments;
             let mut cursor = read_cursor();
             if size >= least.max(cursor.compacted_at / 4 * 5) {
-                match super::compact::compact(Path::new(log), 14, 10, Some(least), false) {
+                let (days, recent) = super::compact::auto_keep();
+                match super::compact::compact(Path::new(log), days, recent, Some(least), false) {
                     Ok(done) => {
                         if done.compacted {
                             println!(
@@ -250,6 +281,15 @@ pub fn run(argv: &[String]) -> i32 {
                 }
                 write_cursor(&cursor);
             }
+        }
+        // Once a day: where delivery got worse goes into the log, and
+        // with `OLP_TUNE_AUTO=1` one threshold may be tried or judged.
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let mut cursor = read_cursor();
+        if cursor.evolved_on != today {
+            cursor.evolved_on = today;
+            write_cursor(&cursor);
+            evolve(prog, log);
         }
         let events = match Log::at(log).read() {
             Ok(events) => events,

@@ -33,6 +33,7 @@ const USAGE: &str = "用法: octoscode olp card dispatch <单元号> --log <日�
   --by 署名           默认 hub
   --skip-health       不查单元健康,也不核对复验方(登记没部署时)
   --allow-busy        单元还占着别的卡也派
+  --allow-backlog     等外环裁决的卡已到上限(olp tune 的 review_backlog_max)也派
   --allow-reviewers   复验方不在单元心跳里、或没登录也派(operator 点名时)
   --stale-after 秒    心跳多久算失联,默认 180
   --json              以 JSON 输出结果
@@ -57,6 +58,7 @@ struct Args {
     stale_after: u64,
     skip_health: bool,
     allow_busy: bool,
+    allow_backlog: bool,
     allow_reviewers: bool,
     json: bool,
     /// A Markdown board instead of an event log.
@@ -84,6 +86,7 @@ fn parse(argv: &[String]) -> Result<Option<Args>, String> {
             "--json" => args.json = true,
             "--skip-health" => args.skip_health = true,
             "--allow-busy" => args.allow_busy = true,
+            "--allow-backlog" => args.allow_backlog = true,
             "--allow-reviewers" => args.allow_reviewers = true,
             "--log" => args.log = value()?,
             "--board" => args.board = Some(value()?),
@@ -561,6 +564,20 @@ pub fn run(argv: &[String]) -> i32 {
                 return Err(format!(
                     "单元 {target} 正忙:还占着 {}。等它了结,或加 --allow-busy",
                     held.join("、")
+                ));
+            }
+        }
+        // The outer loop is the narrow place: past its backlog limit a
+        // new card would only wait behind the ones already answered.
+        let cap = super::tune::value(events, "review_backlog_max");
+        if cap > 0 && !args.allow_backlog {
+            let waiting = items(&mut scan, today, |_| true)
+                .into_iter()
+                .filter(|i| i.partition == Partition::Inbox)
+                .count() as u64;
+            if waiting >= cap {
+                return Err(format!(
+                    "等外环裁决的卡已有 {waiting} 张(上限 review_backlog_max = {cap}):先处理收件箱,或加 --allow-backlog"
                 ));
             }
         }

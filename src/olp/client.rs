@@ -403,22 +403,45 @@ pub fn mirror(argv: &[String]) -> i32 {
         },
         Err(_) => Vec::new(),
     };
-    let since = events.last().map_or(0, |e| e.seq);
-    let Some(reply) = send(&link, &["events".to_string(), since.to_string()], "") else {
-        eprintln!("{prog}: 没有连上 hub,镜像没有更新(还是上次同步的内容)");
-        return EX_TEMPFAIL;
-    };
-    if reply.code != 0 {
-        eprintln!("{}", reply.stderr);
-        return reply.code;
-    }
-    let fresh = match parse(&String::from_utf8_lossy(&reply.stdout)) {
-        Ok(fresh) => fresh,
-        Err(why) => {
-            eprintln!("{prog}: hub 返回的事件无法解析: {why}");
-            return 4;
+    // Ask from the last cached event itself, not from after it: the hub
+    // sending that same event back is what shows the cache is about the
+    // log the hub has now.
+    let fetch = |after: u64| -> Result<Vec<Event>, i32> {
+        let Some(reply) = send(&link, &["events".to_string(), after.to_string()], "") else {
+            eprintln!("{prog}: 没有连上 hub,镜像没有更新(还是上次同步的内容)");
+            return Err(EX_TEMPFAIL);
+        };
+        if reply.code != 0 {
+            eprintln!("{}", reply.stderr);
+            return Err(reply.code);
         }
+        parse(&String::from_utf8_lossy(&reply.stdout)).map_err(|why| {
+            eprintln!("{prog}: hub 返回的事件无法解析: {why}");
+            4
+        })
     };
+    let last = events.last().map(|e| (e.seq, e.ts.clone()));
+    let mut fresh = match fetch(last.as_ref().map_or(0, |(seq, _)| seq - 1)) {
+        Ok(fresh) => fresh,
+        Err(code) => return code,
+    };
+    if let Some((seq, ts)) = last {
+        if fresh.first().is_some_and(|e| e.seq == seq && e.ts == ts) {
+            fresh.remove(0);
+        } else {
+            // Another log, or the hub archived what was cached: the hub's
+            // log as it is now is the whole truth.
+            fresh = match fetch(0) {
+                Ok(all) => all,
+                Err(code) => return code,
+            };
+            println!(
+                "hub 的日志换过或压缩过:本机缓存的 {} 条事件已按 hub 现有的内容重建",
+                events.len()
+            );
+            events.clear();
+        }
+    }
     let added = fresh.len();
     events.extend(fresh);
     let lines: String = events
@@ -721,6 +744,7 @@ pub fn watch(argv: &[String]) -> i32 {
     let prog = "olp remote watch";
     let (mut once, mut interval, mut renudge, mut idle_wait) = (false, 15u64, 900u64, 5u64);
     let (mut retry, mut follow_up) = (120u64, 900u64);
+    let mut follow_up_given = false;
     let mut rest = Vec::new();
     let mut it = argv.iter();
     while let Some(word) = it.next() {
@@ -745,7 +769,10 @@ pub fn watch(argv: &[String]) -> i32 {
             "--interval" => seconds(&mut interval),
             "--renudge" => seconds(&mut renudge),
             "--retry" => seconds(&mut retry),
-            "--follow-up" => seconds(&mut follow_up),
+            "--follow-up" => {
+                follow_up_given = true;
+                seconds(&mut follow_up)
+            }
             "--idle-wait" => seconds(&mut idle_wait),
             other if other.starts_with("--") => false,
             other => {
@@ -959,6 +986,14 @@ pub fn watch(argv: &[String]) -> i32 {
                 // Claimed, no receipt, nothing new for `--follow-up` seconds
                 // and the pane idle: the host stopped half-way. Asked to go
                 // on, at most twice while the card stays silent.
+                // The hub's setting, unless this watcher was told its own.
+                let follow_up = if follow_up_given {
+                    follow_up
+                } else {
+                    report["tuning"]["follow_up_after"]
+                        .as_u64()
+                        .unwrap_or(follow_up)
+                };
                 let held: Vec<(String, u64)> = report["held"]
                     .as_array()
                     .map(|cards| {

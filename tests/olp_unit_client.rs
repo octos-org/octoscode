@@ -186,6 +186,75 @@ fn a_unit_reports_progress_and_acks_once() {
     }
 }
 
+/// Scenario: hub 的日志换过或压缩过,本机的事件缓存按 hub 现有的内容重建
+#[test]
+fn a_cache_about_another_log_is_rebuilt_from_the_hub() {
+    let site = Site::new(LOCAL);
+    assert!(site.unit(&["progress", "1", "claimed"]).status.success());
+    let out = site.unit(&["mirror"]);
+    assert!(
+        stdout(&out).contains("新增 2 条事件,共 2 条"),
+        "{}",
+        stdout(&out)
+    );
+    // The cache is about some other log: same numbers, another time.
+    let cache = PathBuf::from(format!("{}.events.jsonl", site.mirror().display()));
+    let other = std::fs::read_to_string(&cache)
+        .unwrap()
+        .replace("\"ts\":\"20", "\"ts\":\"19")
+        .replace("给 m07 的卡", "别的日志里的卡");
+    std::fs::write(&cache, other).unwrap();
+    let out = site.unit(&["mirror"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("已按 hub 现有的内容重建") && stdout(&out).contains("共 2 条"),
+        "{}",
+        stdout(&out)
+    );
+    let view = std::fs::read_to_string(site.mirror()).unwrap();
+    assert!(
+        view.contains("给 m07 的卡") && !view.contains("别的日志里的卡"),
+        "{view}"
+    );
+    // And the next run is incremental again.
+    let out = site.unit(&["mirror"]);
+    assert!(
+        stdout(&out).contains("新增 0 条事件,共 2 条"),
+        "{}",
+        stdout(&out)
+    );
+
+    // The hub archives the card: the cache follows the hub.
+    assert!(site.unit(&["ack", "1", "done", "做完了"]).status.success());
+    let out = site.hub(&["card", "accept", "--log", &site.log(), "1", "好"], "");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(site.unit(&["mirror"]).status.success());
+    let out = site.hub(
+        &[
+            "log",
+            "compact",
+            &site.log(),
+            "--keep-days",
+            "0",
+            "--keep",
+            "0",
+        ],
+        "",
+    );
+    assert!(
+        stdout(&out).contains("已压缩"),
+        "{}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    let out = site.unit(&["mirror"]);
+    assert!(
+        stdout(&out).contains("重建") && stdout(&out).contains("共 0 条"),
+        "{}",
+        stdout(&out)
+    );
+}
+
 /// Scenario: 镜像只有本单元的卡,每次只取新增的事件(critical)
 #[test]
 fn the_mirror_holds_only_this_units_cards_and_grows_incrementally() {

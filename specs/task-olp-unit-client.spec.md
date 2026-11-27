@@ -63,6 +63,12 @@ Scenario: 镜像只有本单元的卡,每次只取新增的事件(critical)
   When m07 同步镜像,无变化时再同步,外环打回 #1 后再同步,最后换一个镜像路径同步
   Then 镜像里只有 #1 及其事件、没有 m08 的卡;三次分别新增 2、0、2 条;收件箱读镜像得到"m07 忙,#1 已打回";新路径从头取
 
+Scenario: hub 的日志换过或压缩过,本机的事件缓存按 hub 现有的内容重建
+  Test: a_cache_about_another_log_is_rebuilt_from_the_hub
+  Given m07 已同步过镜像
+  When 把缓存改成另一份日志的事件(序号相同、时间不同)后同步,再同步;hub 把那张卡了结并压缩归档后同步
+  Then 同步从缓存的最后一条事件问起,hub 没有原样送回这一条就整份重取并说明;随后又是增量;hub 归档后缓存跟着只剩 hub 现有的内容
+
 Scenario: 经 ssh 的请求原样到达 hub;连不上时退出码 75,重跑不重复
   Test: requests_travel_over_ssh_and_an_unreachable_hub_is_retryable
   Given 单元配置 hub = hub-01;一个连不上的 ssh 与一个连得上的 ssh
