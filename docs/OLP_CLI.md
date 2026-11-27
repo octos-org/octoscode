@@ -128,6 +128,7 @@
 | `olp unit register\|set-state\|status\|check\|where …` | Rust(`src/olp/unit.rs`),原 `olp-unit.py` 同名子命令 | hub |
 | `olp unit receive [--unit U]` | Rust,原 `olp-unit.py receive` | hub(ssh 强制命令) |
 | `olp unit heartbeat --unit U [--require …]` | Rust,原 `olp-unit.py heartbeat` | 单元 |
+| `olp unit host --pane <窗格> \| --label <标签> … -- <主持的启动命令>` | Rust(`src/olp/unithost.rs`,新增):主持的窗格里没有程序时重新启动它并送接班提示 | 单元 |
 
 登记文件与心跳文件的格式不变,hub 换二进制不用重新登记。`OCTOSCODE_OLP_LEGACY=1` 改跑原脚本。
 还没迁移的脚本(派卡、汇总、提问、体检、保活)仍直接调用 `olp-unit.py`,所以脚本暂时保留。
@@ -167,7 +168,7 @@
 | `olp guard forward [--include K] [--only K]` | Rust(`src/olp/forward.rs`),原 `olp-alert-forward.py` | 单元 |
 
 `guard forward` 按单元的配置选通道:`store = log` 时告警经 `remote serve-log` 的 `alert` 请求记成
-日志里的 `alert` 事件(指向本单元的卡时挂在卡上,进展汇总的告警里能看到);hub 连不上的留在进程里,
+日志里的 `alert` 事件(指向本单元的卡时挂在卡上:外环值守会为它叫醒外环,`olp inbox <日志>` 与进展汇总在卡未了结期间列出它);hub 连不上的留在进程里,
 守护的下一条记录到来时(以及输入结束时)按顺序补发,不必等新的告警。没写 `store = log` 时照旧往 Markdown 黑板追加一行。
 
 ### 2.9 保活(keepalive)——按平台自动选 launchd 或 systemd

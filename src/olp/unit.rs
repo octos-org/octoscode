@@ -43,6 +43,7 @@ const USAGE: &str = "用法: octoscode olp unit <动作>
     where <单元号>                       输出 local 或 remote
   单元上:
     heartbeat --unit <单元号> [--require agent,disk,full] [--disk-min-free 百分比]
+    host --pane <窗格> | --label <标签> … -- <主持的启动命令>   主持的保活,另见它的 --help
 退出码:0 成功;1 check 未通过;2 用法或输入错误;3 心跳被拒绝";
 
 struct Fail(i32, String);
@@ -1347,6 +1348,10 @@ pub fn run(argv: &[String]) -> i32 {
             return USAGE_CODE;
         }
     };
+    if action == "host" {
+        // Has its own help, and a command after `--` that may hold `-h`.
+        return super::unithost::run(rest);
+    }
     if rest.iter().any(|w| w == "-h" || w == "--help") {
         println!("{USAGE}");
         return 0;

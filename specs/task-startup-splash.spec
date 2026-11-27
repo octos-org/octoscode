@@ -11,7 +11,7 @@ octoscode 启动时（`backend_ensure` 之后、`event_loop::run` 接管终端�
 一段 OCTOS ASCII logo 动画，用 [ttfx](https://github.com/omacom-io/ttfx) 引擎的公开
 原语（`Effect::build`/`next_frame` + `Terminal` 帧原语）在 octos-tui 侧自建帧循环渲染。
 每次启动从精选效果列表随机抽一个并**自然播完**（精选成员以自然时长 ~1.7–4.5s 为准入
-标准），按键可随时跳过，8000ms 仅作防挂安全网；结束时（无论跑完还是截断）在原地留下
+标准），按键可随时跳过（打的字不丢：可打印字符与粘贴交给 TUI 作为最先的输入），8000ms 仅作防挂安全网；结束时（无论跑完还是截断）在原地留下
 完整 logo + 版本号作为 banner，自然跑完后停顿 450ms 再进入 TUI（按键可打断停顿）。
 动画是纯装饰，任何失败都静默跳过，绝不阻断启动。
 
@@ -143,6 +143,12 @@ octoscode 启动时（`backend_ensure` 之后、`event_loop::run` 接管终端�
   假设 should_stop 在第 3 帧后返回 true
   当 运行 run_splash 并执行终态打印
   那么 写入器末尾内容包含完整 logo 文本与版本号行
+
+场景: 动画期间打的字留给输入框,跳过的手势才被用掉
+  测试: text_typed_during_the_splash_is_kept_for_the_prompt
+  假设 动画播放时依次收到可打印字符、粘贴,以及回车、Esc、空格、Ctrl 组合键、resize
+  当 用 classify_input 判定每个事件
+  那么 可打印字符与粘贴判为 Typed(动画停下,事件交给 TUI 作为最先的输入),其余按键与 resize 判为 Skip(只跳过动画),按键释放与焦点事件判为 Ignore
 
 场景: 引擎错误静默不阻断
   测试: play_swallows_engine_errors

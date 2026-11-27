@@ -43,13 +43,13 @@ const SHELL_HELPERS: [&str; 10] = [
     "dirname",
 ];
 
-struct Fail(i32, String);
+pub(super) struct Fail(pub(super) i32, pub(super) String);
 
-fn fail<T>(code: i32, why: impl Into<String>) -> Result<T, Fail> {
+pub(super) fn fail<T>(code: i32, why: impl Into<String>) -> Result<T, Fail> {
     Err(Fail(code, why.into()))
 }
 
-fn now() -> f64 {
+pub(super) fn now() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
@@ -67,7 +67,7 @@ fn absolute(path: &str) -> String {
         .into_owned()
 }
 
-fn quote(word: &str) -> String {
+pub(super) fn quote(word: &str) -> String {
     shlex::try_quote(word)
         .map(|q| q.into_owned())
         .unwrap_or_else(|_| word.to_string())
@@ -81,7 +81,7 @@ fn herdr_bin() -> String {
 }
 
 /// Run herdr and return its `result`.
-fn herdr(args: &[&str], session: Option<&str>) -> Result<Value, Fail> {
+pub(super) fn herdr(args: &[&str], session: Option<&str>) -> Result<Value, Fail> {
     let mut cmd = Command::new(herdr_bin());
     if let Some(session) = session {
         cmd.args(["--session", session]);
@@ -348,16 +348,25 @@ fn parse(action: &str, argv: &[String]) -> Result<Common, Fail> {
 /// The outer's pane: the first pane of the workspace labelled `--label`,
 /// created when there is none. `true` when it was just created.
 fn find_pane(c: &Common) -> Result<(String, bool), Fail> {
-    let session = c.session.as_deref();
+    let cwd = c.cwd.as_deref().unwrap_or(&c.project);
+    pane_for_label(&c.label, cwd, c.session.as_deref())
+}
+
+/// The first pane of the workspace labelled `label`; the workspace is
+/// created in `cwd` when there is none (`true`).
+pub(super) fn pane_for_label(
+    label: &str,
+    cwd: &str,
+    session: Option<&str>,
+) -> Result<(String, bool), Fail> {
     let workspaces = herdr(&["workspace", "list"], session)?;
     let found = workspaces["workspaces"]
         .as_array()
         .into_iter()
         .flatten()
-        .find(|w| w["label"].as_str() == Some(c.label.as_str()))
+        .find(|w| w["label"].as_str() == Some(label))
         .and_then(|w| w["workspace_id"].as_str().map(str::to_string));
     let Some(workspace) = found else {
-        let cwd = c.cwd.as_deref().unwrap_or(&c.project);
         let created = herdr(
             &[
                 "workspace",
@@ -365,7 +374,7 @@ fn find_pane(c: &Common) -> Result<(String, bool), Fail> {
                 "--cwd",
                 cwd,
                 "--label",
-                &c.label,
+                label,
                 "--no-focus",
             ],
             session,
@@ -386,7 +395,7 @@ fn find_pane(c: &Common) -> Result<(String, bool), Fail> {
         .find(|p| p["workspace_id"].as_str() == Some(workspace.as_str()))
         .and_then(|p| p["pane_id"].as_str())
         .map(|pane| (pane.to_string(), false))
-        .ok_or_else(|| Fail(1, format!("工作区 {} 里没有窗格", c.label)))
+        .ok_or_else(|| Fail(1, format!("工作区 {label} 里没有窗格")))
 }
 
 /// The first pane of the workspace labelled `label`, if there is one.
@@ -409,7 +418,7 @@ pub(super) fn pane_of_label(label: &str, session: Option<&str>) -> Option<String
 
 /// Programs in the pane's foreground other than its shell and the helpers a
 /// shell runs while starting.
-fn busy_programs(pane: &str, session: Option<&str>) -> Result<Vec<String>, Fail> {
+pub(super) fn busy_programs(pane: &str, session: Option<&str>) -> Result<Vec<String>, Fail> {
     let info = herdr(&["pane", "process-info", "--pane", pane], session)?;
     Ok(info
         .pointer("/process_info/foreground_processes")
@@ -514,7 +523,7 @@ fn register_resume(c: &Common, pane: &str, hold: &[&str]) {
 /// The prompt was typed but the agent did not start on it: an agent that
 /// has only just started can lose the Enter. While the agent is idle — never
 /// while it waits on a dialog of its own — press Enter again, a few times.
-fn submit_again(pane: &str, session: Option<&str>) -> Option<Value> {
+pub(super) fn submit_again(pane: &str, session: Option<&str>) -> Option<Value> {
     for _ in 0..4 {
         std::thread::sleep(Duration::from_secs(3));
         herdr(

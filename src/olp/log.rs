@@ -296,17 +296,13 @@ impl Log {
         let mut path = self.dir.join(segment_name(index));
         // Cut off a torn tail before writing after it.
         if let Ok(mut file) = OpenOptions::new().read(true).write(true).open(&path) {
-            let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes)?;
-            let complete = bytes
-                .iter()
-                .rposition(|b| *b == b'\n')
-                .map_or(0, |at| at + 1);
-            if complete != bytes.len() {
-                file.set_len(complete as u64)?;
+            let len = file.metadata()?.len();
+            let complete = whole_lines(&mut file, len)?;
+            if complete != len {
+                file.set_len(complete)?;
                 file.sync_all()?;
             }
-            if complete as u64 >= self.segment_bytes {
+            if complete >= self.segment_bytes {
                 index += 1;
                 path = self.dir.join(segment_name(index));
             }
@@ -342,6 +338,25 @@ impl Log {
         }
         Ok(out)
     }
+}
+
+/// How many of the file's `len` bytes are whole lines: the end of its last
+/// newline. Read from the end, so a full segment costs one small read.
+fn whole_lines(file: &mut File, len: u64) -> std::io::Result<u64> {
+    const CHUNK: u64 = 64 * 1024;
+    let mut end = len;
+    let mut chunk = vec![0u8; CHUNK as usize];
+    while end > 0 {
+        let start = end.saturating_sub(CHUNK);
+        let part = &mut chunk[..(end - start) as usize];
+        file.seek(SeekFrom::Start(start))?;
+        file.read_exact(part)?;
+        if let Some(at) = part.iter().rposition(|b| *b == b'\n') {
+            return Ok(start + at as u64 + 1);
+        }
+        end = start;
+    }
+    Ok(0)
 }
 
 /// Make a new segment's directory entry durable. Best effort off Unix.
@@ -466,6 +481,26 @@ mod tests {
             log.append(draft("c", None)),
             Err(LogError::Corrupt { .. })
         ));
+    }
+
+    #[test]
+    fn the_end_of_the_last_whole_line_is_found_from_the_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f");
+        let long = "x".repeat(200_000);
+        for (text, whole) in [
+            (String::new(), 0),
+            ("no newline".to_string(), 0),
+            ("a\nb\n".to_string(), 4),
+            ("a\nb\ntorn".to_string(), 4),
+            // A torn tail longer than one read.
+            (format!("a\n{long}"), 2),
+            (format!("{long}\n{long}\n"), 400_002),
+        ] {
+            std::fs::write(&path, &text).unwrap();
+            let mut file = File::open(&path).unwrap();
+            assert_eq!(whole_lines(&mut file, text.len() as u64).unwrap(), whole);
+        }
     }
 
     #[test]

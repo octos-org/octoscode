@@ -3,7 +3,8 @@
 //! sentence, that something on the event log now waits for it.
 //!
 //! What waits for the outer loop: a unit's ACK, a recorded push, a question,
-//! a delivery a unit reported as failed — and a stall of the whole cluster
+//! a delivery a unit reported as failed, what a unit's runtime guard saw on
+//! one of its cards (an inner loop gone, stalled) — and a stall of the whole cluster
 //! (`olp board stall`). The sentence carries none of it; it only says where
 //! to look. The outer loop is not polled and never polls.
 //!
@@ -31,7 +32,7 @@ use super::log::{Event, Log};
 
 const USAGE: &str = "用法: octoscode olp outer watch <日志目录> --pane <外环的窗格> | --label <外环工作区的标签> [--once] [--interval 30] [--quiet 600] [--idle-wait 5] [--session herdr 会话]
 
-外环值守:日志里有等外环处理的新事件(单元的回执、推送登记、提问、送达失败),或集群整体静默时,
+外环值守:日志里有等外环处理的新事件(单元的回执、推送登记、提问、送达失败、未了结卡上的守护告警),或集群整体静默时,
 在外环的 agent 空闲时往它的窗格发一句固定短句。不带任何内容。
 --label:每轮按标签找外环的窗格(olp outer install 注册的值守任务这样用);没有这个工作区时这一轮不提醒。
 退出码:0;2 用法;4 日志读不了";
@@ -71,6 +72,9 @@ fn for_outer(event: &Event) -> bool {
     match event.kind.as_str() {
         "ack" | "pushed" | "asked" => true,
         "progress" => event.data.get("node").and_then(|n| n.as_str()) == Some("undelivered"),
+        // What the unit's guard saw on a card; one tied to no card has
+        // nothing the outer loop could decide.
+        "alert" => event.card.is_some(),
         _ => false,
     }
 }

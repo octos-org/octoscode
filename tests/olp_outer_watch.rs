@@ -234,6 +234,42 @@ fn what_is_already_over_does_not_wake_the_outer_loop() {
     assert!(hub.watch("99999").contains("1 条新事件"));
 }
 
+/// Scenario: 未了结卡上的守护告警唤醒外环,收件箱里列出;卡了结后不再列
+#[test]
+fn a_guard_alert_on_an_open_card_wakes_the_outer_loop() {
+    let hub = Hub::new();
+    hub.card("第一张");
+    hub.ok(&["remote", "progress", "1", "claimed"], "");
+    assert_eq!(hub.watch("99999"), "");
+    // The unit's runtime guard sees the inner loop's agent gone.
+    let record = serde_json::json!({
+        "identity": {"agent_pid": 4101, "task": ["1"]},
+        "agent": {"state": "process_missing"},
+        "backend": {"state": "alive"},
+        "monitors": [],
+        "alerts": [],
+    });
+    hub.ok(&["guard", "forward"], &format!("{record}\n"));
+    let said = hub.watch("99999");
+    assert!(said.contains("1 条新事件"), "{said}");
+    let prompts = hub.prompts();
+    assert_eq!(prompts.len(), 1, "{prompts:?}");
+    assert!(!prompts[0].contains("agent_missing"), "{prompts:?}");
+    // Where the sentence points, the alert is there to read.
+    let log = hub.log();
+    let inbox = hub.ok(&["inbox", &log], "");
+    assert!(inbox.contains("== 单元守护的告警(1)"), "{inbox}");
+    assert!(inbox.contains("#1 [m07] agent_missing"), "{inbox}");
+    let report: serde_json::Value =
+        serde_json::from_str(&hub.ok(&["inbox", &log, "--json"], "")).unwrap();
+    assert_eq!(report["alerts"][0]["number"], 1, "{report}");
+    assert_eq!(hub.watch("99999"), "", "said once");
+
+    hub.ok(&["card", "void", "--log", &log, "1", "不做了"], "");
+    let inbox = hub.ok(&["inbox", &log], "");
+    assert!(!inbox.contains("守护的告警"), "{inbox}");
+}
+
 /// Scenario: 外环在忙时不打扰,它空闲后补上,忙的时候到的事件不会被跳过
 #[test]
 fn a_busy_outer_loop_is_told_when_it_is_idle_again() {

@@ -24,7 +24,7 @@ estimate: 1d
   `olp outer install` 在 `--board` 是事件日志时用它把值守注册成常驻任务(`<name>-watch`,
   每 `--interval` 秒跑一次 `--once`)。来源:2026-11-26 实测,外环自己在后台启动的值守在外环
   死后还活着,接班的外环再启动一个就成了两个。
-- 等外环处理的事件:`ack`、`pushed`、`asked`,以及节点为 `undelivered` 的 `progress`。派卡、
+- 等外环处理的事件:`ack`、`pushed`、`asked`,以及节点为 `undelivered` 的 `progress`,以及挂在卡上的 `alert`(单元守护看到内环没了、停滞;`olp inbox <日志>` 对未了结的卡列出这些告警)。派卡、
   领取(`claimed`)、复验轮次、外环自己的判词不算。
 - 已经了结的不算:卡已在"已了结"分区的事件、已有回答或已超时的提问不计入。值守第一次在一份
   旧日志上跑时不会为历史发话(2026-11-26 实测:新注册的值守为 18 条早已了结的事件叫醒了外环,
@@ -79,6 +79,12 @@ Scenario: 已了结的卡、已有结局的提问不再叫醒外环
   Given 一份日志:一张卡已回执并采认,一个提问已超时;值守从未跑过
   When 跑一轮;再记一个新提问后跑一轮
   Then 第一轮不发话;第二轮为这一个新提问发话
+
+Scenario: 未了结卡上的守护告警唤醒外环,收件箱里列出;卡了结后不再列
+  Test: a_guard_alert_on_an_open_card_wakes_the_outer_loop
+  Given 一张已领取的卡,单元的守护经 `olp guard forward` 报内环的 agent 没了
+  When 跑一轮值守,看 `olp inbox <日志>`(文本与 --json),再跑一轮;作废这张卡后再看收件箱
+  Then 值守发一次固定短句(不带告警内容);收件箱有"单元守护的告警"一段、JSON 有 alerts;第二轮不再发;卡了结后这一段不再出现
 
 Scenario: 外环在忙时不打扰,它空闲后补上,忙的时候到的事件不会被跳过(critical)
   Tags: critical

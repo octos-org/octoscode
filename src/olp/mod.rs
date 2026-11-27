@@ -44,3 +44,4 @@ pub mod serve;
 pub mod stall;
 pub mod summary;
 pub mod unit;
+pub mod unithost;

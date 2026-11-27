@@ -229,7 +229,48 @@ struct Report {
     counts: Counts,
     items: Vec<Item>,
     questions: Vec<QuestionOut>,
+    /// What units' runtime guards saw on cards still open (event log only).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    alerts: Vec<AlertOut>,
     warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct AlertOut {
+    number: u64,
+    unit: Option<String>,
+    at: String,
+    alert: String,
+}
+
+/// The guards' alerts on cards that are not settled, oldest first, the
+/// last twenty.
+fn open_alerts(events: &[super::log::Event], shown: &[Item]) -> Vec<AlertOut> {
+    let mut out: Vec<AlertOut> = events
+        .iter()
+        .filter(|e| e.kind == "alert")
+        .filter_map(|e| {
+            let number = e.card?;
+            shown
+                .iter()
+                .any(|i| i.number == number && i.partition != Partition::Settled)
+                .then(|| AlertOut {
+                    number,
+                    unit: e.unit.clone(),
+                    at: e.ts.clone(),
+                    alert: e
+                        .data
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or_default()
+                        .chars()
+                        .take(160)
+                        .collect(),
+                })
+        })
+        .collect();
+    let skip = out.len().saturating_sub(20);
+    out.split_off(skip)
 }
 
 #[derive(Serialize)]
@@ -374,12 +415,17 @@ pub fn run(argv: &[String]) -> i32 {
         },
         None => chrono::Local::now().date_naive(),
     };
+    let mut logged = Vec::new();
     let (mut scan, pending) = if from_log {
         match super::log::Log::at(source).read() {
-            Ok(events) => (
-                super::cards::scan(&events),
-                super::cards::pending_questions(&events),
-            ),
+            Ok(events) => {
+                let found = (
+                    super::cards::scan(&events),
+                    super::cards::pending_questions(&events),
+                );
+                logged = events;
+                found
+            }
             Err(e) => {
                 eprintln!("olp-inbox: {e}");
                 return 1;
@@ -467,10 +513,12 @@ pub fn run(argv: &[String]) -> i32 {
         .into_iter()
         .filter(|q| args.unit.is_none() || q.unit == args.unit)
         .collect();
+    let alerts = open_alerts(&logged, &shown);
     if args.json {
         print_json(&Report {
             today: today.to_string(),
             counts,
+            alerts,
             items: shown.into_iter().filter(|i| listed(i.partition)).collect(),
             questions: questions
                 .into_iter()
@@ -499,6 +547,18 @@ pub fn run(argv: &[String]) -> i32 {
                 }
                 None => println!("id={} {}", q.id, q.question),
             }
+        }
+    }
+    if !alerts.is_empty() {
+        // An inner loop that is gone or stalled does not report by itself.
+        println!("== 单元守护的告警({}),卡未了结", alerts.len());
+        for a in &alerts {
+            let unit = a
+                .unit
+                .as_ref()
+                .map(|u| format!(" [{u}]"))
+                .unwrap_or_default();
+            println!("#{}{unit} {}  ({})", a.number, a.alert, a.at);
         }
     }
     for partition in Partition::ALL.into_iter().filter(|p| listed(*p)) {

@@ -4,7 +4,8 @@
 mod olp_env;
 
 use octoscode::splash::{
-    SPLASH_EFFECTS, SplashGate, effect_args_for, pick_effect_args, should_play, splash_text,
+    SPLASH_EFFECTS, SplashGate, SplashInput, classify_input, effect_args_for, pick_effect_args,
+    should_play, splash_text,
 };
 
 /// A gate whose every condition allows playback; tests flip one field each.
@@ -169,4 +170,33 @@ fn play_swallows_engine_errors() {
     // surface that as Err (never panic), which `play` then discards.
     let result = SplashSession::new(&["decrypt"], "", test_opts(), 80, String::new());
     assert!(result.is_err(), "empty input should fail session build");
+}
+
+/// 场景: 动画期间打的字留给输入框,跳过的手势才被用掉
+#[test]
+fn text_typed_during_the_splash_is_kept_for_the_prompt() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    let press = |code, modifiers| Event::Key(KeyEvent::new(code, modifiers));
+    // The first character of a prompt handed over while the logo plays.
+    for typed in [
+        press(KeyCode::Char('外'), KeyModifiers::NONE),
+        press(KeyCode::Char('A'), KeyModifiers::SHIFT),
+        Event::Paste("外环刚被自动重启".to_string()),
+    ] {
+        assert_eq!(classify_input(&typed), SplashInput::Typed, "{typed:?}");
+    }
+    // The gestures that only skip the animation.
+    for skip in [
+        press(KeyCode::Enter, KeyModifiers::NONE),
+        press(KeyCode::Esc, KeyModifiers::NONE),
+        press(KeyCode::Char(' '), KeyModifiers::NONE),
+        press(KeyCode::Char('c'), KeyModifiers::CONTROL),
+        Event::Resize(80, 24),
+    ] {
+        assert_eq!(classify_input(&skip), SplashInput::Skip, "{skip:?}");
+    }
+    let mut release = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+    release.kind = KeyEventKind::Release;
+    assert_eq!(classify_input(&Event::Key(release)), SplashInput::Ignore);
+    assert_eq!(classify_input(&Event::FocusGained), SplashInput::Ignore);
 }
