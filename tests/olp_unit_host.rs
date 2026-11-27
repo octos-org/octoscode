@@ -40,7 +40,10 @@ case "$1 $2" in
     echo '{"result":{}}' ;;
   "pane get")
     # A program is an agent to herdr only a moment after it started.
-    if [ -e "$here/unknown" ]; then
+    if [ -e "$here/blocked" ]; then
+      : > "$here/seen"
+      echo '{"result":{"pane":{"pane_id":"'"$3"'","agent":"claude","agent_status":"blocked"}}}'
+    elif [ -e "$here/unknown" ]; then
       echo '{"result":{"pane":{"pane_id":"'"$3"'","agent":null}}}'
     elif [ -e "$here/seen" ]; then
       echo '{"result":{"pane":{"pane_id":"'"$3"'","agent":"claude"}}}'
@@ -53,13 +56,15 @@ case "$1 $2" in
     echo '{"result":{"status":"idle"}}' ;;
   "agent prompt")
     echo "$3 | $4" >> "$here/prompts.log"
+    # An agent still starting: the words land in its input box, the Enter is lost.
+    [ -e "$here/stuck" ] && printf 'transcript\n> %s\n' "$4" > "$here/screen"
     echo '{"result":{}}' ;;
   "pane read") cat "$here/screen" 2>/dev/null; echo ;;
   "pane send-text")
     echo "$3 | $4" >> "$here/typed.log"; printf '> %s\n' "$4" > "$here/screen"
     echo '{"result":{}}' ;;
   "pane send-keys")
-    echo "$3 | $4" >> "$here/keys.log"
+    echo "$3 | $4" >> "$here/keys.log"; rm -f "$here/stuck"
     echo '{"result":{}}' ;;
   *) echo '{"error":{"message":"fake herdr: unsupported"}}'; exit 1 ;;
 esac
@@ -91,6 +96,7 @@ impl Unit {
             .env("OLP_HERDR", self.p("herdr"))
             .env("OLP_UNIT_HOST_STATE", self.p("state"))
             .env("OLP_UNIT_HOST_ENTER_MS", "50")
+            .env("OLP_UNIT_HOST_CHECK_MS", "50")
             .output()
             .unwrap()
     }
@@ -145,6 +151,33 @@ fn a_host_whose_program_is_gone_is_started_again_and_told_to_take_over() {
     );
     assert_eq!(unit.lines("run.log").len(), 1);
     assert_eq!(unit.lines("prompts.log").len(), 1);
+}
+
+/// Scenario: 提示停在输入框里没提交时,再按一次回车
+#[test]
+fn a_prompt_left_in_the_input_box_is_submitted_again() {
+    let unit = Unit::new();
+    std::fs::write(unit.p("stuck"), "").unwrap();
+    let out = unit.host(&["--pane", "w3:p2", "--", "claude"]);
+    assert_eq!(out.status.code(), Some(0), "{}", said(&out));
+    assert!(said(&out).contains("prompted pane w3:p2"), "{}", said(&out));
+    assert_eq!(unit.lines("prompts.log").len(), 1, "said once");
+    assert_eq!(unit.lines("keys.log"), ["w3:p2 | Enter"]);
+}
+
+/// Scenario: 提示被对话框挡住时不说已送达
+#[test]
+fn a_prompt_behind_a_dialog_is_not_called_delivered() {
+    let unit = Unit::new();
+    std::fs::write(unit.p("blocked"), "").unwrap();
+    let out = unit.host(&["--pane", "w3:p2", "--", "claude"]);
+    assert_eq!(out.status.code(), Some(0), "{}", said(&out));
+    assert!(
+        said(&out).contains("挡住") && !said(&out).contains("prompted pane"),
+        "{}",
+        said(&out)
+    );
+    assert!(unit.lines("keys.log").is_empty(), "no Enter into a dialog");
 }
 
 /// Scenario: herdr 认不出的 agent,接班提示直接敲进窗格,并说明没法确认

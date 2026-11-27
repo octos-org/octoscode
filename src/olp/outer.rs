@@ -101,10 +101,16 @@ pub(super) fn herdr(args: &[&str], session: Option<&str>) -> Result<Value, Fail>
             .filter(|m| !m.is_empty())
             .unwrap_or_else(|| {
                 let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                if err.is_empty() {
-                    text.trim().to_string()
-                } else {
-                    err
+                // herdr also reports a failure as JSON on stderr.
+                let message = serde_json::from_str::<Value>(&err).ok().and_then(|doc| {
+                    doc.pointer("/error/message")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                });
+                match message {
+                    Some(message) => message,
+                    None if err.is_empty() => text.trim().to_string(),
+                    None => err,
                 }
             });
         let what: Vec<&str> = args.iter().take(2).copied().collect();
@@ -533,6 +539,9 @@ pub(super) fn submit_again(pane: &str, session: Option<&str>) -> Option<Value> {
                 pane,
                 "--until",
                 "idle",
+                // herdr's word for an idle agent whose last turn nobody has looked at.
+                "--until",
+                "done",
                 "--timeout",
                 "1000",
             ],

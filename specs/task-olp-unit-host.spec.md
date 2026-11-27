@@ -60,6 +60,18 @@ Scenario: herdr 认不出的 agent,接班提示直接敲进窗格,并说明没�
   When 以 `--ready 1` 跑一次 `olp unit host --pane w3:p2 -- kimi -y`
   Then 主持照常拉起;等屏幕不再变化后把接班提示敲进窗格,停顿片刻再回车(紧跟的回车会被当成粘贴的一部分);输出说明是直接敲入、没法确认 agent 接住;不调用 agent prompt
 
+Scenario: 提示停在输入框里没提交时,再按一次回车
+  Test: a_prompt_left_in_the_input_box_is_submitted_again
+  Given herdr 报提示已送达,但文字还停在屏幕底部的输入框里,agent 没在工作
+  When 运行 `olp unit host`
+  Then 再按一次回车,提示只送一次
+
+Scenario: 提示被对话框挡住时不说已送达
+  Test: a_prompt_behind_a_dialog_is_not_called_delivered
+  Given 送提示后窗格的状态是 blocked
+  When 运行 `olp unit host`
+  Then 输出提醒“被对话框或审批挡住,需要人看”,不说 prompted,也不往对话框里按回车
+
 Scenario: 按标签找窗格,工作区不存在时新建;--no-prompt 不发话
   Test: the_host_pane_is_found_or_created_by_its_workspace_label
   Given herdr 里没有标签为 unit-host 的工作区

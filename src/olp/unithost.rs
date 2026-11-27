@@ -221,7 +221,15 @@ fn deliver(a: &Args, pane: &str) {
     })
     .or_else(|first| submit_again(pane, session).ok_or(first));
     match sent {
-        Ok(_) => println!("prompted pane {pane}"),
+        Ok(_) => match taken(pane, &text, session) {
+            Taken::Yes => println!("prompted pane {pane}"),
+            Taken::Blocked => eprintln!(
+                "{PROG}: 提醒:接班提示敲进了窗格 {pane},但窗格被对话框或审批挡住,agent 还没接,需要人看"
+            ),
+            Taken::No => {
+                eprintln!("{PROG}: 提醒:接班提示敲进了窗格 {pane},agent 没有接(还停在输入框里)")
+            }
+        },
         // Still on the screen: it was typed and the agent has not taken it;
         // typing it again would say it twice.
         Err(Fail(_, why)) if screen(pane, session).is_some_and(|now| now.contains(head(&text))) => {
@@ -261,6 +269,56 @@ fn enter_pause() -> Duration {
         .and_then(|v| v.parse().ok())
         .unwrap_or(1500);
     Duration::from_millis(ms)
+}
+
+enum Taken {
+    Yes,
+    Blocked,
+    No,
+}
+
+fn status(pane: &str, session: Option<&str>) -> String {
+    herdr(&["pane", "get", pane], session)
+        .ok()
+        .and_then(|got| {
+            got.pointer("/pane/agent_status")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
+}
+
+/// herdr said the prompt was taken. An agent still starting can show
+/// "working" for reasons of its own (restoring a session) while the Enter is
+/// lost and the words stay in its input box, and "blocked" is a dialog in
+/// front of them. So look once more, a moment later: an agent at rest with
+/// the words still at the foot of its screen gets the Enter again.
+fn taken(pane: &str, text: &str, session: Option<&str>) -> Taken {
+    let ms = std::env::var("OLP_UNIT_HOST_CHECK_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2000);
+    std::thread::sleep(Duration::from_millis(ms));
+    let verdict = |status: &str| match status {
+        "blocked" => Taken::Blocked,
+        _ => Taken::Yes,
+    };
+    let at = status(pane, session);
+    if at == "working" || at == "blocked" {
+        return verdict(&at);
+    }
+    let waiting = screen(pane, session).is_some_and(|now| {
+        let lines: Vec<&str> = now.lines().filter(|l| !l.trim().is_empty()).collect();
+        let foot = lines.len().saturating_sub(8);
+        lines[foot..].iter().any(|l| l.contains(head(text)))
+    });
+    if !waiting {
+        return Taken::Yes;
+    }
+    match submit_again(pane, session) {
+        Some(_) => verdict(&status(pane, session)),
+        None => Taken::No,
+    }
 }
 
 /// The prompt, typed into the pane as a person would: for an agent herdr
