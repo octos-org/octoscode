@@ -65,6 +65,7 @@ monitor 进程、真实 UI ledger、任务自有源文件做有界探测，及�
 ## Boundaries
 
 ### Allowed Changes
+- src/olp/forward.rs(2026-11-23:负哨转发的 Rust 实现;相关场景改为对 `octoscode olp guard forward` 运行)
 - src/cmd/olp_runtime_watch.rs、src/cmd/mod.rs（dispatch/route/CLI help）
 - tests/olp_runtime_watch.rs、docs/OLP_OUTER_BOOT.md、本 spec
 - scripts/olp-alert-forward.py、tests/olp_alert_forward.rs、docs/OLP_CLUSTER.md(hub 转发)
@@ -176,3 +177,15 @@ Scenario: 没有 ledger 的内环的告警也转得出去
   Given 守护在没有后端与 ledger 时输出的停滞记录与进程消失记录
   When 交给转发器
   Then 板上两行都写 `turn=-`,没有后端一行,也没有 `turn=None`
+
+Scenario: hub 用事件日志时告警走日志通道,连不上的留到下一条之前补发
+  Test: alert_forward_reaches_a_hub_that_keeps_an_event_log
+  Given 单元配置 store = log,hub 的强制命令是 olp remote serve-log;第一次 ssh 连不上
+  When 转发器读到两条记录(先是 agent 进程不在,后是 backend 也不在);同样的记录再喂一遍
+  Then 第一条先留着,第二条发出前补发,日志里依次是两条 alert 事件并挂在卡上;重喂不新增
+
+Scenario: 中心恢复后,等着的告警不必等下一件事发生就送出
+  Test: an_alert_that_waited_goes_out_once_the_hub_is_back
+  Given 单元配置 store = log;第一次 ssh 连不上,之后都能连上
+  When 转发器读到同一件事(agent 进程不在)的两条记录
+  Then 第一条记录时留着,第二条记录到来时补发,日志里有一条 alert 事件

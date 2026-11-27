@@ -35,7 +35,9 @@ agent 由大外环按卡指定,复验通过才交回。单元上的内环一律�
   `impl`、`review`。
 - 心跳新增内置巡检 `full`(每个内环都以完全访问启动),默认巡检改为 `agent,disk,full`:
   不满足 R8 的单元判为降级、不派卡。
-- 汇总:`olp-summary.py --board <板> [--repo <hub 仓库>] [--name <项目名>] [--json]`,只读,
+- 汇总:`octoscode olp board summary`(Rust,`src/olp/summary.rs`,2026-11-23 起;原 `olp-summary.py`,
+  输出不变;`--board` 也可以是事件日志目录,这时告警取单元上报的送达失败)
+  `--board <板> [--repo <hub 仓库>] [--name <项目名>] [--json]`,只读,
   收卡(含角色与所处分区)、各区计数、单元状态、本地 PR、待答提问、未了结卡上的负哨;某个
   数据源读不到时该项记 `unavailable`,其余照常。全景台不在 OctoLoop 里,由用户指定。
 - skill 新增 unit 模式(单元主持)与 outer 模式的集群循环;inner 模式写明三种内环的免沙箱
@@ -49,7 +51,7 @@ agent 由大外环按卡指定,复验通过才交回。单元上的内环一律�
 - docs/OCTOLOOP_AGENTS.md、docs/OCTOLOOP_AGENTS.zh-CN.md、docs/OLP_CLUSTER.md、docs/OCTOLOOP_FEATURES.md
 - skills/octoloop/AGENTS.md、.claude/skills/octoloop/SKILL.md
 - scripts/olp-dispatch.py、scripts/olp-inbox.py、scripts/olp-board-archive.py、scripts/olp-unit.py
-- scripts/olp-git-hub.py、scripts/olp-task-push.sh、scripts/olp-init.sh、scripts/olp-summary.py
+- scripts/olp-git-hub.py、scripts/olp-task-push.sh、scripts/olp-init.sh、scripts/olp-summary.py、src/olp/summary.rs、src/olp/unit.rs
 - tests/olp_v3_cluster.rs、tests/olp_unit.rs、tests/olp_contract.rs、tests/olp_evo_retro.rs
 - specs/task-olp-v3-cluster-roles.spec.md
 

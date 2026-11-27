@@ -21,8 +21,10 @@ fn fixture(rel: &str) -> PathBuf {
 }
 
 fn run(script: &PathBuf, args: &[&str]) -> std::process::Output {
-    Command::new("bash")
-        .arg(script)
+    // The skeleton tool is Rust now; `script` is kept for the call sites.
+    let _ = script;
+    Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "skeleton"])
         .args(args)
         .current_dir(repo_root())
         .output()

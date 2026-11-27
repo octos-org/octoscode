@@ -35,7 +35,12 @@ fn has_flock() -> bool {
 }
 
 fn run(dir: &Path, program: &str, args: &[&str], stdin: &str) -> Output {
-    let mut cmd = if program.ends_with(".py") {
+    let mut cmd = if let Some(words) = program.strip_prefix("olp ") {
+        // A command that has moved to Rust.
+        let mut c = Command::new(env!("CARGO_BIN_EXE_octoscode"));
+        c.arg("olp").args(words.split(' '));
+        c
+    } else if program.ends_with(".py") {
         let mut c = Command::new("python3");
         c.arg("-B").arg(scripts().join(program));
         c
@@ -70,7 +75,7 @@ fn dispatch(dir: &Path, board: &Path, title: &str, roles: &[&str]) -> Output {
         "2026-11-14",
     ];
     args.extend_from_slice(roles);
-    run(dir, "olp-dispatch.py", &args, "正文。\n")
+    run(dir, "olp card dispatch", &args, "正文。\n")
 }
 
 /// Scenario: 大外环按卡指定实现方与复验方
@@ -140,9 +145,8 @@ fn v3_dispatch_names_the_implementer_and_reviewers_per_card() {
     )
     .unwrap();
     std::fs::set_permissions(&herdr, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    let out = Command::new("python3")
-        .arg("-B")
-        .arg(scripts().join("olp-dispatch.py"))
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "card", "dispatch"])
         .args([
             "m07",
             "--board",
@@ -428,7 +432,7 @@ fn v3_summary_collects_cards_units_prs_and_alerts() {
 
     let out = run(
         d,
-        "olp-summary.py",
+        "olp board summary",
         &[
             "--board",
             board.to_str().unwrap(),
@@ -457,7 +461,7 @@ fn v3_summary_collects_cards_units_prs_and_alerts() {
     // are left out.
     let out = run(
         d,
-        "olp-summary.py",
+        "olp board summary",
         &["--board", board.to_str().unwrap(), "--name", "demo"],
         "",
     );
@@ -474,7 +478,7 @@ fn v3_summary_collects_cards_units_prs_and_alerts() {
     // A repository that cannot be read is reported, the rest still comes out.
     let out = run(
         d,
-        "olp-summary.py",
+        "olp board summary",
         &[
             "--board",
             board.to_str().unwrap(),
@@ -491,7 +495,7 @@ fn v3_summary_collects_cards_units_prs_and_alerts() {
 
     let out = run(
         d,
-        "olp-summary.py",
+        "olp board summary",
         &["--board", "/nonexistent/board.md"],
         "",
     );

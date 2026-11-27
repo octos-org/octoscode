@@ -60,8 +60,8 @@ impl Sandbox {
     }
 
     fn run(&self, dry_run: bool) -> Output {
-        let mut cmd = Command::new("bash");
-        cmd.arg(script()).arg(&self.repo);
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_octoscode"));
+        cmd.args(["olp", "evo", "retro"]).arg(&self.repo);
         if dry_run {
             cmd.arg("--dry-run");
         }
@@ -70,8 +70,8 @@ impl Sandbox {
     }
 
     fn run_env(&self, extra: &[(&str, &str)]) -> Output {
-        let mut cmd = Command::new("bash");
-        cmd.arg(script())
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_octoscode"));
+        cmd.args(["olp", "evo", "retro"])
             .arg(&self.repo)
             .env("OLP_EVO_STATE", &self.state_root);
         for (k, v) in extra {
@@ -366,8 +366,9 @@ fn olp_evo_retro_concurrent_runs_keep_records() {
         let repo = sb.repo.clone();
         let state = sb.state_root.clone();
         handles.push(std::thread::spawn(move || {
-            Command::new("bash")
-                .arg(script)
+            let _ = script;
+            Command::new(env!("CARGO_BIN_EXE_octoscode"))
+                .args(["olp", "evo", "retro"])
                 .arg(repo)
                 .env("OLP_EVO_STATE", state)
                 .output()
@@ -488,7 +489,9 @@ fn olp_evo_retro_skill_step5_and_protected_sections_golden() {
     // Revised with the operator's approval (2026-11-16): the launch table
     // states that unsandboxed launch needs the operator's standing grant for
     // the unit first (protocol R8); registration alone is not the grant.
-    const INNER: &str = "3c1b85960e44aa28e8bec310ee398eb7550eeef7bfcd6af1d07890dd450e547e";
+    // Revised with the operator's approval (2026-11-25): the launch table
+    // gains a row for Kimi Code (`kimi -y`).
+    const INNER: &str = "eee7b8a4e5039f344b255b9e5edbb563e68c1ae6953035c041b5bd3b459ddc3c";
     // Revised with the operator's approval (2026-11-16): the restart
     // checklist's step 1 follows protocol R8 (authorized agents may launch
     // an inner loop without a sandbox) instead of "operator by hand".

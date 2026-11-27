@@ -100,7 +100,34 @@ octoscode olp-runtime-watch --agent inner --agent-pid "$pid" --repo <仓库> \
 没有 turn 一层,不会报 `turn_error`;停滞提示靠 herdr 的 `working` 状态区分"在忙但
 文件不动"和"什么都没做"。
 
-## 6. 实测记录(2026-11-14,单机)
+## 6. 让 herdr 认得出状态
+
+唤醒、值守和停滞判定都看 herdr 报的状态(`idle`、`working`、`blocked`)。herdr 默认从
+屏幕内容判断,agent 改了界面就可能判错。实测 Kimi Code 2.7.3:工作时 herdr 0.9.1 一直报
+`idle`,单元值守因此记"发话后 agent 没有开始工作",心跳里也没有 `working`,hub 的停滞
+判定会把正在做的卡当成没人做。
+
+解决办法是让 agent 自己上报状态。herdr 为多数 agent 带了钩子,单元装机时对用到的种类
+各执行一次:
+
+```bash
+herdr integration status          # 哪些已装
+herdr integration install kimi    # 写入 ~/.kimi-code/hooks/ 并在 config.toml 里登记钩子
+```
+
+钩子只在 herdr 的窗格里生效(看 `HERDR_ENV`),在别处运行同一个 agent 不受影响;卸载用
+`herdr integration uninstall <种类>`。装好后的实测(omarchy,2026-11-25):发话后 3 秒内
+报 `working`,做完报 `idle`。Claude Code、Codex、octoscode 在上面的版本里不装钩子也
+判得对;换了版本后状态不对时,同样先装对应的钩子。
+
+### Kimi Code 的启动与巡检
+
+`kimi -y` 是"需要时才问":日常的编辑和命令自动执行,有风险的操作、提问和计划仍然会问,这时
+herdr 报 `blocked`,单元值守会把接不了卡的情况报给 hub。Kimi Code 没有沙箱一说。它启动后把
+进程改名为 `kimi-code`、不带参数(omarchy 上实测),心跳读不到启动参数,权限记为"未知",
+所以有 Kimi Code 内环的单元过不了 `full` 巡检,心跳用 `--require agent`。
+
+## 7. 实测记录(2026-11-14,单机)
 
 | 卡 | 内环 | 结果 |
 |---|---|---|

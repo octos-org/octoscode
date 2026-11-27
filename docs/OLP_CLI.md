@@ -19,66 +19,170 @@
 6. **旧入口保留一段时间**:`scripts/olp-*` 照常可用;`octoscode outer-duty`、
    `octoscode olp-mcp-serve`、`octoscode olp-runtime-watch` 作为新命令的别名保留。
 
+## 1b. 给 agent 的四条约定
+
+命令清单由 CLI 自己提供,文档只维护这四条:
+
+- 不确定用哪条命令时,执行 `octoscode olp commands --json` 查当前版本的命令目录。按
+  `summary` 选命令,用 `route` 给出的正式写法。
+- 已经知道命令时,执行 `octoscode olp <组> <动作> --help` 看用法和示例;要用程序取字段
+  时执行 `octoscode olp <组> <动作> --help --json`。
+- 参数取值取决于当前环境时,先用对应的查询命令拿到可选值,例如
+  `octoscode olp unit status --json`。
+- 查帮助不会执行命令。要执行就写 `octoscode olp <组> <动作> [参数]`;单独传 `--json`
+  时该选项由命令自己处理,命令仍会执行。
+
+目录里每条命令的字段:
+
+| 字段 | 含义 |
+|---|---|
+| `route` | 正式写法,如 `octoscode olp card dispatch` |
+| `summary` | 一句话说明 |
+| `subcommands` | `true`:下一个词是工具自己的子命令,用它的 `--help` 查 |
+| `runs_on` | 在哪一侧运行:`hub`、`unit`、`any`;`internal` 是 git 或 ssh 强制命令调用的,不手工执行 |
+| `writes` | 是否改动数据;`false` 的命令可以放心试 |
+| `needs_lease` | 是否需要主审权租约(没有时退出码 6) |
+| `implementation` | `script`(打包的脚本)或 `rust` |
+| `help` | 查这条命令帮助的写法 |
+
+`writes`、`needs_lease` 为 `null` 表示这里没有记录(取决于子命令,或尚未核实),以该命令
+自己的 `--help` 为准,不要当成 `false`。参数的用法提示(`args`)和可选值的查询命令
+(`values_from`)随命令迁到 Rust 逐条补上,现在还没有。
+
+事件日志(JSON Lines,`specs/task-olp-event-log.spec.md`):`octoscode olp board import <板.md>
+--to <目录>` 把 Markdown 黑板一次性导入成事件日志;`board inbox <路径>` 的路径是目录时读
+事件日志,结论与原板相同。日志不手工编辑,写入走命令(`specs/task-olp-card-writes.spec.md`):
+`card open`(立卡,分配卡号)、`card ack`(内环回执)、`card accept` / `return` / `void` /
+`snooze`(外环判词),都带 `--log <目录>`;`board render <目录>` 把日志输出成只读的 Markdown。
+单元经 ssh 强制命令 `remote serve-log --unit <单元号> --log <目录>` 访问日志
+(`specs/task-olp-unit-serve.spec.md`):只能对派给自己的卡回执(`ack`)、报进度节点
+(`progress`),只能读到自己的卡的事件(`events`)。单元上的命令(`specs/task-olp-unit-client.spec.md`):
+`unit.conf` 里写了 `store = log` 时,`remote ack`、`remote mirror` 走这条通道,另有
+`remote progress <N> claimed | review <轮次> | rework <轮次>`;没写时一切照旧。
+回执的键在一轮之内去重:外环打回之后,同样的结果、同样的说明是新的一次回执,不当成重发。
+一个键只代表一件事:已用于别的卡或别的种类的键被拒收,不会悄悄当成"已记录"。
+到 hub 的每个 ssh 请求有总时限(`OLP_SSH_TIMEOUT` 秒,默认 60):连上以后卡住的,到时限算没有连上,
+命令退出码 75,原样重跑即可。
+派卡与唤醒(`specs/task-olp-delivery-wake.spec.md`):`card open --unit U --pane <窗格>` 写进日志
+就是送达;单元用 `remote inbox [<窗格>]` 看还没领取的卡(`body` 是卡的全文,`next` 是接下来的
+领取与回执命令),用 `remote progress <N> claimed` 领取。`remote watch <窗格>` 是单元上的值守(不是 agent):有新卡且 agent 空闲时往窗格发一句
+固定短句"有新派卡,请执行:octoscode olp remote inbox <窗格>,再按输出里的 next 领取、办理、回执",
+不带卡的内容。发话后 agent 开始工作才算提醒过;没接住的隔 `--retry` 秒再发一次,连续两次没接住就
+不再追发。窗格被对话框或审批挡住(herdr 报 `blocked`)时不往里打字;持续接不了卡就向 hub
+上报 `progress <N> undelivered`,外环的 `olp inbox` 会把这张卡列出来并写明"送达失败"。
+已领取的卡 `--follow-up` 秒(默认 900)没有新事件、窗格又空闲时,说明主持停在了半路:值守发一句
+"已领取的卡 #N 还没有回执,而这个窗格已经空闲:请接着办理…",同一张卡在没有新事件期间最多发两次,
+之后由 hub 的停滞判定(`board stall`)接手。`remote inbox` 的输出里 `held` 列出这些已领取未回执的卡。
+内环用 `ask_outer` 提问时,提问服务(`olp ask mcp`)在 `store = log` 的单元上自动运行
+`remote question ask|answer|timeout <提问id>`,把提问和它的结局记进 hub 的日志:外环值守看到
+`asked` 事件就叫醒外环,外环用 `olp ask list|show|answer <单元>` 作答。
+
+迁到 Rust 的命令(`src/olp/`):`board inbox`。迁过去的命令不再经过打包的脚本;
+`OCTOSCODE_OLP_LEGACY=1` 让它改跑原脚本,保留一个版本作退路。
+
 ## 2. 命令一览
 
 ### 2.1 起步
 
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
-| `olp init [目录]` | `scripts/olp-init.sh` | 任意 |
-| `olp skill install [--to F \| --print \| --home-only] [--force]` | `scripts/olp-install-skill.sh` | 任意 |
-| `olp doctor [--repo R]… [--work W]… [--remote hub] [--json]` | `scripts/olp-doctor.py` | 任意 |
+| `olp init [目录]` | Rust(`src/olp/init.rs`),原 `scripts/olp-init.sh` | 任意 |
+| `olp skill install [--to F \| --print \| --home-only] [--force]` | Rust(`src/olp/init.rs`),原 `scripts/olp-install-skill.sh` | 任意 |
+| `olp doctor [--repo R]… [--work W]… [--remote hub] [--json]` | Rust(`src/olp/doctor.rs`),原 `scripts/olp-doctor.py` | 任意 |
 
 ### 2.2 黑板(board)——一块黑板文件上的操作
 
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
-| `olp board append [--key K] <板>` | `olp-board-append.sh` | 黑板所在机器 |
+| `olp board append [--key K] <板>` | Rust(`src/olp/append.rs`),原 `olp-board-append.sh` | 黑板所在机器 |
 | `olp board inbox <板> [--units] [--json] …` | `olp-inbox.py` | hub |
-| `olp board archive <板> [--keep N] [--dry-run]` | `olp-board-archive.py` | hub |
-| `olp board watch <板> <token> [--harvest <repo>] …` | `olp-watch-board.sh` | hub |
-| `olp board summary --board <板> [--repo R] [--json]` | `olp-summary.py` | hub |
-| `olp id alloc …` | `olp-id-alloc.sh` | 任意 |
+| `olp board archive <板> [--keep N] [--dry-run]` | Rust(`src/olp/archive.rs`),原 `olp-board-archive.py` | hub |
+| `olp board watch <板> <token> [--harvest <repo>] …` | Rust(`src/olp/sentinel.rs`),原 `olp-watch-board.sh` | hub |
+| `olp board summary --board <板或日志目录> [--repo R] [--json]` | Rust(`src/olp/summary.rs`),原 `olp-summary.py` | hub |
+| `olp id alloc …` | Rust(`src/olp/append.rs`),原 `olp-id-alloc.sh` | 任意 |
+| `olp board stall <日志目录> [--quiet 秒] [--policy 命令 \| --policy-crate 目录] [--json]` | Rust(`src/olp/stall.rs`) | hub |
+| `olp log compact <日志目录> [--keep-days 14] [--keep 10] [--if-over MiB] [--dry-run] [--json]` | Rust(`src/olp/compact.rs`) | hub |
+| `olp log history <日志目录> [--card N] [--json]` | Rust(`src/olp/compact.rs`) | hub |
+| `olp log metrics <日志目录> [--since 日期] [--until 日期] [--by unit\|impl\|week] [--cards] [--json]` | Rust(`src/olp/metrics.rs`) | hub |
+| `olp log symptoms <日志目录> [--window 7] [--min-cards 5] [--now 时刻] [--record] [--json]` | Rust(`src/olp/symptom.rs`) | hub |
+| `olp tune list\|set\|revert\|replay\|auto <日志目录> …` | Rust(`src/olp/tune.rs`) | hub |
+
+`log compact`(`specs/task-olp-log-compact.spec.md`)让日常命令不必重读已了结的卡:已了结、
+最后一条事件早于 `--keep-days` 天、不在最近了结的 `--keep` 张之内、单元已领取、也不是某张
+留下的卡的回测对象的卡,全部事件移入归档;旧分段原样搬到 `<日志目录>/archive/`,序号不重排。
+归档的卡保留卡号与立卡的键,之后再写它会被拒收;全过程用 `log history --card N` 看。替换前
+先核对留下的事件与完整日志读起来一致,不一致不写(退出码 5)。外环值守(`outer watch`)在
+在用的日志超过 `OLP_LOG_COMPACT_MIB`(默认 32,0 为关)时自己压缩。
+
+`log metrics`(`specs/task-olp-log-metrics.spec.md`)从完整历史算交付指标:每张卡一行(`--cards`),
+时间按事件切成等认领、单元在做、等外环裁决三段,另数打回、阻塞、告警与单元提问;时长给中位数
+与 90 分位。只读,是诊断不是考核;日志还没有记一步是 agent 还是人做的,所以没有人工介入量。
+
+`log symptoms` 与 `tune`(`specs/task-olp-log-evolve.spec.md`)把指标接成闭环:一个指标连续两个
+窗口都比基线差、且有足够的卡,才是症状,带着说明它的卡;`--record` 记进日志(外环值守每天自己
+记一次,并唤醒外环)。`tune` 管随使用调整的阈值——`review_backlog_max`(等外环裁决的卡到这么多
+张就不再派新卡,默认不限,`card dispatch --allow-backlog` 放行)与 `follow_up_after`(单元认领后
+静默多久提醒主持,默认 900 秒,随收件箱下发给单元值守)——值是日志里最后一条 `tuned` 事件:
+`set` 要写原因,`revert` 撤回,`replay` 回放换一个值历史会怎样,`auto --apply` 按症状一次试改
+一处,之后派出的卡够数时对冲指标变差就自动撤回、否则保留。外环值守只在 `OLP_TUNE_AUTO=1` 时
+自动调;默认关。
+
+`board stall`(`specs/task-olp-stall.spec.md`)回答"是不是所有人都在等":有卡未了结、占着卡的
+单元上没有内环在工作、日志 `--quiet` 秒没有新事件,三条都成立才算。有人在工作就不算,做得久
+不是问题。静默时逐张卡给出原因、起始事件和谁能推动;同一段沉默最多报三次。`--peek` 只看不记:
+输出这次会报的卡,但不算一次运行、不占报告次数(外环值守这样问,次数留给外环自己看的那几次)。
+心跳是否算数看它的年龄:标记离线的单元留下的旧心跳不算"有人在工作"。判定可以交给外部策略
+(`--policy`,或带 `relax` feature 时的 `--policy-crate`);`--samples` 留下每次的事实与判定,
+`--replay <样本文件>` 在这些样本上比较两个判定。见 `docs/OLP_POLICY.md`。
 
 ### 2.3 卡(card)——派发
 
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
-| `olp card dispatch <单元> --board <板> --title … [--impl A] [--review B,C] [--wake 窗格] …` | `olp-dispatch.py` | hub |
+| `olp card dispatch <单元> --board <板> --title … [--impl A] [--review B,C] [--wake 窗格] …` | Rust(`src/olp/dispatch.rs`),原 `olp-dispatch.py` | hub |
+| `olp card dispatch <单元> --log <目录> --title … [--impl A] [--review B,C] [--avoid 文本]… [--verify-of M] [--wake 窗格] …` | Rust(`src/olp/dispatch.rs`) | hub |
+
+事件日志上的派卡(`specs/task-olp-dispatch-log.spec.md`)在日志锁内依次查:单元健康、卡上的复验方
+这台单元跑不跑得了(按心跳里的复验 CLI 与在跑的内环;`--allow-reviewers` 放行)、回测卡不派给
+原作者、单元是否还占着卡,然后写入。`--avoid` 写明这张卡不许碰什么,单元在收件箱里看得到。
 
 ### 2.4 单元(unit)——登记、心跳、健康
 
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
-| `olp unit register\|set-state\|status\|check\|where …` | `olp-unit.py` 同名子命令 | hub |
-| `olp unit receive [--unit U]` | `olp-unit.py receive` | hub(ssh 强制命令) |
-| `olp unit heartbeat --unit U [--require …]` | `olp-unit.py heartbeat` | 单元 |
+| `olp unit register\|set-state\|status\|check\|where …` | Rust(`src/olp/unit.rs`),原 `olp-unit.py` 同名子命令 | hub |
+| `olp unit receive [--unit U]` | Rust,原 `olp-unit.py receive` | hub(ssh 强制命令) |
+| `olp unit heartbeat --unit U [--require …]` | Rust,原 `olp-unit.py heartbeat` | 单元 |
+| `olp unit host --pane <窗格> \| --label <标签> … -- <主持的启动命令>` | Rust(`src/olp/unithost.rs`,新增):主持的窗格里没有程序时重新启动它并送接班提示 | 单元 |
+
+登记文件与心跳文件的格式不变,hub 换二进制不用重新登记。`OCTOSCODE_OLP_LEGACY=1` 改跑原脚本。
+还没迁移的脚本(派卡、汇总、提问、体检、保活)仍直接调用 `olp-unit.py`,所以脚本暂时保留。
 
 ### 2.5 远程写板(remote)——单元写 hub 的黑板
 
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
-| `olp remote append\|ack\|flush\|queue\|mirror …` | `olp-board-remote.py` 同名子命令 | 单元 |
-| `olp remote serve --unit U --board <板>` | `olp-board-remote.py serve` | hub(ssh 强制命令) |
+| `olp remote append\|ack\|flush\|queue\|mirror …` | Rust(`src/olp/mdremote.rs`),原 `olp-board-remote.py` 同名子命令 | 单元 |
+| `olp remote serve --unit U --board <板>` | Rust(`src/olp/mdremote.rs`),原 `olp-board-remote.py serve` | hub(ssh 强制命令) |
 
 ### 2.6 本地仓库与本地 PR(repo)
 
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
-| `olp repo init <裸仓库> --board <板>` | `olp-git-hub.py init` | hub |
-| `olp repo serve --unit U --repo R` | `olp-git-hub.py serve` | hub(ssh 强制命令) |
-| `olp repo connect-local --unit U --repo R` | `olp-git-hub.py connect-local` | 单元(单机部署) |
-| `olp repo push <N> --verified-by S [--force]` | `olp-task-push.sh` | 单元 |
-| `olp repo status --repo R --board <板>` | `olp-local-pr.py status` | hub |
-| `olp repo promote <N> --repo R --board <板>` | `olp-local-pr.py promote` | hub |
+| `olp repo init <裸仓库> --board <板>` | Rust(`src/olp/repo.rs`),原 `olp-git-hub.py init` | hub |
+| `olp repo serve --unit U --repo R` | Rust(`src/olp/repo.rs`),原 `olp-git-hub.py serve` | hub(ssh 强制命令) |
+| `olp repo connect-local --unit U --repo R` | Rust(`src/olp/repo.rs`),原 `olp-git-hub.py connect-local` | 单元(单机部署) |
+| `olp repo push <N> --verified-by S [--force]` | Rust(`src/olp/localpr.rs`),原 `olp-task-push.sh` | 单元 |
+| `olp repo status --repo R --board <板>` | Rust(`src/olp/localpr.rs`),原 `olp-local-pr.py status` | hub |
+| `olp repo promote <N> --repo R --board <板>` | Rust(`src/olp/localpr.rs`),原 `olp-local-pr.py promote` | hub |
 | (内部)`olp repo hook …`、`olp repo local-pack …` | `olp-git-hub.py hook / local-pack` | 由 git 调用 |
 
 ### 2.7 提问(ask)
 
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
-| `olp ask list\|show\|answer <单元> [id]` | `olp-answer.py` 同名子命令 | hub |
-| `olp ask serve` | `olp-answer.py serve` | 单元(ssh 强制命令) |
+| `olp ask list\|show\|answer <单元> [id]` | Rust(`src/olp/answer.rs`),原 `olp-answer.py` 同名子命令 | hub |
+| `olp ask serve` | Rust,原 `olp-answer.py serve` | 单元(ssh 强制命令) |
 | `olp ask mcp` | `octoscode olp-mcp-serve` | 单元(MCP 服务) |
 
 ### 2.8 守护(guard)——单元上的负哨
@@ -86,38 +190,57 @@
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
 | `olp guard watch …` | `octoscode olp-runtime-watch` | 单元 |
-| `olp guard forward [--include K] [--only K]` | `olp-alert-forward.py` | 单元 |
+| `olp guard forward [--include K] [--only K]` | Rust(`src/olp/forward.rs`),原 `olp-alert-forward.py` | 单元 |
+
+`guard forward` 按单元的配置选通道:`store = log` 时告警经 `remote serve-log` 的 `alert` 请求记成
+日志里的 `alert` 事件(指向本单元的卡时挂在卡上:外环值守会为它叫醒外环,`olp inbox <日志>` 与进展汇总在卡未了结期间列出它);hub 连不上的留在进程里,
+守护的下一条记录到来时(以及输入结束时)按顺序补发,不必等新的告警。没写 `store = log` 时照旧往 Markdown 黑板追加一行。
 
 ### 2.9 保活(keepalive)——按平台自动选 launchd 或 systemd
 
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
-| `olp keepalive doctor\|heartbeat\|install\|uninstall\|list\|render …` | macOS:`olp-launchd.py`;Linux:`olp-systemd.py`(同名子命令) | 单元(hub 也可) |
+| `olp keepalive doctor\|heartbeat\|install\|uninstall\|list\|render …` | Rust(`src/olp/keepalive.rs`);原 macOS:`olp-launchd.py`,Linux:`olp-systemd.py` | 单元(hub 也可) |
 
 ### 2.10 主审权锁(duty)
 
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
 | `olp duty hold\|check\|lease …` | `octoscode outer-duty` | hub |
-| `olp outer supervise\|resume\|install …` | `olp-outer.py` | hub(外环所在机器) |
+| `olp outer supervise\|resume\|install …` | Rust(`src/olp/outer.rs`),原 `olp-outer.py` | hub(外环所在机器) |
+| `olp outer watch <日志目录> --pane <窗格> \| --label <工作区标签> [--once]` | Rust(`src/olp/outerwatch.rs`) | hub(外环所在机器) |
+
+`olp outer supervise` 的留言(已自动重启、重启已暂停、接班提示未送达):`--board` 是 Markdown 黑板
+时追加一行;是事件日志目录时写成一条 `note` 事件,`olp board render` 与 `olp outer resume` 都会
+显示。接班提示打进窗格后要看到 agent 开始办才算送到;没看到且 agent 空闲时补按回车,最多四次。
+重启成功后它还把带 `hold` 的整条命令登记成窗格的 herdr 恢复命令,herdr 重启后回来的仍是持锁的
+外环;外环以 `env -u HERDR_ENV …` 启动,agent 自带的 herdr 集成在这个窗格里不生效(`docs/OLP_KEEPALIVE.md` §4a)。
+
+外环值守(`specs/task-olp-outer-watch.spec.md`)是"收件箱 + 唤醒"往上的那一半:日志里出现等外环处理
+的事件(单元的回执、推送登记、提问、送达失败)或集群整体静默时,在外环的 agent 空闲时往它的窗格
+发一句固定短句,指向 `olp inbox` 与 `olp board stall`。短句不带内容;外环不轮询。
+静默由值守用 `board stall --peek` 询问,不占报告次数;外环窗格忙多久都不会把次数耗掉。同一段沉默
+值守说一次;外环一直没去看的话,隔一个 `--quiet`(至少 60 秒)再说,最多三次。
+值守不由外环自己启动:`olp outer install` 在 `--board` 是事件日志时另注册一个常驻任务
+`<name>-watch`,每分钟按工作区标签找到外环的窗格跑一轮。外环死了它照常跑,接班的外环不用再启动。
 
 ### 2.11 进化环(evo)
 
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
-| `olp evo harvest <repo> [--dry-run]` | `olp-evo-harvest.sh` | hub |
-| `olp evo retro <repo> [--dry-run]` | `olp-evo-retro.sh` | hub |
-| `olp evo metrics <repo> …` | `olp-evo-metrics.sh` | hub |
-| `olp evo index <repo>` | `olp-evo-index.sh` | hub |
-| `olp evo skeleton <FLAW-NNN.md> [--out F]` | `olp-evo-spec-skeleton.sh` | hub |
+| `olp evo harvest <repo> [--dry-run]` | Rust(`src/olp/evoharvest.rs`),原 `olp-evo-harvest.sh` | hub |
+| `olp evo retro <repo> [--dry-run]` | Rust(`src/olp/evoretro.rs`),原 `olp-evo-retro.sh` | hub |
+| `olp evo metrics <repo> …` | Rust(`src/olp/evometrics.rs`),原 `olp-evo-metrics.sh` | hub |
+| `olp evo index <repo>` | Rust(`src/olp/evo.rs`),原 `olp-evo-index.sh` | hub |
+| `olp evo skeleton <FLAW-NNN.md> [--out F]` | Rust(`src/olp/evo.rs`),原 `olp-evo-spec-skeleton.sh` | hub |
 
 ### 2.12 行为证据互审(review)
 
 | 新命令 | 现在的入口 | 在哪运行 |
 |---|---|---|
-| `olp review init\|freeze\|challenge\|cross\|status\|classify …` | `olp-review-evidence.py` | 任意 |
-| `olp review cargo …` | `olp-review-evidence-cargo.py` | 任意 |
-| `olp review monitor …` | `olp-review-monitor.py` | 任意 |
+| `olp review init\|freeze\|challenge\|cross\|status\|classify …` | Rust(`src/olp/reviewevidence.rs`、`reviewclassify.rs`),原 `olp-review-evidence.py` | 任意 |
+| `olp review cargo …` | Rust(`src/olp/reviewcargo.rs`),原 `olp-review-evidence-cargo.py` | 任意 |
+| `olp review monitor …` | Rust(`src/olp/reviewmonitor.rs`),原 `olp-review-monitor.py` | 任意 |
 
 ## 3. 写进系统里的命令
 

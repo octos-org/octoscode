@@ -89,6 +89,16 @@ impl Hub {
         cmd
     }
 
+    /// A command that has moved to Rust, with the same sandbox.
+    fn native(&self, words: &[&str]) -> Command {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_octoscode"));
+        cmd.arg("olp")
+            .args(words)
+            .env("OLP_UNITS_DIR", self.dir.path().join("units"))
+            .env("OLP_HERDR", self.fake_herdr());
+        cmd
+    }
+
     /// Register a unit and feed the hub one healthy heartbeat for it.
     fn healthy_unit(&self, unit: &str, n: u8) {
         let mac = format!("aa:bb:cc:dd:ee:{n:02x}");
@@ -118,7 +128,7 @@ impl Hub {
     }
 
     fn dispatch(&self, unit: &str, title: &str, extra: &[&str], body: &str) -> Output {
-        let mut cmd = self.python("olp-dispatch.py");
+        let mut cmd = self.native(&["card", "dispatch"]);
         cmd.arg(unit)
             .arg("--board")
             .arg(self.board())

@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-//! Contract tests for `scripts/olp-unit.py` (SDD spec:
+//! Contract tests for `octoscode olp unit` (SDD spec:
 //! `specs/task-olp-unit-registry.spec.md`): unit registration, heartbeats and
 //! the health states the hub derives from them.
 
@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 fn tool() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/olp-unit.py")
+    PathBuf::from(env!("CARGO_BIN_EXE_octoscode"))
 }
 
 fn stdout(out: &Output) -> String {
@@ -94,9 +94,8 @@ impl Hub {
     }
 
     fn cmd(&self) -> Command {
-        let mut cmd = Command::new("python3");
-        cmd.arg("-B")
-            .arg(tool())
+        let mut cmd = Command::new(tool());
+        cmd.args(["olp", "unit"])
             .env("OLP_UNITS_DIR", self.units_dir())
             .env("OLP_UNIT_CHECKS_DIR", self.checks_dir())
             .env("OLP_HERDR", self.dir.path().join("herdr"));
@@ -557,6 +556,22 @@ fn unit_heartbeat_reports_launch_permission() {
     assert_eq!(hb["permission"], "none");
     assert_eq!(hb["backends"], serde_json::json!([]));
 
+    // A serve without `--solo` is somebody's own service, not an inner
+    // loop's backend: it is listed, and it does not decide the permission.
+    let (_, hb) = heartbeat(
+        "  4101 octos serve --stdio --solo --danger-full-access\n  4200 /usr/local/bin/octos serve --port 8080\n",
+    );
+    assert_eq!(hb["permission"], "full");
+    assert_eq!(
+        hb["backends"],
+        serde_json::json!([
+            {"pid": 4101, "full_access": true, "solo": true},
+            {"pid": 4200, "full_access": false, "solo": false},
+        ])
+    );
+    let (_, hb) = heartbeat("  4200 /usr/local/bin/octos serve --port 8080\n");
+    assert_eq!(hb["permission"], "none");
+
     // Through the hub: the status shows what the unit reported, and the
     // permission does not change the health state.
     hub.register("m01", "m01", "aa:bb:cc:dd:ee:01");
@@ -687,6 +702,8 @@ fn unit_heartbeat_recognises_any_kind_of_inner_loop() {
         ("codex", vec!["codex", "--yolo"], true),
         ("codex", vec!["codex", "-s", "danger-full-access"], true),
         ("codex", vec!["codex", "--sandbox=workspace-write"], false),
+        ("kimi", vec!["kimi", "-y"], true),
+        ("kimi", vec!["kimi-code", "--auto"], true),
     ] {
         hub.set_agents(&[("a", kind, "idle", "w9:p1")], &[("w9:p1", &argv)]);
         let b = heartbeat("agent");
@@ -694,6 +711,15 @@ fn unit_heartbeat_recognises_any_kind_of_inner_loop() {
         assert_eq!(b["permission"], want, "{kind} {argv:?}: {b}");
         assert_eq!(b["agent_permissions"][0]["full_access"], full);
     }
+    // Kimi Code as it really shows on Linux: renamed, its flags gone. It is
+    // an inner loop whose launch cannot be read, not a missing one.
+    hub.set_agents(
+        &[("a", "kimi", "idle", "w9:p1")],
+        &[("w9:p1", &["kimi-code"])],
+    );
+    let b = heartbeat("agent");
+    assert_eq!(b["permission"], "unknown", "{b}");
+    assert!(b["agent_permissions"][0]["full_access"].is_null(), "{b}");
     // Mixed with an octos backend that has full access.
     std::fs::write(
         &ps,
@@ -843,7 +869,17 @@ fn unit_heartbeat_reports_reviewer_logins_without_judging_health() {
     let beat_with = |claude: &Path, codex: &Path| {
         let out = hub
             .cmd()
-            .args(["heartbeat", "--unit", "m01", "--require", "disk"])
+            // The check itself is not under test: a zero threshold passes on
+            // any host, however full its disk (it failed at 9.9% free).
+            .args([
+                "heartbeat",
+                "--unit",
+                "m01",
+                "--require",
+                "disk",
+                "--disk-min-free",
+                "0",
+            ])
             .env("OLP_CLAUDE", claude)
             .env("OLP_CODEX", codex)
             .output()

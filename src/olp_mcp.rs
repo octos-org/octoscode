@@ -101,8 +101,21 @@ pub fn serve(
             let _ = writer.flush();
         }
     }
+    // Reports still on their way to the hub are let through before the
+    // server ends (each has its own deadline).
+    let pending = REPORTS
+        .lock()
+        .map(|mut list| std::mem::take(&mut *list))
+        .unwrap_or_default();
+    for report in pending {
+        let _ = report.join();
+    }
     Ok(asks)
 }
+
+/// Reports to the hub that run after their answer was already returned.
+static REPORTS: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> =
+    std::sync::Mutex::new(Vec::new());
 
 pub struct OlpMcpServer<'a> {
     root: &'a std::path::Path,
@@ -154,6 +167,28 @@ impl<'a> OlpMcpServer<'a> {
                 }
                 child.wait()
             });
+    }
+
+    /// Where the unit's hub keeps an event log, a question and how it ended
+    /// are also reported there (`olp remote question`), so the outer loop is
+    /// told a question waits. Like the audit, this never fails the call.
+    fn report(kind: &'static str, id: &str, question: &str) -> Option<std::thread::JoinHandle<()>> {
+        if !crate::olp::client::log_mode() {
+            return None;
+        }
+        let exe = std::env::current_exe().ok()?;
+        let mut cmd = Command::new(exe);
+        cmd.args(["olp", "remote", "question", kind, id]);
+        if !question.is_empty() {
+            cmd.arg(question.trim_start_matches('-'));
+        }
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // In the background: the wait for the answer starts at once.
+        Some(std::thread::spawn(move || {
+            let _ = cmd.status();
+        }))
     }
 
     fn audit(&self, kind: &str, detail: &str) {
@@ -235,6 +270,26 @@ impl<'a> OlpMcpServer<'a> {
         ASK_STATE.with(|state| state.set(state.get() + 1));
         let detail_head: String = question.chars().take(200).collect();
         self.audit("ask", &format!("id={ask_id} question={detail_head}"));
+        let reported = Self::report("ask", &ask_id, &detail_head);
+        // The question's end is reported after the question itself, and
+        // on its own time: an answer that is already here is not held
+        // back by a hub that is slow to take the report.
+        let close = {
+            let id = ask_id.clone();
+            move |kind: &'static str| {
+                let report = std::thread::spawn(move || {
+                    if let Some(asked) = reported {
+                        let _ = asked.join();
+                    }
+                    if let Some(closed) = Self::report(kind, &id, "") {
+                        let _ = closed.join();
+                    }
+                });
+                if let Ok(mut pending) = REPORTS.lock() {
+                    pending.push(report);
+                }
+            }
+        };
 
         let answer_path = self.answers_dir.join(format!("{ask_id}.json"));
         let deadline = Instant::now() + Duration::from_secs_f64(self.timeout_secs);
@@ -262,6 +317,7 @@ impl<'a> OlpMcpServer<'a> {
                     );
                     let _ = std::fs::remove_file(&question_path);
                     let _ = std::fs::remove_file(&answer_path);
+                    close("answer");
                     return reply;
                 }
             }
@@ -272,6 +328,7 @@ impl<'a> OlpMcpServer<'a> {
             "timeout",
             &format!("id={ask_id} no answer in {:.0}s", self.timeout_secs),
         );
+        close("timeout");
         format!(
             "{DEGRADED_GUIDANCE}\n(已等待 {:.0}s;问询 id: {ask_id})",
             self.timeout_secs

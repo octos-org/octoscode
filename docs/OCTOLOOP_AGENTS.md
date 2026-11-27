@@ -254,6 +254,12 @@ octos steer --session '<session-key>' --text '[external-reviewer] ...'
 Without herdr, fall back to tmux `send-keys` — text starting with `-` needs a
 `--` separator or it is eaten as a flag.
 
+**Refer to an entry by its number, do not restate it.** A wake-up line, a steer
+or a message between agents says `#N` and what to do with it ("#12 is on the
+board — claim it"); the instruction itself stays in the entry. The entry is the
+only copy that gets superseded, ACKed and verified, so a restated copy is the
+one that goes stale.
+
 ### 3.4 Observe — three layers, all of them
 
 **Delivery ≠ consumption ≠ execution.** Watching one layer guarantees a

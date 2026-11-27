@@ -23,15 +23,14 @@ estimate: 1d
 - 条目边界:一个 `### <数字>` 标题到下一个 `### ` 或 `## ` 标题之前的全部行;代码围栏
   (``` 或 ~~~)内的标题不算边界。板的前言、`##` 小节、非编号标题的块原样保留,顺序不变。
   追加在板尾的无标题行在物理上属于最后一个条目,会随该条目一起归档。
-- 闭环判定,满足其一:(a) 外环已下结论——板上关于 #N 最后出现的署名行是采认或打回,或者
-  #N 被改判作废;结论之后又有单元的推送登记或内环的署名 ACK 则不算闭环。(b) 板上没有关于
-  #N 的任何判词或登记时沿用旧规则:条目里围栏外最后一条 `ACK(` 行是 `ACK(done` 或
-  `ACK(wontdo`。多机部署的卡没有条目内的 ACK,靠 (a);单机的板没有判词行,靠 (b)。
-  `ACK(blocked`、无 ACK、旧格式 `ACK:` 的条目不动。`--keep N`(默认 10)让最近 N 个编号
-  条目不论是否闭环都原样保留。
+- 归档与收件箱、单元占用、派单共用同一份黑板快照的判定。外环采认、改判作废、无单元的卡被打回可归档。
+  带单元的卡打回后继续返工。裸 ACK、具名 ACK、单元推送与搁置都保留在活板上,直到有终态判词。
+  采认后出现新的 ACK 或推送又回到待办。围栏内示例和以 `## Active` 明确结束的 `## Historical record` 区间不参与判定。老板末尾经写板助手追加的卡与回执继续生效。
+  旧式 Markdown 板无需转换;`ACK:` 按既有约定保留原文。旧桩已有的单元与回执仍用于判断是否需要返工或复验。
+  `--keep N`(默认 10)原样保留最近 N 张卡。
 - 编号桩:原标题行 + 条目里所有围栏外"给机器读"的行(逐字、按原顺序)+
   `<!-- olp-archived: <归档文件名> -->` + 一个空行。给机器读的行是:`ACK(` 行、`unit:` 行
-  (hub 的推送钩子在返工推送时读它)、`<!-- olp-key: … -->` 行(写板助手的幂等标记),以及
+  (hub 的推送钩子在返工推送时读它)、`<!-- olp-key: … -->` 行(写板助手的幂等标记)、紧邻该键前且编号一致的完整 `<!-- olp-dispatch: n=… sha256=… pane=… -->` 派卡绑定,以及
   署名的行首定式——采认、打回、搁置、改判、单元的推送登记、内环的署名 ACK,以及进化环采集在活板上读的
   两种单元信号:负哨(`单元(U)·负哨(`)与单元转发的 MCP blocked/timeout 审计行(先归档后采集也不漏;
   ask、answer 审计行与普通进度行不是信号,随正文归档)。这些判词按 `#N`
@@ -55,7 +54,9 @@ estimate: 1d
 ## Boundaries
 
 ### Allowed Changes
+- src/olp/archive.rs、src/olp/board.rs(2026-11-23:归档的 Rust 实现;本 spec 的全部场景改为对 `octoscode olp board archive` 运行,输出与退出码不变)
 - scripts/olp-board-archive.py
+- scripts/olp-inbox.py
 - tests/olp_board_archive.rs
 - docs/OLP_OUTER_BOOT.md(仅 §7 末尾新增"黑板归档"小节;§0–§6 不动)
 - specs/task-olp-board-archive.spec.md
@@ -79,9 +80,9 @@ estimate: 1d
 Scenario: 已闭环条目移入归档并留编号桩(critical)
   Tags: critical
   Test: board_archive_moves_closed_entries_and_leaves_numbered_stubs
-  Given 一块含前言、`##` 小节和五个条目的板,其中 #1、#5 为 ACK(done),#3 为 ACK(wontdo),#2 为 ACK(blocked),#4 无 ACK
+  Given 一块含前言、`##` 小节和五个条目的板,其中 #1、#5 在 ACK(done) 后获采认,#3 为无单元的卡,在 ACK(wontdo) 后被外环打回,#2 为 ACK(blocked),#4 无 ACK
   When 以 `--keep 0` 运行归档工具
-  Then #1、#3、#5 在板上变为"标题 + 原 ACK 行 + 归档标记"的桩,#2、#4、前言与小节逐字不变,板上编号仍为 1 到 5;归档文件含三个条目的完整原文
+  Then #1、#3、#5 在板上变为"标题 + 原 ACK 和判词 + 归档标记"的桩,#2、#4、前言与小节逐字不变,板上编号仍为 1 到 5;归档文件含三个条目的完整原文
 
 Scenario: 最近的条目原样保留
   Test: board_archive_keeps_the_most_recent_entries_intact
@@ -89,11 +90,11 @@ Scenario: 最近的条目原样保留
   When 以 `--keep 2` 运行;以及在另一份拷贝上以默认参数运行
   Then `--keep 2` 时已闭环的 #5 保持原样而 #1、#3 被归档;默认(保留 10 个)时板不变且不产生归档文件
 
-Scenario: 闭环判定只看围栏外的最后一条 ACK
-  Test: board_archive_closure_uses_last_ack_outside_code_fences
-  Given 条目分别为:围栏内含示例标题与 ACK(done)、先 done 后 blocked、旧格式 `ACK:`、先 blocked 后 done
+Scenario: 闭环判定只看围栏外本卡的最新有效事件
+  Test: board_archive_follows_latest_event_outside_code_fences
+  Given 条目分别为:围栏内含示例标题及采认、先采认后 blocked、旧格式 `ACK:`、先 blocked 后 done 并获采认
   When 以 `--keep 0` 运行
-  Then 只有"先 blocked 后 done"的条目被归档,它的桩按原顺序保留两条 ACK 行与 olp-key 标记;其余条目逐字不变
+  Then 只有最后获得采认的条目被归档,它的桩按原顺序保留两条 ACK 行与 olp-key 标记;其余条目逐字不变
 
 ### Rule: safety — 幂等与并发
 Scenario: 重跑幂等,中断后不重复归档(critical)
@@ -131,12 +132,27 @@ Scenario: 用法错误不触碰任何文件
 Scenario: 多机部署的卡按外环的结论闭环,给机器读的行留在板上(critical)
   Tags: critical
   Test: board_archive_follows_outer_verdicts_and_keeps_machine_lines
-  Given 五张没有条目内 ACK 的卡:#1 已采认,#2 采认后单元又推送,#3 被 #4 改判作废,#5 远程 ACK 后被打回;推送登记与判词都追加在板尾(物理上在 #5 下面)
+  Given 六张卡:#1 已采认,#2 采认后单元又推送,#3 被 #4 改判作废,#5 属于单元,远程 ACK 后被打回,#6 已采认;推送登记与判词都追加在 #6 下面
   When 以 `--keep 0` 运行
-  Then 只有 #1、#3、#5 被归档;#1 的桩保留 `unit:` 行与键标记;#5 的桩逐字保留板尾全部七行登记与判词;#2、#4 逐字不变;三段正文进入归档文件
+  Then 只有 #1、#3、#6 被归档;#1 的桩保留 `unit:` 行与键标记;#6 的桩逐字保留板尾登记与判词;#2、#4、#5 逐字不变;三段正文进入归档文件
 
 Scenario: 采集要读的单元信号留在桩里,先归档后采集也不漏
   Test: board_archive_keeps_unit_signals_for_the_harvest
   Given 一张已采认的卡,条目下有负哨、单元转发的 MCP timeout 与 blocked 行,以及 ask、answer 审计行和一条普通进度行
   When 以 `--keep 0` 运行
   Then 桩逐字保留负哨、timeout、blocked 三行;ask、answer、进度行与正文进入归档文件,不在板上
+
+
+Scenario: 归档保持收件箱、单元占用和派单结果一致(critical)
+  Tags: critical
+  Test: board_archive_preserves_open_work_and_unit_occupancy
+  Given 单元卡分别为已打回、裸 ACK、远程具名 ACK、已采认、已搁置、旧版误归档后仍待返工;历史区记录重复的采认
+  When 以 `--keep 0` 归档,再对返工中的单元派一张新卡
+  Then 只归档已采认的正文;待办和单元占用视图逐项保持一致,历史区原样保留,新派单因原卡仍占用而被拒绝
+
+
+Scenario: 归档桩保留紧邻编号键的原始投递绑定
+  Test: board_archive_keeps_only_complete_adjacent_dispatch_bindings
+  Given 已采认的卡中有派卡绑定、对应编号键,以及围栏内、引用内、编号不符与未紧邻键的示例
+  When 归档该卡
+  Then 编号桩保留正确绑定与对应键的原始相邻行,其余示例随正文进入归档文件

@@ -51,6 +51,7 @@ estimate: 1d
 ## Boundaries
 
 ### Allowed Changes
+- src/olp/dispatch.rs、src/olp/append.rs(2026-11-23:Markdown 板上派卡的 Rust 实现;本 spec 的场景改为对 `octoscode olp card dispatch --board` 运行,检查、写板、唤醒、输出、退出码不变;另可用 `--avoid` 在卡上写 `avoid:` 行)
 - scripts/olp-dispatch.py
 - scripts/olp-inbox.py(占用视图;带 `unit:` 的卡被打回后归为进行中)
 - tests/olp_dispatch.rs

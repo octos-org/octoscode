@@ -32,6 +32,11 @@ server 脚本、本规格、以及 S2 的内环工具配置 diff。operator 已�
 - **审计**:每次 Q/A(发问、作答、超时降级、限额拒绝)经
   `~/.octos/outer/board_append.sh` 自动落板,署名 `MCP(ask_outer)`;
   黑板仍是唯一权威账本,信箱文件只是传输介质。
+- **hub 用事件日志时**(单元配置 `store = log`,2026-11-26):发问、作答、超时之外再各运行
+  一次 `octoscode olp remote question ask|answer|timeout <id>`,把提问及其结局记进 hub 的
+  日志——外环值守靠日志里的 `asked` 事件叫醒外环。发问的上报在后台进行,不占等待时间;结局
+  在发问的上报结束后再报。上报失败不影响这次调用。server 自己仍不联网,连 hub 的是这条子
+  命令(与 Markdown 黑板时的 `board_append.sh` 同一角色)。
 - **防思考外包**:每片(每个 goal/任务切片,以调用方传入的切片标识
   或服务端会话窗口计)限 **3 次** `ask_outer` 问询;`tried` 字段必填
   (内环已尝试过的路径,空值即拒);超限返回拒绝语,不进入信箱。
@@ -45,6 +50,7 @@ server 脚本、本规格、以及 S2 的内环工具配置 diff。operator 已�
 
 ### Allowed Changes
 - specs/task-req-olp-mcp.spec.md(本文件)
+- tests/olp_mcp_contract.rs
 - octoscode olp-mcp-serve 子命令(#31 Rust 化:src/olp_mcp.rs + src/cmd/olp_mcp.rs,纯 stdlib 无新依赖;Python 原型归档 scripts/reference/)
 - S2 的内环 MCP 工具配置(配置 diff 先落板给外环过目,确认后再生效)
 
@@ -108,6 +114,12 @@ Scenario: 等待时间短于 MCP 客户端的工具调用上限
   When 以默认值、压缩时钟、90、0、负数、非数字配置 OLP_MCP_TIMEOUT_SECS
   Then 默认等待 50s;超过 55s 的配置被压到 55s;非正数与非数字回到默认值;压缩时钟的小数值原样保留
 
+Scenario: hub 用事件日志时,提问与它的结局记进 hub 的日志
+  Test: ask_outer_on_a_log_hub_reports_the_question_and_how_it_ended
+  Given 单元配置 `store = log`、`hub = local`,无人作答
+  When 内环调用 ask_outer(问题有两行)
+  Then hub 的日志里依次有 asked 与 timed_out 两条事件,单元号、提问 id 一致,问题并成一行
+
 Scenario: 限额拒绝
   测试: self_test_ask_outer_quota_refusal
   Given 同一切片已问询 3 次,且这 3 次都真的进了信箱(生成问询 id 不消耗配额)
@@ -133,3 +145,9 @@ Scenario: report_blocked 直通落板
 S2(真机端到端,外环过目配置 diff 后执行):`octos mcp` 挂载 server,
 内环一次真实 ask_outer 发问 → 外环接问作答 → turn 内收到答案,全程
 落板可查。
+
+Scenario: 答案已经到了就立刻返回,不等 hub 收完上报
+  Test: ask_outer_returns_the_answer_without_waiting_for_a_slow_hub
+  Given hub 用事件日志,每次上报要八秒才收完;答案在提问落盘后立刻写好
+  When 内环调用 ask_outer
+  Then 五秒内拿到答案;提问的上报照常发往 hub

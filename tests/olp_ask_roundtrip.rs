@@ -62,12 +62,12 @@ impl Cluster {
              while [ \"$1\" = \"-o\" ]; do shift 2; done\n\
              shift\n\
              case \"$1\" in\n\
-               append|read) SSH_ORIGINAL_COMMAND=\"$*\" exec python3 -B '{remote}' serve --unit m07 --board '{board}' ;;\n\
-               *) SSH_ORIGINAL_COMMAND=\"$*\" exec python3 -B '{answer}' serve --root '{root}' --max-age \"$(cat '{max_age}' 2>/dev/null || echo 50)\" ;;\n\
+               append|read) SSH_ORIGINAL_COMMAND=\"$*\" exec '{remote}' olp remote serve --unit m07 --board '{board}' ;;\n\
+               *) SSH_ORIGINAL_COMMAND=\"$*\" exec '{answer}' olp ask serve --root '{root}' --max-age \"$(cat '{max_age}' 2>/dev/null || echo 50)\" ;;\n\
              esac\n",
             down = c.down().display(),
-            remote = scripts().join("olp-board-remote.py").display(),
-            answer = scripts().join("olp-answer.py").display(),
+            remote = env!("CARGO_BIN_EXE_octoscode"),
+            answer = env!("CARGO_BIN_EXE_octoscode"),
             board = c.board().display(),
             root = c.unit_root().display(),
             max_age = c.max_age().display(),
@@ -75,8 +75,8 @@ impl Cluster {
         c.write_executable(&c.fake_ssh(), &ssh);
         // The unit's MCP audit hook: forward, signed, to the hub.
         let hook = format!(
-            "#!/bin/sh\nexec python3 -B '{}' append --sign\n",
-            scripts().join("olp-board-remote.py").display()
+            "#!/bin/sh\nexec '{}' olp remote append --sign\n",
+            env!("CARGO_BIN_EXE_octoscode")
         );
         c.write_executable(&c.unit_root().join("board_append.sh"), &hook);
         c
@@ -129,10 +129,17 @@ impl Cluster {
     }
 
     fn python(&self, script: &str, args: &[&str], stdin: Option<&str>) -> Output {
-        let mut cmd = Command::new("python3");
-        cmd.arg("-B")
-            .arg(scripts().join(script))
-            .args(args)
+        // The answer tool is Rust now; the name is kept in the calls below.
+        let mut cmd = if script == "olp-answer.py" {
+            let mut c = Command::new(env!("CARGO_BIN_EXE_octoscode"));
+            c.args(["olp", "ask"]);
+            c
+        } else {
+            let mut c = Command::new("python3");
+            c.arg("-B").arg(scripts().join(script));
+            c
+        };
+        cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -344,9 +351,8 @@ fn answer_validates_input_and_reports_an_unreachable_unit() {
 
     // The unit's forced command allows nothing else.
     for original in ["", "cat /etc/passwd", "answer", "answer a b", "show ../x"] {
-        let out = Command::new("python3")
-            .arg("-B")
-            .arg(scripts().join("olp-answer.py"))
+        let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+            .args(["olp", "ask"])
             .args(["serve", "--root"])
             .arg(c.unit_root())
             .env("SSH_ORIGINAL_COMMAND", original)
@@ -389,9 +395,8 @@ fn answer_list_hides_questions_that_timed_out_long_ago() {
             .unwrap();
     }
     let serve = |original: &str, extra: &[&str]| {
-        Command::new("python3")
-            .arg("-B")
-            .arg(scripts().join("olp-answer.py"))
+        Command::new(env!("CARGO_BIN_EXE_octoscode"))
+            .args(["olp", "ask"])
             .args(["serve", "--root", dir.path().to_str().unwrap()])
             .args(extra)
             .env("SSH_ORIGINAL_COMMAND", original)
@@ -428,4 +433,26 @@ fn answer_list_hides_questions_that_timed_out_long_ago() {
         stdout(&out)
     );
     assert_eq!(std::fs::read_dir(&questions).unwrap().count(), 4);
+}
+
+/// Scenario: 连上以后卡住的 ssh 到时限算单元不可达
+#[test]
+fn a_stalled_connection_to_the_unit_ends_at_the_deadline() {
+    let c = Cluster::new();
+    let stuck = c.unit_root().join("../stuck-ssh");
+    c.write_executable(&stuck, "#!/bin/sh\nexec sleep 300\n");
+    let started = std::time::Instant::now();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_octoscode"));
+    cmd.args(["olp", "ask", "list", "m07"]);
+    c.env(&mut cmd);
+    let out = cmd
+        .env("OLP_SSH", &stuck)
+        .env("OLP_SSH_TIMEOUT", "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(75), "{}", stderr(&out));
+    assert!(stderr(&out).contains("不可达"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("秒内没有答复"), "{}", stderr(&out));
+    assert!(started.elapsed() < std::time::Duration::from_secs(60));
 }

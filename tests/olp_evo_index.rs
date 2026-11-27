@@ -12,10 +12,6 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn index_script() -> PathBuf {
-    repo_root().join("scripts/olp-evo-index.sh")
-}
-
 fn fixture_repo() -> PathBuf {
     // copy fixtures/evolution/index → temp so INDEX.md writes stay sandboxed
     // 44-r1: per-TEST temp dir (parallel-safe), cleaned by the caller
@@ -50,8 +46,8 @@ fn mtime(p: &Path) -> std::time::SystemTime {
 #[test]
 fn olp_evo_index_lists_flaws_and_retired_prose() {
     let repo = fixture_repo();
-    let out = Command::new("bash")
-        .arg(index_script())
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "index"])
         .arg(&repo)
         .output()
         .unwrap();
@@ -98,8 +94,8 @@ fn olp_evo_index_lists_flaws_and_retired_prose() {
 #[test]
 fn olp_evo_index_is_idempotent() {
     let repo = fixture_repo();
-    let out = Command::new("bash")
-        .arg(index_script())
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "index"])
         .arg(&repo)
         .output()
         .unwrap();
@@ -108,8 +104,8 @@ fn olp_evo_index_is_idempotent() {
     let before_text = std::fs::read_to_string(&idx).unwrap();
     let before_m = mtime(&idx);
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    let out2 = Command::new("bash")
-        .arg(index_script())
+    let out2 = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "index"])
         .arg(&repo)
         .output()
         .unwrap();
@@ -125,8 +121,8 @@ fn olp_evo_index_is_idempotent() {
 #[test]
 fn olp_evo_index_lists_issue_and_pr_together() {
     let repo = fixture_repo();
-    let out = Command::new("bash")
-        .arg(index_script())
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "index"])
         .arg(&repo)
         .output()
         .unwrap();

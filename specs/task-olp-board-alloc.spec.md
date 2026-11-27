@@ -64,6 +64,7 @@ estimate: 1d
 - scripts/olp-evo-retro.sh(仅预检接入与退出码注释)
 - scripts/olp-evo-spec-skeleton.sh(仅预检接入)
 - tests/olp_board_alloc.rs
+- src/olp/append.rs、tests/olp_append_native.rs(2026-11-23:两条命令的 Rust 实现;脚本保留,`olp init` 仍把它们单文件装到 `~/.octos/outer/`)
 - docs/OCTOLOOP_AGENTS.md
 - docs/OCTOLOOP_AGENTS.zh-CN.md
 - specs/task-olp-board-alloc.spec.md
@@ -183,3 +184,21 @@ Scenario: 非法请求在触碰登记文件前被拒绝
   Given 非法前缀、非法位数、空键、含制表符或换行的键
   When 分别调用分配脚本
   Then 退出码均为 2,登记文件与锁文件都没有被创建
+
+Scenario: Rust 版在锁内分配编号、按键去重、旧写法原样追加
+  Test: native_append_allocates_dedups_and_keeps_legacy_entries
+  Given PATH 上没有 flock 程序,一块末行不是空行的板
+  When 用 octoscode olp board append 追加带 {N} 的条目、带键的条目两次、无编号带键的条目两次、旧写法条目,以及各种不合法的输入
+  Then 编号为板上最大号加一且正文里的 {N} 全部替换,标题上方空一行;同一个键第二次不追加并返回原编号;旧写法逐字追加;不合法的输入退出码 2 且不创建板与锁文件
+
+Scenario: Rust 版与脚本并发写同一块板,编号不重复、条目不交错
+  Test: native_and_script_writers_share_one_lock
+  Given 16 个并发写入方,一半用 Rust 版、一半用 olp-board-append.sh(主机没有 flock 时全部用 Rust 版)
+  When 同时向一块板追加带 {N} 的三行条目
+  Then 得到 1 到 16 各一次,板上每个条目的三行连在一起
+
+Scenario: Rust 版按自然键分配编号,并发不重复
+  Test: native_id_alloc_is_stable_per_key_and_unique_under_load
+  Given PATH 上没有 flock 程序
+  When 用 octoscode olp id alloc 对两个前缀、若干键请求编号,其中有重复的键和带反斜杠的键;12 个并发请求 6 个键;再用各种不合法的输入请求
+  Then 同一个键总是同一个编号,各前缀独立计数,登记文件每行四列;并发下 6 个键恰好 6 个编号;不合法的输入退出码 2 且不创建登记文件与锁文件

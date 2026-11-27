@@ -25,6 +25,13 @@ estimate: 0.5d
   是让外环先跑上面的 resume;`--prompt` 换话,`--no-prompt` 不送。送不进去(agent 卡在确认
   界面:herdr 报 `agent_blocked`;或超时)时 stderr 提醒、黑板记一行"接班提示未送达",重启
   本身仍算成功(退出码 0)。`install` 原样传递这些参数。
+- 提示算送到,要 herdr 看到 agent 开始办(`agent prompt … --wait --until working --until
+  blocked`,10 秒)。没看到时:agent 空闲(`agent wait --until idle`,1 秒)才往窗格补一个
+  回车,再等 10 秒,最多四次,每次间隔 3 秒;agent 不空闲(例如卡在确认界面)就不按。提示本身
+  只打一次。来源:2026-11-26 在 hub 上实测,刚启动的 octoscode 丢了回车,提示留在输入框里,
+  原先却报已送达。
+- `--board` 是事件日志目录时:简报多一段"监督任务的留言"(日志里最近 5 条 note 事件);检查
+  单的"重新挂正哨"换成"确认外环值守已注册(`olp keepalive list` 里的 `…-watch`,有就不要自己再启动)","署名记接班"换成"不用另记"。
 - skill 外环模式加"被自动重启后(接班)"一段;`docs/OLP_KEEPALIVE.md` §4a 补充说明。
 
 ## Boundaries
@@ -59,6 +66,12 @@ Scenario: 提示没送到时黑板记一行,重启仍算成功
   Given agent 一直不就绪
   When 运行 supervise --ready 1
   Then 退出码 0,stderr 提醒没送到,黑板有"接班提示未送达",没有送提示
+
+Scenario: 提示打进去了但 agent 没有开始办时,在它空闲时再按回车
+  Test: outer_supervise_presses_enter_again_when_the_prompt_was_not_taken
+  Given 假 herdr 收下提示但 agent 不开始办,直到窗格收到回车
+  When 运行 supervise
+  Then 提示只打一次,窗格收到一次回车,输出 prompted
 
 Scenario: --no-prompt 不送任何话
   Test: outer_supervise_sends_nothing_with_no_prompt

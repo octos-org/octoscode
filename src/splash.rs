@@ -401,16 +401,66 @@ fn play_inner(theme: &crate::cli::ThemeName) -> Result<()> {
     Ok(())
 }
 
-/// Drain pending terminal events; any key press or resize stops the splash.
-/// Errors read as "stop" — never let event plumbing wedge the animation.
+/// What an event that arrives during the splash means for it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SplashInput {
+    /// Not a reason to stop (a key release, focus, mouse).
+    Ignore,
+    /// The gesture to skip the animation: used up here.
+    Skip,
+    /// Text meant for the prompt: stops the animation and is handed on.
+    Typed,
+}
+
+/// Enter, Esc, Space, arrows and control chords skip the animation. A
+/// printable character or a paste is the start of a prompt typed ahead (a
+/// person in a hurry, or a supervisor handing over its first prompt): the
+/// animation stops and the TUI gets it as its first input.
+pub fn classify_input(event: &crossterm::event::Event) -> SplashInput {
+    use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+    match event {
+        Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+            KeyCode::Char(c) if c != ' ' && (key.modifiers - KeyModifiers::SHIFT).is_empty() => {
+                SplashInput::Typed
+            }
+            _ => SplashInput::Skip,
+        },
+        Event::Paste(_) => SplashInput::Typed,
+        Event::Resize(..) => SplashInput::Skip,
+        _ => SplashInput::Ignore,
+    }
+}
+
+/// What was typed while the splash played, oldest first.
+static TYPED: std::sync::Mutex<Vec<crossterm::event::Event>> = std::sync::Mutex::new(Vec::new());
+
+/// The input the splash stopped for, for the TUI to take as its first
+/// events. Empty after the first call.
+pub fn take_typed() -> Vec<crossterm::event::Event> {
+    TYPED
+        .lock()
+        .map(|mut held| std::mem::take(&mut *held))
+        .unwrap_or_default()
+}
+
+/// Drain pending terminal events; a key press, a paste or a resize stops
+/// the splash. Errors read as "stop" — never let event plumbing wedge the
+/// animation.
 fn key_or_resize_pending() -> bool {
-    use crossterm::event::{Event, KeyEventKind, poll, read};
+    use crossterm::event::{poll, read};
     loop {
         match poll(std::time::Duration::ZERO) {
             Ok(true) => match read() {
-                Ok(Event::Key(key)) if key.kind == KeyEventKind::Press => return true,
-                Ok(Event::Resize(..)) => return true,
-                Ok(_) => continue,
+                Ok(event) => match classify_input(&event) {
+                    SplashInput::Ignore => continue,
+                    SplashInput::Skip => return true,
+                    SplashInput::Typed => {
+                        if let Ok(mut held) = TYPED.lock() {
+                            held.push(event);
+                        }
+                        return true;
+                    }
+                },
                 Err(_) => return true,
             },
             Ok(false) => return false,

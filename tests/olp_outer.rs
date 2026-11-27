@@ -63,13 +63,31 @@ elif args[:2] == ["pane", "process-info"]:
     out({"process_info": {"foreground_processes": procs}})
 elif args[:2] == ["agent", "wait"]:
     state = os.path.join(here, "agent_state")
-    if os.path.exists(state) and open(state).read().strip() == "never":
+    state = open(state).read().strip() if os.path.exists(state) else ""
+    lost = state == "enter_lost" and "working" in args and not os.path.exists(os.path.join(here, "entered"))
+    if state == "never" or lost:
         print(json.dumps({"error": {"message": "timeout"}}))
         sys.exit(1)
     out({"status": "idle"})
 elif args[:2] == ["agent", "prompt"]:
     with open(os.path.join(here, "prompts.log"), "a") as f:
         f.write(args[3] + "\n")
+    state = os.path.join(here, "agent_state")
+    if os.path.exists(state) and open(state).read().strip() == "enter_lost":
+        # Typed, but the Enter was lost: the agent never starts on it.
+        print(json.dumps({"error": {"message": "timeout"}}))
+        sys.exit(1)
+    out({})
+elif args[:2] == ["pane", "get"]:
+    state = os.path.join(here, "agent_state")
+    unseen = os.path.exists(state) and open(state).read().strip() == "never"
+    out({"pane": {"pane_id": args[2], "agent": None if unseen else "claude"}})
+elif args[:2] == ["pane", "report-agent-session"]:
+    with open(os.path.join(here, "resume.log"), "a") as f:
+        f.write(json.dumps(args[2:]) + "\n")
+    out({})
+elif args[:2] == ["pane", "send-keys"]:
+    open(os.path.join(here, "entered"), "w").write(args[3])
     out({})
 elif args[:2] == ["pane", "run"]:
     p = subprocess.Popen(["/bin/sh", "-c", args[3]], start_new_session=True,
@@ -117,12 +135,16 @@ impl Sb {
     }
 
     fn supervise(&self, extra: &[&str], agent: &str) -> Output {
+        self.supervise_on("board.md", extra, agent)
+    }
+
+    fn supervise_on(&self, board: &str, extra: &[&str], agent: &str) -> Output {
         self.cmd()
             .args(["olp", "outer", "supervise", "--project"])
             .arg(self.p("project"))
             .args(["--signature", "hub-outer", "--duties", "primary-review"])
             .arg("--board")
-            .arg(self.p("board.md"))
+            .arg(self.p(board))
             .args(extra)
             .args(["--", "/bin/sh", "-c", agent])
             .output()
@@ -319,6 +341,64 @@ fn outer_install_registers_supervise_as_a_keepalive_job() {
     );
 }
 
+/// Scenario: 黑板是事件日志时,install 另注册外环值守
+#[test]
+fn outer_install_registers_the_watcher_for_an_event_log() {
+    let sb = Sb::new();
+    std::fs::create_dir_all(sb.p("log")).unwrap();
+    let install = |board: &str, jobs: &str| {
+        let out = sb
+            .cmd()
+            .args(["olp", "outer", "install", "--project"])
+            .arg(sb.p("project"))
+            .args(["--signature", "hub-outer", "--duties", "primary-review"])
+            .args(["--label", "my-outer", "--board"])
+            .arg(sb.p(board))
+            .args(["--no-load", "--dir"])
+            .arg(sb.p(jobs))
+            .args(["--", "claude", "--continue"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
+        let mut found: Vec<(String, String)> = std::fs::read_dir(sb.p(jobs))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .map(|p| {
+                (
+                    p.file_name().unwrap().to_string_lossy().into_owned(),
+                    std::fs::read_to_string(&p).unwrap(),
+                )
+            })
+            .collect();
+        found.sort();
+        found
+    };
+    // launchd writes one file per job, systemd a service and a timer.
+    let is_watch = |name: &str| name.contains("outer-watch");
+    let on_log = install("log", "jobs-log");
+    assert!(on_log.iter().any(|(name, _)| !is_watch(name)), "{on_log:?}");
+    let watch = &on_log
+        .iter()
+        .find(|(name, text)| is_watch(name) && text.contains("--label"))
+        .expect("a job named outer-watch")
+        .1;
+    for word in ["watch", "--label", "my-outer", "--once", "OLP_HERDR"] {
+        assert!(watch.contains(word), "missing {word}: {watch}");
+    }
+    assert!(
+        watch.contains(&sb.p("log").display().to_string()),
+        "{watch}"
+    );
+    assert!(!watch.contains("supervise"), "{watch}");
+    // A Markdown board has its own watch: one job only.
+    let on_board = install("board.md", "jobs-md");
+    assert!(!on_board.is_empty(), "the supervisor's own job");
+    assert!(
+        !on_board.iter().any(|(name, _)| is_watch(name)),
+        "{on_board:?}"
+    );
+}
+
 /// Scenario: 重启后等 agent 就绪,把接班提示送进去;没送到在黑板上记一行;--no-prompt 不送
 #[test]
 fn outer_supervise_hands_the_restarted_outer_the_resume_prompt() {
@@ -343,6 +423,78 @@ fn outer_supervise_hands_the_restarted_outer_the_resume_prompt() {
     assert!(prompts.contains("board.md"), "{prompts}");
 }
 
+/// Scenario: 重启后把带 hold 的完整命令登记成 herdr 的恢复命令,不报状态
+#[test]
+fn outer_supervise_registers_the_hold_command_as_herdrs_resume_command() {
+    let sb = Sb::new();
+    let out = sb.supervise(&["--no-prompt"], "while true; do sleep 0.1; done");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("resume command registered"),
+        "{}",
+        stdout(&out)
+    );
+    let log = std::fs::read_to_string(sb.p("herdr/resume.log")).unwrap();
+    let args: Vec<String> = serde_json::from_str(log.lines().next().unwrap()).unwrap();
+    let at = args
+        .iter()
+        .position(|w| w == "--")
+        .expect("a resume command");
+    let (flags, resume) = (&args[..at], &args[at + 1..]);
+    assert_eq!(flags[0], "w1:p1");
+    assert!(
+        flags.windows(2).any(|w| w == ["--source", "olp-outer"]),
+        "{flags:?}"
+    );
+    assert!(
+        flags.windows(2).any(|w| w == ["--agent", "claude"]),
+        "{flags:?}"
+    );
+    assert!(
+        !flags.iter().any(|w| w == "--state"),
+        "the agent's state is herdr's to read"
+    );
+    // A plain command name first, and the agent's own herdr integration off.
+    assert_eq!(resume[..3], ["env", "-u", "HERDR_ENV"]);
+    assert_eq!(resume[3], env!("CARGO_BIN_EXE_octoscode"));
+    assert_eq!(resume[4..6], ["outer-duty", "hold"]);
+    let tail: Vec<&str> = resume
+        .iter()
+        .rev()
+        .take(3)
+        .rev()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(tail, ["/bin/sh", "-c", "while true; do sleep 0.1; done"]);
+    assert_eq!(sb.calls("pane report-agent "), 0);
+}
+
+/// Scenario: 锁空着而窗格里一直有程序在跑时,第二次看到就留言一次
+#[test]
+fn outer_supervise_notes_a_pane_that_stays_busy_without_the_lock() {
+    let sb = Sb::new();
+    std::fs::write(
+        sb.p("herdr/workspaces.json"),
+        r#"[{"workspace_id":"w1","label":"olp-outer"}]"#,
+    )
+    .unwrap();
+    std::fs::write(sb.p("herdr/busy"), "claude\n").unwrap();
+    for round in 1..=3 {
+        let out = sb.supervise(&[], "true");
+        assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+        if has_flock() {
+            let notes = sb.board().matches("外环没有持锁").count();
+            assert_eq!(
+                notes,
+                usize::from(round >= 2),
+                "round {round}: {}",
+                sb.board()
+            );
+        }
+    }
+    assert_eq!(sb.calls("pane run"), 0);
+}
+
 #[test]
 fn outer_supervise_notes_a_prompt_that_was_not_delivered() {
     let sb = Sb::new();
@@ -354,6 +506,66 @@ fn outer_supervise_notes_a_prompt_that_was_not_delivered() {
         assert!(sb.board().contains("接班提示未送达"), "{}", sb.board());
     }
     assert_eq!(sb.calls("agent prompt"), 0);
+}
+
+/// Scenario: 提示打进去了但 agent 没有开始办时,在它空闲时再按回车
+#[test]
+fn outer_supervise_presses_enter_again_when_the_prompt_was_not_taken() {
+    let sb = Sb::new();
+    std::fs::write(sb.p("herdr/agent_state"), "enter_lost").unwrap();
+    let out = sb.supervise(&[], "while true; do sleep 0.1; done");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("prompted pane w1:p1"),
+        "{}{}",
+        stdout(&out),
+        stderr(&out)
+    );
+    assert_eq!(sb.calls("agent prompt"), 1, "the prompt is typed once");
+    assert_eq!(sb.calls("pane send-keys"), 1);
+    let key = std::fs::read_to_string(sb.p("herdr/entered")).unwrap();
+    assert_eq!(key, "Enter");
+}
+
+/// Scenario: 黑板是事件日志时,监督的留言写成日志里的一条事件
+#[test]
+fn outer_supervise_writes_its_notes_into_an_event_log() {
+    let sb = Sb::new();
+    std::fs::create_dir_all(sb.p("log")).unwrap();
+    let out = sb.supervise_on("log", &["--no-prompt"], "while true; do sleep 0.1; done");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(!stderr(&out).contains("没写进"), "{}", stderr(&out));
+    let events = std::fs::read_to_string(sb.p("log/events-000001.jsonl")).unwrap();
+    let note: serde_json::Value = serde_json::from_str(events.lines().next().unwrap()).unwrap();
+    assert_eq!(note["kind"], "note");
+    assert_eq!(note["actor"], "外环监督");
+    let text = note["data"]["text"].as_str().unwrap();
+    assert!(text.starts_with("外环已自动重启(hub-outer)"), "{text}");
+
+    let view = sb
+        .cmd()
+        .args(["olp", "board", "render"])
+        .arg(sb.p("log"))
+        .output()
+        .unwrap();
+    assert!(
+        stdout(&view).contains("> 外环监督: 外环已自动重启"),
+        "{}",
+        stdout(&view)
+    );
+    let brief = sb
+        .cmd()
+        .args(["olp", "outer", "resume", "--project"])
+        .arg(sb.p("project"))
+        .arg("--board")
+        .arg(sb.p("log"))
+        .output()
+        .unwrap();
+    let said = stdout(&brief);
+    assert!(said.contains("监督任务的留言"), "{said}");
+    assert!(said.contains("olp outer watch"), "{said}");
+    assert!(said.contains("keepalive list"), "{said}");
+    assert!(!said.contains("board watch"), "{said}");
 }
 
 #[test]

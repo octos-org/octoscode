@@ -1,6 +1,8 @@
 # OLP Review Evidence — 行为证据互审流程
 
-> 入口: `scripts/olp-review-evidence.py` · 监控: `scripts/olp-review-monitor.py`
+> 入口: `octoscode olp review …`(Rust,`src/olp/reviewevidence.rs`;原 `scripts/olp-review-evidence.py`,`OCTOSCODE_OLP_LEGACY=1` 时仍运行脚本) · 监控: `octoscode olp review monitor`
+>
+> 下文命令示例写作 `python3 scripts/olp-review-evidence.py <子命令> …`,等价于 `octoscode olp review <子命令> …`,参数相同。`challenge --live-cargo` 执行的固定 adapter 是本二进制自身的 `olp review cargo`。
 > Spec: [specs/task-evo-review-evidence.spec.md](../specs/task-evo-review-evidence.spec.md)
 > Plan: [docs/superpowers/plans/2026-09-09-review-evidence.md](superpowers/plans/2026-09-09-review-evidence.md)
 
@@ -135,7 +137,10 @@ python3 scripts/olp-review-evidence.py challenge <review_dir> \
    `not-replayed`,不自动 accepted。
 2. **内容门**: 证据含结构锚(测试名行 + panicked at + FAILED 汇总,
    或通过形态 `test result: ok.`);纯文档/字符串断言 →
-   `evidence-not-behavioral`,claim 置 `unverified`。
+   `evidence-not-behavioral`,claim 置 `unverified`。**注意这一步会覆盖
+   已有判词**:同一条 claim 先经 `--live-cargo` 得到 executed 的判词,之后
+   再对它提交一份文档性的 `--evidence`,判词就回到 `unverified`——每条
+   claim 只留最后一次提交的结论。要恢复,重跑一次 `--live-cargo`。
 3. **测试名解析**: `--test-name` 必须能在 `--harness-root` 源码中解析到
    `fn <name>(` 定义。
 4. **执行终拒(核心)**: 结构锚齐全但无本入口真实执行的 receipt →

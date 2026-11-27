@@ -70,8 +70,8 @@ fn olp_evo_metrics_text_output() {
             ),
         ],
     );
-    let out = Command::new("bash")
-        .arg(metrics_script())
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "metrics"])
         .arg(&repo)
         .output()
         .unwrap();
@@ -122,8 +122,8 @@ fn olp_evo_metrics_json_and_since_window() {
             ("turn_error", "events /e", "{\"detail\":\"c\"}"),
         ],
     );
-    let out = Command::new("bash")
-        .arg(metrics_script())
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "metrics"])
         .arg(&repo)
         .args(["--json", "--since", "EVO-0003"])
         .output()
@@ -167,8 +167,8 @@ fn olp_evo_metrics_baseline_window_diagnostics() {
         r#"{"note":"x","through_evo":"EVO-0000","cards":4,"by_trigger":{"ack_blocked":3,"goal_blocked":1},"by_source":{"review":3,"events":1,"mcp":0},"recurring_candidates":0,"recurring":[],"deltas":[]}"#,
     )
     .unwrap();
-    let out = Command::new("bash")
-        .arg(metrics_script())
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "metrics"])
         .arg(&repo)
         .arg("--baseline")
         .arg(&baseline)
@@ -215,8 +215,8 @@ fn olp_evo_metrics_writes_nothing() {
     let before_repo = digest(&repo);
     let before_scripts = digest(&scripts_copy);
     let before_state = digest(&state);
-    let out = Command::new("bash")
-        .arg(metrics_script())
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "metrics"])
         .arg(&repo)
         .env("OLP_EVO_STATE", &state)
         .output()
@@ -252,8 +252,8 @@ fn olp_evo_metrics_empty_board_outputs_zero() {
     let repo = root.join("repo");
     std::fs::create_dir_all(repo.join(".octos")).unwrap();
     // no EVOLUTION.md at all
-    let out = Command::new("bash")
-        .arg(metrics_script())
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "metrics"])
         .arg(&repo)
         .output()
         .unwrap();
@@ -341,8 +341,8 @@ fn olp_evo_metrics_stall_matches_board_grammar() {
     let root = std::env::temp_dir().join(format!("m-stall-{}", std::process::id()));
     let repo = root.join("repo");
     std::fs::create_dir_all(&repo).unwrap();
-    let out = Command::new("bash")
-        .arg(metrics_script())
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "metrics"])
         .arg(&repo)
         .args(["--stall", &stall_fixture().to_string_lossy()])
         .args(["--stall-threshold", "30", "--now", "2026-09-05T00:45:00"])
@@ -363,8 +363,8 @@ fn olp_evo_metrics_stall_accepts_reverse_order_and_status_words() {
     let root = std::env::temp_dir().join(format!("m-rev-{}", std::process::id()));
     let repo = root.join("repo");
     std::fs::create_dir_all(&repo).unwrap();
-    let out = Command::new("bash")
-        .arg(metrics_script())
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "metrics"])
         .arg(&repo)
         .args(["--stall", &stall_fixture().to_string_lossy()])
         .args(["--now", "2026-09-05T00:45:00"])
@@ -383,8 +383,8 @@ fn olp_evo_metrics_stall_respects_threshold() {
     let root = std::env::temp_dir().join(format!("m-th-{}", std::process::id()));
     let repo = root.join("repo");
     std::fs::create_dir_all(&repo).unwrap();
-    let out = Command::new("bash")
-        .arg(metrics_script())
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "metrics"])
         .arg(&repo)
         .args(["--stall", &stall_fixture().to_string_lossy()])
         .args(["--stall-threshold", "60", "--now", "2026-09-05T00:45:00"])
@@ -423,16 +423,16 @@ fn olp_evo_metrics_fake_verified_counts_r2_records() {
     let root = std::env::temp_dir().join(format!("m-fv-{}", std::process::id()));
     let repo = root.join("repo");
     write_r2_board(&repo);
-    let out = Command::new("bash")
-        .arg(metrics_script())
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "metrics"])
         .arg(&repo)
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("fake_verified: 1"), "{text}");
     assert!(!text.contains("regress"), "{text}");
-    let out2 = Command::new("bash")
-        .arg(metrics_script())
+    let out2 = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "metrics"])
         .arg(&repo)
         .arg("--json")
         .output()
@@ -457,8 +457,8 @@ fn olp_evo_metrics_stall_slice_boundaries_and_dateless_entry() {
         "### 43. x(2026-09-01,外环)\n派单 43-old 无 ACK\n\n### 44. 无日期标题\n派单 44a\n派单 99xyz\nabc27c 派单\n",
     )
     .unwrap();
-    let out = Command::new("bash")
-        .arg(metrics_script())
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "metrics"])
         .arg(&repo)
         .arg("--stall")
         .arg(&board)
@@ -488,8 +488,8 @@ fn olp_evo_metrics_stall_invalid_date_is_unknown() {
         "### 44. x(2026-02-30,外环)\n派单 44a\n不派单 44b\n立案并派单 44c\n立案+派单 44d\n",
     )
     .unwrap();
-    let out = Command::new("bash")
-        .arg(metrics_script())
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "metrics"])
         .arg(&repo)
         .arg("--stall")
         .arg(&board)
@@ -522,8 +522,8 @@ fn olp_evo_metrics_stall_ignores_negated_and_compound_phrases() {
         "### 44. x(2026-09-01,外环)\n不派单 44a\n立案并派单 44b\n立案+派单 44c\n",
     )
     .unwrap();
-    let out = Command::new("bash")
-        .arg(metrics_script())
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "metrics"])
         .arg(&repo)
         .arg("--stall")
         .arg(&board)
@@ -555,8 +555,8 @@ fn olp_evo_metrics_stall_open_ignores_threshold() {
         "# 板\n\n### 43. 阶段 2(2026-09-05,外环)\n\n> 外环·**派单 43c-2**(2026-09-05 00:00):指标。\n\n### 44. 无日期条目\n\n派单 44a\n",
     )
     .unwrap();
-    let out = Command::new("bash")
-        .arg(metrics_script())
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "evo", "metrics"])
         .arg(&repo)
         .arg("--stall")
         .arg(&board)

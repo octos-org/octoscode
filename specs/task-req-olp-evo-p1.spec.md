@@ -94,6 +94,7 @@ grok 的对抗复审。
 ## 边界
 
 ### Allowed Changes
+- src/olp/evolib.rs、src/olp/evoretro.rs、src/olp/evometrics.rs、Cargo.toml(2026-11-23:公共库、retro、指标的 Rust 实现;相关场景改为对 `octoscode olp evo retro|metrics` 运行,简报、状态文件、输出与退出码不变。正则沿用原来的写法,为此把已在锁文件里的 fancy-regex 加为直接依赖。"retro 与 metrics 共享同一 lib"那个场景仍检查脚本本身)
 - scripts/olp-evo-retro.sh
 - scripts/olp-evo-harvest.sh
 - tests/olp_evo_retro.rs

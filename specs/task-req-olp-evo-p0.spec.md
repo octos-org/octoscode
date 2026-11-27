@@ -74,6 +74,7 @@ estimate: 1.5d
 ## 边界
 
 ### Allowed Changes
+- src/olp/evoharvest.rs、src/olp/sentinel.rs(2026-11-23:采集的 Rust 实现;行为层面的场景改为对 `octoscode olp evo harvest` 运行,卡片、状态文件、输出与退出码不变,不再需要 GNU coreutils、flock、python3。"工具预检"与"单独拷贝脚本"的场景针对脚本本身,仍对脚本运行。侦听哨的 `--harvest` 改为调用本程序自带的采集)
 - specs/task-req-olp-evo-p0.spec.md
   <!-- self-allowance: 决策文字补充(如工具依赖说明)可改;场景与断言不可改 -->
 - scripts/olp-evo-harvest.sh

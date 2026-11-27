@@ -15,10 +15,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
-fn scripts() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts")
-}
-
 fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
@@ -43,9 +39,9 @@ impl Net {
         };
         std::fs::write(n.board(), "# 板\n\n### 212. 一张卡\nunit: m07\n\n").unwrap();
         let script = format!(
-            "#!/bin/sh\n[ -e '{down}' ] && exit 255\nwhile [ \"$1\" = \"-o\" ]; do shift 2; done\nshift\nSSH_ORIGINAL_COMMAND=\"$*\" exec python3 -B '{tool}' serve --unit m07 --board '{board}'\n",
+            "#!/bin/sh\n[ -e '{down}' ] && exit 255\nwhile [ \"$1\" = \"-o\" ]; do shift 2; done\nshift\nSSH_ORIGINAL_COMMAND=\"$*\" exec '{tool}' olp remote serve --unit m07 --board '{board}'\n",
             down = n.down().display(),
-            tool = scripts().join("olp-board-remote.py").display(),
+            tool = env!("CARGO_BIN_EXE_octoscode"),
             board = n.board().display(),
         );
         std::fs::write(n.fake_ssh(), script).unwrap();
@@ -67,15 +63,18 @@ impl Net {
     }
 
     fn command(&self, script: &str, args: &[&str]) -> Command {
-        let mut cmd = Command::new("python3");
-        cmd.arg("-B")
-            .arg(scripts().join(script))
-            .args(args)
-            .env("OLP_SSH", self.fake_ssh())
-            .env("OLP_HUB", "olp@hub-01")
-            .env("OLP_UNIT_ID", "m07")
-            .env("OLP_QUEUE_DIR", self.queue())
-            .env("OLP_UNIT_CONF", self.dir.path().join("absent.conf"));
+        // Both tools are Rust now; the script names are kept in the calls.
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_octoscode"));
+        cmd.args(match script {
+            "olp-alert-forward.py" => ["olp", "guard", "forward"].as_slice(),
+            _ => ["olp", "remote"].as_slice(),
+        })
+        .args(args)
+        .env("OLP_SSH", self.fake_ssh())
+        .env("OLP_HUB", "olp@hub-01")
+        .env("OLP_UNIT_ID", "m07")
+        .env("OLP_QUEUE_DIR", self.queue())
+        .env("OLP_UNIT_CONF", self.dir.path().join("absent.conf"));
         cmd
     }
 
@@ -297,9 +296,8 @@ fn alert_forward_only_emits_whitelisted_fields() {
 
     // Usage: an unknown kind, and no unit configuration.
     assert_eq!(n.forward(&["--only", "bogus"], &[]).status.code(), Some(2));
-    let out = Command::new("python3")
-        .arg("-B")
-        .arg(scripts().join("olp-alert-forward.py"))
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "guard", "forward"])
         .env("OLP_UNIT_CONF", n.dir.path().join("absent.conf"))
         .env_remove("OLP_HUB")
         .env_remove("OLP_UNIT_ID")
@@ -340,4 +338,152 @@ fn alert_forward_handles_an_inner_loop_without_a_ledger() {
         ],
         "no backend line, and no `turn=None`"
     );
+}
+
+/// Scenario: hub 用事件日志时告警走日志通道,连不上的留到下一条之前补发
+#[test]
+fn alert_forward_reaches_a_hub_that_keeps_an_event_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = env!("CARGO_BIN_EXE_octoscode");
+    let log = dir.path().join("log");
+    let mut open = Command::new(tool)
+        .args(["olp", "card", "open", "--log"])
+        .arg(&log)
+        .args(["--title", "给 m07 的卡", "--unit", "m07"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _ = open.stdin.take().unwrap().write_all("正文\n".as_bytes());
+    assert!(open.wait().unwrap().success());
+
+    // An ssh to the hub's log channel; the first call does not get through.
+    let ssh = dir.path().join("fake-ssh");
+    let script = format!(
+        "#!/bin/sh\nif [ ! -e '{0}/called' ]; then : > '{0}/called'; exit 255; fi\nwhile [ \"$1\" = \"-o\" ]; do shift 2; done\nshift\nSSH_ORIGINAL_COMMAND=\"$*\" exec '{tool}' olp remote serve-log --unit m07 --log '{1}'\n",
+        dir.path().display(),
+        log.display(),
+    );
+    std::fs::write(&ssh, script).unwrap();
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let about_card_1 = |mut record: serde_json::Value| {
+        record["identity"]["task"] = serde_json::json!(["1"]);
+        record
+    };
+    let records = [
+        about_card_1(record("process_missing", "alive", serde_json::json!([]))),
+        about_card_1(record(
+            "process_missing",
+            "process_zombie",
+            serde_json::json!([]),
+        )),
+    ];
+    let mut input = String::new();
+    for r in &records {
+        input.push_str(&r.to_string());
+        input.push('\n');
+    }
+    let forward = || {
+        let mut child = Command::new(tool)
+            .args(["olp", "guard", "forward"])
+            .env("OLP_SSH", &ssh)
+            .env("OLP_HUB", "olp@hub-01")
+            .env("OLP_UNIT_ID", "m07")
+            .env("OLP_STORE", "log")
+            .env("OLP_UNIT_CONF", dir.path().join("absent.conf"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let _ = child.stdin.take().unwrap().write_all(input.as_bytes());
+        child.wait_with_output().unwrap()
+    };
+    let out = forward();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).contains("留待下次再发"), "{}", stderr(&out));
+    let alerts = || -> Vec<serde_json::Value> {
+        std::fs::read_to_string(log.join("events-000001.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .filter(|e| e["kind"] == "alert")
+            .collect()
+    };
+    let seen = alerts();
+    assert_eq!(seen.len(), 2, "the one that waited went first: {seen:?}");
+    assert_eq!(seen[0]["card"], 1);
+    assert_eq!(seen[0]["actor"], "单元(m07)·负哨(#1)");
+    assert_eq!(
+        seen[0]["data"]["text"],
+        "agent_missing turn=turn-abc pid=4101 state=process_missing"
+    );
+    assert!(
+        seen[1]["data"]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("backend_missing turn=turn-abc"),
+        "{seen:?}"
+    );
+    // A restarted forwarder sees the same things: nothing is added.
+    assert!(forward().status.success());
+    assert_eq!(alerts().len(), 2);
+}
+
+/// Scenario: 中心恢复后,等着的告警不必等下一件事发生就送出
+#[test]
+fn an_alert_that_waited_goes_out_once_the_hub_is_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = env!("CARGO_BIN_EXE_octoscode");
+    let log = dir.path().join("log");
+    let mut open = Command::new(tool)
+        .args(["olp", "card", "open", "--log"])
+        .arg(&log)
+        .args(["--title", "给 m07 的卡", "--unit", "m07"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _ = open.stdin.take().unwrap().write_all("正文\n".as_bytes());
+    assert!(open.wait().unwrap().success());
+
+    // The first call does not get through; the hub is there from then on.
+    let ssh = dir.path().join("fake-ssh");
+    let script = format!(
+        "#!/bin/sh\nif [ ! -e '{0}/called' ]; then : > '{0}/called'; exit 255; fi\nwhile [ \"$1\" = \"-o\" ]; do shift 2; done\nshift\nSSH_ORIGINAL_COMMAND=\"$*\" exec '{tool}' olp remote serve-log --unit m07 --log '{1}'\n",
+        dir.path().display(),
+        log.display(),
+    );
+    std::fs::write(&ssh, script).unwrap();
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // The agent goes missing and stays missing: one thing, seen twice.
+    let mut gone = record("process_missing", "alive", serde_json::json!([]));
+    gone["identity"]["task"] = serde_json::json!(["1"]);
+    let input = format!("{gone}\n{gone}\n");
+    let mut child = Command::new(tool)
+        .args(["olp", "guard", "forward"])
+        .env("OLP_SSH", &ssh)
+        .env("OLP_HUB", "olp@hub-01")
+        .env("OLP_UNIT_ID", "m07")
+        .env("OLP_STORE", "log")
+        .env("OLP_UNIT_CONF", dir.path().join("absent.conf"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let _ = child.stdin.take().unwrap().write_all(input.as_bytes());
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).contains("留待下次再发"), "{}", stderr(&out));
+    let alerts: Vec<serde_json::Value> = std::fs::read_to_string(log.join("events-000001.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .filter(|e| e["kind"] == "alert")
+        .collect();
+    assert_eq!(alerts.len(), 1, "{alerts:?}");
+    assert_eq!(alerts[0]["card"], 1);
 }

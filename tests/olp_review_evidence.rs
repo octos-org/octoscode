@@ -51,10 +51,31 @@ fn head() -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+/// The review tool: `octoscode olp review`.
 fn py() -> Command {
-    let mut c = Command::new("python3");
-    c.arg(script());
+    let mut c = Command::new(env!("CARGO_BIN_EXE_octoscode"));
+    c.args(["olp", "review"]);
     c
+}
+
+/// The Rust sources of the review tool, for checks on the code itself.
+fn tool_source() -> String {
+    [
+        "reviewevidence.rs",
+        "reviewclassify.rs",
+        "reviewpeer.rs",
+        "reviewstate.rs",
+    ]
+    .iter()
+    .map(|f| {
+        std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/olp")
+                .join(f),
+        )
+        .unwrap()
+    })
+    .collect()
 }
 
 struct TmpDir(PathBuf);
@@ -452,15 +473,9 @@ fn run_adapter(
     env_fixture: Option<&str>,
     deadline: u64,
 ) -> (bool, String) {
-    let adapter =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/olp-review-evidence-cargo.py");
-    assert!(
-        adapter.exists(),
-        "生产 cargo adapter 缺失: {}",
-        adapter.display()
-    );
-    let mut c = Command::new("python3");
-    c.arg(&adapter)
+    // The adapter is Rust now: `octoscode olp review cargo`.
+    let mut c = Command::new(env!("CARGO_BIN_EXE_octoscode"));
+    c.args(["olp", "review", "cargo"])
         .arg("--repo")
         .arg(repo)
         .args(args)
@@ -2263,7 +2278,7 @@ fn olp_review_regression_dataset_classifies_four_prs() {
         "conditional-approve-scope-and-specs"
     );
     // 脚本源码不得按 PR 编号硬编码分类
-    let script_src = std::fs::read_to_string(script()).unwrap();
+    let script_src = tool_source();
     assert!(
         !script_src.contains("\"629\"") && !script_src.contains("'629'"),
         "禁止按 PR 编号硬编码 residual"
@@ -2496,9 +2511,7 @@ fn olp_review_regression_dataset_classifies_four_prs() {
     let (summary, slot) =
         write_classify_fixture(&d, &manifest_v, &receipts, "fixture_probe_fails", &dual629);
     keep_alive.push(ft629); // 双执行 fixture 保活到 classify 之后
-    let out = Command::new("python3")
-        .arg("-B")
-        .arg(script())
+    let out = py()
         .arg("classify")
         .arg("--manifest")
         .arg(&manifest)
@@ -2566,8 +2579,7 @@ fn olp_review_evidence_json_and_human_output() {
     let v2: serde_json::Value = serde_json::from_str(so2.trim()).unwrap();
     assert!(v2["error"]["code"].is_string());
     // human 格式
-    let out = Command::new("python3")
-        .arg(script())
+    let out = py()
         .arg("--format")
         .arg("human")
         .arg("status")
@@ -2583,8 +2595,7 @@ fn olp_review_evidence_json_and_human_output() {
         &human[..human.len().min(200)]
     );
     // human 模式下错误也不得泄漏 JSON 错误信封
-    let out2 = Command::new("python3")
-        .arg(script())
+    let out2 = py()
         .arg("--format")
         .arg("human")
         .arg("challenge")
@@ -3559,9 +3570,7 @@ fn olp_review_classify_pr_aggregation_production_cli() {
         // blocked —— 语义不变,无需注册。
         let _ = pr;
     }
-    let out = Command::new("python3")
-        .arg("-B")
-        .arg(script())
+    let out = py()
         .arg("classify")
         .arg("--manifest")
         .arg(&manifest)
@@ -3617,7 +3626,7 @@ fn olp_review_classify_pr_aggregation_production_cli() {
         "629 应绑定双执行证据"
     );
     // 源码零 PR 编号分支(通用聚合红线)
-    let src = std::fs::read_to_string(script()).unwrap();
+    let src = tool_source();
     for pr in prs.keys() {
         assert!(
             !src.contains(&format!("\"{pr}\"")),
@@ -3650,8 +3659,7 @@ fn olp_review_classify_missing_and_foreign_receipt_rejected() {
         serde_json::to_string(&serde_json::json!({"results": results_a})).unwrap(),
     )
     .unwrap();
-    let out_a = Command::new("python3")
-        .arg(script())
+    let out_a = py()
         .arg("classify")
         .arg("--manifest")
         .arg(&manifest)
@@ -3709,8 +3717,7 @@ fn olp_review_classify_missing_and_foreign_receipt_rejected() {
         serde_json::to_string(&serde_json::json!({"results": results_b})).unwrap(),
     )
     .unwrap();
-    let out_b = Command::new("python3")
-        .arg(script())
+    let out_b = py()
         .arg("classify")
         .arg("--manifest")
         .arg(&manifest)
@@ -4287,9 +4294,7 @@ fn olp_review_classify_pass_selector_consistency_gates() {
         sp
     };
     let run_classify = |sp: &Path| -> serde_json::Value {
-        let out = Command::new("python3")
-            .arg("-B")
-            .arg(script())
+        let out = py()
             .arg("classify")
             .arg("--manifest")
             .arg(&manifest)
@@ -4435,9 +4440,7 @@ fn olp_review_classify_forged_chain_and_provenance_gates() {
         .unwrap(),
     )
     .unwrap();
-    let out = Command::new("python3")
-        .arg("-B")
-        .arg(script())
+    let out = py()
         .arg("classify")
         .arg("--manifest")
         .arg(&manifest)
@@ -4544,10 +4547,8 @@ fn olp_review_classify_forged_chain_and_provenance_gates() {
         sp
     };
     let run2 = |summary2: &Path, slot2: &Path, ctxs: &[&Path]| -> serde_json::Value {
-        let mut c = Command::new("python3");
-        c.arg("-B")
-            .arg(script())
-            .arg("classify")
+        let mut c = py();
+        c.arg("classify")
             .arg("--manifest")
             .arg(&manifest2)
             .arg("--replay-summary")
@@ -4635,9 +4636,7 @@ fn olp_review_classify_forged_chain_and_provenance_gates() {
     let tampered_path = ctx_head.join("live-evidence").join("tampered.json");
     std::fs::write(&tampered_path, "").unwrap();
     std::fs::write(&reg_head_receipt, tampered).unwrap();
-    let out3 = Command::new("python3")
-        .arg("-B")
-        .arg(script())
+    let out3 = py()
         .arg("classify")
         .arg("--manifest")
         .arg(&manifest2)
@@ -4658,9 +4657,7 @@ fn olp_review_classify_forged_chain_and_provenance_gates() {
         String::from_utf8_lossy(&out3.stdout)
     );
     // (4) --review-dir 不存在 → 非零结构化
-    let out4 = Command::new("python3")
-        .arg("-B")
-        .arg(script())
+    let out4 = py()
         .arg("classify")
         .arg("--manifest")
         .arg(&manifest)

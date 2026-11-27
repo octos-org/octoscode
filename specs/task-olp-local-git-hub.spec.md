@@ -48,16 +48,19 @@ ssh 强制命令和单元侧的推送命令,并把三道关的规则写进协议
   措辞本任务不改(另一个未合并分支正在改同一段),附录 C 给出多机下的读法。
 - 局限(写入协议与 PR):本地复验记录不能证明复验独立;大外环不得因此省略 R2。
 
-- 复验方由 operator 在卡上 `review:` 行决定(2026-11-16,与生产补丁 71cacd8 同一需求):hub
-  只执行这个决定,署名(去掉 `<单元>-` 前缀后按 `+` 拆开)必须覆盖卡里最后一条 `review:`
+- 复验方写在卡的 `review:` 行上(2026-11-16,与生产补丁 71cacd8 同一需求;2026-11-23 澄清:
+  operator 给范围或原则,大外环在范围内按卡挑,operator 也可直接点名):hub
+  只执行卡上的决定,署名(去掉 `<单元>-` 前缀后按 `+` 拆开)必须覆盖卡里最后一条 `review:`
   的每一个名字,大小写不敏感、顺序不限;空的 `review:` 不要求;没有 `review:` 行的卡不检查。
   工具不内置任何复验方。派单与复验方从同一次读取里取得;黑板读不了时拒收,不当成"没有
-  `review:` 行"放行。复验方个数不设上限(operator 决定);原来 64 字符的署名上限连两个长名字都签不下,
+  `review:` 行"放行。复验方个数不设上限(由卡决定);原来 64 字符的署名上限连两个长名字都签不下,
   放宽到 4096 字符,只作防荒谬输入的长度界(按 32 字符的名字约 120 个复验方,评审意见,2026-11-16)。
 
 ## Boundaries
 
 ### Allowed Changes
+- src/olp/localpr.rs(2026-11-23:单元侧推送 `olp repo push` 的 Rust 实现,原 `olp-task-push.sh`;事件日志场景同时核对本地 PR 状态从日志里读)
+- src/olp/repo.rs(2026-11-23:hub 仓库这道门的 Rust 实现;本 spec 中针对 `olp-git-hub.py` 的场景改为对 `octoscode olp repo …` 运行,规则、输出、退出码不变。黑板是事件日志目录时,卡从日志里读,推送以 `pushed` 事件登记进日志)
 - scripts/olp-git-hub.py
 - scripts/olp-task-push.sh
 - tests/olp_git_hub.rs
@@ -152,3 +155,9 @@ Scenario: init 可重跑且拒绝非裸仓库
   Given 一个已初始化并有引用的 hub 仓库
   When 重跑 init;对一个普通工作仓库 init;以不存在的黑板 init 新路径
   Then 重跑成功且引用不变、两个钩子可执行;后两种退出码 2,新路径没有被创建
+
+Scenario: 黑板是事件日志时,卡从日志里读,推送登记进日志
+  Test: hub_reads_the_card_from_an_event_log_and_records_the_push_there
+  Given hub 仓库的 olp.board 指向一个事件日志目录,日志里 #1 派给 m07 并指定复验方 codex、claude,#2 派给 m08
+  When m07 推 task/2;以只含 codex 的署名推 task/1;以覆盖两个复验方的署名推 task/1;随后把 task/1 强推到一个改写过的提交,再强推回原来的提交
+  Then 前两次被拒并说明(派给的是 m08;缺少 claude);第三次被接收,日志里多一条 pushed 事件(带提交号前 12 位与署名),渲染出的板上有"本地复验通过(#1)"一行,Markdown 板没有被写入;两次强推各记一条 pushed 事件,推回原提交的那条也在(共三条,键各不相同)

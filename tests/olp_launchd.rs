@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn tool() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/olp-launchd.py")
+    PathBuf::from(env!("CARGO_BIN_EXE_octoscode"))
 }
 
 fn stderr(out: &Output) -> String {
@@ -28,10 +28,10 @@ fn stdout(out: &Output) -> String {
 /// Run the tool with HOME pointed at `home`, so logs and the default agents
 /// directory never resolve to the developer's own.
 fn run(home: &Path, args: &[&str]) -> Output {
-    Command::new("python3")
-        .arg("-B")
-        .arg(tool())
+    Command::new(tool())
+        .args(["olp", "keepalive"])
         .args(args)
+        .env("OLP_KEEPALIVE_BACKEND", "launchd")
         .env("HOME", home)
         .output()
         .unwrap()
@@ -292,10 +292,10 @@ fn launchd_heartbeat_job_pipes_the_unit_heartbeat_to_the_hub() {
             "--no-load",
         ];
         args.extend_from_slice(extra);
-        Command::new("python3")
-            .arg("-B")
-            .arg(tool())
+        Command::new(tool())
+            .args(["olp", "keepalive"])
             .args(&args)
+            .env("OLP_KEEPALIVE_BACKEND", "launchd")
             .env("HOME", home.path())
             .env("PATH", path)
             .output()

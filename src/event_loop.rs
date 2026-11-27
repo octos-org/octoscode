@@ -303,6 +303,8 @@ pub fn run(cli: Cli) -> Result<()> {
         store.state.onboarding.profiles_data_dir = Some(data_dir.to_string_lossy().into_owned());
     }
     let mut input_state = TerminalInputState::default();
+    // What was typed while the startup splash played comes first.
+    let mut typed_ahead: std::collections::VecDeque<Event> = crate::splash::take_typed().into();
     let mut scrollback = ScrollbackTracker::new();
     // Force a draw on the first iteration.
     let mut dirty = true;
@@ -387,7 +389,7 @@ pub fn run(cli: Cli) -> Result<()> {
         } else {
             UI_EVENT_POLL_INTERVAL
         };
-        if event::poll(poll)? {
+        if !typed_ahead.is_empty() || event::poll(poll)? {
             // Drain every already-queued input event before the next redraw:
             // momentum scrolling delivers dozens of wheel events per second,
             // and repainting the full alt-screen after EACH one is what makes
@@ -395,8 +397,12 @@ pub fn run(cli: Cli) -> Result<()> {
             // a pathological event stream can never starve rendering.
             let mut quit = false;
             for _ in 0..MAX_INPUT_EVENTS_PER_TICK {
-                let raw_event = event::read()?;
-                let next_event_waiting = event::poll(Duration::from_millis(0))?;
+                let raw_event = match typed_ahead.pop_front() {
+                    Some(event) => event,
+                    None => event::read()?,
+                };
+                let next_event_waiting =
+                    !typed_ahead.is_empty() || event::poll(Duration::from_millis(0))?;
                 let is_resize = matches!(raw_event, Event::Resize(_, _));
                 match handle_terminal_event_with_input_state(
                     &mut store,

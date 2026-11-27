@@ -34,6 +34,8 @@ impl ServerProc {
             .arg("olp-mcp-serve")
             .env("OLP_MCP_OUTER_ROOT", root)
             .env("OLP_MCP_TIMEOUT_SECS", timeout_secs.to_string())
+            // The unit's configuration is the test's own, never this machine's.
+            .env("OLP_UNIT_CONF", root.join("unit.conf"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -228,6 +230,128 @@ fn self_test_ask_outer_timeout_degrades() {
     );
     #[cfg(unix)]
     assert!(board_text(&root).contains("timeout"), "timeout audited");
+}
+
+/// Scenario: hub 用事件日志时,提问与它的结局记进 hub 的日志
+#[test]
+fn ask_outer_on_a_log_hub_reports_the_question_and_how_it_ended() {
+    let root = temp_outer_root("loghub");
+    let log = root.join("log");
+    std::fs::create_dir_all(&log).unwrap();
+    std::fs::write(
+        root.join("unit.conf"),
+        format!(
+            "hub = local\nunit = m07\nstore = log\nlog = {}\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    let mut server = ServerProc::spawn(&root, 0.4);
+    let answer = ask_outer(&mut server, "接口用哪个版本\n第二行", "x", "已自查");
+    assert!(answer.contains("超时降级"), "{answer}");
+    // The end is reported on its own time, after the reply.
+    let read = || -> Vec<Value> {
+        std::fs::read_to_string(log.join("events-000001.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while read().len() < 2 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let events = read();
+    let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["asked", "timed_out"], "{events:?}");
+    assert_eq!(events[0]["unit"], "m07");
+    assert_eq!(events[0]["data"]["question"], "接口用哪个版本 第二行");
+    assert_eq!(events[0]["data"]["id"], events[1]["data"]["id"]);
+    assert!(answer.contains(events[0]["data"]["id"].as_str().unwrap()));
+}
+
+/// Scenario: 答案已经到了就立刻返回,不等 hub 收完上报
+#[cfg(unix)]
+#[test]
+fn ask_outer_returns_the_answer_without_waiting_for_a_slow_hub() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = temp_outer_root("slowhub");
+    std::fs::write(
+        root.join("unit.conf"),
+        "hub = hub-01\nunit = m07\nstore = log\n",
+    )
+    .unwrap();
+    // The hub takes eight seconds over every report.
+    let ssh = root.join("slow-ssh");
+    let seen = root.join("ssh-calls");
+    std::fs::write(
+        &ssh,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\nsleep 8\nexit 0\n",
+            seen.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let watcher_root = root.clone();
+    let watcher = std::thread::spawn(move || {
+        let questions = watcher_root.join("mcp/questions");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            for entry in std::fs::read_dir(&questions)
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                let payload = std::fs::read_to_string(entry.path())
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+                if let Some(payload) = payload {
+                    let id = payload["id"].as_str().unwrap().to_string();
+                    std::fs::write(
+                        watcher_root.join(format!("mcp/answers/{id}.json")),
+                        json!({"answer": "用 v2"}).to_string(),
+                    )
+                    .unwrap();
+                    return;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    });
+    let mut child = Command::new(server_binary())
+        .arg("olp-mcp-serve")
+        .env("OLP_MCP_OUTER_ROOT", &root)
+        .env("OLP_MCP_TIMEOUT_SECS", "30")
+        .env("OLP_UNIT_CONF", root.join("unit.conf"))
+        .env("OLP_SSH", &ssh)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn octoscode olp-mcp-serve");
+    let stdout = child.stdout.take().expect("stdout piped");
+    let mut server = ServerProc {
+        child,
+        reader: BufReader::new(stdout),
+    };
+    let started = Instant::now();
+    let answer = ask_outer(&mut server, "接口用哪个版本", "x", "已自查");
+    let took = started.elapsed();
+    watcher.join().unwrap();
+    assert_eq!(answer, "用 v2");
+    assert!(
+        took < Duration::from_secs(5),
+        "the answer waited for the hub: {took:?}"
+    );
+    // The question itself is on its way to the hub all the same.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !seen.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let calls = std::fs::read_to_string(&seen).unwrap_or_default();
+    assert!(calls.contains("question ask"), "{calls}");
 }
 
 /// Scenario: 限额拒绝 — the 4th ask on one slice is refused and questions/

@@ -46,6 +46,7 @@ Markdown,没有哪个 agent 专有的指令。Claude Code 经
 | 黑板太长、归档已了结的卡 | `docs/OLP_OUTER_BOOT.md` §7 | `octoscode olp board archive` |
 | 进化环:采集摩擦信号、出 retro 简报 | `docs/OLP_OUTER_BOOT.md` §7,本文件 outer 模式第 5 步 | `octoscode olp evo harvest`、`octoscode olp evo retro` |
 | 两个 octos peer 审查员的初审结论不一致,用实际执行的测试裁决(只适用于以 octos peer 方式跑的审查,不是通用的人工仲裁) | `docs/OLP_REVIEW_EVIDENCE.md` | `octoscode olp review`;只读的进度视图 `octoscode olp review monitor` |
+| 想改一条判定规则(目前是"什么算集群静默、每张卡在等谁")而不重新构建 octoscode | `docs/OLP_POLICY.md` | `octoscode olp board stall --policy <命令>`;带 `relax` feature 的构建另有 `--policy-crate <目录>` |
 | 给落地项目的 agent 一张自包含的上岗卡 | `docs/OCTOLOOP_AGENTS.zh-CN.md`(英文 `docs/OCTOLOOP_AGENTS.md`),由 `olp-init.sh` 铺成项目的 `AGENTS.md` | `octoscode olp init` |
 | 想通读原理,或查某项能力的缺省状态 | `docs/OCTOLOOP_GUIDE.md`、`docs/OCTOLOOP_FEATURES.md` | — |
 
@@ -177,7 +178,10 @@ macOS 与 Linux 各自的前提也在那里。步骤在单元和 hub 之间来�
    写)。不知道就问用户,不要自己发明一个。从全景台读项目目标与当前进展。
 2. **规划成卡**:把目标拆成单元能独立完成的卡,每张卡写清背景、精确文件、验收
    标准,并**指定单元里的分工**:实现方一个、复验方至少一个且与实现方不同,
-   按任务挑 agent(例如 `--impl octoscode --review codex,claude`)。
+   按任务挑 agent(例如 `--impl octoscode --review codex,claude`)。复验方只在
+   operator 给的范围内挑(哪台单元上有哪些可用的 agent、什么样的卡用几个);
+   operator 直接点名时照写;没给范围就先问,不自己猜。卡是单元拿到的全部信息:
+   它不许碰的东西(别的卡在改的文件、公开接口)用 `--avoid` 逐条写上(事件日志上的派卡)。
 3. **派发**:`octoscode olp dispatch <单元> --board <板> --title … --impl … --review …
    --wake <单元主持的窗格>`。一台单元同一时间一张卡,按单元健康与占用分配。
 4. **汇总**:`octoscode olp summary --board <板> --repo <hub 仓库> [--json]`,
@@ -220,6 +224,7 @@ R2 诚实验证声明(verified/partially/unverified)。
 | octoscode | `octoscode` | `octoscode --stdio-command 'octos serve --stdio --solo --danger-full-access'` |
 | Claude Code | `claude` | `claude --dangerously-skip-permissions` |
 | Codex | `codex` | `codex --dangerously-bypass-approvals-and-sandbox` |
+| Kimi Code | `kimi` | `kimi -y` |
 
 在 herdr 窗格里启动:`herdr agent start <名字> --kind <种类> --pane <窗格> -- <参数>`。
 单元心跳的 `full` 巡检看的就是这些开关;少了它们单元判为降级、不派卡。挂提问
@@ -276,6 +281,16 @@ R2 诚实验证声明(verified/partially/unverified)。
    `octoscode olp repo push <N> --verified-by <单元号>-<复验方>+<复验方>`(在实现
    方的克隆里),再 `octoscode olp remote ack <N> done <说明>`:提交号、
    轮次、每个复验方跑了什么与结论。hub 凭这些收单,不会替你补做复验。
+
+等内环停下用 `herdr agent wait <窗格> --until idle --until done --until blocked`
+(阻塞到状态变化),不要隔一会儿重复执行同一条查看命令:有的 agent 会把连续
+几次完全相同的调用判为空转并中止这一轮(octoscode 是 3 次),卡就停在半路。
+herdr 靠屏幕内容判断内环的状态,agent 升级后可能认不出(Kimi Code 2.7 工作时被报成
+`idle`,值守和停滞判定都会看错):单元装机时对用到的种类执行一次
+`herdr integration install <种类>`,让 agent 自己上报,见 `docs/OLP_INNER_AGENTS.md` §6。
+
+领了卡就要回执:已领取的卡长时间没有新事件、你的窗格又空闲时,单元值守会发一句请你
+接着办(`olp remote watch --follow-up`,默认 900 秒,最多两次)。
 
 单元复验板 `.octos/UNIT_BOARD.md` 不入库(`olp-init.sh` 已把它加进
 `.gitignore`),写入用 `octoscode olp board append <板>`。

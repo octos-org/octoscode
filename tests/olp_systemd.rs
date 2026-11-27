@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 fn tool() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/olp-systemd.py")
+    PathBuf::from(env!("CARGO_BIN_EXE_octoscode"))
 }
 
 fn stderr(out: &Output) -> String {
@@ -28,10 +28,10 @@ fn stdout(out: &Output) -> String {
 /// Run the tool with HOME pointed at `home`, so logs and the default units
 /// directory never resolve to the developer's own.
 fn run(home: &Path, args: &[&str]) -> Output {
-    Command::new("python3")
-        .arg("-B")
-        .arg(tool())
+    Command::new(tool())
+        .args(["olp", "keepalive"])
         .args(args)
+        .env("OLP_KEEPALIVE_BACKEND", "systemd")
         .env("HOME", home)
         .output()
         .unwrap()
@@ -268,6 +268,55 @@ fn systemd_heartbeat_job_pipes_the_unit_heartbeat_to_the_hub() {
     let timer = std::fs::read_to_string(dir.join("olp-heartbeat.timer")).unwrap();
     assert!(timer.contains("OnUnitActiveSec=60\n"), "{timer}");
 
+    // The hub is reached through `OLP_SSH` when it is set, as everywhere
+    // else; and the directories the reviewer CLIs are in now go on the job's
+    // PATH, or the heartbeat could not ask them whether they are logged in.
+    let tools = home.path().join("version manager/bin");
+    std::fs::create_dir_all(&tools).unwrap();
+    for name in ["codex", "node"] {
+        std::fs::write(tools.join(name), "").unwrap();
+    }
+    let out = Command::new(tool())
+        .args(["olp", "keepalive", "heartbeat", "--unit", "m07"])
+        .args(["--hub", "olp@hub-01", "--dir", d, "--no-load"])
+        .args(["--env", "OLP_HERDR=/opt/herdr/bin/herdr"])
+        .env("OLP_KEEPALIVE_BACKEND", "systemd")
+        .env("HOME", home.path())
+        .env("PATH", &tools)
+        .env("OLP_SSH", "/opt/olp/ssh-hub.sh")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let service = std::fs::read_to_string(dir.join("olp-heartbeat.service")).unwrap();
+    assert!(
+        service.contains(
+            "| /opt/olp/ssh-hub.sh -o BatchMode=yes -o ConnectTimeout=10 olp@hub-01 receive"
+        ),
+        "{service}"
+    );
+    let path = service
+        .lines()
+        .find(|l| l.contains("PATH="))
+        .expect("the job's PATH");
+    assert!(path.contains(":/usr/bin:/bin"), "the default stays: {path}");
+    assert!(
+        path.contains("PATH=")
+            && path
+                .split("PATH=")
+                .nth(1)
+                .unwrap()
+                .starts_with(tools.to_str().unwrap()),
+        "found directories come first, as in the shell: {path}"
+    );
+    assert_eq!(path.matches("version manager/bin").count(), 1, "{path}");
+    // The CLI this shell resolves is the one the job asks, by path: a
+    // file of the same name earlier on the job's PATH is not it.
+    assert!(
+        service.contains("OLP_CODEX=") && service.contains("version manager/bin/codex"),
+        "{service}"
+    );
+    assert!(!service.contains("OLP_CLAUDE="), "not installed: {service}");
+
     // A scripts directory that is not there yet: the job is still written,
     // with a reminder.
     let out = run(
@@ -320,10 +369,10 @@ fn systemd_heartbeat_job_pipes_the_unit_heartbeat_to_the_hub() {
             "--no-load",
         ];
         args.extend_from_slice(extra);
-        Command::new("python3")
-            .arg("-B")
-            .arg(tool())
+        Command::new(tool())
+            .args(["olp", "keepalive"])
             .args(&args)
+            .env("OLP_KEEPALIVE_BACKEND", "systemd")
             .env("HOME", home.path())
             .env("PATH", path)
             .output()

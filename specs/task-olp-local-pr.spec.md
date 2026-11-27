@@ -44,6 +44,7 @@ PR 看板用)和推 GitHub 前的采认闸门。
 ## Boundaries
 
 ### Allowed Changes
+- src/olp/localpr.rs(2026-11-23:本地 PR 状态与 GitHub 闸门的 Rust 实现;本 spec 的场景改为对 `octoscode olp repo status|promote` 运行,输出与退出码不变;`--board` 也可以是事件日志目录,推送登记与判词从日志里读)
 - scripts/olp-local-pr.py
 - tests/olp_local_pr.rs
 - docs/OLP_LOCAL_PR.md
@@ -97,3 +98,9 @@ Scenario: 用法错误
   Given 不存在的仓库、不存在的黑板、非法远程名、缺参数、非数字任务号
   When 分别运行
   Then 都以非 0 退出(用法错误为 2)
+
+Scenario: 嵌在别的围栏里的围栏标记不改变哪些行算数
+  Test: local_pr_reads_fences_the_way_the_inbox_does
+  Given 一条已登记的推送
+  When 黑板上出现一段反引号围栏,里面有一行 ~~~ 和一行采认判词;之后是一行真的打回;再之后是四个反引号的围栏包着三个反引号的围栏和一行采认判词
+  Then 围栏里的判词都不算;状态先是待复验,真的打回之后是已打回,并保持不变

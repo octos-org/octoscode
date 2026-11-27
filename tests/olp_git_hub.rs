@@ -16,16 +16,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
 fn hub_tool() -> PathBuf {
-    repo_root().join("scripts/olp-git-hub.py")
-}
-
-fn push_tool() -> PathBuf {
-    repo_root().join("scripts/olp-task-push.sh")
+    PathBuf::from(env!("CARGO_BIN_EXE_octoscode"))
 }
 
 fn stderr(out: &Output) -> String {
@@ -101,9 +93,8 @@ impl Cluster {
             dir: tempfile::tempdir().unwrap(),
         };
         std::fs::write(c.board(), BOARD).unwrap();
-        let out = Command::new("python3")
-            .arg("-B")
-            .arg(hub_tool())
+        let out = Command::new(hub_tool())
+            .args(["olp", "repo"])
             .arg("init")
             .arg(c.hub())
             .arg("--board")
@@ -177,8 +168,8 @@ impl Cluster {
 
     /// The unit-side push: `olp-task-push.sh <n> --verified-by <signer>`.
     fn task_push(&self, n: &str, extra: &[&str], unit: Option<&str>) -> Output {
-        let mut cmd = self.base("bash");
-        cmd.arg(push_tool()).arg(n).args(extra);
+        let mut cmd = self.base(env!("CARGO_BIN_EXE_octoscode"));
+        cmd.args(["olp", "repo", "push"]).arg(n).args(extra);
         if let Some(u) = unit {
             cmd.env("OLP_UNIT", u);
         }
@@ -500,9 +491,8 @@ fn hub_local_pushes_without_unit_are_unrestricted() {
 fn hub_serve_pins_the_unit_and_only_allows_git_on_the_hub_repo() {
     let c = Cluster::new();
     let serve = |original: &str| {
-        Command::new("python3")
-            .arg("-B")
-            .arg(hub_tool())
+        Command::new(hub_tool())
+            .args(["olp", "repo"])
             .args(["serve", "--unit", "m07", "--repo"])
             .arg(c.hub())
             .env("SSH_ORIGINAL_COMMAND", original)
@@ -529,7 +519,7 @@ fn hub_serve_pins_the_unit_and_only_allows_git_on_the_hub_repo() {
     std::fs::write(
         &fake_ssh,
         format!(
-            "#!/bin/sh\nshift\nSSH_ORIGINAL_COMMAND=\"$*\" exec python3 -B '{}' serve --unit m07 --repo '{}'\n",
+            "#!/bin/sh\nshift\nSSH_ORIGINAL_COMMAND=\"$*\" exec '{}' olp repo serve --unit m07 --repo '{}'\n",
             hub_tool().display(),
             hub_str
         ),
@@ -605,9 +595,8 @@ fn task_push_checks_inputs_before_pushing() {
 fn hub_init_is_rerunnable_and_refuses_a_non_bare_repo() {
     let c = Cluster::new();
     let init = |repo: &Path, board: &Path| {
-        Command::new("python3")
-            .arg("-B")
-            .arg(hub_tool())
+        Command::new(hub_tool())
+            .args(["olp", "repo"])
             .arg("init")
             .arg(repo)
             .arg("--board")
@@ -640,4 +629,171 @@ fn hub_init_is_rerunnable_and_refuses_a_non_bare_repo() {
         Some(2)
     );
     assert!(!c.dir.path().join("new.git").exists());
+}
+
+/// Scenario: 黑板是事件日志时,卡从日志里读,推送登记进日志
+#[test]
+fn hub_reads_the_card_from_an_event_log_and_records_the_push_there() {
+    let c = Cluster::new();
+    let bin = hub_tool();
+    let log = c.dir.path().join("log");
+    let log_str = log.to_str().unwrap();
+    let open = |title: &str, extra: &[&str]| {
+        use std::io::Write;
+        let mut child = Command::new(&bin)
+            .args(["olp", "card", "open", "--log", log_str, "--title", title])
+            .args(extra)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all("正文\n".as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+    };
+    open(
+        "给 m07 的卡",
+        &[
+            "--unit",
+            "m07",
+            "--impl",
+            "octoscode",
+            "--review",
+            "codex,claude",
+        ],
+    );
+    open("给 m08 的卡", &["--unit", "m08"]);
+    // Point the hub at the log instead of the Markdown board.
+    let out = Command::new(&bin)
+        .args(["olp", "repo", "init"])
+        .arg(c.hub())
+        .args(["--board", log_str])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+
+    let sha2 = c.task_branch(2);
+    let sha1 = c.task_branch(1);
+    let push = |n: u32, sha: &str, signer: &str| {
+        c.git(
+            &[
+                "push",
+                "-o",
+                &format!("olp-verified={sha}:{signer}"),
+                "hub",
+                &format!("task/{n}"),
+            ],
+            Some("m07"),
+        )
+    };
+    // Not this unit's card; then a signer that leaves a reviewer out.
+    let out = push(2, &sha2, "m07-codex");
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("派给的是 m08"), "{}", stderr(&out));
+    let out = push(1, &sha1, "m07-codex");
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("缺少 claude"), "{}", stderr(&out));
+    assert_eq!(c.hub_ref("refs/heads/task/1"), None);
+
+    let out = push(1, &sha1, "m07-codex+claude");
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).contains("已在黑板登记"), "{}", stderr(&out));
+    assert_eq!(
+        c.hub_ref("refs/heads/task/1").as_deref(),
+        Some(sha1.as_str())
+    );
+    let events = std::fs::read_to_string(log.join("events-000001.jsonl")).unwrap();
+    let pushed: Vec<&str> = events
+        .lines()
+        .filter(|l| l.contains("\"pushed\""))
+        .collect();
+    assert_eq!(pushed.len(), 1, "{events}");
+    assert!(pushed[0].contains(&sha1[..12]) && pushed[0].contains("m07-codex+claude"));
+    let rendered = Command::new(&bin)
+        .args(["olp", "board", "render", log_str])
+        .output()
+        .unwrap();
+    assert!(
+        stdout(&rendered).contains("> 单元(m07)·本地复验通过(#1): task/1 @ "),
+        "{}",
+        stdout(&rendered)
+    );
+    // The ref moves on and then back to the commit it was at: each move
+    // is a push and is recorded, the return included.
+    std::fs::write(c.work().join("task1.txt"), "reworked").unwrap();
+    c.git_ok(&["commit", "-q", "-a", "--amend", "-m", "task 1 (reworked)"]);
+    let sha1b = c.git_ok(&["rev-parse", "HEAD"]);
+    let force = |sha: &str| {
+        c.git(
+            &[
+                "push",
+                "--force",
+                "-o",
+                &format!("olp-verified={sha}:m07-codex+claude"),
+                "hub",
+                &format!("{sha}:refs/heads/task/1"),
+            ],
+            Some("m07"),
+        )
+    };
+    for sha in [&sha1b, &sha1] {
+        let out = force(sha);
+        assert!(out.status.success(), "{}", stderr(&out));
+    }
+    assert_eq!(
+        c.hub_ref("refs/heads/task/1").as_deref(),
+        Some(sha1.as_str())
+    );
+    let events = std::fs::read_to_string(log.join("events-000001.jsonl")).unwrap();
+    let pushed: Vec<serde_json::Value> = events
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .filter(|e| e["kind"] == "pushed")
+        .collect();
+    assert_eq!(pushed.len(), 3, "{events}");
+    let said = |e: &serde_json::Value| e["data"]["text"].as_str().unwrap().to_string();
+    assert!(said(&pushed[1]).contains(&sha1b[..12]), "{events}");
+    assert!(said(&pushed[2]).contains(&sha1[..12]), "{events}");
+    assert_ne!(pushed[0]["key"], pushed[2]["key"]);
+
+    // The Markdown board was not written to.
+    assert!(!c.board_text().contains("本地复验通过"));
+
+    // The local pull request's state comes from the same log.
+    let state = || {
+        let out = Command::new(&bin)
+            .args(["olp", "repo", "status", "--json", "--repo"])
+            .arg(c.hub())
+            .args(["--board", log_str])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", stderr(&out));
+        let doc: serde_json::Value = serde_json::from_str(&stdout(&out)).unwrap();
+        doc["items"][0].clone()
+    };
+    let item = state();
+    assert_eq!(
+        (item["number"].as_u64(), item["state"].as_str()),
+        (Some(1), Some("pending"))
+    );
+    assert_eq!(item["unit"], "m07");
+    assert_eq!(item["registered"].as_str(), Some(&sha1[..12]));
+    let out = Command::new(&bin)
+        .args([
+            "olp",
+            "card",
+            "accept",
+            "--log",
+            log_str,
+            "1",
+            "复验通过,采认",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(state()["state"], "accepted");
 }

@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
 //! olp-review-monitor 生产入口集成测试(spec: review-monitor rules)。
-//! 子进程真实调用 scripts/olp-review-monitor.py。测试方法:
+//! 子进程真实调用 `octoscode olp review monitor`(原 scripts/olp-review-monitor.py)。测试方法:
 //! spawn → 等 ready 基线(已有输出) → 变更 → 限时轮询/try_wait →
 //! 只 kill 本测试持有的 child 句柄并 wait 回收。禁止全局 pkill。
 //!
@@ -19,11 +19,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-fn script() -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.push("scripts/olp-review-monitor.py");
-    assert!(p.exists(), "missing script: {}", p.display());
-    p
+/// The monitor: `octoscode olp review monitor`.
+fn monitor_cmd() -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_octoscode"));
+    c.args(["olp", "review", "monitor"]);
+    c
 }
 
 fn fixtures() -> PathBuf {
@@ -87,8 +87,8 @@ fn sha256_bytes(bytes: &[u8]) -> String {
 
 /// 一次性渲染(单次 render)。
 fn monitor(review_dir: &Path, runtime_dir: Option<&Path>, board: Option<&Path>) -> (bool, String) {
-    let mut c = Command::new("python3");
-    c.arg(script()).arg(review_dir);
+    let mut c = monitor_cmd();
+    c.arg(review_dir);
     if let Some(r) = runtime_dir {
         c.arg("--runtime-dir").arg(r);
     }
@@ -109,8 +109,8 @@ fn monitor_with_session(
     board: Option<&Path>,
     session: &str,
 ) -> (bool, String) {
-    let mut c = Command::new("python3");
-    c.arg(script()).arg(review_dir);
+    let mut c = monitor_cmd();
+    c.arg(review_dir);
     if let Some(r) = runtime_dir {
         c.arg("--runtime-dir").arg(r);
     }
@@ -132,8 +132,8 @@ fn monitor_with_profile(
     board: Option<&Path>,
     profile: &str,
 ) -> (bool, String) {
-    let mut c = Command::new("python3");
-    c.arg(script()).arg(review_dir);
+    let mut c = monitor_cmd();
+    c.arg(review_dir);
     if let Some(r) = runtime_dir {
         c.arg("--runtime-dir").arg(r);
     }
@@ -154,8 +154,7 @@ fn monitor_json_profile(
     runtime_dir: &Path,
     profile: &str,
 ) -> (bool, serde_json::Value) {
-    let out = Command::new("python3")
-        .arg(script())
+    let out = monitor_cmd()
         .arg(review_dir)
         .arg("--runtime-dir")
         .arg(runtime_dir)
@@ -177,9 +176,8 @@ struct WatchChild {
 }
 impl WatchChild {
     fn spawn(review_dir: &Path, board: Option<&Path>, extra: &[&str]) -> Self {
-        let mut cmd = Command::new("python3");
-        cmd.arg(script())
-            .arg(review_dir)
+        let mut cmd = monitor_cmd();
+        cmd.arg(review_dir)
             .arg("--watch")
             .arg("--interval")
             .arg("0.3");
@@ -501,8 +499,7 @@ fn olp_review_monitor_json_output_parseable() {
         r#"{"frozen":true,"runtime":"/tmp/r","session":"s","goal":"g"}"#,
     )
     .unwrap();
-    let out = Command::new("python3")
-        .arg(script())
+    let out = monitor_cmd()
         .arg(&d)
         .arg("--format")
         .arg("json")
@@ -938,8 +935,7 @@ fn olp_review_monitor_cross_runtime_binding_and_closed() {
     );
 
     // 以 runtime B + session-B 视角渲染: lifetime master=session-A ≠ session-B → unknown
-    let out = Command::new("python3")
-        .arg(script())
+    let out = monitor_cmd()
         .arg(&d)
         .arg("--runtime-dir")
         .arg(d.join("runtimeB"))
@@ -1002,8 +998,7 @@ fn olp_review_monitor_cross_runtime_binding_and_closed() {
         r#"{"runtime":"runtimeC","session":"session-C","goal":"goal_01"}"#,
     )
     .unwrap();
-    let out2 = Command::new("python3")
-        .arg(script())
+    let out2 = monitor_cmd()
         .arg(d2.path())
         .arg("--runtime-dir")
         .arg(d.join("runtimeC"))
@@ -1431,8 +1426,7 @@ fn olp_review_monitor_v3_real_wire_thread_recognition() {
 
     // NUL 字节不能进 argv: session 由 review-state.json 提供(文件可含 NUL),
     // 不传 --session,让 render 从 state 读 eff_session。
-    let out = Command::new("python3")
-        .arg(script())
+    let out = monitor_cmd()
         .arg(&d)
         .arg("--runtime-dir")
         .arg(d.join("runtime"))
@@ -1769,8 +1763,7 @@ fn olp_review_monitor_v3_foreign_originator_thread_not_running() {
         serde_json::json!({"v":1,"session_id":sid,"thread_id":"thread-1","next_seq":22,"completed":false}),
     );
 
-    let out = Command::new("python3")
-        .arg(script())
+    let out = monitor_cmd()
         .arg(&d)
         .arg("--runtime-dir")
         .arg(d.join("runtime"))
@@ -1838,8 +1831,7 @@ fn olp_review_monitor_v3_peer_goal_file_mismatch_not_running() {
         serde_json::json!({"v":1,"session_id":sid,"thread_id":"thread-1","next_seq":22,"completed":false}),
     );
 
-    let out = Command::new("python3")
-        .arg(script())
+    let out = monitor_cmd()
         .arg(&d)
         .arg("--runtime-dir")
         .arg(d.join("runtime"))
@@ -1889,8 +1881,7 @@ fn olp_review_monitor_v3_unverified_self_claim_outcome_not_terminal() {
         ]}),
     );
 
-    let out = Command::new("python3")
-        .arg(script())
+    let out = monitor_cmd()
         .arg(&d)
         .arg("--format")
         .arg("json")
@@ -1966,8 +1957,7 @@ fn olp_review_monitor_v3_matching_originator_goal_thread_still_running() {
         serde_json::json!({"v":1,"session_id":sid,"thread_id":"thread-1","next_seq":22,"completed":false}),
     );
 
-    let out = Command::new("python3")
-        .arg(script())
+    let out = monitor_cmd()
         .arg(&d)
         .arg("--runtime-dir")
         .arg(d.join("runtime"))
@@ -2031,8 +2021,7 @@ fn olp_review_monitor_v3_missing_originator_thread_not_running() {
         serde_json::json!({"v":1,"session_id":sid,"thread_id":"t1","next_seq":2,"completed":false}),
     );
 
-    let out = Command::new("python3")
-        .arg(script())
+    let out = monitor_cmd()
         .arg(&d)
         .arg("--runtime-dir")
         .arg(d.join("runtime"))
@@ -2095,8 +2084,7 @@ fn olp_review_monitor_v3_missing_goal_thread_not_running() {
         serde_json::json!({"v":1,"session_id":sid,"thread_id":"t1","next_seq":2,"completed":false}),
     );
 
-    let out = Command::new("python3")
-        .arg(script())
+    let out = monitor_cmd()
         .arg(&d)
         .arg("--runtime-dir")
         .arg(d.join("runtime"))
@@ -2172,9 +2160,7 @@ fn olp_review_monitor_valid_lifetime_cross_goal_not_promoted() {
     mk("p-cross-running", "goal_99", "running");
     mk("p-cross-idle", "goal_99", "idle");
 
-    let out = Command::new("python3")
-        .arg("-B")
-        .arg(script())
+    let out = monitor_cmd()
         .arg(&d)
         .arg("--runtime-dir")
         .arg(d.join("runtime"))
@@ -2282,9 +2268,7 @@ fn olp_review_monitor_closed_keeps_identity_on_trusted_lifetime() {
             "phase": "failed", "turn_id": "turn-5"
         }),
     );
-    let out = Command::new("python3")
-        .arg("-B")
-        .arg(script())
+    let out = monitor_cmd()
         .arg(&d)
         .arg("--runtime-dir")
         .arg(d.join("runtime"))

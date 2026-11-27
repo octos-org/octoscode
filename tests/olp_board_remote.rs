@@ -18,12 +18,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
 fn tool() -> PathBuf {
-    repo_root().join("scripts/olp-board-remote.py")
+    PathBuf::from(env!("CARGO_BIN_EXE_octoscode"))
 }
 
 fn stderr(out: &Output) -> String {
@@ -61,7 +57,7 @@ impl Net {
              [ \"$mode\" = down ] && exit 255\n\
              while [ \"$1\" = \"-o\" ]; do shift 2; done\n\
              shift\n\
-             SSH_ORIGINAL_COMMAND=\"$*\" python3 -B '{tool}' serve --unit m07 --board '{board}'\n\
+             SSH_ORIGINAL_COMMAND=\"$*\" '{tool}' olp remote serve --unit m07 --board '{board}'\n\
              rc=$?\n\
              [ \"$mode\" = lost-reply ] && exit 255\n\
              exit $rc\n",
@@ -97,9 +93,8 @@ impl Net {
 
     /// A unit-side command with the unit's configuration in the environment.
     fn unit(&self, args: &[&str], stdin: Option<&str>) -> Output {
-        let mut cmd = Command::new("python3");
-        cmd.arg("-B")
-            .arg(tool())
+        let mut cmd = Command::new(tool());
+        cmd.args(["olp", "remote"])
             .args(args)
             .env("OLP_SSH", self.fake_ssh())
             .env("OLP_HUB", "olp@hub-01")
@@ -121,9 +116,8 @@ impl Net {
 
     /// The hub-side forced command, called directly.
     fn serve(&self, original: &str, body: &str) -> Output {
-        let mut child = Command::new("python3")
-            .arg("-B")
-            .arg(tool())
+        let mut child = Command::new(tool())
+            .args(["olp", "remote"])
             .args(["serve", "--unit", "m07", "--board"])
             .arg(self.board())
             .env("SSH_ORIGINAL_COMMAND", original)
@@ -344,9 +338,8 @@ fn remote_mirror_target_comes_from_configuration() {
     )
     .unwrap();
     let run = |conf: &Path, args: &[&str], env: &[(&str, &str)]| {
-        let mut cmd = Command::new("python3");
-        cmd.arg("-B")
-            .arg(tool())
+        let mut cmd = Command::new(tool());
+        cmd.args(["olp", "remote"])
             .args(args)
             .env("OLP_SSH", n.fake_ssh())
             .env("OLP_QUEUE_DIR", n.queue())
@@ -401,9 +394,8 @@ fn remote_mirror_target_comes_from_configuration() {
 fn remote_requires_configuration_and_valid_input() {
     let n = Net::new();
     let bare = |args: &[&str], env: &[(&str, &str)], stdin: &str| {
-        let mut cmd = Command::new("python3");
-        cmd.arg("-B")
-            .arg(tool())
+        let mut cmd = Command::new(tool());
+        cmd.args(["olp", "remote"])
             .args(args)
             .env("OLP_SSH", n.fake_ssh())
             .env("OLP_QUEUE_DIR", n.queue())
@@ -467,4 +459,37 @@ fn remote_requires_configuration_and_valid_input() {
         assert!(out.status.success(), "stderr: {}", stderr(&out));
         assert!(n.board_text().contains("经配置文件"));
     }
+}
+
+/// Scenario: 连上以后卡住的 ssh 到时限算 hub 不可达,写入照常排队
+#[test]
+fn a_stalled_connection_counts_as_an_unreachable_hub() {
+    let n = Net::new();
+    let stuck = n.dir.path().join("stuck-ssh");
+    std::fs::write(&stuck, "#!/bin/sh\nexec sleep 300\n").unwrap();
+    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let started = std::time::Instant::now();
+    let mut child = Command::new(tool())
+        .args(["olp", "remote", "append"])
+        .env("OLP_SSH", &stuck)
+        .env("OLP_SSH_TIMEOUT", "1")
+        .env("OLP_HUB", "olp@hub-01")
+        .env("OLP_UNIT_ID", "m07")
+        .env("OLP_QUEUE_DIR", n.queue())
+        .env("OLP_UNIT_CONF", n.dir.path().join("absent.conf"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let _ = child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all("> 单元(m07)·一条\n".as_bytes());
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(75), "{}", stderr(&out));
+    assert!(stderr(&out).contains("已排队"), "{}", stderr(&out));
+    assert_eq!(n.queued(), 1);
+    assert!(started.elapsed() < std::time::Duration::from_secs(60));
 }
