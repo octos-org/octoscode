@@ -168,10 +168,12 @@ pub fn run(argv: &[String]) -> i32 {
     let log = Log::at(Path::new(&to));
     let drafts = plan.drafts;
     match log.append_with(|existing| {
-        if existing.is_empty() {
+        // A compacted log holds events too, in its archive.
+        let archived = log.floor().map_or(1, |floor| floor.dropped as usize);
+        if existing.is_empty() && archived == 0 {
             Ok(drafts)
         } else {
-            Err(existing.len())
+            Err(existing.len() + archived)
         }
     }) {
         Ok(_) => {

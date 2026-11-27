@@ -101,6 +101,15 @@
 | `olp board summary --board <板或日志目录> [--repo R] [--json]` | Rust(`src/olp/summary.rs`),原 `olp-summary.py` | hub |
 | `olp id alloc …` | Rust(`src/olp/append.rs`),原 `olp-id-alloc.sh` | 任意 |
 | `olp board stall <日志目录> [--quiet 秒] [--policy 命令 \| --policy-crate 目录] [--json]` | Rust(`src/olp/stall.rs`) | hub |
+| `olp log compact <日志目录> [--keep-days 14] [--keep 10] [--if-over MiB] [--dry-run] [--json]` | Rust(`src/olp/compact.rs`) | hub |
+| `olp log history <日志目录> [--card N] [--json]` | Rust(`src/olp/compact.rs`) | hub |
+
+`log compact`(`specs/task-olp-log-compact.spec.md`)让日常命令不必重读已了结的卡:已了结、
+最后一条事件早于 `--keep-days` 天、不在最近了结的 `--keep` 张之内、单元已领取、也不是某张
+留下的卡的回测对象的卡,全部事件移入归档;旧分段原样搬到 `<日志目录>/archive/`,序号不重排。
+归档的卡保留卡号与立卡的键,之后再写它会被拒收;全过程用 `log history --card N` 看。替换前
+先核对留下的事件与完整日志读起来一致,不一致不写(退出码 5)。外环值守(`outer watch`)在
+在用的日志超过 `OLP_LOG_COMPACT_MIB`(默认 32,0 为关)时自己压缩。
 
 `board stall`(`specs/task-olp-stall.spec.md`)回答"是不是所有人都在等":有卡未了结、占着卡的
 单元上没有内环在工作、日志 `--quiet` 秒没有新事件,三条都成立才算。有人在工作就不算,做得久

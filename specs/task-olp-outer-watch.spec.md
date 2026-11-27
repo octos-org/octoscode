@@ -19,6 +19,9 @@ estimate: 1d
 
 - 命令 `octoscode olp outer watch <日志目录> --pane <外环的窗格> [--once] [--interval 30]
   [--quiet 600] [--idle-wait 5] [--session <herdr 会话>]`,在 hub(外环所在机器)上跑。
+- 每轮顺带看在用日志的大小:超过 `OLP_LOG_COMPACT_MIB`(默认 32,0 为关)且达到上次压缩
+  留下的两倍就压缩(`specs/task-olp-log-compact.spec.md`,测试
+  `the_outer_watcher_compacts_a_log_that_grew_large`);试过之后要再长四分之一才再试。
 - `--label <工作区标签>` 代替 `--pane`(二者给且只给一个):每轮按标签找外环工作区的第一个
   窗格,与 `olp outer supervise` 找外环窗格的办法相同;没有这个工作区时这一轮不提醒,游标不动。
   `olp outer install` 在 `--board` 是事件日志时用它把值守注册成常驻任务(`<name>-watch`,

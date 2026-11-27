@@ -18,6 +18,10 @@
 //! remembers which stall it has pointed to, and says it again — three times
 //! at most — only while the outer loop has still not looked.
 //!
+//! Each round also keeps the log small: once the part in use is over
+//! `OLP_LOG_COMPACT_MIB` (32 by default, 0 for never) and twice what the
+//! last compaction left, it is compacted as `olp log compact` does.
+//!
 //! Exit codes: 0 (with `--once`: the round is done); 2 usage; 4 the log
 //! could not be read.
 
@@ -44,6 +48,9 @@ struct Cursor {
     seen: u64,
     /// Stalls pointed to, by card number.
     stalls: BTreeMap<String, Pointed>,
+    /// The log's size in use when it was last compacted, or was found to
+    /// have nothing to archive.
+    compacted_at: u64,
 }
 
 /// One stall the outer loop's pane was told about.
@@ -192,7 +199,58 @@ pub fn run(argv: &[String]) -> i32 {
                 .join(format!(".octos/outer/watch/outer-{name}.json"))
         });
     let session = session.as_deref();
+    let read_cursor = || -> Cursor {
+        std::fs::read_to_string(&state_path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    };
+    let write_cursor = |cursor: &Cursor| {
+        let written = state_path
+            .parent()
+            .map(std::fs::create_dir_all)
+            .unwrap_or(Ok(()))
+            .and_then(|()| {
+                std::fs::write(
+                    &state_path,
+                    serde_json::to_string(cursor).unwrap_or_default(),
+                )
+            });
+        if let Err(e) = written {
+            eprintln!("{prog}: 记不下读到哪条 {}: {e}", state_path.display());
+        }
+    };
     loop {
+        // Every command replays the log: keep what is over out of its way.
+        // Tried when the log in use has grown large, and not again until
+        // it has grown by a quarter more.
+        if let (Some(least), Ok((base, segments))) =
+            (super::compact::auto_threshold(), Log::at(log).bytes())
+        {
+            let size = base + segments;
+            let mut cursor = read_cursor();
+            if size >= least.max(cursor.compacted_at / 4 * 5) {
+                match super::compact::compact(Path::new(log), 14, 10, Some(least), false) {
+                    Ok(done) => {
+                        if done.compacted {
+                            println!(
+                                "已压缩日志:归档 {} 张卡,在用 {} → {} 字节",
+                                done.cards_archived.len(),
+                                done.bytes_before,
+                                done.bytes_after
+                            );
+                        }
+                        cursor.compacted_at = done.bytes_after;
+                    }
+                    Err(super::compact::Failed::Log(why))
+                    | Err(super::compact::Failed::Differs(why)) => {
+                        eprintln!("{prog}: 日志没有压缩: {why}");
+                        cursor.compacted_at = size;
+                    }
+                }
+                write_cursor(&cursor);
+            }
+        }
         let events = match Log::at(log).read() {
             Ok(events) => events,
             Err(e) => {
@@ -200,10 +258,7 @@ pub fn run(argv: &[String]) -> i32 {
                 return 4;
             }
         };
-        let mut cursor: Cursor = std::fs::read_to_string(&state_path)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default();
+        let mut cursor = read_cursor();
         let head = events.last().map(|e| e.seq).unwrap_or(0);
         // What is already over does not wait for anyone: a watcher that
         // starts on an old log says nothing about its history.
@@ -295,19 +350,7 @@ pub fn run(argv: &[String]) -> i32 {
                         String::new()
                     }
                 );
-                let written = state_path
-                    .parent()
-                    .map(std::fs::create_dir_all)
-                    .unwrap_or(Ok(()))
-                    .and_then(|()| {
-                        std::fs::write(
-                            &state_path,
-                            serde_json::to_string(&cursor).unwrap_or_default(),
-                        )
-                    });
-                if let Err(e) = written {
-                    eprintln!("{prog}: 记不下读到哪条 {}: {e}", state_path.display());
-                }
+                write_cursor(&cursor);
             } else {
                 println!("外环窗格 {pane} 现在不空闲或没有接住提醒,下一轮再试");
             }

@@ -11,6 +11,7 @@ pub mod board;
 pub mod card;
 pub mod cards;
 pub mod client;
+pub mod compact;
 pub mod dispatch;
 pub mod doctor;
 pub mod duty;

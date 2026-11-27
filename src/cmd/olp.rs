@@ -374,6 +374,18 @@ const COMMANDS: &[Entry] = &[
         help: "事件日志:集群是否整体静默(有卡未结、没有内环在工作、日志无新事件)",
     },
     Entry {
+        group: "log",
+        action: Some("compact"),
+        target: Target::Rust(crate::olp::compact::run),
+        help: "事件日志:把已了结的卡移入归档,日常命令只读还需要的部分",
+    },
+    Entry {
+        group: "log",
+        action: Some("history"),
+        target: Target::Rust(crate::olp::compact::history),
+        help: "事件日志:输出完整历史(归档 + 在用)",
+    },
+    Entry {
         group: "board",
         action: Some("render"),
         target: Target::Rust(crate::olp::render::run),
@@ -685,6 +697,8 @@ fn meta(group: &str, action: Option<&str>) -> Option<Meta> {
         }
         ("card", Some("ack")) => meta_of(Any, yes, no),
         ("board", Some("render" | "stall")) => meta_of(Hub, no, no),
+        ("log", Some("compact")) => meta_of(Hub, yes, no),
+        ("log", Some("history")) => meta_of(Hub, no, no),
         ("unit", None) | ("keepalive", None) | ("ask", None) => meta_of(Any, None, None),
         ("remote", None) => meta_of(Unit, None, no),
         ("repo", Some("init")) => meta_of(Hub, yes, no),

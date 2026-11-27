@@ -149,6 +149,12 @@ fn open_card(events: &[Event], n: u64) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// What compaction left of the log, inside a decision.
+fn floor(log: &Log) -> Result<super::log::Floor, Refusal> {
+    log.floor()
+        .map_err(|e| Refusal::Rule(format!("读不了日志的基线: {e}")))
+}
+
 fn finish(prog: &str, result: Result<Vec<Event>, AppendError<Refusal>>) -> Result<Vec<Event>, i32> {
     result.map_err(|e| match e {
         AppendError::Refused(Refusal::Rule(why)) => {
@@ -269,6 +275,11 @@ pub fn run(action: &str, argv: &[String]) -> i32 {
                     )));
                 }
             }
+            if floor(&log)?.gone.contains_key(&n) {
+                return Err(Refusal::Rule(format!(
+                    "#{n} 已了结并归档,不再接受写入(全过程见 olp log history)"
+                )));
+            }
             open_card(events, n)?;
             Ok(vec![draft])
         }),
@@ -364,12 +375,19 @@ fn open(prog: &str, log: &Log, args: Args) -> i32 {
                 return Ok(Vec::new());
             }
         }
+        // A card that is only in the archive keeps its number and its key.
+        let floor = floor(log)?;
+        if let Some(archived) = args.key.as_deref().and_then(|key| floor.card_of_key(key)) {
+            reused = Some(archived);
+            return Ok(Vec::new());
+        }
         let next = events
             .iter()
             .filter(|e| e.kind == "dispatched")
             .filter_map(|e| e.card)
             .max()
             .unwrap_or(0)
+            .max(floor.max_card)
             + 1;
         Ok(vec![Draft {
             kind: "dispatched".to_string(),

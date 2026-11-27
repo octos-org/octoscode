@@ -505,6 +505,12 @@ pub fn run(argv: &[String]) -> i32 {
             reused = first.card;
             return Ok(Vec::new());
         }
+        // A card that is only in the archive keeps its number and its key.
+        let floor = log.floor().map_err(|e| format!("读不了日志的基线: {e}"))?;
+        if let Some(archived) = floor.card_of_key(&key) {
+            reused = Some(archived);
+            return Ok(Vec::new());
+        }
         if !args.skip_health {
             let Some(health) = unit::health(target, args.stale_after) else {
                 return Err(format!("单元 {target} 现在不能接卡:单元未登记"));
@@ -532,14 +538,17 @@ pub fn run(argv: &[String]) -> i32 {
         }
         let mut scan = super::cards::scan(events);
         if let Some(original) = args.verify_of {
-            match scan.entries.get(&original) {
-                None => return Err(format!("没有 #{original},无法派它的回测卡")),
-                Some(entry) if entry.unit.as_deref() == Some(target) => {
-                    return Err(format!(
-                        "#{original} 就是 {target} 做的,回测卡要派给另一台单元"
-                    ));
-                }
-                Some(_) => {}
+            let done_by = match scan.entries.get(&original) {
+                Some(entry) => entry.unit.as_deref(),
+                None => match floor.gone.get(&original) {
+                    Some(gone) => gone.unit.as_deref(),
+                    None => return Err(format!("没有 #{original},无法派它的回测卡")),
+                },
+            };
+            if done_by == Some(target) {
+                return Err(format!(
+                    "#{original} 就是 {target} 做的,回测卡要派给另一台单元"
+                ));
             }
         }
         if !args.allow_busy {
@@ -561,6 +570,7 @@ pub fn run(argv: &[String]) -> i32 {
             .filter_map(|e| e.card)
             .max()
             .unwrap_or(0)
+            .max(floor.max_card)
             + 1;
         Ok(vec![Draft {
             kind: "dispatched".to_string(),

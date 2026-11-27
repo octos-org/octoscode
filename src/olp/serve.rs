@@ -95,6 +95,11 @@ fn said_before(events: &[Event], key: &str, kind: &str, card: Option<u64>) -> Re
 /// the same words are a new answer, not a retry of the old one.
 fn write(log: &Log, unit: &str, n: u64, mut draft: Draft, per_round: bool) -> i32 {
     let result = log.append_with(|events| {
+        // Nothing more is written about a card that is only in the archive.
+        let floor = log.floor().map_err(|e| e.to_string())?;
+        if floor.gone.contains_key(&n) {
+            return Err(format!("#{n} 已了结并归档,不再接受写入"));
+        }
         own_card(events, n, unit)?;
         if per_round {
             let returns = events
