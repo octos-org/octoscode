@@ -8159,7 +8159,7 @@ impl AppState {
     /// operator answers a peer's approval WITHOUT switching to it. Restricted to
     /// the rows the dock actually draws at `terminal_height` (collapsed pill →
     /// none; capped exactly as `peer_strip_lines`): a peer whose ⚠ row is
-    /// off-screen (below the row cap) or hidden (collapsed / height-0) must NOT
+    /// off-screen (below the drawn rows) or hidden (collapsed / height-0) must NOT
     /// be actionable, or the key would act on an affordance the user cannot see.
     /// Only APPROVALS qualify (a question-blocked peer needs the picker, not a
     /// yes/no key). `None` when no visible peer has a pending approval.
