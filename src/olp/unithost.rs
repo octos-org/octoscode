@@ -21,7 +21,9 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use super::outer::{Fail, busy_programs, fail, herdr, now, pane_for_label, quote, submit_again};
+use super::outer::{
+    Fail, busy_programs, fail, herdr, herdr_bin, now, pane_for_label, quote, submit_again,
+};
 
 const PROG: &str = "olp unit host";
 const USAGE: &str = "用法: octoscode olp unit host --pane <窗格> | --label <工作区标签> [--cwd 目录] [--session 会话] [--ready 90] [--max-restarts 3] [--window 1800] [--prompt 话 | --no-prompt] [--reset] -- <主持 agent 的启动命令…>
@@ -177,7 +179,9 @@ fn deliver(a: &Args, pane: &str) {
             break;
         }
         if Instant::now() >= deadline {
-            eprintln!("{PROG}: 提醒:herdr 没认出窗格 {pane} 里的 agent,接班提示没有送");
+            // herdr does not know every agent (Kimi Code shows up as
+            // `kimi-co` and stays unknown): the words still go in.
+            typed(pane, &text, session, "herdr 没认出这里的 agent");
             return;
         }
         std::thread::sleep(Duration::from_secs(1));
@@ -218,7 +222,71 @@ fn deliver(a: &Args, pane: &str) {
     .or_else(|first| submit_again(pane, session).ok_or(first));
     match sent {
         Ok(_) => println!("prompted pane {pane}"),
-        Err(Fail(_, why)) => eprintln!("{PROG}: 提醒:接班提示没送到窗格 {pane}: {why}"),
+        // Still on the screen: it was typed and the agent has not taken it;
+        // typing it again would say it twice.
+        Err(Fail(_, why)) if screen(pane, session).is_some_and(|now| now.contains(head(&text))) => {
+            eprintln!("{PROG}: 提醒:接班提示没送到窗格 {pane}: {why}")
+        }
+        Err(Fail(_, why)) => typed(pane, &text, session, &why),
+    }
+}
+
+/// What the pane shows now, as plain text.
+fn screen(pane: &str, session: Option<&str>) -> Option<String> {
+    let mut cmd = std::process::Command::new(herdr_bin());
+    if let Some(session) = session {
+        cmd.args(["--session", session]);
+    }
+    let out = cmd
+        .args(["pane", "read", pane])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The opening of a prompt, enough to find it on a screen.
+fn head(text: &str) -> &str {
+    let end = text.char_indices().nth(12).map_or(text.len(), |(at, _)| at);
+    &text[..end]
+}
+
+/// The pause between the words and the Enter. An Enter that follows at
+/// once is taken by some agents as part of the paste and submits nothing.
+fn enter_pause() -> Duration {
+    let ms = std::env::var("OLP_UNIT_HOST_ENTER_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1500);
+    Duration::from_millis(ms)
+}
+
+/// The prompt, typed into the pane as a person would: for an agent herdr
+/// cannot follow. Nothing confirms the agent took it, and this says so;
+/// the watcher's follow-up reaches a host that sits idle on a card.
+fn typed(pane: &str, text: &str, session: Option<&str>, why: &str) {
+    let pause = enter_pause();
+    // A program still drawing its first screen loses what is typed at it.
+    let mut last = screen(pane, session);
+    for _ in 0..15 {
+        std::thread::sleep(pause.min(Duration::from_secs(1)));
+        let now = screen(pane, session);
+        if now == last {
+            break;
+        }
+        last = now;
+    }
+    let sent = herdr(&["pane", "send-text", pane, text], session).and_then(|_| {
+        std::thread::sleep(pause);
+        herdr(&["pane", "send-keys", pane, "Enter"], session)
+    });
+    match sent {
+        Ok(_) => println!("typed into pane {pane}({why};直接敲进了窗格,没法确认 agent 接住)"),
+        Err(Fail(_, failed)) => {
+            eprintln!("{PROG}: 提醒:接班提示没送到窗格 {pane}: {why};直接敲入也失败: {failed}")
+        }
     }
 }
 

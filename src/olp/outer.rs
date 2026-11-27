@@ -73,7 +73,7 @@ pub(super) fn quote(word: &str) -> String {
         .unwrap_or_else(|_| word.to_string())
 }
 
-fn herdr_bin() -> String {
+pub(super) fn herdr_bin() -> String {
     std::env::var("OLP_HERDR")
         .ok()
         .filter(|v| !v.is_empty())

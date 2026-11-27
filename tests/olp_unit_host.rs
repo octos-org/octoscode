@@ -40,7 +40,9 @@ case "$1 $2" in
     echo '{"result":{}}' ;;
   "pane get")
     # A program is an agent to herdr only a moment after it started.
-    if [ -e "$here/seen" ]; then
+    if [ -e "$here/unknown" ]; then
+      echo '{"result":{"pane":{"pane_id":"'"$3"'","agent":null}}}'
+    elif [ -e "$here/seen" ]; then
       echo '{"result":{"pane":{"pane_id":"'"$3"'","agent":"claude"}}}'
     else
       : > "$here/seen"
@@ -51,6 +53,13 @@ case "$1 $2" in
     echo '{"result":{"status":"idle"}}' ;;
   "agent prompt")
     echo "$3 | $4" >> "$here/prompts.log"
+    echo '{"result":{}}' ;;
+  "pane read") cat "$here/screen" 2>/dev/null; echo ;;
+  "pane send-text")
+    echo "$3 | $4" >> "$here/typed.log"; printf '> %s\n' "$4" > "$here/screen"
+    echo '{"result":{}}' ;;
+  "pane send-keys")
+    echo "$3 | $4" >> "$here/keys.log"
     echo '{"result":{}}' ;;
   *) echo '{"error":{"message":"fake herdr: unsupported"}}'; exit 1 ;;
 esac
@@ -81,6 +90,7 @@ impl Unit {
             .env("HOME", self.dir.path())
             .env("OLP_HERDR", self.p("herdr"))
             .env("OLP_UNIT_HOST_STATE", self.p("state"))
+            .env("OLP_UNIT_HOST_ENTER_MS", "50")
             .output()
             .unwrap()
     }
@@ -135,6 +145,28 @@ fn a_host_whose_program_is_gone_is_started_again_and_told_to_take_over() {
     );
     assert_eq!(unit.lines("run.log").len(), 1);
     assert_eq!(unit.lines("prompts.log").len(), 1);
+}
+
+/// Scenario: herdr 认不出的 agent,接班提示直接敲进窗格,并说明没法确认
+#[test]
+fn a_host_herdr_cannot_follow_gets_the_prompt_typed_in() {
+    let unit = Unit::new();
+    std::fs::write(unit.p("unknown"), "").unwrap();
+    let out = unit.host(&["--pane", "w3:p2", "--ready", "1", "--", "kimi", "-y"]);
+    assert_eq!(out.status.code(), Some(0), "{}", said(&out));
+    assert!(
+        said(&out).contains("typed into pane w3:p2") && said(&out).contains("没法确认"),
+        "{}",
+        said(&out)
+    );
+    assert!(unit.lines("prompts.log").is_empty(), "no agent to prompt");
+    let typed = unit.lines("typed.log");
+    assert_eq!(typed.len(), 1, "{typed:?}");
+    assert!(
+        typed[0].contains("octoscode olp remote inbox w3:p2"),
+        "{typed:?}"
+    );
+    assert_eq!(unit.lines("keys.log"), ["w3:p2 | Enter"]);
 }
 
 /// Scenario: 窗格里有别的程序在跑时不启动、不发话

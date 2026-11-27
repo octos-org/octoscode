@@ -54,6 +54,12 @@ Scenario: 窗格里有别的程序在跑时不启动、不发话
   When 跑一次保活
   Then 退出码 0,没有启动命令,没有接班提示
 
+Scenario: herdr 认不出的 agent,接班提示直接敲进窗格,并说明没法确认
+  Test: a_host_herdr_cannot_follow_gets_the_prompt_typed_in
+  Given herdr 始终认不出窗格里的程序是 agent(真机上 Kimi Code 的进程名是 `kimi-co`,状态一直未知)
+  When 以 `--ready 1` 跑一次 `olp unit host --pane w3:p2 -- kimi -y`
+  Then 主持照常拉起;等屏幕不再变化后把接班提示敲进窗格,停顿片刻再回车(紧跟的回车会被当成粘贴的一部分);输出说明是直接敲入、没法确认 agent 接住;不调用 agent prompt
+
 Scenario: 按标签找窗格,工作区不存在时新建;--no-prompt 不发话
   Test: the_host_pane_is_found_or_created_by_its_workspace_label
   Given herdr 里没有标签为 unit-host 的工作区
