@@ -177,3 +177,9 @@ Scenario: 没有 ledger 的内环的告警也转得出去
   Given 守护在没有后端与 ledger 时输出的停滞记录与进程消失记录
   When 交给转发器
   Then 板上两行都写 `turn=-`,没有后端一行,也没有 `turn=None`
+
+Scenario: hub 用事件日志时告警走日志通道,连不上的留到下一条之前补发
+  Test: alert_forward_reaches_a_hub_that_keeps_an_event_log
+  Given 单元配置 store = log,hub 的强制命令是 olp remote serve-log;第一次 ssh 连不上
+  When 转发器读到两条记录(先是 agent 进程不在,后是 backend 也不在);同样的记录再喂一遍
+  Then 第一条先留着,第二条发出前补发,日志里依次是两条 alert 事件并挂在卡上;重喂不新增

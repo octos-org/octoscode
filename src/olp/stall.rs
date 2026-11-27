@@ -24,7 +24,7 @@ use super::inbox::{Partition, items};
 use super::log::{Event, Log};
 use super::{policy, unit};
 
-const USAGE: &str = "用法: octoscode olp board stall <日志目录> [--quiet 秒] [--stale-after 秒] [--state 文件] [--policy 命令 | --policy-crate 目录] [--samples 文件] [--json]
+const USAGE: &str = "用法: octoscode olp board stall <日志目录> [--quiet 秒] [--stale-after 秒] [--state 文件] [--policy 命令 | --policy-crate 目录] [--samples 文件] [--json] [--peek]
       octoscode olp board stall --replay <样本文件> [--policy 命令 | --policy-crate 目录] [--json]
 
 集群是否整体静默:有未了结的卡、占着卡的单元上没有内环在工作、日志已 --quiet 秒(默认 600)
@@ -37,6 +37,7 @@ const USAGE: &str = "用法: octoscode olp board stall <日志目录> [--quiet �
 --replay:不读日志,把样本文件里的事实逐份重算,比较两个判定:带策略时拿内置规则对这个策略,
 不带时拿这个版本的内置规则对样本里当时的判定。全部一致退出码 0,有不同退出码 1。
 同一段沉默不连着报:卡的状态变了、或又过了 3 次运行才再报,最多 3 次。
+--peek:只看不记——照常输出这次会报的卡,但不算一次运行、不占报告次数(外环值守这样问)。
 退出码:0(是否静默看输出;--replay 时为全部一致);1 --replay 发现不同;2 用法;4 日志或样本读不了";
 
 /// Runs between two reports of the same silence, and how many reports.
@@ -77,15 +78,26 @@ fn seconds_since(ts: &str, now: chrono::DateTime<chrono::Utc>) -> Option<i64> {
     Some((now - at.with_timezone(&chrono::Utc)).num_seconds())
 }
 
+/// The unit's last heartbeat, when it is recent enough to say anything.
+/// A unit marked offline keeps the heartbeat it last sent; how old that is
+/// decides, not the mark.
+fn fresh_beat(name: &str, stale_after: u64) -> Option<serde_json::Value> {
+    let beat = unit::health(name, stale_after)
+        .filter(|h| h.state != "stale")
+        .and_then(|h| h.beat)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64());
+    let age = now - beat.get("received_at")?.as_f64()?;
+    (age <= stale_after as f64).then_some(beat)
+}
+
 /// Units with a fresh heartbeat in which herdr saw a working inner loop.
 fn working_units(units: &BTreeSet<String>, stale_after: u64) -> (BTreeSet<String>, Vec<String>) {
     let mut working = BTreeSet::new();
     let mut unknown = Vec::new();
     for name in units {
-        let fresh = unit::health(name, stale_after)
-            .filter(|h| h.state != "stale")
-            .and_then(|h| h.beat);
-        let Some(beat) = fresh else {
+        let Some(beat) = fresh_beat(name, stale_after) else {
             unknown.push(name.clone());
             continue;
         };
@@ -377,9 +389,7 @@ fn ask_policy(source: &policy::Source, facts: &Facts) -> Result<Decision, String
 
 /// The status of every inner loop in a unit's fresh heartbeat.
 fn agent_statuses(name: &str, stale_after: u64) -> Vec<String> {
-    unit::health(name, stale_after)
-        .filter(|h| h.state != "stale")
-        .and_then(|h| h.beat)
+    fresh_beat(name, stale_after)
         .and_then(|beat| beat.get("agents").and_then(|v| v.as_array()).cloned())
         .unwrap_or_default()
         .iter()
@@ -395,6 +405,7 @@ fn last_about(events: &[Event], card: u64) -> Option<&Event> {
 pub fn run(argv: &[String]) -> i32 {
     let prog = "olp board stall";
     let (mut quiet, mut stale_after, mut as_json) = (600u64, unit::DEFAULT_STALE, false);
+    let mut peek = false;
     let mut state_file: Option<PathBuf> = None;
     let mut source = std::env::var("OLP_STALL_POLICY")
         .ok()
@@ -422,6 +433,10 @@ pub fn run(argv: &[String]) -> i32 {
             }
             "--json" => {
                 as_json = true;
+                true
+            }
+            "--peek" => {
+                peek = true;
                 true
             }
             "--quiet" => number(&mut quiet),
@@ -507,11 +522,13 @@ pub fn run(argv: &[String]) -> i32 {
 
     let now = chrono::Utc::now();
     let mut scan = super::cards::scan(&events);
-    let open: Vec<_> = items(&mut scan, now.date_naive(), |e| e.unit.is_some())
-        .into_iter()
-        // A snoozed card waits on purpose.
-        .filter(|i| matches!(i.partition, Partition::Inbox | Partition::Working))
-        .collect();
+    let open: Vec<_> = items(&mut scan, chrono::Local::now().date_naive(), |e| {
+        e.unit.is_some()
+    })
+    .into_iter()
+    // A snoozed card waits on purpose.
+    .filter(|i| matches!(i.partition, Partition::Inbox | Partition::Working))
+    .collect();
     let holders: BTreeSet<String> = open.iter().filter_map(|i| i.unit.clone()).collect();
     let (working, unknown) = working_units(&holders, stale_after);
     let silent_for = events
@@ -626,9 +643,12 @@ pub fn run(argv: &[String]) -> i32 {
             });
         }
     }
-    if let Ok(text) = serde_json::to_string(&st) {
-        if let Err(e) = std::fs::write(&state_file, text) {
-            eprintln!("{prog}: 记不下已报告的卡 {}: {e}", state_file.display());
+    // A look that reports to nobody spends nothing.
+    if !peek {
+        if let Ok(text) = serde_json::to_string(&st) {
+            if let Err(e) = std::fs::write(&state_file, text) {
+                eprintln!("{prog}: 记不下已报告的卡 {}: {e}", state_file.display());
+            }
         }
     }
 
@@ -649,19 +669,9 @@ pub fn run(argv: &[String]) -> i32 {
     }
     if open.is_empty() {
         println!("没有未了结的卡");
-    } else if !working.is_empty() {
-        let names: Vec<&str> = working.iter().map(String::as_str).collect();
-        println!(
-            "没有静默:{} 张卡未了结,{} 上有内环在工作",
-            open.len(),
-            names.join("、")
-        );
-    } else if !stalled {
-        println!(
-            "还没到静默的时间:{} 张卡未了结,没有内环在工作,日志已 {silent_for} 秒没有新事件(上限 {quiet} 秒)",
-            open.len()
-        );
-    } else {
+    } else if stalled {
+        // What is said follows the decision that was used, a policy's
+        // included — not the built-in conditions.
         for a in &alerts {
             println!(
                 "[stall] #{} 单元 {}:{},自 {} 起(事件 {});能推动的是{}",
@@ -680,6 +690,23 @@ pub fn run(argv: &[String]) -> i32 {
         if alerts.is_empty() {
             println!("仍然静默,{held_back} 张卡已报告过,没有变化");
         }
+    } else if !working.is_empty() {
+        let names: Vec<&str> = working.iter().map(String::as_str).collect();
+        println!(
+            "没有静默:{} 张卡未了结,{} 上有内环在工作",
+            open.len(),
+            names.join("、")
+        );
+    } else if silent_for >= quiet as i64 {
+        println!(
+            "没有静默:{} 张卡未了结,策略判定不算静默(日志已 {silent_for} 秒没有新事件)",
+            open.len()
+        );
+    } else {
+        println!(
+            "还没到静默的时间:{} 张卡未了结,没有内环在工作,日志已 {silent_for} 秒没有新事件(上限 {quiet} 秒)",
+            open.len()
+        );
     }
     if !unknown.is_empty() && !open.is_empty() {
         println!(

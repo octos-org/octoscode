@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::unit::is_unit;
+use super::unit::{is_target, is_unit};
 
 struct Fail(i32, String);
 
@@ -68,13 +68,6 @@ fn is_name(s: &str) -> bool {
         .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
         && s.len() <= 41
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-}
-
-fn is_target(s: &str) -> bool {
-    let mut chars = s.chars();
-    chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
-        && s.len() <= 128
-        && chars.all(|c| c.is_ascii_alphanumeric() || "._@-".contains(c))
 }
 
 fn which(name: &str) -> Option<PathBuf> {
@@ -663,18 +656,7 @@ fn heartbeat(backend: Backend, argv: &[String]) -> Result<i32, Fail> {
                 .unwrap_or(v),
         })
         .unwrap_or_else(|| "ssh".to_string());
-    // One shell word, quoted only when it has to be.
-    let quote = |word: &str| {
-        let plain = !word.is_empty()
-            && word
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "@%+=:,./-_".contains(c));
-        if plain {
-            word.to_string()
-        } else {
-            format!("'{}'", word.replace('\'', "'\"'\"'"))
-        }
-    };
+    let quote = super::proc::quote;
     let shell = |words: &[&str]| words.iter().map(|w| quote(w)).collect::<Vec<_>>().join(" ");
     let mut send: Vec<&str> = tool.iter().map(String::as_str).collect();
     send.extend(["heartbeat", "--unit", unit]);

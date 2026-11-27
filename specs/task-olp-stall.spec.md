@@ -140,3 +140,21 @@ Scenario: 重放样本,比较内置规则与策略、或这个版本与当时的
   Given 两份样本:一份由内置规则判定,一份由一条改了原因的策略判定
   When 不带策略重放;带该策略重放(--json);带一条判为不算静默的策略、一条失败的策略重放;只重放第一份;给了日志目录、文件不存在、内容不是样本
   Then 不带策略时一份一致一份不同并指出行号与两边的原因,退出码 1;带策略时两份都不同;判为不算静默与策略失败都算不同;只有内置规则判定的样本全部一致,退出码 0;三种错误输入分别是 2、4、4
+
+Scenario: --peek 只看不记
+  Test: a_peek_reports_the_same_and_spends_nothing
+  Given 一张没人领的卡
+  When 带 --peek 查五次,再不带 --peek 查一次,再带 --peek 查一次
+  Then 五次都输出这张卡且都是第 1 次报告,不写状态文件;不带 --peek 的那次仍是第 1 次报告;之后的 --peek 与正式运行一样不再输出它
+
+Scenario: 标记离线的单元留下的旧心跳不算有人在工作
+  Test: an_offline_unit_with_an_old_heartbeat_is_not_working
+  Given 一台内环在工作的单元占着一张卡,随后被人工标记离线
+  When 心跳还新时查;把心跳改成一小时前再查
+  Then 心跳新时不算静默;心跳过期后算静默,该单元不在 working_units 里而在 unknown_units 里
+
+Scenario: 文字输出跟着实际采用的判定
+  Test: the_text_follows_the_decision_a_policy_made
+  Given 一台内环在工作的单元占着一张卡(内置规则判为没有静默)
+  When 带一条判为静默的策略看文字输出;单元空闲后带一条判为不算静默的策略再看
+  Then 前者逐卡输出 [stall] 行与策略给的原因,不说"没有静默";后者说明是策略判定不算静默,没有 [stall] 行

@@ -74,6 +74,8 @@ fn signed_line(event: &Event) -> Option<String> {
         ),
         // Left by a job that is no card's party, e.g. the outer's supervisor.
         ("note", _) => format!("> {}{}", event.actor, colon(say)),
+        // What a unit's runtime guard saw (`olp guard forward`).
+        ("alert", _) => format!("> {}{}", event.actor, colon(say)),
         _ => return None,
     })
 }

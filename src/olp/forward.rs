@@ -8,6 +8,11 @@
 //!
 //! `> 单元(<unit>)·负哨(#<task>): <kind> turn=<turn> <detail>`
 //!
+//! To a hub that keeps an event log (`store = log`) the same thing goes as
+//! an `alert` event through the log channel (`olp remote serve-log`); what
+//! could not be sent because the hub was not reached is sent again before
+//! the next one.
+//!
 //! Each thing is reported once while it lasts (the guard repeats it every
 //! heartbeat); gone and back is a new one. Only whitelisted fields go out —
 //! kind, pid, tool name, sequence number, stall seconds — never output.
@@ -174,13 +179,31 @@ pub fn run(argv: &[String]) -> i32 {
         );
         return 2;
     }
-    let hub = match resolve(hub.as_ref(), unit.as_ref()) {
-        Ok(hub) => hub,
-        Err(Fail(_, why)) => {
-            eprintln!("{prog}: {why}");
-            return 2;
+    // A hub that keeps an event log takes alerts on the log channel; the
+    // Markdown channel's forced command is not installed there.
+    let on_log = super::client::log_mode();
+    let (hub_md, unit_name) = if on_log {
+        match super::client::unit_name(hub.as_ref(), unit.as_ref()) {
+            Ok(name) => (None, name),
+            Err(why) => {
+                eprintln!("{prog}: {why}");
+                return 2;
+            }
+        }
+    } else {
+        match resolve(hub.as_ref(), unit.as_ref()) {
+            Ok(found) => {
+                let name = found.unit.clone();
+                (Some(found), name)
+            }
+            Err(Fail(_, why)) => {
+                eprintln!("{prog}: {why}");
+                return 2;
+            }
         }
     };
+    // Log channel only: alerts the hub was not reached for, oldest first.
+    let mut unsent: Vec<(String, String, String)> = Vec::new();
     // What is going on now, and how many times each thing has started.
     let mut active: BTreeSet<(String, String)> = BTreeSet::new();
     let mut episodes: BTreeMap<(String, String), u64> = BTreeMap::new();
@@ -222,16 +245,14 @@ pub fn run(argv: &[String]) -> i32 {
             let episode = episodes.entry(ident.clone()).or_default();
             *episode += 1;
             active.insert(ident);
-            let line = format!(
-                "> 单元({})·负哨({label}): {kind} turn={turn} {detail}\n",
-                hub.unit
-            );
+            let said = format!("{kind} turn={turn} {detail}");
+            let line = format!("> 单元({unit_name})·负哨({label}): {said}\n");
             // Stable for the same thing; a digest keeps the key short.
             let digest =
                 Sha256::digest(format!("{task}\n{turn}\n{kind}\n{disc}\n{episode}").as_bytes());
             let hex: String = digest.iter().take(12).map(|b| format!("{b:02x}")).collect();
             let key = match make_key(
-                &hub.unit,
+                &unit_name,
                 Some(&format!("neg:{kind}:{hex}")),
                 line.as_bytes(),
             ) {
@@ -241,7 +262,35 @@ pub fn run(argv: &[String]) -> i32 {
                     continue;
                 }
             };
-            let code = deliver(&hub, &key, line.as_bytes());
+            let Some(hub_md) = &hub_md else {
+                unsent.push((key, label.clone(), said));
+                // In order: nothing newer goes out before what waits.
+                while let Some((key, label, said)) = unsent.first() {
+                    match super::client::alert(hub.as_ref(), unit.as_ref(), key, label, said) {
+                        Ok(Some((0, _))) => {}
+                        Ok(Some((code, why))) => {
+                            eprintln!("{prog}: hub 拒绝了一条告警(退出码 {code}){}", {
+                                if why.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(":{why}")
+                                }
+                            });
+                        }
+                        Ok(None) => {
+                            eprintln!("{prog}: 没有连上 hub,{} 条告警留待下次再发", unsent.len());
+                            break;
+                        }
+                        Err(why) => {
+                            eprintln!("{prog}: {why}");
+                            break;
+                        }
+                    }
+                    unsent.remove(0);
+                }
+                continue;
+            };
+            let code = deliver(hub_md, &key, line.as_bytes());
             if code != 0 && code != EX_TEMPFAIL {
                 eprintln!("{prog}: hub 拒绝了 {kind}(退出码 {code})");
             }

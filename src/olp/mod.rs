@@ -30,6 +30,7 @@ pub mod mdremote;
 pub mod outer;
 pub mod outerwatch;
 pub mod policy;
+pub mod proc;
 pub mod render;
 pub mod repo;
 pub mod reviewcargo;

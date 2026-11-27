@@ -92,3 +92,10 @@ Scenario: 整体静默也唤醒外环,同一段沉默不反复唤醒
   Given 一张没人领的卡,没有内环在工作
   When 静默时间未到时跑一轮;以 --quiet 0 跑三轮;再用缺窗格、缺日志、不存在的日志、不合法的窗格调用
   Then 未到时间不唤醒;到了发一句指向 olp board stall 的短句;同一段沉默的后两轮不再发;参数不对退出码 2
+
+Scenario: 外环忙着时值守不占用静默的报告次数(critical)
+  Tags: critical
+  Test: a_busy_outer_pane_does_not_use_up_the_stall_reports
+  Given 一张没人领的卡,外环的窗格一直忙
+  When 值守跑六轮;窗格空闲后再跑一轮;外环自己执行 olp board stall;值守再跑一轮
+  Then 忙的六轮都没有发短句;空闲后发一次;外环自己那次仍列出这张卡且是第 1 次报告;外环看过之后值守不再为同一段沉默发短句

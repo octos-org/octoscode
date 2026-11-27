@@ -82,20 +82,13 @@ fn pushed_sha(text: &str) -> Option<String> {
 }
 
 /// What a Markdown board records per card, in line order. Only line-start
-/// forms outside code fences count.
+/// forms outside code fences count — by the board's one reader of fences
+/// (`board::markdown_lines`), so this agrees with the inbox on what is
+/// quoted and what is live.
 fn board_events(text: &str) -> BTreeMap<u64, Vec<Kind>> {
     let mut events: BTreeMap<u64, Vec<Kind>> = BTreeMap::new();
-    let mut in_fence = false;
-    for line in text.lines() {
-        let stripped = line.trim_start();
-        if stripped.starts_with("```") || stripped.starts_with("~~~") {
-            in_fence = !in_fence;
-            continue;
-        }
-        if in_fence {
-            continue;
-        }
-        let line = strip_quote(line.trim_end_matches('\r'));
+    for (_, line) in super::board::markdown_lines(super::board::lines(text)) {
+        let line = strip_quote(line);
         if let Some((unit, rest)) = signed(line, "单元") {
             let pushed = rest
                 .strip_prefix("本地复验通过(#")

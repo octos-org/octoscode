@@ -118,3 +118,9 @@ Scenario: 配置缺失或输入非法时不发起连接
   Given 没有任何配置;只有 hub;hub 写成 ssh 选项的样子;以及一份配置文件
   When 分别运行 append;在有配置文件时给出空正文、非法键、非法 ACK 种类、非数字条目号、缺说明、缺 `--to`、未知子命令
   Then 都以退出码 2 结束,黑板不变、队列为空;只凭配置文件的一次正常追加成功
+
+Scenario: 连上以后卡住的 ssh 到时限算 hub 不可达,写入照常排队
+  Test: a_stalled_connection_counts_as_an_unreachable_hub
+  Given 一个连上后长时间不返回的 ssh,OLP_SSH_TIMEOUT=1
+  When 执行 remote append
+  Then 到时限结束,退出码 75,提示已排队,队列里有这一条

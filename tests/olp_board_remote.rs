@@ -460,3 +460,36 @@ fn remote_requires_configuration_and_valid_input() {
         assert!(n.board_text().contains("经配置文件"));
     }
 }
+
+/// Scenario: 连上以后卡住的 ssh 到时限算 hub 不可达,写入照常排队
+#[test]
+fn a_stalled_connection_counts_as_an_unreachable_hub() {
+    let n = Net::new();
+    let stuck = n.dir.path().join("stuck-ssh");
+    std::fs::write(&stuck, "#!/bin/sh\nexec sleep 300\n").unwrap();
+    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let started = std::time::Instant::now();
+    let mut child = Command::new(tool())
+        .args(["olp", "remote", "append"])
+        .env("OLP_SSH", &stuck)
+        .env("OLP_SSH_TIMEOUT", "1")
+        .env("OLP_HUB", "olp@hub-01")
+        .env("OLP_UNIT_ID", "m07")
+        .env("OLP_QUEUE_DIR", n.queue())
+        .env("OLP_UNIT_CONF", n.dir.path().join("absent.conf"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let _ = child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all("> 单元(m07)·一条\n".as_bytes());
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(75), "{}", stderr(&out));
+    assert!(stderr(&out).contains("已排队"), "{}", stderr(&out));
+    assert_eq!(n.queued(), 1);
+    assert!(started.elapsed() < std::time::Duration::from_secs(60));
+}

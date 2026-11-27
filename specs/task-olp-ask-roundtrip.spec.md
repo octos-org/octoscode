@@ -110,3 +110,9 @@ Scenario: 单机的 MCP 板上,超时行的 reason 是 id 之后的文字
   Given MCP 审计板上有一行 `timeout: id=0a06174e2d90 no answer in 90s`
   When 运行采集
   Then 症状为 `kind=timeout id=0a06174e2d90 reason=no answer in 90s`
+
+Scenario: 连上以后卡住的 ssh 到时限算单元不可达
+  Test: a_stalled_connection_to_the_unit_ends_at_the_deadline
+  Given 一个连上后长时间不返回的 ssh,OLP_SSH_TIMEOUT=1
+  When 执行 olp ask list m07
+  Then 到时限结束,退出码 75,提示单元不可达并写明多少秒内没有答复

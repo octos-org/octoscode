@@ -159,5 +159,5 @@ Scenario: init 可重跑且拒绝非裸仓库
 Scenario: 黑板是事件日志时,卡从日志里读,推送登记进日志
   Test: hub_reads_the_card_from_an_event_log_and_records_the_push_there
   Given hub 仓库的 olp.board 指向一个事件日志目录,日志里 #1 派给 m07 并指定复验方 codex、claude,#2 派给 m08
-  When m07 推 task/2;以只含 codex 的署名推 task/1;以覆盖两个复验方的署名推 task/1
-  Then 前两次被拒并说明(派给的是 m08;缺少 claude);第三次被接收,日志里多一条 pushed 事件(带提交号前 12 位与署名),渲染出的板上有"本地复验通过(#1)"一行,Markdown 板没有被写入
+  When m07 推 task/2;以只含 codex 的署名推 task/1;以覆盖两个复验方的署名推 task/1;随后把 task/1 强推到一个改写过的提交,再强推回原来的提交
+  Then 前两次被拒并说明(派给的是 m08;缺少 claude);第三次被接收,日志里多一条 pushed 事件(带提交号前 12 位与署名),渲染出的板上有"本地复验通过(#1)"一行,Markdown 板没有被写入;两次强推各记一条 pushed 事件,推回原提交的那条也在(共三条,键各不相同)

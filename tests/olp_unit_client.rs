@@ -320,3 +320,27 @@ fn a_unit_on_a_markdown_hub_keeps_the_old_channel() {
     assert_eq!(out.status.code(), Some(2));
     assert!(stderr(&out).contains("store = log"), "{}", stderr(&out));
 }
+
+/// Scenario: 连上以后卡住的 ssh 到时限就结束,算没有连上
+#[test]
+fn a_connection_that_stalls_ends_at_the_deadline() {
+    let site = Site::new(OVER_SSH);
+    // An ssh that connects and then says nothing for a long time.
+    let stuck = site.dir.path().join("stuck-ssh");
+    std::fs::write(&stuck, "#!/bin/sh\nexec sleep 300\n").unwrap();
+    std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let envs = [
+        ("OLP_SSH", stuck.to_str().unwrap()),
+        ("OLP_SSH_TIMEOUT", "1"),
+    ];
+    let started = std::time::Instant::now();
+    let out = site.unit_env(&["ack", "1", "done", "测试通过"], &envs);
+    assert_eq!(out.status.code(), Some(75), "{}", stderr(&out));
+    assert!(stderr(&out).contains("没有连上 hub"), "{}", stderr(&out));
+    assert_eq!(site.unit_env(&["mirror"], &envs).status.code(), Some(75));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(60),
+        "both ended at their deadline, not at the ssh's own end"
+    );
+    assert_eq!(site.events().len(), 2, "nothing was recorded");
+}

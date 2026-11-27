@@ -17,6 +17,8 @@
 //!   not take the card;
 //! - `question ask|answer|timeout <id>` (the question on stdin for `ask`) —
 //!   a question an inner loop asked with `ask_outer`, and how it ended;
+//! - `alert <键> <任务标签>` (one line on stdin) — what the unit's runtime
+//!   guard saw (`olp guard forward`), recorded once per key;
 //! - `inbox [<窗格>]` — this unit's cards that were dispatched to a pane and
 //!   not claimed yet (`progress <N> claimed` claims one);
 //! - `events [<之后的序号>]` — the events about this unit's cards, as JSON
@@ -31,18 +33,12 @@ use serde_json::json;
 
 use super::cards;
 use super::log::{AppendError, Draft, Event, Log};
+use super::unit::is_unit;
 
 /// A unit's text travels over ssh on stdin; this is plenty for one line.
 const TEXT_LIMIT: u64 = 64 * 1024;
 const REFUSED: i32 = 3;
 const LOG_FAILED: i32 = 4;
-
-fn is_unit(s: &str) -> bool {
-    let mut chars = s.chars();
-    chars.next().is_some_and(|c| c.is_ascii_lowercase())
-        && s.len() <= 32
-        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-}
 
 /// Stdin as one trimmed line. `Err` when it is longer than a line may be
 /// or holds a line break.
@@ -81,11 +77,36 @@ fn own_card(events: &[Event], n: u64, unit: &str) -> Result<(), String> {
     }
 }
 
-fn write(log: &Log, unit: &str, n: u64, draft: Draft) -> i32 {
+/// `Ok(true)`: `key` already stands for this very thing (a retry).
+/// `Err`: it stands for something else, which a retry never is.
+fn said_before(events: &[Event], key: &str, kind: &str, card: Option<u64>) -> Result<bool, String> {
+    match events.iter().find(|e| e.key.as_deref() == Some(key)) {
+        None => Ok(false),
+        Some(first) if first.kind == kind && first.card == card => Ok(true),
+        Some(first) => Err(format!(
+            "键 {key} 已用于第 {} 条事件,与这次要写的不是同一件事",
+            first.seq
+        )),
+    }
+}
+
+/// Append `draft` about the unit's card `n`. `per_round`: the key counts
+/// within one round of the card — after the outer loop returned the card,
+/// the same words are a new answer, not a retry of the old one.
+fn write(log: &Log, unit: &str, n: u64, mut draft: Draft, per_round: bool) -> i32 {
     let result = log.append_with(|events| {
         own_card(events, n, unit)?;
+        if per_round {
+            let returns = events
+                .iter()
+                .filter(|e| e.card == Some(n) && e.kind == "returned")
+                .count();
+            if returns > 0 {
+                draft.key = draft.key.take().map(|key| format!("{key}:r{returns}"));
+            }
+        }
         if let Some(key) = &draft.key {
-            if events.iter().any(|e| e.key.as_ref() == Some(key)) {
+            if said_before(events, key, &draft.kind, draft.card)? {
                 return Ok(Vec::new());
             }
         }
@@ -121,7 +142,7 @@ pub fn run(argv: &[String]) -> i32 {
             "--log" => dir = words.next().cloned(),
             "-h" | "--help" => {
                 println!(
-                    "用法(ssh 强制命令): octoscode olp remote serve-log --unit <单元号> --log <日志目录>\n\n单元的请求来自 SSH_ORIGINAL_COMMAND:ack <N> <结果>、progress <N> <节点> [轮次]、question <ask|answer|timeout> <提问id>、inbox [窗格]、events [序号]。"
+                    "用法(ssh 强制命令): octoscode olp remote serve-log --unit <单元号> --log <日志目录>\n\n单元的请求来自 SSH_ORIGINAL_COMMAND:ack <N> <结果>、progress <N> <节点> [轮次]、question <ask|answer|timeout> <提问id>、alert <键> <任务标签>、inbox [窗格]、events [序号]。"
                 );
                 return 0;
             }
@@ -187,7 +208,7 @@ pub fn run(argv: &[String]) -> i32 {
                 key,
                 data: json!({ "result": result, "text": text }),
             };
-            write(&log, &unit, n, draft)
+            write(&log, &unit, n, draft, true)
         }
         ["progress", n, rest @ ..] => {
             let Some(n) = card(n) else {
@@ -220,7 +241,63 @@ pub fn run(argv: &[String]) -> i32 {
                 key: Some(format!("{unit}:progress:{n}:{node}:{round}")),
                 data: json!({ "node": node, "round": round, "text": text }),
             };
-            write(&log, &unit, n, draft)
+            write(&log, &unit, n, draft, false)
+        }
+        ["alert", key, label] => {
+            // What the unit's runtime guard saw (`olp guard forward`). It
+            // is the unit's own word about itself; a card it names is
+            // linked only when that card is this unit's.
+            let own_key = key.strip_prefix(&format!("{unit}:")).is_some_and(|rest| {
+                (1..=180).contains(&rest.len())
+                    && rest
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "._:/@+=-".contains(c))
+            });
+            if !own_key {
+                return refuse(&format!("键必须以 {unit}: 开头且只含 [A-Za-z0-9._:/@+=-]"));
+            }
+            let plain = (1..=41).contains(&label.len())
+                && label
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "#._:/@+=-".contains(c));
+            if !plain {
+                return refuse("告警的任务标签不合法");
+            }
+            let text = match one_line() {
+                Ok(text) if !text.is_empty() => text,
+                Ok(_) => return refuse("告警的内容为空"),
+                Err(why) => return refuse(&why),
+            };
+            let named = label.strip_prefix('#').and_then(card);
+            let result = log.append_with(|events| {
+                let card = named.filter(|n| own_card(events, *n, &unit).is_ok());
+                if said_before(events, key, "alert", card)? {
+                    return Ok(Vec::new());
+                }
+                Ok::<_, String>(vec![Draft {
+                    kind: "alert".to_string(),
+                    card,
+                    actor: format!("单元({unit})·负哨({label})"),
+                    unit: Some(unit.clone()),
+                    key: Some(key.to_string()),
+                    data: json!({ "text": text }),
+                }])
+            });
+            match result {
+                Ok(written) if written.is_empty() => {
+                    println!("告警:已经记录过,没有重复写入");
+                    0
+                }
+                Ok(_) => {
+                    println!("告警:已记录");
+                    0
+                }
+                Err(AppendError::Refused(why)) => refuse(&why),
+                Err(AppendError::Log(e)) => {
+                    eprintln!("olp-hub: {e}");
+                    LOG_FAILED
+                }
+            }
         }
         ["question", kind @ ("ask" | "answer" | "timeout"), id] => {
             // A question an inner loop asked with `ask_outer`, and how it
@@ -255,8 +332,10 @@ pub fn run(argv: &[String]) -> i32 {
                     e.unit.as_deref() == Some(unit.as_str())
                         && e.data.get("id").and_then(|v| v.as_str()) == Some(*id)
                 };
-                if events.iter().any(|e| e.key == draft.key) {
-                    return Ok(Vec::new());
+                if let Some(key) = &draft.key {
+                    if said_before(events, key, &draft.kind, None)? {
+                        return Ok(Vec::new());
+                    }
                 }
                 if *kind != "ask" {
                     if !events.iter().filter(about).any(|e| e.kind == "asked") {
@@ -339,6 +418,6 @@ pub fn run(argv: &[String]) -> i32 {
             println!("{}", json!({ "unit": unit, "items": items, "held": held }));
             0
         }
-        _ => refuse("这个密钥只能用于 ack、progress、events 与 inbox"),
+        _ => refuse("这个密钥只能用于 ack、progress、question、alert、events 与 inbox"),
     }
 }

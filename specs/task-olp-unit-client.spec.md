@@ -74,3 +74,9 @@ Scenario: hub 还在用 Markdown 黑板的单元,命令照旧走原通道
   Given 单元配置里没有 store = log
   When 执行 remote ack 与 remote progress
   Then 回执以原定式追加到 Markdown 黑板,事件日志不变;progress 退出码 2 并说明需要 store = log
+
+Scenario: 连上以后卡住的 ssh 到时限就结束,算没有连上
+  Test: a_connection_that_stalls_ends_at_the_deadline
+  Given 一个连上后长时间不返回的 ssh,OLP_SSH_TIMEOUT=1
+  When 执行 remote ack 与 remote mirror
+  Then 两条命令都在时限到时结束,退出码 75 并提示没有连上 hub;日志里没有新事件

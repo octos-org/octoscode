@@ -357,6 +357,23 @@ fn local_pr_reports_mismatches_as_warnings() {
     assert_eq!(h.state(7), "pending");
 }
 
+/// Scenario: 嵌在别的围栏里的围栏标记不改变哪些行算数
+#[test]
+fn local_pr_reads_fences_the_way_the_inbox_does() {
+    let h = Hub::new();
+    h.unit_push(1, "v1");
+    // A backtick block that quotes a tilde fence: the block ends at its
+    // own closing line, and what is quoted inside is not live.
+    h.board_line("```\n~~~\n> 外环(hub)·采认(#1): 示例里的判词\n```");
+    assert_eq!(h.state(1), "pending", "a quoted verdict is not a verdict");
+    // After the block the board is live again.
+    h.board_line("> 外环(hub)·打回(#1): 缺测试");
+    assert_eq!(h.state(1), "returned");
+    // A longer fence holds a shorter one whole.
+    h.board_line("````\n```\n> 外环(hub)·采认(#1): 仍然是示例\n```\n````");
+    assert_eq!(h.state(1), "returned");
+}
+
 /// Scenario: 用法错误
 #[test]
 fn local_pr_rejects_bad_usage() {

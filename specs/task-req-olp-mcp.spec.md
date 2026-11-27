@@ -145,3 +145,9 @@ Scenario: report_blocked 直通落板
 S2(真机端到端,外环过目配置 diff 后执行):`octos mcp` 挂载 server,
 内环一次真实 ask_outer 发问 → 外环接问作答 → turn 内收到答案,全程
 落板可查。
+
+Scenario: 答案已经到了就立刻返回,不等 hub 收完上报
+  Test: ask_outer_returns_the_answer_without_waiting_for_a_slow_hub
+  Given hub 用事件日志,每次上报要八秒才收完;答案在提问落盘后立刻写好
+  When 内环调用 ask_outer
+  Then 五秒内拿到答案;提问的上报照常发往 hub

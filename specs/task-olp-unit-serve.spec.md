@@ -93,3 +93,22 @@ Scenario: 单元只看得到自己的卡(critical)
   Given m07 与 m08 各有一张卡并各有后续事件
   When 两台单元分别请求 events,m08 再带序号请求,没有卡的 m09 也请求
   Then 各自只得到自己那张卡的事件;带序号时只得到之后的;m09 得到空
+
+Scenario: 打回之后同样的回执是新的一次,不当成重发(critical)
+  Tags: critical
+  Test: an_ack_after_a_return_is_a_new_answer
+  Given m07 对 #1 带键回执了两次(第二次是重发),外环随后打回
+  When m07 用同样的结果、同样的说明、同样的键再回执;再重发一次
+  Then 打回前只记一条;打回后的那次记成新事件(键带上轮次),卡回到收件箱;它的重发不再重复
+
+Scenario: 单元的运行时告警记成事件,一件事一条
+  Test: a_units_guard_alert_is_recorded_once
+  Given #1 派给 m07,#2 派给 m08
+  When m07 发 alert <键> '#1' 两次;对 '#2'、对不是卡号的标签各发一次;键不是自己的、标签不合法、内容为空或多行各发一次
+  Then 第一种只记一条 alert 事件并挂在 #1 上;指向别人卡的和不指卡的不挂卡号;四种不合法的请求退出码 3 且不写入;进展汇总的告警里有它
+
+Scenario: 一个键只代表一件事
+  Test: a_key_never_stands_for_two_things
+  Given m07 用某个键记了一条告警;外环用键 k1 打回了 #1
+  When m07 用同一个键回执 #1;外环用 k1 再打回 #1、打回 #2、采认 #1
+  Then 回执被拒收(退出码 3)且不写入;同一件事再说一遍成功且不重复;把键用到另一张卡或另一种判词上被拒绝(退出码 1)且不写入

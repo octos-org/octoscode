@@ -19,13 +19,13 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
 use super::board::strip_quote;
 use super::client::{conf, setting};
-use super::unit::is_unit;
+use super::unit::{is_target, is_unit};
 
 const MAX_BODY: usize = 256 * 1024;
 pub const EX_TEMPFAIL: i32 = 75;
@@ -47,13 +47,6 @@ fn is_key(s: &str) -> bool {
     (1..=180).contains(&s.len())
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._:/@+=-".contains(&b))
-}
-
-fn is_target(s: &str) -> bool {
-    let mut chars = s.chars();
-    chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
-        && s.len() <= 128
-        && chars.all(|c| c.is_ascii_alphanumeric() || "._@-".contains(c))
 }
 
 fn hex(bytes: &[u8], chars: usize) -> String {
@@ -115,7 +108,7 @@ fn hub_run(hub: &Hub, request: &[&str], stdin: &[u8]) -> Ran {
         stdout: Vec::new(),
         stderr: why,
     };
-    let mut cmd = if hub.target == LOCAL {
+    let cmd = if hub.target == LOCAL {
         // The forced command, run here: the same handler, the same rules.
         let Ok(exe) = std::env::current_exe() else {
             return unreachable("无法在本机运行 hub 一侧".to_string());
@@ -140,24 +133,17 @@ fn hub_run(hub: &Hub, request: &[&str], stdin: &[u8]) -> Ran {
         .args(request);
         cmd
     };
-    let spawned = cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
-    let mut child = match spawned {
-        Ok(child) => child,
-        Err(e) => return unreachable(format!("无法运行 ssh: {e}")),
-    };
-    if let Some(mut pipe) = child.stdin.take() {
-        let _ = pipe.write_all(stdin);
-    }
-    match child.wait_with_output() {
-        Err(e) => unreachable(e.to_string()),
+    // The whole request has a deadline, not only the connection.
+    match super::proc::run(cmd, Some(stdin), super::proc::ssh_limit()) {
+        Err(super::proc::RunError::Spawn(e)) => unreachable(format!("无法运行 ssh: {e}")),
+        Err(super::proc::RunError::Timeout) => unreachable(format!(
+            "{} 秒内没有答复",
+            super::proc::ssh_limit().as_secs()
+        )),
         Ok(out) => Ran {
-            code: out.status.code().unwrap_or(UNREACHABLE),
+            code: out.code.unwrap_or(UNREACHABLE),
+            stderr: out.stderr_text(),
             stdout: out.stdout,
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         },
     }
 }

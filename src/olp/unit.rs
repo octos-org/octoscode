@@ -18,8 +18,8 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::process::Command;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
@@ -81,6 +81,14 @@ pub fn is_unit(s: &str) -> bool {
     chars.next().is_some_and(|c| c.is_ascii_lowercase())
         && s.len() <= 32
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// An ssh target as the tools accept one: `host`, `user@host`, an alias.
+pub fn is_target(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && s.len() <= 128
+        && chars.all(|c| c.is_ascii_alphanumeric() || "._@-".contains(c))
 }
 
 fn is_mac(s: &str) -> bool {
@@ -356,43 +364,16 @@ enum RunError {
 }
 
 /// Run a command to its end, or kill it at the deadline.
-fn run_for(mut cmd: Command, limit: Duration) -> Result<Ran, RunError> {
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(RunError::Spawn)?;
-    fn drain(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<String> {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            if let Some(mut pipe) = pipe {
-                let _ = pipe.read_to_end(&mut bytes);
-            }
-            String::from_utf8_lossy(&bytes).into_owned()
-        })
+fn run_for(cmd: Command, limit: Duration) -> Result<Ran, RunError> {
+    match super::proc::run(cmd, None, limit) {
+        Ok(ran) => Ok(Ran {
+            code: ran.code,
+            stdout: ran.stdout_text(),
+            stderr: ran.stderr_text(),
+        }),
+        Err(super::proc::RunError::Spawn(e)) => Err(RunError::Spawn(e)),
+        Err(super::proc::RunError::Timeout) => Err(RunError::Timeout),
     }
-    let out = drain(child.stdout.take());
-    let err = drain(child.stderr.take());
-    let deadline = Instant::now() + limit;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(RunError::Timeout);
-            }
-        }
-    };
-    Ok(Ran {
-        code: status.code(),
-        stdout: out.join().unwrap_or_default(),
-        stderr: err.join().unwrap_or_default(),
-    })
 }
 
 fn cut(text: &str, chars: usize) -> String {

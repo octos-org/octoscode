@@ -59,6 +59,10 @@
 (`progress`),只能读到自己的卡的事件(`events`)。单元上的命令(`specs/task-olp-unit-client.spec.md`):
 `unit.conf` 里写了 `store = log` 时,`remote ack`、`remote mirror` 走这条通道,另有
 `remote progress <N> claimed | review <轮次> | rework <轮次>`;没写时一切照旧。
+回执的键在一轮之内去重:外环打回之后,同样的结果、同样的说明是新的一次回执,不当成重发。
+一个键只代表一件事:已用于别的卡或别的种类的键被拒收,不会悄悄当成"已记录"。
+到 hub 的每个 ssh 请求有总时限(`OLP_SSH_TIMEOUT` 秒,默认 60):连上以后卡住的,到时限算没有连上,
+命令退出码 75,原样重跑即可。
 派卡与唤醒(`specs/task-olp-delivery-wake.spec.md`):`card open --unit U --pane <窗格>` 写进日志
 就是送达;单元用 `remote inbox [<窗格>]` 看还没领取的卡(`body` 是卡的全文,`next` 是接下来的
 领取与回执命令),用 `remote progress <N> claimed` 领取。`remote watch <窗格>` 是单元上的值守(不是 agent):有新卡且 agent 空闲时往窗格发一句
@@ -100,7 +104,9 @@
 
 `board stall`(`specs/task-olp-stall.spec.md`)回答"是不是所有人都在等":有卡未了结、占着卡的
 单元上没有内环在工作、日志 `--quiet` 秒没有新事件,三条都成立才算。有人在工作就不算,做得久
-不是问题。静默时逐张卡给出原因、起始事件和谁能推动;同一段沉默最多报三次。判定可以交给外部策略
+不是问题。静默时逐张卡给出原因、起始事件和谁能推动;同一段沉默最多报三次。`--peek` 只看不记:
+输出这次会报的卡,但不算一次运行、不占报告次数(外环值守这样问,次数留给外环自己看的那几次)。
+心跳是否算数看它的年龄:标记离线的单元留下的旧心跳不算"有人在工作"。判定可以交给外部策略
 (`--policy`,或带 `relax` feature 时的 `--policy-crate`);`--samples` 留下每次的事实与判定,
 `--replay <样本文件>` 在这些样本上比较两个判定。见 `docs/OLP_POLICY.md`。
 
@@ -160,6 +166,10 @@
 | `olp guard watch …` | `octoscode olp-runtime-watch` | 单元 |
 | `olp guard forward [--include K] [--only K]` | Rust(`src/olp/forward.rs`),原 `olp-alert-forward.py` | 单元 |
 
+`guard forward` 按单元的配置选通道:`store = log` 时告警经 `remote serve-log` 的 `alert` 请求记成
+日志里的 `alert` 事件(指向本单元的卡时挂在卡上,进展汇总的告警里能看到);hub 连不上的留在进程里,
+下一条告警发出前按顺序补发。没写 `store = log` 时照旧往 Markdown 黑板追加一行。
+
 ### 2.9 保活(keepalive)——按平台自动选 launchd 或 systemd
 
 | 新命令 | 现在的入口 | 在哪运行 |
@@ -183,6 +193,8 @@
 外环值守(`specs/task-olp-outer-watch.spec.md`)是"收件箱 + 唤醒"往上的那一半:日志里出现等外环处理
 的事件(单元的回执、推送登记、提问、送达失败)或集群整体静默时,在外环的 agent 空闲时往它的窗格
 发一句固定短句,指向 `olp inbox` 与 `olp board stall`。短句不带内容;外环不轮询。
+静默由值守用 `board stall --peek` 询问,不占报告次数;外环窗格忙多久都不会把次数耗掉。同一段沉默
+值守说一次;外环一直没去看的话,隔一个 `--quiet`(至少 60 秒)再说,最多三次。
 值守不由外环自己启动:`olp outer install` 在 `--board` 是事件日志时另注册一个常驻任务
 `<name>-watch`,每分钟按工作区标签找到外环的窗格跑一轮。外环死了它照常跑,接班的外环不用再启动。
 

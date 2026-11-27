@@ -722,6 +722,44 @@ fn hub_reads_the_card_from_an_event_log_and_records_the_push_there() {
         "{}",
         stdout(&rendered)
     );
+    // The ref moves on and then back to the commit it was at: each move
+    // is a push and is recorded, the return included.
+    std::fs::write(c.work().join("task1.txt"), "reworked").unwrap();
+    c.git_ok(&["commit", "-q", "-a", "--amend", "-m", "task 1 (reworked)"]);
+    let sha1b = c.git_ok(&["rev-parse", "HEAD"]);
+    let force = |sha: &str| {
+        c.git(
+            &[
+                "push",
+                "--force",
+                "-o",
+                &format!("olp-verified={sha}:m07-codex+claude"),
+                "hub",
+                &format!("{sha}:refs/heads/task/1"),
+            ],
+            Some("m07"),
+        )
+    };
+    for sha in [&sha1b, &sha1] {
+        let out = force(sha);
+        assert!(out.status.success(), "{}", stderr(&out));
+    }
+    assert_eq!(
+        c.hub_ref("refs/heads/task/1").as_deref(),
+        Some(sha1.as_str())
+    );
+    let events = std::fs::read_to_string(log.join("events-000001.jsonl")).unwrap();
+    let pushed: Vec<serde_json::Value> = events
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .filter(|e| e["kind"] == "pushed")
+        .collect();
+    assert_eq!(pushed.len(), 3, "{events}");
+    let said = |e: &serde_json::Value| e["data"]["text"].as_str().unwrap().to_string();
+    assert!(said(&pushed[1]).contains(&sha1b[..12]), "{events}");
+    assert!(said(&pushed[2]).contains(&sha1[..12]), "{events}");
+    assert_ne!(pushed[0]["key"], pushed[2]["key"]);
+
     // The Markdown board was not written to.
     assert!(!c.board_text().contains("本地复验通过"));
 

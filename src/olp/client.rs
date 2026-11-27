@@ -22,6 +22,7 @@ use std::process::{Command, Stdio};
 use sha2::{Digest, Sha256};
 
 use super::log::Event;
+use super::unit::{is_target, is_unit};
 
 const EX_TEMPFAIL: i32 = 75;
 const LOCAL: &str = "local";
@@ -73,25 +74,11 @@ struct Link {
     log: String,
 }
 
-fn is_unit(s: &str) -> bool {
-    let mut chars = s.chars();
-    chars.next().is_some_and(|c| c.is_ascii_lowercase())
-        && s.len() <= 32
-        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-}
-
-fn is_hub(s: &str) -> bool {
-    let mut chars = s.chars();
-    chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
-        && s.len() <= 128
-        && chars.all(|c| c.is_ascii_alphanumeric() || "._@-".contains(c))
-}
-
 fn link(hub: Option<&String>, unit: Option<&String>) -> Result<Link, String> {
     let conf = conf();
     let hub = setting(hub, "OLP_HUB", &conf, "hub");
     let unit = setting(unit, "OLP_UNIT_ID", &conf, "unit");
-    if !is_hub(&hub) {
+    if !is_target(&hub) {
         return Err("没有配置 hub 的 ssh 目标(--hub、OLP_HUB 或 unit.conf 里的 hub=)".to_string());
     }
     if !is_unit(&unit) {
@@ -116,7 +103,7 @@ struct Reply {
 fn send(link: &Link, request: &[String], stdin: &str) -> Option<Reply> {
     let words: Vec<&str> = request.iter().map(String::as_str).collect();
     let line = shlex::try_join(words).ok()?;
-    let mut cmd = if link.hub == LOCAL {
+    let cmd = if link.hub == LOCAL {
         // The forced command, run here: the same handler, the same rules.
         let mut cmd = Command::new(std::env::current_exe().ok()?);
         cmd.args([
@@ -143,16 +130,10 @@ fn send(link: &Link, request: &[String], stdin: &str) -> Option<Reply> {
         ]);
         cmd
     };
-    let mut child = cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()?;
-    // A request refused before stdin is read closes the pipe first.
-    let _ = child.stdin.take()?.write_all(stdin.as_bytes());
-    let out = child.wait_with_output().ok()?;
-    let code = out.status.code()?;
+    // The whole request has a deadline: an ssh that connected and then
+    // stalls counts as a hub that was not reached.
+    let out = super::proc::run(cmd, Some(stdin.as_bytes()), super::proc::ssh_limit()).ok()?;
+    let code = out.code?;
     // ssh's own failures (no route, refused, bad key) are 255.
     if link.hub != LOCAL && code == 255 {
         return None;
@@ -214,6 +195,26 @@ fn deliver(prog: &str, link: &Link, request: &[String], text: &str) -> i32 {
             reply.code
         }
     }
+}
+
+/// One alert of the unit's runtime guard, to a hub that keeps an event
+/// log. `None`: the hub was not reached; else the hub's exit code and what
+/// it said on stderr.
+pub fn alert(
+    hub: Option<&String>,
+    unit: Option<&String>,
+    key: &str,
+    label: &str,
+    text: &str,
+) -> Result<Option<(i32, String)>, String> {
+    let link = link(hub, unit)?;
+    let request = ["alert", key, label].map(str::to_string);
+    Ok(send(&link, &request, text).map(|reply| (reply.code, reply.stderr)))
+}
+
+/// The unit this machine is configured as, on the event-log channel.
+pub fn unit_name(hub: Option<&String>, unit: Option<&String>) -> Result<String, String> {
+    link(hub, unit).map(|link| link.unit)
 }
 
 const ACK_USAGE: &str = "用法: octoscode olp remote ack <N> <done|wontdo|blocked> <说明…>";

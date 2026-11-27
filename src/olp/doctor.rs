@@ -23,21 +23,10 @@ use std::process::Command;
 
 use serde_json::{Value, json};
 
+use super::proc::quote;
+
 const HOOKS: [&str; 2] = ["pre-receive", "post-receive"];
 const COMPONENTS: [&str; 3] = ["octoscode", "octos", "herdr"];
-
-/// One shell word, quoted only when it has to be.
-fn quote(word: &str) -> String {
-    let plain = !word.is_empty()
-        && word
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "@%+=:,./-_".contains(c));
-    if plain {
-        word.to_string()
-    } else {
-        format!("'{}'", word.replace('\'', "'\"'\"'"))
-    }
-}
 
 fn base(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)

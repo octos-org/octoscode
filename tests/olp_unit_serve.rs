@@ -322,3 +322,125 @@ fn a_unit_sees_only_its_own_cards() {
         "a unit with no cards sees nothing"
     );
 }
+
+/// Scenario: 打回之后同样的回执是新的一次,不当成重发(critical)
+#[test]
+fn an_ack_after_a_return_is_a_new_answer() {
+    let hub = Hub::new();
+    let ack = || hub.unit("m07", "ack 1 wontdo m07:ack:1:abc", "做不了:缺权限\n");
+    for _ in 0..2 {
+        assert!(ack().status.success());
+    }
+    assert_eq!(hub.events().len(), 4, "the retry was recorded once");
+    assert_eq!(hub.partition(1), "inbox");
+
+    assert!(hub.outer("return", &["1", "再试一次"], "").status.success());
+    assert_eq!(hub.partition(1), "working");
+    // The same result with the same words, after the return.
+    let out = ack();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("已记录"), "{}", stdout(&out));
+    let last = hub.events().pop().unwrap();
+    assert_eq!(last["kind"], "ack");
+    assert_eq!(last["key"], "m07:ack:1:abc:r1");
+    assert_eq!(hub.partition(1), "inbox", "the card is answered again");
+    // A retry of that one is still a retry.
+    let before = hub.events().len();
+    assert!(stdout(&ack()).contains("没有重复写入"));
+    assert_eq!(hub.events().len(), before);
+}
+
+/// Scenario: 单元的运行时告警记成事件,一件事一条
+#[test]
+fn a_units_guard_alert_is_recorded_once() {
+    let hub = Hub::new();
+    let said = "agent_missing turn=turn-abc pid=4101 state=process_missing\n";
+    for _ in 0..2 {
+        let out = hub.unit("m07", "alert m07:neg:agent_missing:0a1b '#1'", said);
+        assert!(out.status.success(), "{}", stderr(&out));
+    }
+    let events = hub.events();
+    assert_eq!(events.len(), 4, "recorded once");
+    let alert = &events[3];
+    assert_eq!(alert["kind"], "alert");
+    assert_eq!(alert["card"], 1);
+    assert_eq!(alert["unit"], "m07");
+    assert_eq!(alert["actor"], "单元(m07)·负哨(#1)");
+    assert_eq!(alert["data"]["text"], said.trim());
+
+    // A card that is not this unit's is named in the label only.
+    let out = hub.unit("m07", "alert m07:neg:x:1 '#2'", said);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let other = hub.events().pop().unwrap();
+    assert!(other.get("card").is_none(), "{other}");
+    assert_eq!(other["actor"], "单元(m07)·负哨(#2)");
+    // And one without a card at all.
+    assert!(
+        hub.unit("m07", "alert m07:neg:x:2 unknown", said)
+            .status
+            .success()
+    );
+
+    let before = hub.events().len();
+    for (request, text, why) in [
+        ("alert m08:neg:x:3 '#1'", said, "键必须以 m07: 开头"),
+        ("alert m07:neg:x:3 'bad label'", said, "任务标签不合法"),
+        ("alert m07:neg:x:3 '#1'", "\n", "内容为空"),
+        ("alert m07:neg:x:3 '#1'", "两行\n告警\n", "单行"),
+    ] {
+        let out = hub.unit("m07", request, text);
+        assert_eq!(out.status.code(), Some(3), "{request}");
+        assert!(stderr(&out).contains(why), "{request}: {}", stderr(&out));
+    }
+    assert_eq!(hub.events().len(), before);
+
+    // The summary shows it with the open card.
+    let out = Command::new(env!("CARGO_BIN_EXE_octoscode"))
+        .args(["olp", "board", "summary", "--board", &hub.log(), "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("agent_missing turn=turn-abc"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+/// Scenario: 一个键只代表一件事
+#[test]
+fn a_key_never_stands_for_two_things() {
+    let hub = Hub::new();
+    assert!(
+        hub.unit("m07", "alert m07:one-key '#1'", "turn_error turn=t1\n")
+            .status
+            .success()
+    );
+    let before = hub.events().len();
+    // The same key on an ACK: not a retry of anything, and not written.
+    let out = hub.unit("m07", "ack 1 done m07:one-key", "做完了\n");
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert!(stderr(&out).contains("不是同一件事"), "{}", stderr(&out));
+    assert_eq!(hub.events().len(), before);
+    assert_eq!(hub.partition(1), "working");
+
+    // On the hub: a key used for one card is refused for another.
+    assert!(
+        hub.outer("return", &["1", "--key", "k1", "换个做法"], "")
+            .status
+            .success()
+    );
+    assert!(
+        hub.outer("return", &["1", "--key", "k1", "换个做法"], "")
+            .status
+            .success(),
+        "the same thing said again is fine"
+    );
+    let before = hub.events().len();
+    let out = hub.outer("return", &["2", "--key", "k1", "换个做法"], "");
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("不是同一件事"), "{}", stderr(&out));
+    let out = hub.outer("accept", &["1", "--key", "k1", "通过"], "");
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(hub.events().len(), before);
+}

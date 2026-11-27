@@ -101,8 +101,21 @@ pub fn serve(
             let _ = writer.flush();
         }
     }
+    // Reports still on their way to the hub are let through before the
+    // server ends (each has its own deadline).
+    let pending = REPORTS
+        .lock()
+        .map(|mut list| std::mem::take(&mut *list))
+        .unwrap_or_default();
+    for report in pending {
+        let _ = report.join();
+    }
     Ok(asks)
 }
+
+/// Reports to the hub that run after their answer was already returned.
+static REPORTS: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> =
+    std::sync::Mutex::new(Vec::new());
 
 pub struct OlpMcpServer<'a> {
     root: &'a std::path::Path,
@@ -258,13 +271,23 @@ impl<'a> OlpMcpServer<'a> {
         let detail_head: String = question.chars().take(200).collect();
         self.audit("ask", &format!("id={ask_id} question={detail_head}"));
         let reported = Self::report("ask", &ask_id, &detail_head);
-        // The question's end is reported after the question itself.
-        let close = |kind: &'static str| {
-            if let Some(asked) = reported {
-                let _ = asked.join();
-            }
-            if let Some(closed) = Self::report(kind, &ask_id, "") {
-                let _ = closed.join();
+        // The question's end is reported after the question itself, and
+        // on its own time: an answer that is already here is not held
+        // back by a hub that is slow to take the report.
+        let close = {
+            let id = ask_id.clone();
+            move |kind: &'static str| {
+                let report = std::thread::spawn(move || {
+                    if let Some(asked) = reported {
+                        let _ = asked.join();
+                    }
+                    if let Some(closed) = Self::report(kind, &id, "") {
+                        let _ = closed.join();
+                    }
+                });
+                if let Ok(mut pending) = REPORTS.lock() {
+                    pending.push(report);
+                }
             }
         };
 

@@ -11,9 +11,16 @@
 //! over. An event that arrives while the outer loop is busy is not slept
 //! through — the cursor moves only when the sentence was taken.
 //!
+//! A stall is asked about without spending anything (`board stall --peek`):
+//! the reports of a stall are counted when the outer loop itself runs
+//! `olp board stall`, which is where it reads the card numbers. The watcher
+//! remembers which stall it has pointed to, and says it again — three times
+//! at most — only while the outer loop has still not looked.
+//!
 //! Exit codes: 0 (with `--once`: the round is done); 2 usage; 4 the log
 //! could not be read.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -34,7 +41,23 @@ const USAGE: &str = "用法: octoscode olp outer watch <日志目录> --pane <�
 struct Cursor {
     /// The highest event number handed over to the outer loop.
     seen: u64,
+    /// Stalls pointed to, by card number.
+    stalls: BTreeMap<String, Pointed>,
 }
+
+/// One stall the outer loop's pane was told about.
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
+struct Pointed {
+    /// The card's last event at the time.
+    seq: u64,
+    /// Unix seconds of the last time it was said.
+    at: u64,
+    times: u32,
+}
+
+/// How often one stall is pointed to while the outer loop has not looked.
+const STALL_REMINDERS: u32 = 3;
 
 /// The one sentence the outer loop's pane is woken with.
 pub fn sentence(log: &str) -> String {
@@ -61,11 +84,11 @@ fn herdr(args: &[&str], session: Option<&str>) -> Option<std::process::Output> {
     cmd.args(args).stdin(Stdio::null()).output().ok()
 }
 
-/// New stall alerts, by asking `olp board stall` (which keeps its own
-/// record of what it has already said).
-fn stall_alerts(log: &str, quiet: u64) -> usize {
+/// The stalls `olp board stall` would report now, as (card, its last
+/// event). Asked with `--peek`: nothing is counted as reported.
+fn stall_alerts(log: &str, quiet: u64) -> Vec<(u64, u64)> {
     let Ok(exe) = std::env::current_exe() else {
-        return 0;
+        return Vec::new();
     };
     Command::new(exe)
         .args([
@@ -74,14 +97,22 @@ fn stall_alerts(log: &str, quiet: u64) -> usize {
             "stall",
             log,
             "--json",
+            "--peek",
             "--quiet",
             &quiet.to_string(),
         ])
         .output()
         .ok()
         .and_then(|out| serde_json::from_slice::<serde_json::Value>(&out.stdout).ok())
-        .and_then(|doc| doc["alerts"].as_array().map(Vec::len))
-        .unwrap_or(0)
+        .and_then(|doc| {
+            doc["alerts"].as_array().map(|alerts| {
+                alerts
+                    .iter()
+                    .filter_map(|a| Some((a["number"].as_u64()?, a["seq"].as_u64()?)))
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
 }
 
 /// `argv` is what follows `olp outer watch`.
@@ -172,7 +203,7 @@ pub fn run(argv: &[String]) -> i32 {
         let head = events.last().map(|e| e.seq).unwrap_or(0);
         // What is already over does not wait for anyone: a watcher that
         // starts on an old log says nothing about its history.
-        let settled = super::cards::settled(&events, chrono::Utc::now().date_naive());
+        let settled = super::cards::settled(&events, chrono::Local::now().date_naive());
         let open_questions = super::cards::pending_questions(&events);
         let still_open = |e: &Event| match e.kind.as_str() {
             "asked" => {
@@ -185,7 +216,21 @@ pub fn run(argv: &[String]) -> i32 {
             .iter()
             .filter(|e| e.seq > cursor.seen && for_outer(e) && still_open(e))
             .count();
-        let stalled = stall_alerts(log, quiet);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        // A stall not pointed to yet, or one the outer loop was told of a
+        // quiet period ago and has still not looked at.
+        let stalls: Vec<(u64, u64)> = stall_alerts(log, quiet)
+            .into_iter()
+            .filter(|(card, seq)| match cursor.stalls.get(&card.to_string()) {
+                Some(said) if said.seq == *seq => {
+                    said.times < STALL_REMINDERS && now >= said.at + quiet.max(60)
+                }
+                _ => true,
+            })
+            .collect();
+        let stalled = stalls.len();
         let pane = match (&pane, &label) {
             (Some(pane), _) => Some(pane.clone()),
             (None, Some(label)) => super::outer::pane_of_label(label, session),
@@ -229,6 +274,15 @@ pub fn run(argv: &[String]) -> i32 {
             if taken {
                 // Everything up to the log's head has been pointed to.
                 cursor.seen = head;
+                for (card, seq) in &stalls {
+                    let said = cursor.stalls.entry(card.to_string()).or_default();
+                    if said.seq != *seq {
+                        said.times = 0;
+                    }
+                    said.seq = *seq;
+                    said.at = now;
+                    said.times += 1;
+                }
                 println!(
                     "已提醒外环窗格 {pane}:{waiting} 条新事件{}",
                     if stalled > 0 {

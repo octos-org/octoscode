@@ -3,8 +3,8 @@
 //! …), one event per line. Everything else — card states, inboxes, unit
 //! occupancy — is computed by replaying it.
 //!
-//! Every write takes the directory's lock, reads the log, decides, appends
-//! and syncs, so a decision ("has this message been claimed", "is this key
+//! Every write reads the log, takes the directory's lock, reads what was
+//! appended in between, decides, appends and syncs, so a decision ("has this message been claimed", "is this key
 //! used", "what is the next card number") is made on the log as it stands.
 //! Nothing here is edited by hand; people read a rendered view.
 
@@ -94,6 +94,15 @@ pub enum AppendError<E> {
     Refused(E),
 }
 
+/// How far a read got: the segment, the bytes of whole lines taken from
+/// it, and how many lines that was.
+#[derive(Default)]
+struct Mark {
+    segment: u32,
+    offset: u64,
+    lines: usize,
+}
+
 pub struct Log {
     dir: PathBuf,
     segment_bytes: u64,
@@ -152,17 +161,37 @@ impl Log {
     /// write that did not finish and is left out; any other line that does
     /// not parse, or a sequence number out of step, is an error.
     pub fn read(&self) -> Result<Vec<Event>, LogError> {
-        let mut events: Vec<Event> = Vec::new();
+        let mut events = Vec::new();
+        self.read_on(&mut events, &mut Mark::default())?;
+        Ok(events)
+    }
+
+    /// Read on from `mark`: push what the log holds after it onto `events`
+    /// and move the mark. Segments are append-only, so what was read
+    /// before is not read again.
+    fn read_on(&self, events: &mut Vec<Event>, mark: &mut Mark) -> Result<(), LogError> {
         let segments = self.segments()?;
         for (position, index) in segments.iter().enumerate() {
+            if *index < mark.segment {
+                continue;
+            }
+            if *index > mark.segment {
+                *mark = Mark {
+                    segment: *index,
+                    offset: 0,
+                    lines: 0,
+                };
+            }
             let path = self.dir.join(segment_name(*index));
             let mut text = String::new();
-            File::open(&path)?.read_to_string(&mut text)?;
+            let mut file = File::open(&path)?;
+            file.seek(SeekFrom::Start(mark.offset))?;
+            file.read_to_string(&mut text)?;
             let last_segment = position + 1 == segments.len();
-            for (i, raw) in text.split_inclusive('\n').enumerate() {
+            for raw in text.split_inclusive('\n') {
                 let corrupt = |why: String| LogError::Corrupt {
                     file: path.clone(),
-                    line: i + 1,
+                    line: mark.lines + 1,
                     why,
                 };
                 let Some(line) = raw.strip_suffix('\n') else {
@@ -178,9 +207,11 @@ impl Log {
                     return Err(corrupt(format!("序号是 {},应为 {expected}", event.seq)));
                 }
                 events.push(event);
+                mark.offset += raw.len() as u64;
+                mark.lines += 1;
             }
         }
-        Ok(events)
+        Ok(())
     }
 
     fn lock(&self) -> Result<File, LogError> {
@@ -212,8 +243,16 @@ impl Log {
         &self,
         decide: impl FnOnce(&[Event]) -> Result<Vec<Draft>, E>,
     ) -> Result<Vec<Event>, AppendError<E>> {
+        // The log is read before the lock is taken; under the lock only
+        // what was appended meanwhile is read. However long the log, the
+        // lock is held for the new lines, the decision and the write.
+        let mut existing = Vec::new();
+        let mut mark = Mark::default();
+        self.read_on(&mut existing, &mut mark)
+            .map_err(AppendError::Log)?;
         let lock = self.lock().map_err(AppendError::Log)?;
-        let existing = self.read().map_err(AppendError::Log)?;
+        self.read_on(&mut existing, &mut mark)
+            .map_err(AppendError::Log)?;
         let drafts = decide(&existing).map_err(AppendError::Refused)?;
         let written = self.write(&existing, drafts).map_err(AppendError::Log)?;
         drop(lock);
@@ -476,6 +515,74 @@ mod tests {
         unique.sort();
         unique.dedup();
         assert_eq!(keys.len(), unique.len());
+    }
+
+    #[test]
+    fn a_read_goes_on_from_where_the_last_one_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        // Small segments: the log rolls over while it is being followed.
+        let log = Log::at(dir.path()).with_segment_bytes(200);
+        for _ in 0..3 {
+            log.append(draft("a", None)).unwrap();
+        }
+        let mut events = Vec::new();
+        let mut mark = Mark::default();
+        log.read_on(&mut events, &mut mark).unwrap();
+        assert_eq!(events.len(), 3);
+        let at = (mark.segment, mark.offset);
+        // Nothing new: nothing is read again and the mark stays.
+        log.read_on(&mut events, &mut mark).unwrap();
+        assert_eq!((events.len(), (mark.segment, mark.offset)), (3, at));
+
+        for _ in 0..4 {
+            log.append(draft("b", None)).unwrap();
+        }
+        assert!(log.segments().unwrap().len() > 1, "the log rolled over");
+        // A write that did not finish sits at the end.
+        let last = *log.segments().unwrap().last().unwrap();
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(dir.path().join(segment_name(last)))
+            .unwrap();
+        file.write_all(b"{\"seq\":8,\"ts\"").unwrap();
+        log.read_on(&mut events, &mut mark).unwrap();
+        assert_eq!(events, log.read().unwrap());
+        assert_eq!(events.len(), 7);
+        assert_eq!(events.last().unwrap().seq, 7);
+
+        // The torn tail is cut off by the next write, which the read then
+        // picks up from the same mark.
+        log.append(draft("c", None)).unwrap();
+        log.read_on(&mut events, &mut mark).unwrap();
+        assert_eq!(events.len(), 8);
+        assert_eq!(events, log.read().unwrap());
+    }
+
+    #[test]
+    fn a_decision_sees_what_was_appended_while_it_waited_for_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = Log::at(dir.path());
+        log.append(draft("a", Some("k1"))).unwrap();
+        // Hold the lock, start an append that has to wait, and write an
+        // event behind its back (as the lock's holder would).
+        let held = log.lock().unwrap();
+        let path = dir.path().to_path_buf();
+        let waiting = std::thread::spawn(move || {
+            Log::at(path).append_with(|events| {
+                let kinds: Vec<String> = events.iter().map(|e| e.kind.clone()).collect();
+                Ok::<_, String>(vec![Draft {
+                    data: serde_json::json!({ "saw": kinds }),
+                    ..draft("c", None)
+                }])
+            })
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let existing = log.read().unwrap();
+        log.write(&existing, vec![draft("b", None)]).unwrap();
+        drop(held);
+        let written = waiting.join().unwrap().unwrap();
+        assert_eq!(written[0].seq, 3);
+        assert_eq!(written[0].data["saw"], serde_json::json!(["a", "b"]));
     }
 
     #[test]

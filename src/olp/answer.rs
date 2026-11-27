@@ -16,7 +16,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::SystemTime;
 
 use serde_json::{Value, json};
@@ -42,13 +42,6 @@ fn is_id(s: &str) -> bool {
     (4..=64).contains(&s.len())
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-}
-
-fn is_target(s: &str) -> bool {
-    let mut chars = s.chars();
-    chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
-        && s.len() <= 128
-        && chars.all(|c| c.is_ascii_alphanumeric() || "._@-".contains(c))
 }
 
 /// What `serve` printed and how it ended.
@@ -276,7 +269,7 @@ fn relay(unit_name: &str, to: Option<&str>, request: &[&str], stdin: &[u8]) -> R
     }
     let local = unit::is_local(unit_name) == Some(true);
     let target = to.unwrap_or(if local { "local" } else { unit_name });
-    if !is_target(target) {
+    if !unit::is_target(target) {
         return Err(Fail(2, format!("--to 不是合法的 ssh 目标: {target}")));
     }
     let served = if target == "local" {
@@ -292,28 +285,21 @@ fn relay(unit_name: &str, to: Option<&str>, request: &[&str], stdin: &[u8]) -> R
             stdout: String::new(),
             stderr: why,
         };
-        let spawned = Command::new(ssh)
-            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", target])
-            .args(request)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn();
-        match spawned {
-            Err(e) => unreachable(format!("无法运行 ssh: {e}")),
-            Ok(mut child) => {
-                if let Some(mut pipe) = child.stdin.take() {
-                    let _ = pipe.write_all(stdin);
-                }
-                match child.wait_with_output() {
-                    Err(e) => unreachable(e.to_string()),
-                    Ok(done) => Served {
-                        code: done.status.code().unwrap_or(255),
-                        stdout: String::from_utf8_lossy(&done.stdout).into_owned(),
-                        stderr: String::from_utf8_lossy(&done.stderr).into_owned(),
-                    },
-                }
-            }
+        let mut cmd = Command::new(ssh);
+        cmd.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", target])
+            .args(request);
+        // The whole request has a deadline, not only the connection.
+        match super::proc::run(cmd, Some(stdin), super::proc::ssh_limit()) {
+            Err(super::proc::RunError::Spawn(e)) => unreachable(format!("无法运行 ssh: {e}")),
+            Err(super::proc::RunError::Timeout) => unreachable(format!(
+                "{} 秒内没有答复",
+                super::proc::ssh_limit().as_secs()
+            )),
+            Ok(done) => Served {
+                code: done.code.unwrap_or(255),
+                stdout: done.stdout_text(),
+                stderr: done.stderr_text(),
+            },
         }
     };
     if served.code == 255 {

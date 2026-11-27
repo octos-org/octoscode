@@ -259,6 +259,138 @@ fn the_same_silence_is_not_reported_over_and_over() {
     assert_eq!(out.status.code(), Some(2));
 }
 
+/// Scenario: --peek 只看不记
+#[test]
+fn a_peek_reports_the_same_and_spends_nothing() {
+    let hub = Hub::new();
+    hub.beat("m07", "idle");
+    hub.card("m07", "卡一");
+    let numbers = |seen: &serde_json::Value| -> Vec<(u64, u64)> {
+        seen["alerts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| {
+                (
+                    a["number"].as_u64().unwrap(),
+                    a["reports"].as_u64().unwrap(),
+                )
+            })
+            .collect()
+    };
+    // Any number of looks: each shows the first report, none is counted.
+    for _ in 0..5 {
+        let seen = hub.stall(&["--quiet", "0", "--peek"]);
+        assert_eq!(numbers(&seen), vec![(1, 1)], "{seen}");
+    }
+    assert!(
+        !std::path::Path::new(&hub.log())
+            .join("stall-state.json")
+            .exists()
+    );
+    // The first counted run is still the first report.
+    let seen = hub.stall(&["--quiet", "0"]);
+    assert_eq!(numbers(&seen), vec![(1, 1)], "{seen}");
+    // Reported now: a look shows nothing new, like a counted run would.
+    let seen = hub.stall(&["--quiet", "0", "--peek"]);
+    assert_eq!(
+        (numbers(&seen), seen["held_back"].as_u64()),
+        (vec![], Some(1))
+    );
+}
+
+/// Scenario: 标记离线的单元留下的旧心跳不算有人在工作
+#[test]
+fn an_offline_unit_with_an_old_heartbeat_is_not_working() {
+    let hub = Hub::new();
+    hub.beat("m07", "working");
+    hub.card("m07", "单元已经下线的卡");
+    hub.ok(&["unit", "set-state", "m07", "offline"], "");
+    // Marked offline a moment ago, heartbeat still fresh: it may well be
+    // working.
+    let seen = hub.stall(&["--quiet", "0", "--state", "/dev/null"]);
+    assert_eq!(seen["stalled"], false, "{seen}");
+    // The heartbeat is from an hour ago: it says nothing about now.
+    let path = hub.dir.path().join("units/heartbeat/m07.json");
+    let mut beat: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    beat["received_at"] = serde_json::json!(beat["received_at"].as_f64().unwrap() - 3600.0);
+    std::fs::write(&path, beat.to_string()).unwrap();
+    let seen = hub.stall(&["--quiet", "0", "--state", "/dev/null"]);
+    assert_eq!(seen["stalled"], true, "{seen}");
+    assert_eq!(seen["working_units"], serde_json::json!([]));
+    assert_eq!(seen["unknown_units"], serde_json::json!(["m07"]));
+    assert_eq!(seen["alerts"][0]["number"], 1);
+}
+
+/// Scenario: 文字输出跟着实际采用的判定
+#[test]
+fn the_text_follows_the_decision_a_policy_made() {
+    let hub = Hub::new();
+    // The built-in rule sees a working unit and would say "no stall".
+    hub.beat("m08", "working");
+    hub.card("m08", "内环其实卡住了的卡");
+    let log = hub.log();
+    let builtin = hub.ok(
+        &[
+            "board",
+            "stall",
+            &log,
+            "--quiet",
+            "0",
+            "--state",
+            "/dev/null",
+        ],
+        "",
+    );
+    assert!(builtin.contains("没有静默"), "{builtin}");
+    let policy = script(
+        hub.dir.path(),
+        "stalled.sh",
+        "cat > /dev/null\necho '{\"stalled\":true,\"alerts\":[{\"number\":1,\"waits_on\":\"unit\",\"cause\":\"内环空转\"}]}'",
+    );
+    let text = hub.ok(
+        &[
+            "board",
+            "stall",
+            &log,
+            "--quiet",
+            "0",
+            "--state",
+            "/dev/null",
+            "--policy",
+            &policy,
+        ],
+        "",
+    );
+    assert!(text.contains("[stall] #1"), "{text}");
+    assert!(text.contains("内环空转"), "{text}");
+    assert!(!text.contains("没有静默"), "{text}");
+    // And the other way: the policy says it is not one.
+    hub.beat("m08", "idle");
+    let calm = script(
+        hub.dir.path(),
+        "calm.sh",
+        "cat > /dev/null\necho '{\"stalled\":false,\"alerts\":[]}'",
+    );
+    let text = hub.ok(
+        &[
+            "board",
+            "stall",
+            &log,
+            "--quiet",
+            "0",
+            "--state",
+            "/dev/null",
+            "--policy",
+            &calm,
+        ],
+        "",
+    );
+    assert!(text.contains("策略判定不算静默"), "{text}");
+    assert!(!text.contains("[stall]"), "{text}");
+}
+
 /// A policy: a shell script that ignores its input and prints `answer`.
 #[cfg(test)]
 fn script(dir: &std::path::Path, name: &str, body: &str) -> String {

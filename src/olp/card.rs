@@ -255,8 +255,18 @@ pub fn run(action: &str, argv: &[String]) -> i32 {
         &prog,
         log.append_with(|events| {
             if let Some(key) = &draft.key {
-                if events.iter().any(|e| e.key.as_ref() == Some(key)) {
-                    return Ok(Vec::new()); // said before: nothing to add
+                if let Some(first) = events.iter().find(|e| e.key.as_ref() == Some(key)) {
+                    // The same key is the same thing said again, or it is
+                    // a mistake: it never silently stands for another.
+                    if first.card == draft.card && first.kind == draft.kind {
+                        return Ok(Vec::new()); // said before: nothing to add
+                    }
+                    return Err(Refusal::Rule(format!(
+                        "键 {key} 已用于第 {} 条事件({}{}),与这次要写的不是同一件事",
+                        first.seq,
+                        first.kind,
+                        first.card.map(|c| format!(" #{c}")).unwrap_or_default()
+                    )));
                 }
             }
             open_card(events, n)?;

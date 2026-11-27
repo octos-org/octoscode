@@ -126,10 +126,13 @@ pub fn ask(source: &Source, input: Vec<u8>) -> Result<String, String> {
         });
     }
     let stdout = child.stdout.take().ok_or("没有 stdout")?;
-    let reader = std::thread::spawn(move || {
+    // The answer comes back over a channel: a grandchild that keeps the
+    // pipe open after the policy has ended must not hold us.
+    let (said, heard) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut text = String::new();
         let _ = stdout.take(MAX_OUTPUT).read_to_string(&mut text);
-        text
+        let _ = said.send(text);
     });
     let started = Instant::now();
     let status = loop {
@@ -147,7 +150,9 @@ pub fn ask(source: &Source, input: Vec<u8>) -> Result<String, String> {
     if !status.success() {
         return Err(format!("退出码 {}", status.code().unwrap_or(-1)));
     }
-    let text = reader.join().map_err(|_| "读不到输出")?;
+    let text = heard
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|_| "读不到输出(它结束后输出管道仍被占着)")?;
     text.lines()
         .rev()
         .find(|line| line.trim_start().starts_with('{'))

@@ -264,6 +264,38 @@ fn a_busy_outer_loop_is_told_when_it_is_idle_again() {
     assert_eq!(hub.watch("99999"), "");
 }
 
+/// Scenario: 外环忙着时值守不占用静默的报告次数
+#[test]
+fn a_busy_outer_pane_does_not_use_up_the_stall_reports() {
+    let hub = Hub::new();
+    hub.card("没人领的卡");
+    let busy = hub.dir.path().join("busy");
+    std::fs::write(&busy, "").unwrap();
+    // Many rounds against a busy pane: more than the three reports a
+    // stall gets.
+    for _ in 0..6 {
+        let said = hub.watch("0");
+        assert!(said.contains("下一轮再试"), "{said}");
+    }
+    assert!(hub.prompts().is_empty());
+    // The pane is free: the stall is still said …
+    std::fs::remove_file(&busy).unwrap();
+    let said = hub.watch("0");
+    assert!(said.contains("1 条静默提醒"), "{said}");
+    assert_eq!(hub.prompts().len(), 1);
+    // … and the outer loop's own look still names the card: the watcher
+    // spent none of its reports.
+    let log = hub.log();
+    let seen: serde_json::Value =
+        serde_json::from_str(&hub.ok(&["board", "stall", &log, "--json", "--quiet", "0"], ""))
+            .unwrap();
+    assert_eq!(seen["alerts"][0]["number"], 1, "{seen}");
+    assert_eq!(seen["alerts"][0]["reports"], 1, "{seen}");
+    // The outer loop has looked: the watcher does not say it again.
+    assert_eq!(hub.watch("0"), "");
+    assert_eq!(hub.prompts().len(), 1);
+}
+
 /// Scenario: 整体静默也唤醒外环,同一段沉默不反复唤醒
 #[test]
 fn a_stall_wakes_the_outer_loop_and_is_not_repeated() {

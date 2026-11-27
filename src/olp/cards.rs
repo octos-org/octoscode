@@ -69,11 +69,6 @@ pub fn scan(events: &[Event]) -> Scan {
                     },
                 );
             }
-            "assigned" => {
-                if let Some(entry) = scan.entries.get_mut(&card) {
-                    entry.unit = event.unit.clone();
-                }
-            }
             "archived" => {
                 if let Some(entry) = scan.entries.get_mut(&card) {
                     entry.archive_line = Some(at);
@@ -118,19 +113,12 @@ pub fn scan(events: &[Event]) -> Scan {
 /// The unit card `n` is with now: `None` when there is no such card,
 /// `Some(None)` when it was opened without a unit.
 pub fn unit_of(events: &[Event], n: u64) -> Option<Option<String>> {
-    let mut found = None;
-    let mut opened = false;
-    for event in events.iter().filter(|e| e.card == Some(n)) {
-        match event.kind.as_str() {
-            "dispatched" if !opened => {
-                opened = true;
-                found = Some(event.unit.clone());
-            }
-            "assigned" if opened => found = Some(event.unit.clone()),
-            _ => {}
-        }
-    }
-    found
+    // A card stays with the unit it was dispatched to: nothing on the log
+    // moves one (a card for another unit is a new card).
+    events
+        .iter()
+        .find(|e| e.card == Some(n) && e.kind == "dispatched")
+        .map(|e| e.unit.clone())
 }
 
 /// What a unit may see: every event about a card that is with it now, and
@@ -240,30 +228,30 @@ pub fn settled(events: &[Event], today: chrono::NaiveDate) -> std::collections::
 /// unit's watcher reads this to follow up on a host that stopped half-way.
 pub fn held_by(events: &[Event], unit: &str, now: chrono::DateTime<chrono::Utc>) -> Vec<Held> {
     let mut scan = scan(events);
-    super::inbox::items(&mut scan, now.date_naive(), |e| {
-        e.unit.as_deref() == Some(unit)
-    })
-    .into_iter()
-    .filter(|item| matches!(item.partition, super::inbox::Partition::Working))
-    .filter_map(|item| {
-        let about = || events.iter().filter(|e| e.card == Some(item.number));
-        about().find(|e| e.kind == "progress" && text(e, "node") == "claimed")?;
-        let dispatched = about().find(|e| e.kind == "dispatched")?;
-        let pane = text(dispatched, "pane").to_string();
-        let last = about().next_back()?;
-        let quiet = chrono::DateTime::parse_from_rfc3339(&last.ts)
-            .map(|at| (now - at.with_timezone(&chrono::Utc)).num_seconds())
-            .unwrap_or(0);
-        (!pane.is_empty()).then_some(Held {
-            number: item.number,
-            title: item.title.clone(),
-            pane,
-            body: text(dispatched, "body").trim().to_string(),
-            last_seq: last.seq,
-            quiet_seconds: quiet,
+    // A snooze runs to a local date, here as in the inbox.
+    let today = now.with_timezone(&chrono::Local).date_naive();
+    super::inbox::items(&mut scan, today, |e| e.unit.as_deref() == Some(unit))
+        .into_iter()
+        .filter(|item| matches!(item.partition, super::inbox::Partition::Working))
+        .filter_map(|item| {
+            let about = || events.iter().filter(|e| e.card == Some(item.number));
+            about().find(|e| e.kind == "progress" && text(e, "node") == "claimed")?;
+            let dispatched = about().find(|e| e.kind == "dispatched")?;
+            let pane = text(dispatched, "pane").to_string();
+            let last = about().next_back()?;
+            let quiet = chrono::DateTime::parse_from_rfc3339(&last.ts)
+                .map(|at| (now - at.with_timezone(&chrono::Utc)).num_seconds())
+                .unwrap_or(0);
+            (!pane.is_empty()).then_some(Held {
+                number: item.number,
+                title: item.title.clone(),
+                pane,
+                body: text(dispatched, "body").trim().to_string(),
+                last_seq: last.seq,
+                quiet_seconds: quiet,
+            })
         })
-    })
-    .collect()
+        .collect()
 }
 
 /// Questions asked through `ask_outer` that were neither answered nor

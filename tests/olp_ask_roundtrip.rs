@@ -434,3 +434,25 @@ fn answer_list_hides_questions_that_timed_out_long_ago() {
     );
     assert_eq!(std::fs::read_dir(&questions).unwrap().count(), 4);
 }
+
+/// Scenario: 连上以后卡住的 ssh 到时限算单元不可达
+#[test]
+fn a_stalled_connection_to_the_unit_ends_at_the_deadline() {
+    let c = Cluster::new();
+    let stuck = c.unit_root().join("../stuck-ssh");
+    c.write_executable(&stuck, "#!/bin/sh\nexec sleep 300\n");
+    let started = std::time::Instant::now();
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_octoscode"));
+    cmd.args(["olp", "ask", "list", "m07"]);
+    c.env(&mut cmd);
+    let out = cmd
+        .env("OLP_SSH", &stuck)
+        .env("OLP_SSH_TIMEOUT", "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(75), "{}", stderr(&out));
+    assert!(stderr(&out).contains("不可达"), "{}", stderr(&out));
+    assert!(stderr(&out).contains("秒内没有答复"), "{}", stderr(&out));
+    assert!(started.elapsed() < std::time::Duration::from_secs(60));
+}

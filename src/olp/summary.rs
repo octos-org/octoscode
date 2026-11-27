@@ -59,13 +59,17 @@ fn board_alerts(text: &str, open: &[u64]) -> Vec<Value> {
     out.split_off(skip)
 }
 
-/// On the event log: what units reported as not delivered, for open cards.
+/// On the event log: what units reported as not delivered and what their
+/// runtime guards saw, for open cards.
 fn log_alerts(events: &[super::log::Event], open: &[u64]) -> Vec<Value> {
     let mut out: Vec<Value> = events
         .iter()
-        .filter(|e| e.kind == "progress")
-        .filter(|e| e.data.get("node").and_then(Value::as_str) == Some("undelivered"))
         .filter_map(|e| {
+            let undelivered = e.kind == "progress"
+                && e.data.get("node").and_then(Value::as_str) == Some("undelivered");
+            if !undelivered && e.kind != "alert" {
+                return None;
+            }
             let card = e.card.filter(|c| open.contains(c))?;
             let said: String = e
                 .data
@@ -75,7 +79,12 @@ fn log_alerts(events: &[super::log::Event], open: &[u64]) -> Vec<Value> {
                 .chars()
                 .take(160)
                 .collect();
-            Some(json!({"unit": e.unit, "card": card, "alert": format!("undelivered {said}")}))
+            let alert = if undelivered {
+                format!("undelivered {said}")
+            } else {
+                said
+            };
+            Some(json!({"unit": e.unit, "card": card, "alert": alert}))
         })
         .collect();
     let skip = out.len().saturating_sub(20);

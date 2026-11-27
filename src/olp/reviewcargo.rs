@@ -18,9 +18,8 @@
 //! expected; else an error envelope `{"error": {code, message, detail}}`
 //! and exit 1. Exit 2: usage.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
@@ -100,43 +99,16 @@ enum RunError {
     Timeout,
 }
 
-fn run(mut cmd: Command, limit: Duration) -> Result<Ran, RunError> {
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|_| RunError::Missing)?;
-    fn drain(pipe: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<String> {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            if let Some(mut pipe) = pipe {
-                let _ = pipe.read_to_end(&mut bytes);
-            }
-            String::from_utf8_lossy(&bytes).into_owned()
-        })
+fn run(cmd: Command, limit: Duration) -> Result<Ran, RunError> {
+    match super::proc::run(cmd, None, limit) {
+        Ok(ran) => Ok(Ran {
+            code: ran.code,
+            stdout: ran.stdout_text(),
+            stderr: ran.stderr_text(),
+        }),
+        Err(super::proc::RunError::Spawn(_)) => Err(RunError::Missing),
+        Err(super::proc::RunError::Timeout) => Err(RunError::Timeout),
     }
-    let out = drain(child.stdout.take());
-    let err = drain(child.stderr.take());
-    let deadline = Instant::now() + limit;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(RunError::Timeout);
-            }
-        }
-    };
-    Ok(Ran {
-        code: status.code(),
-        stdout: out.join().unwrap_or_default(),
-        stderr: err.join().unwrap_or_default(),
-    })
 }
 
 fn git(repo: &Path, args: &[&str]) -> Option<String> {

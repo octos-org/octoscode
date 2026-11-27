@@ -31,7 +31,7 @@ use std::process::{Command, Stdio};
 
 use serde_json::json;
 
-use super::log::{Draft, Log};
+use super::log::{Draft, Event, Log};
 use super::unit::is_unit;
 
 const SIGNER_MAX: usize = 4096;
@@ -326,40 +326,12 @@ fn connect_local(argv: &[String]) -> i32 {
 /// the last one.
 type Card = Option<(Option<String>, Option<Vec<String>>)>;
 
-/// A code fence line: up to three spaces, three or more of one of `` ` `` or
-/// `~`, then the rest of the line.
-fn fence(line: &str) -> Option<(char, usize, &str)> {
-    let indent = line.len() - line.trim_start_matches(' ').len();
-    if indent > 3 {
-        return None;
-    }
-    let rest = &line[indent..];
-    let mark = rest.chars().next().filter(|c| matches!(c, '`' | '~'))?;
-    let run = rest.len() - rest.trim_start_matches(mark).len();
-    (run >= 3).then(|| (mark, run, &rest[run..]))
-}
-
+/// Fences are read by the board's one reader (`board::markdown_lines`),
+/// the same one the inbox uses.
 fn card_on_board(text: &str, number: u64) -> Card {
     let (mut found, mut unit, mut reviewers) = (false, None, None);
     let mut current: Option<u64> = None;
-    let mut open: Option<(char, usize)> = None;
-    for line in text.lines() {
-        let line = line.trim_end_matches('\r');
-        let here = fence(line);
-        if let Some((mark, length)) = open {
-            // Only a fence of the same character, at least as long and with
-            // nothing after it, closes the open one.
-            if here.is_some_and(|(m, n, rest)| m == mark && n >= length && rest.trim().is_empty()) {
-                open = None;
-            }
-            continue;
-        }
-        if let Some((mark, length, rest)) = here {
-            if !(mark == '`' && rest.contains('`')) {
-                open = Some((mark, length));
-                continue;
-            }
-        }
+    for (_, line) in super::board::markdown_lines(super::board::lines(text)) {
         if line.starts_with("### ") || line.starts_with("## ") {
             current = line.strip_prefix("### ").and_then(|rest| {
                 let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
@@ -564,18 +536,44 @@ fn record(board: &Path, unit: &str, number: &str, new: &str, signer: &str) -> Re
         &new[..12.min(new.len())]
     );
     if board.is_dir() {
-        let draft = Draft {
+        let card: Option<u64> = number.parse().ok();
+        let base = format!("{unit}:pushed:{number}:{new}");
+        let mut draft = Draft {
             kind: "pushed".to_string(),
-            card: number.parse().ok(),
+            card,
             actor: format!("单元({unit})"),
             unit: Some(unit.to_string()),
-            key: Some(format!("{unit}:pushed:{number}:{new}")),
+            key: Some(base.clone()),
             data: json!({ "text": said }),
         };
         return Log::at(board)
             .append_with(|events| {
-                let seen = events.iter().any(|e| e.key == draft.key);
-                Ok::<_, String>(if seen { Vec::new() } else { vec![draft] })
+                // Only the push recorded last can be this one said again
+                // (the hook run twice). A ref moved back to a commit it
+                // was at before is a new push and is recorded as one.
+                let pushes: Vec<&Event> = events
+                    .iter()
+                    .filter(|e| e.kind == "pushed" && e.card == card)
+                    .collect();
+                let again = |key: &str| {
+                    key == base
+                        || key
+                            .strip_prefix(base.as_str())
+                            .is_some_and(|rest| rest.starts_with(":n"))
+                };
+                if pushes
+                    .last()
+                    .is_some_and(|last| last.key.as_deref().is_some_and(again))
+                {
+                    return Ok::<_, String>(Vec::new());
+                }
+                if events
+                    .iter()
+                    .any(|e| e.key.as_deref() == Some(base.as_str()))
+                {
+                    draft.key = Some(format!("{base}:n{}", pushes.len() + 1));
+                }
+                Ok(vec![draft])
             })
             .map(|_| ())
             .map_err(|e| format!("{e:?}"));

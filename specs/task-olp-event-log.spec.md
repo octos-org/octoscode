@@ -87,3 +87,16 @@ Scenario: 仓库里冻结的真实黑板导入后结论不变
   Given docs/OUTER_LOOP_REVIEW.md(2026-08 战役的冻结快照)
   When 导入并对两边执行收件箱
   Then 报告相同
+
+Scenario: 接着上次读到的地方读,不重读整个日志
+  Test: a_read_goes_on_from_where_the_last_one_stopped
+  Given 一个分段很小的日志,已读到第 3 条
+  When 没有新事件时再读;追加 4 条(跨了分段)且末尾有一行没写完后再读;下一次写入之后再读
+  Then 没有新事件时什么都不读;之后只读到新增的 4 条,没写完的那行不算;写入切掉残行后接着读到新的一条,结果始终与从头读一致
+
+Scenario: 等锁期间别人写入的事件,拿到锁后的判定看得到(critical)
+  Tags: critical
+  Test: a_decision_sees_what_was_appended_while_it_waited_for_the_lock
+  Given 锁被占着,一次追加已读完日志、在等锁
+  When 持锁者写入一条事件后放开锁
+  Then 等锁的那次追加在判定时看得到这条事件,它写入的序号接在其后
