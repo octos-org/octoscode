@@ -430,3 +430,60 @@ fn alert_forward_reaches_a_hub_that_keeps_an_event_log() {
     assert!(forward().status.success());
     assert_eq!(alerts().len(), 2);
 }
+
+/// Scenario: 中心恢复后,等着的告警不必等下一件事发生就送出
+#[test]
+fn an_alert_that_waited_goes_out_once_the_hub_is_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = env!("CARGO_BIN_EXE_octoscode");
+    let log = dir.path().join("log");
+    let mut open = Command::new(tool)
+        .args(["olp", "card", "open", "--log"])
+        .arg(&log)
+        .args(["--title", "给 m07 的卡", "--unit", "m07"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _ = open.stdin.take().unwrap().write_all("正文\n".as_bytes());
+    assert!(open.wait().unwrap().success());
+
+    // The first call does not get through; the hub is there from then on.
+    let ssh = dir.path().join("fake-ssh");
+    let script = format!(
+        "#!/bin/sh\nif [ ! -e '{0}/called' ]; then : > '{0}/called'; exit 255; fi\nwhile [ \"$1\" = \"-o\" ]; do shift 2; done\nshift\nSSH_ORIGINAL_COMMAND=\"$*\" exec '{tool}' olp remote serve-log --unit m07 --log '{1}'\n",
+        dir.path().display(),
+        log.display(),
+    );
+    std::fs::write(&ssh, script).unwrap();
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // The agent goes missing and stays missing: one thing, seen twice.
+    let mut gone = record("process_missing", "alive", serde_json::json!([]));
+    gone["identity"]["task"] = serde_json::json!(["1"]);
+    let input = format!("{gone}\n{gone}\n");
+    let mut child = Command::new(tool)
+        .args(["olp", "guard", "forward"])
+        .env("OLP_SSH", &ssh)
+        .env("OLP_HUB", "olp@hub-01")
+        .env("OLP_UNIT_ID", "m07")
+        .env("OLP_STORE", "log")
+        .env("OLP_UNIT_CONF", dir.path().join("absent.conf"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let _ = child.stdin.take().unwrap().write_all(input.as_bytes());
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).contains("留待下次再发"), "{}", stderr(&out));
+    let alerts: Vec<serde_json::Value> = std::fs::read_to_string(log.join("events-000001.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .filter(|e| e["kind"] == "alert")
+        .collect();
+    assert_eq!(alerts.len(), 1, "{alerts:?}");
+    assert_eq!(alerts[0]["card"], 1);
+}

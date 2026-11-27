@@ -183,3 +183,9 @@ Scenario: hub 用事件日志时告警走日志通道,连不上的留到下一�
   Given 单元配置 store = log,hub 的强制命令是 olp remote serve-log;第一次 ssh 连不上
   When 转发器读到两条记录(先是 agent 进程不在,后是 backend 也不在);同样的记录再喂一遍
   Then 第一条先留着,第二条发出前补发,日志里依次是两条 alert 事件并挂在卡上;重喂不新增
+
+Scenario: 中心恢复后,等着的告警不必等下一件事发生就送出
+  Test: an_alert_that_waited_goes_out_once_the_hub_is_back
+  Given 单元配置 store = log;第一次 ssh 连不上,之后都能连上
+  When 转发器读到同一件事(agent 进程不在)的两条记录
+  Then 第一条记录时留着,第二条记录到来时补发,日志里有一条 alert 事件

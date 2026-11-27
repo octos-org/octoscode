@@ -168,7 +168,7 @@
 
 `guard forward` 按单元的配置选通道:`store = log` 时告警经 `remote serve-log` 的 `alert` 请求记成
 日志里的 `alert` 事件(指向本单元的卡时挂在卡上,进展汇总的告警里能看到);hub 连不上的留在进程里,
-下一条告警发出前按顺序补发。没写 `store = log` 时照旧往 Markdown 黑板追加一行。
+守护的下一条记录到来时(以及输入结束时)按顺序补发,不必等新的告警。没写 `store = log` 时照旧往 Markdown 黑板追加一行。
 
 ### 2.9 保活(keepalive)——按平台自动选 launchd 或 systemd
 

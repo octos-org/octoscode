@@ -214,6 +214,8 @@ pub fn run(argv: &[String]) -> i32 {
         if !record.is_object() {
             continue;
         }
+        // The hub may be back although nothing new has happened here.
+        send_waiting(prog, hub.as_ref(), unit.as_ref(), &mut unsent);
         let first_task = record.pointer("/identity/task/0");
         let task = match first_task {
             Some(task) => clean(Some(task), 40),
@@ -264,30 +266,7 @@ pub fn run(argv: &[String]) -> i32 {
             };
             let Some(hub_md) = &hub_md else {
                 unsent.push((key, label.clone(), said));
-                // In order: nothing newer goes out before what waits.
-                while let Some((key, label, said)) = unsent.first() {
-                    match super::client::alert(hub.as_ref(), unit.as_ref(), key, label, said) {
-                        Ok(Some((0, _))) => {}
-                        Ok(Some((code, why))) => {
-                            eprintln!("{prog}: hub 拒绝了一条告警(退出码 {code}){}", {
-                                if why.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!(":{why}")
-                                }
-                            });
-                        }
-                        Ok(None) => {
-                            eprintln!("{prog}: 没有连上 hub,{} 条告警留待下次再发", unsent.len());
-                            break;
-                        }
-                        Err(why) => {
-                            eprintln!("{prog}: {why}");
-                            break;
-                        }
-                    }
-                    unsent.remove(0);
-                }
+                send_waiting(prog, hub.as_ref(), unit.as_ref(), &mut unsent);
                 continue;
             };
             let code = deliver(hub_md, &key, line.as_bytes());
@@ -298,5 +277,40 @@ pub fn run(argv: &[String]) -> i32 {
         // What this record no longer shows is over; back again is new.
         active.retain(|ident| present.contains(ident));
     }
+    send_waiting(prog, hub.as_ref(), unit.as_ref(), &mut unsent);
     0
+}
+
+/// Log channel: send the alerts that wait, oldest first, stopping at the
+/// first the hub cannot be reached for. Nothing newer goes out before
+/// what waits.
+fn send_waiting(
+    prog: &str,
+    hub: Option<&String>,
+    unit: Option<&String>,
+    unsent: &mut Vec<(String, String, String)>,
+) {
+    while let Some((key, label, said)) = unsent.first() {
+        match super::client::alert(hub, unit, key, label, said) {
+            Ok(Some((0, _))) => {}
+            Ok(Some((code, why))) => {
+                eprintln!("{prog}: hub 拒绝了一条告警(退出码 {code}){}", {
+                    if why.is_empty() {
+                        String::new()
+                    } else {
+                        format!(":{why}")
+                    }
+                });
+            }
+            Ok(None) => {
+                eprintln!("{prog}: 没有连上 hub,{} 条告警留待下次再发", unsent.len());
+                return;
+            }
+            Err(why) => {
+                eprintln!("{prog}: {why}");
+                return;
+            }
+        }
+        unsent.remove(0);
+    }
 }
